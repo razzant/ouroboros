@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import sys
 
 import pytest
 
@@ -52,12 +53,12 @@ def facades():
 
 def _assert_identical(out_path: pathlib.Path, rendered: str):
     rendered += "\n" if not rendered.endswith("\n") else ""
-    assert out_path.is_file(), (
-        f"{out_path.name} is missing — run `python scripts/regenerate_inventories.py`")
+    regenerate = f"run scripts/regenerate_inventories.py with this test's Python ({sys.executable})"
+    assert out_path.is_file(), f"{out_path.name} is missing: {regenerate}"
     assert out_path.read_text(encoding="utf-8") == rendered, (
-        f"{out_path.name} is stale (regeneration changes it) — run "
-        "`python scripts/regenerate_inventories.py` and commit docs/inventories/; a base that was "
-        "already stale is repaired the same way")
+        f"{out_path.name} is stale: {regenerate} and commit docs/inventories/ with the changes it describes, "
+        "alone when they are already committed; untracked files count, and another task's uncommitted work "
+        "owes its own regeneration.")
 
 
 def test_frozen_contracts_inventory_is_byte_identical(frozen):
@@ -299,6 +300,48 @@ def test_frozen_section_uses_markdown_headings_not_fenced_examples():
     section = inv.frozen_section_text(text)
     assert "Actual content" in section
     assert "Fake content" not in section and "Outside" not in section
+
+
+def test_the_inventories_read_a_candidate_the_same_staged_or_not(tmp_path, monkeypatch):
+    """The commit gate stages a candidate and unstages it after a red, and Ouroboros cannot stage by hand:
+    new and deleted modules, anchors and folders read the same staged or not, and every row follows the disk."""
+    import subprocess
+
+    def git(*args):
+        subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                        "-c", "commit.gpgsign=false", *args], cwd=tmp_path, check=True, capture_output=True)
+
+    def write(path, text):
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(text, encoding="utf-8")
+
+    book = ("# Book\n\n## 11.1 What is frozen\n\n| Contract | File | Anchored by |\n|---|---|---|\n"
+            "| `A` | `ouroboros/contracts/a.py` | `tests/test_a.py` |\n\n## Data layout (`~/Ouroboros/`)\n\n"
+            "````\n~/Ouroboros/\n└── data/\n    ├── state/\n{}    └── gone.json\n````\n")
+    write("docs/ARCHITECTURE.md", book.format(""))
+    write("ouroboros/contracts/a.py", "A = 1\n")
+    write("tests/test_a.py", "def test_a():\n    pass\n")
+    write("ouroboros/keeps.py", "ROOT, STATE = 'data', 'state'\n")
+    write("ouroboros/gone.py", "STORE = 'gone.json'\n")
+    git("init", "-q")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    monkeypatch.setattr(inv, "REPO_ROOT", tmp_path)
+    assert inv.build_frozen_inventory()[1] == inv.build_layout_inventory()[1] == []
+    write("docs/ARCHITECTURE.md", book.format("    ├── fresh.json\n"))
+    write("ouroboros/fresh.py", "STORE = 'fresh.json'\n")
+    write("ouroboros/contracts/b.py", "B = 1\n")
+    write("skills/demo/state/notes.md", "a folder named like a layout entry\n")
+    (tmp_path / "ouroboros" / "gone.py").unlink()
+    (tmp_path / "tests" / "test_a.py").unlink()
+    frozen, layout = inv.build_frozen_inventory(), inv.build_layout_inventory()
+    git("add", "-A")
+    assert (frozen, layout) == (inv.build_frozen_inventory(), inv.build_layout_inventory())
+    assert "- `ouroboros/contracts/b.py`" in frozen[0] and "`tests/test_a.py` (MISSING)" in frozen[0]
+    for row in ("| `data/` | `data` | code-ref |", "| `state/` | `state` | repo-dir |",
+                "| `fresh.json` | `fresh.json` | code-ref |", "| `gone.json` | `gone.json` | UNRESOLVED |"):
+        assert row in layout[0], row
+    assert len(frozen[1]) == len(layout[1]) == 1
 
 
 def test_missing_member_refuses_generator_before_partial_inventory(tmp_path, monkeypatch):

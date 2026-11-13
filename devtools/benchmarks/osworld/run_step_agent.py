@@ -307,10 +307,8 @@ def _preflight(config: PreflightConfig) -> dict[str, Any]:
             "OUROBOROS_RUNTIME_MODE": "pro",
             "OUROBOROS_SAFETY_MODE": "light",
             "OUROBOROS_MAX_WORKERS": 4,
-            # The scaffold's blocking review lane is only real if the TARGET server
-            # runs it — CLI env cannot configure the executing server, so the
-            # preflight must verify it (adversarial review r2 #6).
-            "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",
+            # The scaffold's review lane is only real if the TARGET server runs it — CLI env
+            # cannot configure the executing server, so the preflight must verify it (r2 #6).
             "OUROBOROS_TASK_REVIEW_MODE": "required",
         }
         mismatches = []

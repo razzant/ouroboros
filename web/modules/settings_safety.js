@@ -63,32 +63,61 @@ export function safetyFacts(settings = {}) {
 
 const SKIP_TAIL = 2000;
 
-/** Waved-through checks among the inspected recent events (the audit of a level below + Commands), counted within
- * 24 h; a full tail younger than a day says the span it read, never a day it did not inspect. The read is an event
- * tail in the compact view: the page asks for it when it is shown (`ouro:settings-page-shown`). */
+/** Waved-through checks among the inspected recent events (the audit of a level below + Commands) and the checks a
+ * spare model answered (``spareWords``), counted within 24 h; a full tail younger than a day says the span it read,
+ * never a day it did not inspect. The read is an event tail in the compact view: the page asks for it when it is shown
+ * (`ouro:settings-page-shown`). */
 export async function refreshSafetySkipCounter(root, { logsTail = apiClient.logsTail, now = Date.now() } = {}) {
     const el = root?.querySelector?.('[data-safety-skips]');
-    if (!el) return;
+    const spares = root?.querySelector?.('[data-safety-spares]');
+    if (!el && !spares) return;
     try {
         const data = await logsTail('events', SKIP_TAIL, 'compact');
         const entries = data?.entries || [];
         const cutoff = now - 24 * 3600 * 1000;
         const times = entries.map((entry) => Date.parse(String(entry?.ts || ''))).filter(Number.isFinite);
-        const n = entries.filter((entry) => {
-            if (String(entry?.type || '') !== 'safety_mode_skip') return false;
+        const recent = (type) => entries.filter((entry) => {
+            if (String(entry?.type || '') !== type) return false;
             const time = Date.parse(String(entry?.ts || ''));
             return Number.isFinite(time) && time >= cutoff;
-        }).length;
+        });
+        const n = recent('safety_mode_skip').length;
         const oldest = times.length ? Math.min(...times) : null;
         const span = entries.length >= SKIP_TAIL && oldest !== null && oldest > cutoff
             ? `since ${new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false }).format(oldest)} (the latest ${SKIP_TAIL.toLocaleString('en-US')} events)`
             : 'in the last 24 h';
-        el.textContent = n > 0
-            ? `${n} safety ${n === 1 ? 'check' : 'checks'} let through ${span}.`
-            : `No safety checks let through ${span}.`;
+        if (el) {
+            el.textContent = n > 0
+                ? `${n} safety ${n === 1 ? 'check' : 'checks'} let through ${span}.`
+                : `No safety checks let through ${span}.`;
+        }
+        if (spares) spares.textContent = spareWords(recent('safety_route_fallback'), recent('safety_verdict').length, span);
     } catch {
-        el.textContent = '';
+        if (el) el.textContent = '';
+        if (spares) spares.textContent = '';
     }
+}
+
+/** The checks a spare model answered because the Supervisor's own model gave none (``safety_route_fallback`` events,
+ * by the model that answered), the walks no spare answered, and the checks with a recorded verdict in the same span
+ * (``safety_verdict`` events; one holds both verdicts when the second check is on): counts of events, never a share
+ * (a walk is written before its reply is read). */
+export function spareWords(walks, verdicts, span) {
+    const checked = `${verdicts} ${verdicts === 1 ? 'check' : 'checks'} with a recorded verdict in the same span.`;
+    if (!walks.length) return `No safety check went to a spare model ${span}. ${checked}`;
+    const byModel = new Map();
+    for (const walk of walks) {
+        const model = walk?.answered?.model;
+        if (model) byModel.set(modelName(model), (byModel.get(modelName(model)) || 0) + 1);
+    }
+    const answered = [...byModel.values()].reduce((sum, count) => sum + count, 0);
+    const missed = walks.length - answered;
+    return [
+        answered ? `${answered} safety ${answered === 1 ? 'check was' : 'checks were'} answered by a spare model ${span}, because`
+            + ` the Supervisor's own model gave no answer: ${[...byModel].map(([name, count]) => `${name} ×${count}`).join(', ')}.` : '',
+        missed ? `${missed} ${missed === 1 ? 'check' : 'checks'} went to the spare models ${answered ? 'and' : span + ' and'} got no answer.` : '',
+        checked,
+    ].filter(Boolean).join(' ');
 }
 
 const RULES_SAVED = 'Saved · applies from the next task or turn';

@@ -243,7 +243,13 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD) -> Tuple[Dict
     # never arbitrary extensions inside a provider's token-usage block.
     normalized.pop("effort", None)
     normalized.pop("effort_resolution", None)
+    normalized.pop("response_provider", None)  # the response's own outer label below, never a nested claim
     if isinstance(payload, dict):
+        from ouroboros.llm_openai_compatible import _bounded_response_metadata_label
+
+        upstream = _bounded_response_metadata_label(payload.get("provider"))
+        if upstream is not None:  # the upstream that served the call; the accounting provider stays the route's
+            normalized["response_provider"] = upstream
         if "service_tier" in payload:
             normalized["service_tier"] = payload["service_tier"]
         if isinstance(payload.get("processing"), dict):

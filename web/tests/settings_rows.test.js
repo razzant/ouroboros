@@ -557,3 +557,17 @@ test('a strip whose options carry a line says the chosen one\'s as the row\'s me
     const plain = await start(t, [STRIP]);
     assert.equal(plain.view.meta(STRIP), 'T_REVIEW meta');
 });
+
+test('the newest read and each landed write announce the document to the lists that name model prices', async (t) => {
+    const { server, view } = await start(t, [TOTAL]);
+    const seen = [];
+    const listen = (event) => seen.push(event.detail?.TOTAL_BUDGET);
+    document.addEventListener('settings-document:applied', listen);
+    t.after(() => document.removeEventListener('settings-document:applied', listen));
+    await readSettings();
+    assert.deepEqual(seen, [200], 'a read announces the document it keeps (model_catalog_store.js takes the tiers from it)');
+    await view.type(TOTAL, '250');
+    await settle();
+    assert.deepEqual(server.posts, [{ TOTAL_BUDGET: 250 }]);
+    assert.equal(seen.at(-1), 250, 'a landed write announces the patched document, with no read after it');
+});

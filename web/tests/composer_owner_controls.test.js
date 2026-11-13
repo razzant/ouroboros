@@ -649,6 +649,18 @@ test('closed, Context says the mode this room\'s latest request was sent in; the
     m.controls.destroy();
 });
 
+test('each recorded reason of a lower request reads as its own sentence; a lower request without one states none', () => {
+    const m = mountPair();
+    const reason = (cause) => {
+        m.controls.syncState({ context_mode: 'max', active_chat_activities: [sent('low', { cause, id: `work-${cause}` })] });
+        return closed(m).fact[1].split(/ ?Request at /)[0];
+    };
+    const said = ['memory', 'route', 'window', 'after_start'].map(reason);
+    assert.ok(said.every(Boolean) && new Set(said).size === said.length, said.join(' | '));
+    assert.equal(reason(''), '', 'an unknown start (no recorded reason) is not given one');
+    m.controls.destroy();
+});
+
 test('a room reads only its own root works: now, mixed, last and unknown; helpers, other rooms and older attempts never count', () => {
     const main = mountPair(), project = mountPair({ projectId: 'alpha', chatId: 42 });
     const rows = [

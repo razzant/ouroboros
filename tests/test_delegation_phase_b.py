@@ -4,9 +4,9 @@ B1: the dispatch-time executor note (moved whole to `subagent_dispatch_notes`,
 re-exported by `agent`) speaks only for a configured session row, and ONLY on the
 final post-preflight harness dispatch. B2: the frozen acting
 preamble states the write-root boundary without the "do it yourself" imperative.
-B3: a really-INJECTED finalization nudge is durably stamped by the worker, and a
-COMPLETED session child with zero delegated runs carries the typed
-`nanny_finalized_after_nudge_without_delegation` substrate disclosure. B4:
+B3: a durable nudge stamp (written by the retired finalization nudge; audit 11.11,
+item 18) still reads back: a COMPLETED session child with zero delegated runs carries
+the typed `nanny_finalized_after_nudge_without_delegation` substrate disclosure. B4:
 `capability_delta` gains typed `reduction_reasons`/`substrate_disclosures` lists
 and `reason` is DERIVED from them at every writer (byte-identical to the old
 hand-splice). B5: `schedule_subagent` descriptions steer objective = outcome,
@@ -230,7 +230,7 @@ def test_prompt_block_directs_harness_children_through_the_delegated_run():
     assert "delegated run" not in native
 
 
-# ---------------------------------------------------------- B3: nudge stamp end-to-end
+# ---------------------------------------------------------- B3: the nudge stamp's reader
 
 
 def _drive(tmp_path):
@@ -240,6 +240,14 @@ def _drive(tmp_path):
 
 def _stamp_ctx(drive):
     return SimpleNamespace(task_metadata={"budget_drive_root": str(drive)})
+
+
+def record_nanny_nudge_stamp(ctx, task_id, nanny_code):
+    """A stamp row as the retired loop writer recorded it: the reader keeps such rows legible."""
+    from ouroboros import delegate_custody as custody
+    from ouroboros.delegate_evidence import NANNY_NUDGE_STAMP
+
+    custody.emit(custody.custody_root(ctx), NANNY_NUDGE_STAMP, {"task_id": task_id, "nanny_code": nanny_code})
 
 
 def _harness_task(drive, **extra):
@@ -253,57 +261,7 @@ def _harness_task(drive, **extra):
     }
 
 
-def test_loop_injection_writes_the_durable_stamp(tmp_path):
-    import json
-
-    from ouroboros import delegate_custody as custody
-    from ouroboros.delegate_evidence import NANNY_NUDGE_STAMP
-    from ouroboros.loop import _maybe_inject_finalization_nudges
-
-    drive = _drive(tmp_path)
-    ctx = SimpleNamespace(
-        _nanny_route_dispatched=True, _nanny_finalization_injected=False, task_id="child-1",
-        task_metadata={"budget_drive_root": str(drive)},
-        _configured_actor_bootstrap={
-            "route_available": True, "exact_start_pending": True, "physical_started": False,
-            "zero_run_receipt_recorded": False, "selected_subagent_id": "session-a"},
-    )
-    tools = SimpleNamespace(_ctx=ctx, available_tools=lambda: ["delegate_start"])
-    msgs: list = []
-    assert _maybe_inject_finalization_nudges(
-        tools, drive, "child-1",
-        {"reasoning_notes": [], "tool_calls": []}, "done", msgs, lambda *_: None,
-    ) is True
-    rows = [json.loads(line) for line in
-            (drive / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
-    stamps = [r for r in rows if r.get("type") == NANNY_NUDGE_STAMP]
-    assert stamps and stamps[0]["task_id"] == "child-1"
-    assert stamps[0]["nanny_code"] == "CONFIGURED_ACTOR_INCOMPLETE"
-    assert custody.task_execution_evidence(drive, "child-1")["nanny_nudge_recorded"] is True
-
-
-def test_suppressed_nudge_writes_no_stamp(tmp_path):
-    # Verbs policy-hidden: the ctx flag is still latched, the message is empty,
-    # and NO stamp lands — the flag can never impersonate a fired nudge.
-    from ouroboros import delegate_custody as custody
-    from ouroboros.loop import _maybe_inject_finalization_nudges
-
-    drive = _drive(tmp_path)
-    ctx = SimpleNamespace(
-        _nanny_route_dispatched=True, _nanny_finalization_injected=False,
-        task_metadata={"budget_drive_root": str(drive)},
-    )
-    tools = SimpleNamespace(_ctx=ctx, available_tools=lambda: ["read_file"])
-    assert _maybe_inject_finalization_nudges(
-        tools, drive, "child-1",
-        {"reasoning_notes": [], "tool_calls": []}, "done", [], lambda *_: None,
-    ) is False
-    assert ctx._nanny_finalization_injected is True  # the flag alone is not the signal
-    assert custody.task_execution_evidence(drive, "child-1")["nanny_nudge_recorded"] is False
-
-
 def test_nudge_fact_rides_only_completed_native_only_envelopes(tmp_path):
-    from ouroboros.delegate_evidence import record_nanny_nudge_stamp
 
     drive = _drive(tmp_path)
     record_nanny_nudge_stamp(_stamp_ctx(drive), "child-1", "CONFIGURED_ACTOR_INCOMPLETE")
@@ -332,7 +290,7 @@ def test_a_refused_attempt_after_the_nudge_is_never_an_accusation(tmp_path):
     attempt shapes count: the pre-mint typed blocker row and a request row
     whose POST then died."""
     from ouroboros import delegate_custody as custody
-    from ouroboros.delegate_evidence import record_nanny_nudge_stamp, record_start_blocked
+    from ouroboros.delegate_evidence import record_start_blocked
 
     # Shape 1: typed route_health blocker before any invocation was minted.
     drive = _drive(tmp_path / "blocked")
@@ -366,7 +324,6 @@ def test_a_refused_attempt_after_the_nudge_is_never_an_accusation(tmp_path):
 
 def test_nudge_fact_absent_when_delegation_happened_or_nudge_never_fired(tmp_path):
     from ouroboros import delegate_custody as custody
-    from ouroboros.delegate_evidence import record_nanny_nudge_stamp
 
     # Delegation happened (a run started): not native_only, no amendment at all.
     drive = _drive(tmp_path / "ran")

@@ -30,7 +30,7 @@ pytestmark = [pytest.mark.ui_browser]
 PAGES = ["permissions", "rules", "appearance", "notifications", "voice", "computer", "computer/advanced", "computer/about"]
 SIZES = [(1087, 740), (320, 640)]
 EFFECTS = {"OUROBOROS_RUNTIME_MODE": "restart", "OUROBOROS_SERVER_HOST": "restart", "OUROBOROS_MAX_WORKERS": "restart",
-           "OUROBOROS_UI_DIR": "restart", "OUROBOROS_REVIEW_ENFORCEMENT": "next_task", "OUROBOROS_TASK_REVIEW_MODE": "next_task",
+           "OUROBOROS_UI_DIR": "restart", "OUROBOROS_TASK_REVIEW_MODE": "next_task",
            "OUROBOROS_REVIEW_MAX_CYCLES": "next_task", "OUROBOROS_SAFETY_MODE": "next_task",
            "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "next_task", "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "now",
            "OUROBOROS_NETWORK_PASSWORD": "now", "OUROBOROS_EXTRA_CA_BUNDLE": "next_task"}
@@ -49,7 +49,7 @@ class FakeSettings:
             **{key: value for key, value in ui["settings"].items() if key != "_meta"},
             "OUROBOROS_RUNTIME_MODE": "pro", "OUROBOROS_SAFETY_MODE": "full", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "light",
             "OUROBOROS_SAFETY_OWNER_RULES": "Never email my clients without asking me first.",
-            "OUROBOROS_REVIEW_ENFORCEMENT": "advisory", "OUROBOROS_TASK_REVIEW_MODE": "auto", "OUROBOROS_REVIEW_MAX_CYCLES": "2",
+            "OUROBOROS_TASK_REVIEW_MODE": "auto", "OUROBOROS_REVIEW_MAX_CYCLES": "2",
             "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "false", "OUROBOROS_SERVER_HOST": "127.0.0.1", "OUROBOROS_NETWORK_PASSWORD": "",
             "OUROBOROS_MAX_WORKERS": 10, "OUROBOROS_UI_DIR": "", "OUROBOROS_EXTRA_CA_BUNDLE": "", "OUROBOROS_MODEL_SAFETY": "",
             **values,
@@ -70,8 +70,6 @@ class FakeSettings:
                 "access": {"configured": values["OUROBOROS_RUNTIME_MODE"], "effective": self.running["OUROBOROS_RUNTIME_MODE"],
                            "current_process": self.running["OUROBOROS_RUNTIME_MODE"],
                            "restart_required": values["OUROBOROS_RUNTIME_MODE"] != self.running["OUROBOROS_RUNTIME_MODE"]},
-                "review": {"configured": values["OUROBOROS_REVIEW_ENFORCEMENT"], "next_task": values["OUROBOROS_REVIEW_ENFORCEMENT"],
-                           "effective": values["OUROBOROS_REVIEW_ENFORCEMENT"]},
             },
             "restart_state": {"restart_required": bool(pending), "restart_keys": pending,
                               "running": {key: self.running[key] for key in pending}},

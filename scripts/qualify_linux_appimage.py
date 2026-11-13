@@ -35,7 +35,6 @@ def setup_payload(base_url):
     """The real wizard contract, without credentials, subscriptions or installs."""
     return {'OPENAI_COMPATIBLE_BASE_URL': base_url,
             'OUROBOROS_MODEL': 'openai-compatible::native-qualification-inert',
-            'OUROBOROS_REVIEW_ENFORCEMENT': 'advisory',
             'OUROBOROS_RUNTIME_MODE': 'advanced',
             'subscriptionsConnected': False, 'skipSubscriptionPresets': True,
             'starter_skills': []}

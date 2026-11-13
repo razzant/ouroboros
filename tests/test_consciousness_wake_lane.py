@@ -455,6 +455,7 @@ def test_metadata_disabled_tools_reach_the_registry_guard_through_the_contract(t
 def test_model_role_resolves_the_consciousness_slots_and_falls_back_to_main():
     from ouroboros.agent_dispatch import _initial_effort_for, model_role_slot_override
     from ouroboros.model_slots import task_model_binding
+    from ouroboros.route_choice import following_route
 
     meta = {"model_role": "consciousness"}
     assert task_model_binding({"metadata": meta})[0] == "consciousness"
@@ -469,14 +470,18 @@ def test_model_role_resolves_the_consciousness_slots_and_falls_back_to_main():
     with mock.patch.dict(os.environ, {"OUROBOROS_MODEL_CONSCIOUSNESS": "", "OUROBOROS_EFFORT_MAX": "",
                                       "OUROBOROS_EFFORT_TASK": "xhigh"}):
         assert _initial_effort_for({"metadata": meta}, "task") == "xhigh"
-    # An empty model slot still honors the role's OWN local flag when the owner set it and it
-    # differs from Main's (В25=B: every slot is respected; astra round 4).
+    # An empty model slot's own local box, checked under a cloud Main, runs Main's model on the local runtime
+    # (В25=B); unchecked, the box is the row's resting state ("Uses Main.") and never takes the role off a
+    # local Main (owner, 12.11, #3272), for Light as for consciousness.
     with mock.patch.dict(os.environ, {"OUROBOROS_MODEL_CONSCIOUSNESS": "", "USE_LOCAL_CONSCIOUSNESS": "true",
                                       "USE_LOCAL_MAIN": "false", "OUROBOROS_MODEL": "openai/gpt-5.6-sol"}):
         assert model_role_slot_override(meta) == ("openai/gpt-5.6-sol", True)
     with mock.patch.dict(os.environ, {"OUROBOROS_MODEL_CONSCIOUSNESS": "", "USE_LOCAL_CONSCIOUSNESS": "false",
+                                      "OUROBOROS_MODEL_LIGHT": "", "USE_LOCAL_LIGHT": "false",
                                       "USE_LOCAL_MAIN": "true", "OUROBOROS_MODEL": "local/model"}):
-        assert model_role_slot_override(meta) == ("local/model", False)
+        assert model_role_slot_override(meta) is None
+        assert following_route("consciousness") == ("local/model", True)
+        assert model_role_slot_override({"model_role": "light"}) is None
     with mock.patch.dict(os.environ, {"OUROBOROS_MODEL_CONSCIOUSNESS": "", "USE_LOCAL_CONSCIOUSNESS": "true",
                                       "USE_LOCAL_MAIN": "true", "OUROBOROS_MODEL": "local/model"}):
         assert model_role_slot_override(meta) is None  # equal flags: Main, the same prefix

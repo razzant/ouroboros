@@ -500,8 +500,6 @@ def test_restored_handoff_grounds_prior_physical_runs_in_local_custody(tmp_path,
     receipt = json.loads(subagent_bootstrap.bootstrap_before_context(ctx, task, dispatch))
     bootstrap = ctx._configured_actor_bootstrap
     fact = subagent_bootstrap.actor_first_unresolved_fact(ctx, task_id=task["id"], drive_root=tmp_path)
-    note = subagent_bootstrap.configured_actor_finalization_message(ctx, task_id=task["id"], fallback_root=tmp_path)
-    assert "Start the exact assigned session now" not in note, "no paid duplicate over known history"
     if path == "evidence_unreadable":
         assert receipt["status"] == "configured_session_continuation"
         assert bootstrap["physical_started"] is False and bootstrap["zero_run_evidence_status"] == "unknown"

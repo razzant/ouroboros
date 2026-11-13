@@ -133,6 +133,30 @@ export function agentsOnlyAccess(connected = [], sources = []) {
     return connected.length > 0 && serving.size > 0 && !connected.some((harness) => serving.has(harness));
 }
 
+const READ_WORDS = { not_read: 'is not available yet', partial: 'is incomplete', stale: 'is out of date' };
+
+/**
+ * What the Accounts step's access row and its API section badge say for the current reads: facts in, words out.
+ * `continueBlocked` is the Continue button's own state, so the note never offers a step the button refuses.
+ */
+export function accessRowState({ connected = [], sources = [], read = 'ok', checking = false, readErrors = '',
+    previewError = '', configured = false, continueBlocked = false } = {}) {
+    const agentsOnly = !configured && agentsOnlyAccess(connected, sources);
+    const note = [checking ? 'Checking model sources…' : '',
+        !checking && read !== 'ok' && connected.length
+            ? `The model list ${READ_WORDS[read] || 'could not be read'}. ${readErrors} Your choices are kept.` : '',
+        previewError ? `Automatic assignments could not be prepared: ${previewError} `
+            + (continueBlocked ? 'Retry.' : 'Retry, or Continue to choose models yourself.') : ''];
+    return {
+        note: note.filter(Boolean).join(' '),
+        // A healthy read that names the connected accounts agents only leaves discovery nothing to retry.
+        retryHidden: (!connected.length || (agentsOnly && read === 'ok')) && !previewError,
+        // Accounts the engine names agents only leave this section the way forward, not "Optional"; while the list is
+        // unread it stays one of the ways the reason beside Continue names, as with nothing connected.
+        badge: configured ? 'Configured' : agentsOnly ? '' : 'Optional',
+    };
+}
+
 /** Why Accounts cannot continue while nothing connected can serve a model role, with the way forward. */
 export function mainSourceReason(connected = [], sources = [], { snapshot, catalogKnown = false } = {}) {
     if (!connected.length) return 'Connect Codex, enter an API key, or choose a local model before continuing.';
@@ -162,7 +186,6 @@ export function onboardingSettingsDraft({
         ...Object.fromEntries(budgetFields.filter((field) => state[field.stateKey] !== '').map(
             (field) => [field.settingKey, Number(state[field.stateKey] || 0)],
         )),
-        OUROBOROS_REVIEW_ENFORCEMENT: clean(state.reviewEnforcement) || 'advisory',
         OUROBOROS_SKILLS_REPO_PATH: clean(state.skillsRepoPath),
         LOCAL_MODEL_SOURCE: clean(state.localSource),
         LOCAL_MODEL_FILENAME: clean(state.localFilename),

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import queue
+import re
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -854,6 +855,11 @@ def test_a_nonfit_start_ends_its_task_named_and_the_same_worker_runs_the_next(tm
     assert "directly requires the whole development handbook" in text and "without it the start fits" in text
     assert "the model's limit here is 150,000" in text
     assert "window=" not in text, "a person reads the limit in words, never the refusal's key=value record"
+    # The measured parts name the handbook on its own and add up to the input: the core part excludes it.
+    measured = text.split("Measured, in tokens: ", 1)[1]
+    parts = dict(re.findall(r"(core, request and tools|handbook|further memory) ([\d,]+)", measured))
+    total = int(re.match(r"input ([\d,]+)", measured).group(1).replace(",", ""))
+    assert "handbook" in parts and sum(int(value.replace(",", "")) for value in parts.values()) == total, measured
     assert "larger window" in text and "Context mode" in text and "without this requirement" in text
     assert "Error during processing" not in text and "task_exception" not in json.dumps(stored.get("outcome_axes"))
     # Nothing is invented for this attempt: its own loop evidence is absent, never a zero or a no-effect claim.

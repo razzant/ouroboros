@@ -1,4 +1,4 @@
-"""Real two-task Git continuation: saved Blocking correction earns fresh authority."""
+"""Real two-task Git continuation: a saved correction earns fresh review authority."""
 from types import SimpleNamespace
 import json
 import subprocess
@@ -15,6 +15,7 @@ from ouroboros.task_store import list_documents
 from ouroboros.tools import git
 from ouroboros.tools.registry import ToolContext
 from ouroboros.review_ledger import CouplingOutcome
+from tests._review_change_fixtures import land_after_review
 from tests.test_mutation_attribution import _git, _repo
 
 
@@ -65,7 +66,6 @@ def test_second_task_reviews_and_commits_only_explicitly_selected_correction(tmp
     _git(root, "commit", "-qm", "fixture version")
     before = _git(root, "rev-parse", "HEAD")
     (root / "dirty.txt").write_text("unrelated owner WIP\n", encoding="utf-8")
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "1")
     # This scenario owns retained correction and exact staging; release forms have real-Git tests elsewhere.
     monkeypatch.setattr("ouroboros.commit_admission.release_metadata_diagnostics", lambda *a, **kw: {
@@ -114,8 +114,8 @@ def test_second_task_reviews_and_commits_only_explicitly_selected_correction(tmp
     (root / "clean.txt").write_text("draft before criticism\n", encoding="utf-8")
     (root / "new.txt").write_text("retained companion\n", encoding="utf-8")
     first = context("first")
-    blocked = git._repo_commit_push(first, "Correct draft", skip_advisory_review=True)
-    assert "Draft needs correction" in blocked
+    returned = git._repo_commit_push(first, "Correct draft", skip_advisory_review=True)
+    assert returned.startswith("Review outcome returned before commit") and "Correct the draft" in returned, returned
     assert _git(root, "rev-parse", "HEAD") == before and not publications
     (root / "clean.txt").write_text("corrected after final criticism\n", encoding="utf-8")
     exhausted = git._repo_commit_push(first, "Correct draft", skip_advisory_review=True)
@@ -142,7 +142,8 @@ def test_second_task_reviews_and_commits_only_explicitly_selected_correction(tmp
     candidates = attributed_git_candidates(data, second_id, root)
     assert candidates["candidates"] == ["clean.txt", "new.txt"]
     assert candidates["excluded_preexisting_dirty"] == ["dirty.txt"]
-    completed = git._repo_commit_push(second, "Commit retained correction after fresh review", skip_advisory_review=True)
+    completed = land_after_review(second, "Commit retained correction after fresh review", commit=git._repo_commit_push,
+                                  skip_advisory_review=True)
     assert _git(root, "rev-parse", "HEAD") != before, completed
     assert _git(root, "show", "HEAD:clean.txt") == "corrected after final criticism"
     assert _git(root, "show", "HEAD:new.txt") == "retained companion"
@@ -154,6 +155,7 @@ def test_second_task_reviews_and_commits_only_explicitly_selected_correction(tmp
     attempts = load_state(data).attempts
     assert {task_id: sum(row.paid for row in attempts if row.root_task_id == task_id)
             for task_id in ("first", second_id)} == {"first": 1, second_id: 1}
-    assert attempts[-1].status == "succeeded" and not attempts[-1].author_disposition
+    # The fresh outcome returned before Git; the landing is the second task's own explicit continuation.
+    assert attempts[-1].status == "succeeded" and attempts[-1].author_disposition["disposition"] == "accepted"
     assert load_task_result(data, "first") == first_result
     assert len(publications) == 1 and all(row["exit"] == 0 for row in checks)

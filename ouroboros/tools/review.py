@@ -11,7 +11,7 @@ from ouroboros.utils import (
     estimate_tokens,  # noqa: F401 — patchable seam: fit_triad_prompt resolves it through THIS namespace
     truncate_review_artifact,  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 )
-from ouroboros import config as _cfg
+from ouroboros import config as _cfg  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
 from ouroboros.review_overrides import record_override
 from ouroboros.owner_words import owner_words_text
 from ouroboros.review_substrate import SLOT_ID_PREFIX, TYPED_FAILURE_FACT_KEYS, slot_id_for_row  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
@@ -49,14 +49,12 @@ from ouroboros.tools.review_helpers import (
     CRITICAL_FINDING_CALIBRATION,  # noqa: F401 -- facade import surface (devtools/measure_review_pack.py reads the packet parts here)
     anti_pattern_lock_guard,  # noqa: F401 -- facade import surface (same)
     review_preamble,  # noqa: F401 -- facade import surface (same)
-    build_self_verification_template,
     build_review_history_section as _build_review_history_section,  # noqa: F401 -- retained test/facade patch seam
     calibrated_input_token_limit,  # noqa: F401 — patchable seam (see note above)
     emit_review_usage,  # noqa: F401 -- facade import surface; leaves read it through the call-time handle
     format_name_status_for_preflight,
-    format_review_history_entry as _format_review_entry,
     REVIEW_PROMPT_TOKEN_BUDGET,  # noqa: F401 — patchable seam (see note above)
-    review_enforcement_blocks,
+    cyber_review_authority,
     review_subject_pulse,
     single_line as _single_line,
 )
@@ -280,17 +278,9 @@ def _append_review_warning(ctx: ToolContext, text: Any) -> None:
         ctx._review_advisory.append(warning)
 
 
-def _handle_review_block_or_warning(
-    ctx: ToolContext,
-    blocking_review: bool,
-    blocked_msg: str,
-    advisory_prefix: str,
-) -> Optional[str]:
-    """Apply action authority while preserving the independent review signal."""
-    cyber = not review_enforcement_blocks("blocking")
-    if blocking_review and not cyber:
-        return blocked_msg
-    if cyber:
+def _handle_review_block_or_warning(ctx: ToolContext, blocked_msg: str, advisory_prefix: str) -> None:
+    """Record the signal the wave continued past, for the author's decision on the returned outcome."""
+    if cyber_review_authority():
         advisory_prefix = "Cyber Pro: review does not prohibit action; original signal follows. "
     record_override(ctx, blocked_msg)
     _append_review_warning(ctx, advisory_prefix + blocked_msg)
@@ -404,51 +394,6 @@ def _collect_review_findings(ctx: ToolContext, model_results: list, row_plan: Op
     return critical_fails, advisory_warns, errored_models, triad_raw_results
 
 
-def _build_critical_block_message(
-    ctx: ToolContext,
-    commit_message: str,
-    critical_fails: List[str],
-    advisory_warns: List[str],
-    errored_note: str,
-) -> str:
-    critical_entries = list(getattr(ctx, "_last_review_critical_findings", []) or critical_fails)
-    advisory_entries = list(getattr(ctx, "_last_review_advisory_findings", []) or advisory_warns)
-    ctx._review_history.append({
-        "attempt": ctx._review_iteration_count,
-        "commit_message": commit_message,  # full — no [:200] truncation
-        "critical": critical_entries,
-        "advisory": advisory_entries,
-    })
-
-    retry_coaching = build_self_verification_template(
-        critical_entries,
-        attempt_idx=ctx._review_iteration_count,
-        tool_name="commit_reviewed",
-        context_noun="diff",
-    )
-
-    return (
-        f"⚠️ REVIEW_BLOCKED (attempt {ctx._review_iteration_count}): Critical issues found by reviewers.\n"
-        "Commit has NOT been created. Fix the issues and try again. review_rebuttal is\n"
-        "legitimate when a finding is factually incorrect, when its evidence does not\n"
-        "support the claimed severity, or when the requested remedy is disproportionate —\n"
-        "e.g. it would remove or restrict a working capability that the accepted plan\n"
-        "did not narrow. Argue for a capability-preserving remedy: change what you can\n"
-        "argue for, not what you can override — a rebuttal never overrides owner-chosen\n"
-        "enforcement. Repetition alone does not validate a finding: verify its evidence\n"
-        "and proportionality again, retaining a justified rebuttal when appropriate.\n\n"
-        + "Critical findings:\n"
-        + "\n".join(f"  - {_format_review_entry(f, default_severity='critical')}" for f in critical_entries)
-        + (
-            "\n\nAdvisory warnings:\n"
-            + "\n".join(f"  - {_format_review_entry(w)}" for w in advisory_entries)
-            if advisory_entries else ""
-        )
-        + errored_note
-        + retry_coaching
-    )
-
-
 def _build_preflight_staged(target_repo: str, fallback: str = "") -> str:
     """Convert git name-status to the compact preflight format."""
     try:
@@ -524,16 +469,15 @@ def _triad_governance_context(ctx: ToolContext, touched_paths: list,
 
 
 def _capture_triad_staged_diff(
-    ctx: ToolContext, target_repo, blocking_review: bool, frozen: Any = None,
+    ctx: ToolContext, target_repo, frozen: Any = None,
 ) -> tuple[Optional[str], Optional[Any], Optional[str]]:
     """Capture the triad's review-diff evidence, or route a capture failure.
 
     Returns ``(diff_text, subject, None)`` on success — ``subject`` is the
     managed resolution-delta artifact, ``None`` for an ordinary commit whose
     evidence stays the byte-exact hardened staged diff — and
-    ``(None, None, block_result)`` on failure: the fail-closed message in
-    blocking mode, ``None`` (advisory skip) otherwise. A genuine failure fails
-    closed rather than reviewing a placeholder that would yield authoritative
+    ``(None, None, None)`` on failure, recorded as a warning: the triad is
+    skipped rather than reviewing a placeholder that would yield authoritative
     findings about a diff nobody has. A ``frozen`` subject that is not the
     system repo's own index IS the evidence (its diff text and managed artifact);
     the system index keeps the gate's live capture, byte-identical to today.
@@ -551,14 +495,14 @@ def _capture_triad_staged_diff(
         return capture_staged_diff(target_repo), None, None
     except StagedDiffUnavailable as exc:
         ctx._last_review_block_reason = "infra_failure"
-        return None, None, _handle_review_block_or_warning(
-            ctx, blocking_review,
-            "⚠️ REVIEW_BLOCKED: Cannot capture the staged diff — commit cannot "
-            f"proceed.\nError: {exc}\n"
+        _handle_review_block_or_warning(
+            ctx,
+            "⚠️ REVIEW_BLOCKED: Cannot capture the staged diff — nothing was reviewed.\n"
+            f"Error: {exc}\n"
             "Ensure git is available and the repository is in a valid state.",
-            "Review enforcement=Advisory: staged diff capture failed; triad "
-            "review skipped rather than run against a placeholder. ",
+            "Staged diff capture failed; triad review skipped rather than run against a placeholder. ",
         )
+        return None, None, None
 
 
 def _subject_changed_paths(frozen: Any, target_repo) -> tuple[str, str]:
@@ -630,14 +574,12 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
     for field in ("_last_triad_models", "_last_review_critical_findings", "_last_triad_raw_results",
                   "_triad_withheld_seat_records", "_review_degraded_reasons"):
         setattr(ctx, field, [])
-    blocking_review = review_enforcement_blocks(_cfg.get_review_enforcement())
-
     if bool(getattr(ctx, "_review_reconcile_only", False)):
         from ouroboros.tools.review_change_custody import prepare_recorded_commit_review
-        return prepare_recorded_commit_review(ctx, target_repo=target_repo, blocking_review=blocking_review, layer=layer,
+        return prepare_recorded_commit_review(ctx, target_repo=target_repo, layer=layer,
                                               frozen=frozen, review_rebuttal=review_rebuttal)
 
-    diff_text, subject, capture_block = _capture_triad_staged_diff(ctx, target_repo, blocking_review, frozen=frozen)
+    diff_text, subject, capture_block = _capture_triad_staged_diff(ctx, target_repo, frozen=frozen)
     if diff_text is None or not diff_text.strip():  # capture block, advisory skip, or empty diff
         return None, capture_block, True
 
@@ -654,15 +596,10 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
         ctx._last_review_block_reason = (
             "infra_failure" if preflight_evidence_unavailable(preflight_err) else "preflight"
         )
-        result = _handle_review_block_or_warning(
-            ctx, blocking_review, preflight_err,
-            "Review enforcement=Advisory: preflight warning did not block commit. ",
-        )
-        if result is not None:
-            return None, result, True
+        _handle_review_block_or_warning(ctx, preflight_err, "Preflight warning (it does not stop the commit): ")
         from ouroboros.preflight_receipts import with_preparation_finding  # the seats see what the wave continued past
         ctx._preflight_execution = with_preparation_finding(getattr(ctx, "_preflight_execution", None), preflight_err,
-            continued_under="Advisory enforcement" if review_enforcement_blocks("blocking") else "Cyber Pro")
+            continued_under="Cyber Pro" if cyber_review_authority() else "the author's decision")
 
     rebuttal_section = build_rebuttal_section(review_rebuttal)
 
@@ -672,14 +609,12 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
         log.error("Checklist loading failed (fail-closed): %s", e)
         ctx._last_review_block_reason = "infra_failure"
         blocked_msg = (
-            "⚠️ REVIEW_BLOCKED: Cannot load review checklist — commit cannot proceed.\n"
+            "⚠️ REVIEW_BLOCKED: Cannot load review checklist — nothing was reviewed.\n"
             f"Error: {e}\n"
             "Ensure docs/CHECKLISTS.md exists and contains the expected section headers."
         )
-        return None, _handle_review_block_or_warning(
-            ctx, blocking_review, blocked_msg,
-            "Review enforcement=Advisory: review checklist failed to load; commit proceeding anyway. ",
-        ), True
+        _handle_review_block_or_warning(ctx, blocked_msg, "Review checklist failed to load; nothing was reviewed and the outcome returns before Git. ")
+        return None, None, True
 
     review_history_section = _review_history_with_open_obligations(ctx, frozen, review_rebuttal)
 
@@ -700,11 +635,9 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
         row_plan = seat_vectors(commit_triad_delivery())
     except ValueError as exc:
         ctx._last_review_block_reason = "infra_failure"
-        return None, _handle_review_block_or_warning(
-            ctx, blocking_review,
-            f"⚠️ REVIEW_BLOCKED: invalid review pool configuration — {exc}",
-            "Review enforcement=Advisory: invalid review pool configuration did not block commit. ",
-        ), True
+        _handle_review_block_or_warning(ctx, f"⚠️ REVIEW_BLOCKED: invalid review pool configuration — {exc}",
+                                        "Invalid review pool configuration; an explicit author decision is required. ")
+        return None, None, True
     models, row_routes = row_plan["models"], row_plan["routes"]
     ctx._last_triad_models = list(models)  # forensic: actual resolved model IDs
     # Packet rows only: a retrieving api row (native delivery or a configured
@@ -858,13 +791,14 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
     if brief_failure is not None:
         failed_slot, exc = brief_failure
         ctx._last_review_block_reason = "infra_failure"
-        return None, _handle_review_block_or_warning(
-            ctx, blocking_review,
-            "⚠️ REVIEW_BLOCKED: Failed to build the review brief — commit blocked.\n"
+        _handle_review_block_or_warning(
+            ctx,
+            "⚠️ REVIEW_BLOCKED: Failed to build the review brief — nothing was reviewed.\n"
             f"Seat {failed_slot}: {exc}\n"
             "Ensure git is available and the repository is in a valid state.",
-            "Review enforcement=Advisory: review brief assembly failed; an explicit author decision is required. ",
-        ), True
+            "Review brief assembly failed; an explicit author decision is required. ",
+        )
+        return None, None, True
 
     # The governance manifest is the packet's disclosure record: which rules were
     # inlined, which arrived as navigation and why (BIBLE P1). It rides the
@@ -876,7 +810,7 @@ def _prepare_unified_review(ctx: ToolContext, commit_message: str,
         "prompt": prompt, "stable_prefix_len": stable_prefix_len,
         "models": models, "routes": row_routes, "row_plan": row_plan,
         "session_task": "", "target_repo": target_repo,
-        "blocking_review": blocking_review, "task_evidence": task_evidence, "preflight_execution": execution,
+        "task_evidence": task_evidence, "preflight_execution": execution,
         "layer": layer,
         "governance_manifest": list(governance.manifest), "checking_source": commit_checking_source(ctx, row_plan, target_repo, frozen),
         "governance_packet_slots": [slot.slot_id for slot in api_slots],
@@ -919,7 +853,6 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
     the durable record reduces with."""
     from ouroboros.review_ledger import coupling_outcome, reduce_verdict, rows_from_plan
 
-    blocking_review = prepared["blocking_review"] and review_enforcement_blocks("blocking")
     ctx._last_review_verdict = {}
     ctx._last_coupling_result = None
     try:
@@ -943,40 +876,33 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
         log.error("Unified review infrastructure failure: %s", e)
         ctx._last_review_block_reason = "infra_failure"
         blocked_msg = (
-            "⚠️ REVIEW_BLOCKED: Review infrastructure failed — commit cannot proceed "
-            "without a successful review.\n"
+            "⚠️ REVIEW_BLOCKED: Review infrastructure failed — no review verdict.\n"
             f"Error: {e}\n"
             "Check OPENROUTER_API_KEY, network connectivity, and retry."
         )
-        return _handle_review_block_or_warning(
-            ctx, blocking_review, blocked_msg,
-            "Review enforcement=Advisory: review infrastructure failed; an explicit author decision is required. ",
-        )
+        _handle_review_block_or_warning(ctx, blocked_msg, "Review infrastructure failed; an explicit author decision is required. ")
+        return None
 
     if "error" in result:
         log.error("Review returned error: %s", result["error"])
         ctx._last_review_block_reason = "infra_failure"
         blocked_msg = (
-            "⚠️ REVIEW_BLOCKED: Review service returned an error — commit cannot proceed "
-            "without a successful review.\n"
+            "⚠️ REVIEW_BLOCKED: Review service returned an error — no review verdict.\n"
             f"Error: {result['error']}\n"
             "Check OPENROUTER_API_KEY, network connectivity, and retry."
         )
-        return _handle_review_block_or_warning(
-            ctx, blocking_review, blocked_msg,
-            "Review enforcement=Advisory: review service failed; an explicit author decision is required. ",
-        )
+        _handle_review_block_or_warning(ctx, blocked_msg, "Review service failed; an explicit author decision is required. ")
+        return None
 
     model_results = result.get("results", [])
     if not model_results:
         ctx._last_review_block_reason = "infra_failure"
         if getattr(ctx, "_triad_withheld_seat_records", None):
             ctx._last_triad_raw_results = list(ctx._triad_withheld_seat_records)
-        blocked_msg = ("⚠️ REVIEW_BLOCKED: Review returned no results from any "
-                       "model — commit cannot proceed without a successful review.")
-        return _handle_review_block_or_warning(
-            ctx, blocking_review, blocked_msg,
-            "Review enforcement=Advisory: no model results were received; an explicit author decision is required. ")
+        blocked_msg = "⚠️ REVIEW_BLOCKED: Review returned no results from any model — no review verdict."
+        _handle_review_block_or_warning(ctx, blocked_msg,
+                                        "No model results were received; an explicit author decision is required. ")
+        return None
 
     critical_fails, advisory_warns, errored_models, _triad_raw = _collect_review_findings(
         ctx, model_results, prepared.get("row_plan"))
@@ -1002,22 +928,15 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
     verdict = reduce_verdict([seat for seat in rows if not seat.get("additional")], pending=bool(pending_models))
     ctx._last_review_verdict = verdict
     ctx._last_coupling_result = coupling_outcome(verdict, rows)
-    # ``blocked`` is the gate's fact, not the verdict's: under the owner's
-    # advisory enforcement a FAIL on the coupling question is recorded and
-    # surfaced, and blocks nothing.
-    ctx._last_coupling_result.blocked = ctx._last_coupling_result.blocked and bool(blocking_review)
+    # ``blocked`` is the gate's fact, not the verdict's: a FAIL on the coupling
+    # question is recorded and surfaced, and blocks nothing.
+    ctx._last_coupling_result.blocked = False
     if pending_models:
         ctx._last_review_block_reason = "review_late_result_pending"
         blocked_msg = ("⚠️ REVIEW_PENDING: Physical review operation(s) remain unresolved: "
                        f"{', '.join(pending_models)}. Retry the same commit to reconcile them without a blind paid resend.")
-        pending_block = _handle_review_block_or_warning(
-            ctx, blocking_review, blocked_msg,
-            "Review enforcement=Advisory: review is pending; collect its outcome before choosing an author continuation. ",
-        )
-        if pending_block is not None:
-            from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
-            return _publish_tool_result(ctx, ToolResult(status="ok", code="OK",
-                text=pending_block, meta={"review_pending": True}))
+        _handle_review_block_or_warning(
+            ctx, blocked_msg, "Review is pending; collect its outcome before choosing an author continuation. ")
     failed_actors = [_review_actor_label(r) for r in triad_raw
                      if r.get("status") not in ("responded", "not_dispatched")]
     quorum = verdict["quorum"]
@@ -1033,10 +952,8 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
             f"Unavailable/failed:\n{unavailable_str}\n"
             "No retry recommendation is inferred from these failures."
         )
-        return _handle_review_block_or_warning(
-            ctx, blocking_review, blocked_msg,
-            "Review enforcement=Advisory: review quorum was not met; an explicit author decision is required. ",
-        )
+        _handle_review_block_or_warning(ctx, blocked_msg, "Review quorum was not met; an explicit author decision is required. ")
+        return None
 
     if models_total < 2:
         # A single configured reviewer is honored (owner's explicit setup), but
@@ -1092,39 +1009,29 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
             + "".join(f"  - {line}\n" for line in seat_lines)
             + f"The commit gate counts only a PASS/FAIL answer; {advice}" + errored_note
         )
-        outcome = _handle_review_block_or_warning(
-            ctx, blocking_review, blocked_msg,
-            "Review enforcement=Advisory: review was not performed; an explicit author decision is required. ",
-        )
+        _handle_review_block_or_warning(ctx, blocked_msg, "Review was not performed; an explicit author decision is required. ")
         # The wave's typed diagnostics (per-seat errors, FAIL rows the gate could
         # not count) reach the author on this early branch as on the full path.
-        if outcome is None:
-            for warning in getattr(ctx, "_last_review_advisory_findings", []) or []:
-                _append_review_warning(ctx, warning)
-        return outcome
+        for warning in getattr(ctx, "_last_review_advisory_findings", []) or []:
+            _append_review_warning(ctx, warning)
+        return None
 
     if critical_fails:
         # All parse issues get a parse_failure block reason.
         all_parse = all("Could not parse" in f for f in critical_fails)
         ctx._last_review_block_reason = "parse_failure" if all_parse else "critical_findings"
-        if blocking_review:
-            return _build_critical_block_message(
-                ctx, commit_message, critical_fails, advisory_warns, errored_note,
-            )
-
         record_override(ctx, "; ".join(critical_fails[:5]))
         _append_review_warning(
             ctx,
-            ("Cyber Pro: critical review findings do not prohibit action."
-             if not review_enforcement_blocks("blocking") else
-             "Review enforcement=Advisory: critical findings require an explicit author decision before committing."),
+            ("Cyber Pro: critical review findings do not prohibit action." if cyber_review_authority() else
+             "Critical review findings: committing needs your explicit decision (review_reference with author_disposition)."),
         )
         for finding in getattr(ctx, "_last_review_critical_findings", []) or []:
             _append_review_warning(ctx, finding)
 
     if not critical_fails:
         # All clear: reset iteration state. With critical findings present
-        # (advisory enforcement), the anti-thrashing history must SURVIVE so
+        # (handed back to the author), the anti-thrashing history must SURVIVE so
         # repeat findings on the next attempt are still recognized as repeats.
         ctx._review_iteration_count = 0
         ctx._review_history = []

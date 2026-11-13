@@ -1,7 +1,7 @@
 // The served wizard shares the SPA's escaping, request, login and status owners.
 import { fetchJson } from './api_client.js';
 import {
-    agentsOnlyAccess, agentsStepHtml, mainSourceReason,
+    accessRowState, agentsStepHtml, mainSourceReason,
     EARLIER_SAVE_KEPT_TEXT,
     EARLIER_SAVE_OTHER_VALUES_TEXT,
     completionAttemptId,
@@ -46,15 +46,14 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         // The backend contract exports active slots only. Heavy remains a
         // bounded stored-value migration input and never enters this editor.
         const MODEL_SLOTS = SETUP_CONTRACT.modelSlots || [];
-        const REVIEW_MODES = SETUP_CONTRACT.reviewModes || [];
         const RUNTIME_MODES = SETUP_CONTRACT.runtimeModes || [];
         // The setup contract owns the access ladder (a deployment's ceiling included): one column per choice.
         const RUNTIME_MODE_GRID_CLASS = ['one', 'two', 'three', 'four'][Math.min(RUNTIME_MODES.length, 4) - 1] || 'four';
         const LOCAL_ROUTING_MODES = SETUP_CONTRACT.localRoutingModes || [];
         const BUDGET_FIELDS = SETUP_CONTRACT.budgetFields || [];
         const LOCAL_FIELDS = [
-            ['local-source', 'localSource', 'Model Source', 'Qwen/Qwen2.5-7B-Instruct-GGUF or /absolute/path/model.gguf', 'Use either a HuggingFace repo ID or a local absolute GGUF path.', 'field field-full'],
-            ['local-filename', 'localFilename', 'GGUF Filename', 'qwen2.5-7b-instruct-q3_k_m.gguf', 'Required only for HuggingFace repo IDs. Leave empty when the source is a direct filesystem path.', 'field field-full'],
+            ['local-source', 'localSource', 'Model Source', 'unsloth/Qwen3.5-9B-GGUF or /absolute/path/model.gguf', 'Use either a HuggingFace repo ID or a local absolute GGUF path.', 'field field-full'],
+            ['local-filename', 'localFilename', 'GGUF Filename', 'Qwen3.5-9B-Q4_K_M.gguf', 'Required only for HuggingFace repo IDs. Leave empty when the source is a direct filesystem path.', 'field field-full'],
             ['local-context', 'localContextLength', 'Context Length', '', '', 'field', 'number', '2048', '1024'],
             ['local-gpu-layers', 'localGpuLayers', 'GPU Layers', '', '', 'field', 'number', '', '1'],
             ['local-chat-format', 'localChatFormat', 'Chat Format', 'Leave empty for auto-detect', '', 'field field-full'],
@@ -279,10 +278,6 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
             return PROVIDER_PROFILES[profile]?.label || PROVIDER_PROFILES.openrouter?.label || 'OpenRouter';
         }
 
-        function reviewLabel(mode) {
-            return optionByValue(REVIEW_MODES, mode).label || 'Advisory';
-        }
-
         function runtimeModeLabel(mode) {
             return optionByValue(RUNTIME_MODES, mode).label || 'Advanced';
         }
@@ -304,26 +299,15 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         if (quick) quick.hidden = !hasModelSubscription();
         const error = root.querySelector('.wizard-error');
         if (error) error.textContent = state.error || (['accounts', 'models'].includes(state.currentStep) ? validateCurrentStep() : '');
+        const access = accessRowState({ connected: state.agentsConnected, sources: modelCatalog.model_sources,
+            read: catalogReadState(modelCatalog), checking: Boolean(catalogRequest), readErrors: summarizeReadErrors(modelCatalog.errors),
+            previewError: agentsStep?.previewError, configured: hasApiAccess() || hasLocalModel(), continueBlocked: Boolean(next?.disabled) });
         const note = document.getElementById('onboarding-access-note');
-        if (note) {
-            const read = catalogReadState(modelCatalog);
-            const messages = [catalogRequest ? 'Checking model sources…' : '',
-                !catalogRequest && read !== 'ok' && state.agentsConnected.length
-                    ? `Model discovery is ${read === 'not_read' ? 'not available yet' : read}. ${summarizeReadErrors(modelCatalog.errors)} Your choices are kept.` : '',
-                agentsStep?.previewError ? `Automatic assignments could not be prepared: ${agentsStep.previewError} Retry, or Continue to choose models yourself.` : ''];
-            note.textContent = messages.filter(Boolean).join(' ');
-            note.hidden = !note.textContent;
-        }
-        const agentsOnly = !hasApiAccess() && !hasLocalModel() && agentsOnlyAccess(state.agentsConnected, modelCatalog.model_sources);
+        if (note) Object.assign(note, { textContent: access.note, hidden: !access.note });
         const retry = document.getElementById('onboarding-access-retry');
-        if (retry) {
-            // A healthy read that names the connected accounts agents only leaves discovery nothing to retry.
-            retry.hidden = (!state.agentsConnected.length || (agentsOnly && catalogReadState(modelCatalog) === 'ok')) && !agentsStep?.previewError;
-            retry.disabled = Boolean(catalogRequest || agentsStep?.previewPending);
-        }
+        if (retry) Object.assign(retry, { hidden: access.retryHidden, disabled: Boolean(catalogRequest || agentsStep?.previewPending) });
         const optional = root.querySelector('[data-collapse="api-access"] > summary .selection-badge');
-        if (optional) optional.hidden = agentsOnly;  // the way forward named beside Continue is not "Optional"
-        if (optional) optional.textContent = hasApiAccess() || hasLocalModel() ? 'Configured' : 'Optional';
+        if (optional) Object.assign(optional, { textContent: access.badge, hidden: !access.badge });
         const accessRow = document.getElementById('onboarding-access-row');
         if (accessRow) accessRow.hidden = Boolean(note?.hidden && retry?.hidden);
         const recover = document.getElementById('skip-presets-btn');
@@ -353,7 +337,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         if (!presetId) {
             state.localSource = '';
             state.localFilename = '';
-            state.localContextLength = 16384;
+            state.localContextLength = 65536;
             state.localGpuLayers = -1;
             state.localChatFormat = '';
             state.localRoutingMode = 'cloud';
@@ -446,11 +430,6 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         return state.currentStep === 'models' ? modelRoles.validate() : '';
     }
 
-    function validateReviewStep() {
-        if (!['advisory', 'blocking'].includes(trim(state.reviewEnforcement))) return 'Choose advisory or blocking review mode.';
-        return '';
-    }
-
     function validateBudgetStep() {
         for (const field of BUDGET_FIELDS) {
             if (hasModelSubscription() && !hasApiAccess() && state[field.stateKey] === '') continue;
@@ -464,7 +443,6 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
     function validateCurrentStep() {
         if (state.currentStep === 'accounts') return validateProvidersStep();
         if (state.currentStep === 'models') return validateModelsStep();
-        if (state.currentStep === 'review_mode') return validateReviewStep();
         if (state.currentStep === 'budget') return validateBudgetStep();
         return '';
     }
@@ -556,7 +534,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
             filename: trim(state.localFilename),
             port: 8766,
             n_gpu_layers: parseInt(state.localGpuLayers, 10),
-            n_ctx: parseInt(state.localContextLength, 10) || 16384,
+            n_ctx: parseInt(state.localContextLength, 10) || 65536,
             chat_format: trim(state.localChatFormat),
         };
     }
@@ -587,7 +565,6 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                 ? modelSources.filter((source) => state.agentsConnected.includes(source.credentialHarness))
                     .map((source) => source.label || source.id).join(', ') + ' subscription · no API key'
                 : profileLabel(activeProviderProfile())],
-            ['Review mode', reviewLabel(state.reviewEnforcement)],
             ['Access level', runtimeModeLabel(state.runtimeMode)],
             ...((hasApiAccess() || !hasModelSubscription()) ? [['Total API budget', formatUsd(state.totalBudget)],
                 ['Per-task API cap', formatUsd(state.perTaskCostUsd)]] : []),
@@ -795,7 +772,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                 <div id="onboarding-access-note" class="wizard-inline-note" role="status" hidden></div>
                 <button id="onboarding-access-retry" class="btn btn-default" type="button" hidden>Retry model discovery</button>
             </div>
-            <details class="wizard-collapse" data-collapse="api-access" ${state.apiAccessOpen || hasApiAccess() ? 'open' : ''}>
+            <details class="wizard-collapse" data-collapse="api-access" ${state.apiAccessOpen || hasApiAccess() || hasLocalModel() ? 'open' : ''}>
                 <summary><span>API keys and local models</span><span class="selection-badge">${hasApiAccess() || hasLocalModel() ? 'Configured' : 'Optional'}</span></summary>
                 <div class="wizard-collapse-body">${renderProvidersStep()}</div>
             </details>
@@ -870,7 +847,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
 
     function reviewersNote() {
         const count = reviewPoolRows(catalogDraft()).length;
-        if (count) return `Reviewers: ${count} — the rows marked Reviewer under Models → Available subagents. ${reviewerTickCaption(state.reviewEnforcement, state.runtimeMode)}`;
+        if (count) return `Reviewers: ${count} — the rows marked Reviewer under Models → Available subagents. ${reviewerTickCaption(state.runtimeMode)}`;
         if (agentsStep?.previewError) return 'Automatic reviewers are unavailable. Mark rows as Reviewer under Models → Available subagents, or use Main on the summary.';
         return (catalogDraft()?.items || []).length ? 'No row is marked Reviewer, so the main model reviews alone. Mark rows under Models → Available subagents for a second opinion.'
             : 'Reviewers will be prepared from your connected access.';
@@ -888,15 +865,6 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                 </div>
                 </div>
                 <div class="wizard-inline-note" data-reviewers-note>${escapeHtml(reviewersNote())}</div>
-                <div class="wizard-choice-grid">
-                    ${REVIEW_MODES.map((mode) => `
-                        <button type="button" class="wizard-choice ${escapeHtml(mode.className || mode.value)} ${state.reviewEnforcement === mode.value ? 'active' : ''}" data-review-mode="${escapeHtml(mode.value)}" aria-pressed="${state.reviewEnforcement === mode.value}">
-                            <span class="tone">${escapeHtml(mode.tone)}</span>
-                            <h3>${escapeHtml(mode.label)}</h3>
-                            <p>${escapeHtml(mode.copy)}</p>
-                        </button>
-                    `).join('')}
-                </div>
             <div class="panel-card runtime-mode-card">
                 <h3>Access level</h3>
                     <p class="field-note">${escapeHtml(runtimeModeCopy)}</p>
@@ -973,7 +941,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                 </div>
             </div>
             <div class="summary-card"><div data-starter-skills></div><div data-consciousness-offer></div><div class="summary-card-rows">${summaryRowsHtml()}</div></div>
-            ${state.reviewEnforcement === 'blocking' && trim(state.runtimeMode) !== 'cyber_pro' && packetOnlyReviewPool(catalogDraft())
+            ${packetOnlyReviewPool(catalogDraft())
                 ? `<div class="wizard-inline-note" data-tone="warn" data-review-pool-warning>${escapeHtml(PACKET_ONLY_POOL_WARNING)}</div>` : ''}
             ${languageBlockHtml({ onboarding: true })}
             ${state.recoveryPrepared ? `<div class="wizard-inline-note">Automatic subscription presets were skipped. ${state.recoveryMain === mainBinding() ? 'Reviewers were assigned to Main.' : 'Main changed; reviewers keep the assignments shown above. Use Main for reviewers again if you want to update them.'} Check the assignments, then Start Ouroboros to save this draft. Later changes in Settings are manual.</div>` : ''}
@@ -1045,7 +1013,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                     ${state.completedRestartMode || consciousness.running() ? '' : `
                     <div class="wizard-footer">
                         <div class="wizard-error" role="status">${escapeHtml(state.error)}</div>
-                        <div class="footer-copy">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
+                        <div class="footer-copy${saveUnknown ? ' footer-warning' : ''}">${escapeHtml(saveUnknown ? 'The last save did not return a confirmed result.' : meta.footer)}</div>
                         <div class="footer-actions">
                             <button class="btn btn-default" id="back-btn" type="button" ${index === 0 || state.saving || state.preparingRecovery ? 'disabled' : ''}>Back</button>
                             ${state.currentStep === 'accounts' ? `<button class="btn btn-default" id="quick-start-btn" type="button" ${hasModelSubscription() ? '' : 'hidden'}>Review &amp; start</button>` : ''}
@@ -1327,7 +1295,6 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
     }
 
     function bindReviewModeStep() {
-        bindChoices('data-review-mode', 'reviewEnforcement');
         bindChoices('data-runtime-mode', 'runtimeMode');
         const skillsInput = document.getElementById('skills-repo-path');
         if (skillsInput) skillsInput.addEventListener('input', () => { state.skillsRepoPath = skillsInput.value; markStepEdited(); });
@@ -1489,7 +1456,6 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         if (state.saving || state.preparingRecovery) return;
         const providersError = validateProvidersStep();
         const modelsError = validateModelsStep();
-        const reviewError = validateReviewStep();
         const budgetError = validateBudgetStep();
         agentsStep?.noteSaveAttempt?.();
         const subagentsError = agentsStep?.validateSubagents?.()?.[0] || '';
@@ -1499,7 +1465,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                 : `Available subagents could not be refreshed from your latest setup choices${agentsStep.previewError ? `: ${agentsStep.previewError}` : '.'}`)
             : '';
         state.error = (state.skipSubscriptionPresets && !state.recoveryPrepared ? 'Use Main for reviewers to prepare the assignments before saving.' : '')
-            || providersError || modelsError || reviewError || budgetError
+            || providersError || modelsError || budgetError
             || subagentsError || previewError;
         if (state.error) return syncCurrentStepActionState();
         state.saving = true;

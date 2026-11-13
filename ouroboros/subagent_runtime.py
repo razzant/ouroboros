@@ -195,26 +195,22 @@ def current_model_visible_subagent_catalog() -> dict[str, Any]:
 
 _REVIEW_RULES = {
     "cyber_pro": "Cyber Pro: review informs judgment; no finding, failure or unavailable review prohibits action.",
-    "blocking": ("Blocking: critical findings, a failed quorum, a review that was not performed or a review "
-                 "infrastructure failure stop the commit."),
-    "advisory": ("Advisory: material findings and review failures return to the author as the outcome before any Git "
-                 "effect; the author may continue explicitly on that outcome, and nothing is rewritten into PASS."),
+    "advisory": ("Material findings and review failures return to me as the outcome before any Git effect; I may "
+                 "continue explicitly on that outcome, and nothing is rewritten into PASS."),
 }
 
 
 _REVIEW_SURFACES = {
-    "commit_gate": {"blocking": "every ticked reviewer; a subset is widened and recorded",
-                    "advisory": "choose ticked reviewers; narrowing requires a reason; omitted means the whole pool; outcome returns before Git for an author disposition",
-                    "cyber_pro": "compose or skip, recording the departure; never holds"},
+    "commit_gate": {"advisory": "choose ticked reviewers; narrowing requires a reason; omitted means the whole pool; outcome returns before Git for an author disposition",
+                    "cyber_pro": "compose or skip, recording the departure"},
     "review_change": "own code follows commit composition; other repositories compose freely in every mode, record a missing reason and never bind",
-    "skill_review": {"blocking": "whole pool", "advisory": "choose ticked reviewers, with a reason when narrowed; omitted and owner-started mean whole pool; review-each blockers keep the skill off until clean review or owner Skip",
+    "skill_review": {"advisory": "choose ticked reviewers, with a reason when narrowed; omitted and owner-started mean whole pool; review-each blockers keep the skill off until clean review or owner Skip",
                      "cyber_pro": "panel, self-check or no review; the skill may run"},
-    "plan_review": "opening is optional; first own-code ask: Blocking adds missing ticked reviewers, Advisory requires a ticked reviewer and a reason when narrowed, Cyber Pro is free; later asks name rows; only a counted participant's objection holds, only under Blocking",
-    "advisers": "enabled unticked rows may be named in every mode: heard, not counted, never holding",
-    "result": ("review_change(subject=result): on a Required root, Blocking widens a named subset to every ticked "
-               "reviewer and records it; Advisory names ticked reviewers and requires a reason when narrowed, and if "
-               "nobody reviewed before delivery the host seats the whole pool (chosen by the host); Auto composes "
-               "freely; Cyber Pro composes freely and never holds; Off is refused; a child's own result review "
+    "plan_review": "opening is optional; a first own-code ask outside Cyber Pro requires a ticked reviewer and a reason when narrowed, Cyber Pro is free; later asks name rows; objections are disclosed, none holds",
+    "advisers": "enabled unticked rows may be named in every mode: heard, not counted",
+    "result": ("review_change(subject=result): on a Required root, name ticked reviewers, with a reason when narrowed, "
+               "and if nobody reviewed before delivery the host seats the whole pool (chosen by the host); Auto composes "
+               "freely; Cyber Pro composes freely; Off is refused; a child's own result review "
                "composes freely; advisers are heard, not counted; omitted reviewers mean the whole pool"),
     "preflight": "one enabled catalog row you name: commit_reviewed(preflight_reviewer=…); none → recorded as not performed",
     "system_review": "/review: one enabled catalog row, default Main",
@@ -250,26 +246,24 @@ def _api_review_cost_hint(slot: Any, category: str = "", unit: str = "review") -
 # The wizard's summary prints the same sentence (``subagents_settings.js`` ``PACKET_ONLY_POOL_WARNING``).
 PACKET_ONLY_POOL_WARNING = (
     "Every reviewer is a Packet row, so none reads the repository and the coupling question (how the "
-    "change fits the rest of the code) goes unanswered: with Blocking review, every commit to Ouroboros "
-    "itself stops as “not performed”. Mark a reviewer that reads the work itself, or choose Advisory.")
+    "change fits the rest of the code) goes unanswered: every review of a commit to Ouroboros itself "
+    "ends without a verdict. Mark a reviewer that reads the work itself.")
 
 
 def coupling_unanswerable(slots: Any) -> bool:
     """A non-empty pool none of whose seats reads the repository (every row Packet): no seat
     is asked the coupling part, so every commit-gate review ends ``NOT_PERFORMED``
-    (``coupling_not_performed``, ``review_ledger.reduce_verdict``) — a block under Blocking."""
+    (``coupling_not_performed``, ``review_ledger.reduce_verdict``)."""
     return bool(slots) and not any(getattr(slot, "retrieves", False) for slot in slots)
 
 
 def review_pool_save_warning(settings: Mapping[str, Any]) -> str:
     """The save-time warning, never a refusal, for a document whose pool cannot answer the
-    coupling part while review blocks (:func:`coupling_unanswerable`); ``""`` otherwise."""
+    coupling part (:func:`coupling_unanswerable`); ``""`` otherwise."""
     from ouroboros.reviewer_slot_config import review_pool_slots
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
 
-    enforcement = str(settings.get("OUROBOROS_REVIEW_ENFORCEMENT") or "").strip().lower()
     try:
-        warn = review_enforcement_blocks(enforcement) and coupling_unanswerable(review_pool_slots(dict(settings)))
+        warn = coupling_unanswerable(review_pool_slots(dict(settings)))
     except Exception:  # a malformed catalog has its own refusal; a warning never fails a landed save
         import logging
 
@@ -331,14 +325,13 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None, *,
     the task's recent ledger records (:func:`review_records_block`). These facts never rank seats or
     change routing; a pool without seats appends nothing."""
     from ouroboros import reviewer_slot_config as rs
-    from ouroboros.config import get_review_enforcement, get_runtime_mode, resolve_data_dir, runtime_settings, task_settings_scope
+    from ouroboros.config import get_runtime_mode, resolve_data_dir, runtime_settings, task_settings_scope
     from ouroboros.configured_subagents import SUBAGENTS_SETTING, parse_configured_subagents
     from ouroboros.provider_models import model_has_credentials_in_settings
     from ouroboros.review_execution import ReviewRouteKind
     from ouroboros.review_price import PLAN_USAGE_CATEGORY
     from ouroboros.subagent_metrics import seat_facts
     from ouroboros.runtime_mode_policy import runtime_mode_at_least
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
 
     with task_settings_scope(snapshot) if snapshot is not None else contextlib.nullcontext():
         settings = effective_runtime_subagent_settings(runtime_settings())
@@ -388,16 +381,14 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None, *,
         if migration.get("error") and source != "error":
             source, error = "error", migration["error"]
         unanswerable = source == "structured" and coupling_unanswerable(slots)
-        enforcement, mode = get_review_enforcement(), get_runtime_mode()
-        blocks = review_enforcement_blocks(enforcement)
+        mode = get_runtime_mode()
     seats = len(pool)
     facts: dict[str, Any] = {
-        "source": source, "error": error,
-        "enforcement": enforcement, "enforcement_blocks": blocks, "mode": mode,
+        "source": source, "error": error, "mode": mode,
         # The rule is the EXECUTION rule of the effective authority (PR-1): what a
         # finding or a failed review does to the change. Who reviews is ``pool``
         # and ``surfaces``, never this sentence.
-        "rule": _REVIEW_RULES["cyber_pro" if runtime_mode_at_least(mode, "cyber_pro") else enforcement],
+        "rule": _REVIEW_RULES["cyber_pro" if runtime_mode_at_least(mode, "cyber_pro") else "advisory"],
         "pool": pool,
         "pool_empty": source == "empty",
         # The Main model reviews alone: one model, no second opinion, its own work.
@@ -424,7 +415,7 @@ def review_pool_host_section(facts: Mapping[str, Any]) -> str:
     """The producer's one-line current pool, with exceptional configuration facts intact."""
     from ouroboros.section_floor import HostSection
 
-    operative = (f"## Review\n\nenforcement={facts['enforcement']}; mode={facts['mode']}; "
+    operative = (f"## Review\n\nmode={facts['mode']}; "
                  f"reviewers={', '.join(row['subagent_id'] for row in facts['pool']) or 'none'}; source={facts['source']}")
     exceptions = {key: facts[key] for key in ('error', 'main_self_review', 'coupling_unanswerable',
                   'pool_without_credentials', 'no_pool_row_has_credentials', 'migration_snapshot') if facts.get(key)}

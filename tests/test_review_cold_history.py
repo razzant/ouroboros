@@ -32,7 +32,8 @@ def _dispatch(briefs, marker):
     return run
 
 
-def _run(ctx, surface, rebuttal):
+def _run(ctx, surface, rebuttal, *, handed_back=False):
+    """The record of one wave; a review-only commit cycle hands a material outcome back for the author's decision."""
     if surface == "change":
         from ouroboros.tools.review_change import run_review_change
 
@@ -44,8 +45,8 @@ def _run(ctx, surface, rebuttal):
 
     result = _run_non_committing_review_cycle(ctx, "fix: update bounded file design", skip_advisory_review=True,
         goal="Ship the bounded file design", review_rebuttal=rebuttal)
-    assert result["status"] == "passed", result
-    return result["review_record_id"]
+    assert result["status"] == ("reviewed" if handed_back else "passed"), result
+    return result["review_reference"]["review_record_id"] if handed_back else result["review_record_id"]
 
 
 @pytest.mark.parametrize("surface", ["change", "commit"])

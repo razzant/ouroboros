@@ -11,11 +11,15 @@ lands WITH its phases and must survive the domain transplants unchanged:
   answers a WS chat frame with an assistant reply, runs one scripted stub task to
   completion, and leaves a sane durable ``task_results/<id>.json`` behind.
 * S2 — review organ: a scripted task drives ``commit_reviewed`` over a doc-only diff
-  with the preflight explicitly skipped (``preflight: skipped``) and BLOCKING
-  enforcement, the stub answers the triad packet and retrieving scope reviewer with
-  all-clean verdicts, and the commit lands in the isolated clone. Landing under
-  ``blocking`` makes the git log itself the proof that both review organs ran and
-  passed — under advisory a failed review would still commit.
+  with the preflight explicitly skipped (``preflight: skipped``), the stub answers the
+  triad packet and retrieving scope reviewer with all-clean verdicts, the clean outcome
+  returns before Git like every outcome, and the scripted author's explicit
+  continuation on its reference lands the commit in the isolated clone. A landed commit
+  alone proves no verdict (an author may go on over a FAIL), so the scenario reads the
+  review evidence itself: the returned outcome named no critical finding, nothing was
+  recorded as gone over (no ``review_advisory_override``), the durable commit_gate
+  record answers PASS to both questions, and the landing names that record's one paid
+  attempt.
 * S3 — egress hardening (plan: "дыра ANTHROPIC_API_KEY — закрыть в Ф4 первой"): a
   poisoned parent env, a live keyless server tree, and a /proc environ probe of every
   process in it — no planted or real credential value is visible to any child.
@@ -93,6 +97,7 @@ from tests.system_e2e.harness import (
     write_settings_file,
     ws_url,
 )
+from tests.system_e2e.test_system_scenarios_w3a import _HoldingStubModel, _land_on_returned_pass
 
 # ===========================================================================
 # Default lane: harness self-contracts. No server, no model, no egress.
@@ -613,6 +618,8 @@ S2_SCRIPT = [
         "goal": "Land a doc-only smoke note through the full triad+scope review organ.",
         "scope": f"{S2_DOC_PATH} only.",
     }},
+    # ... and the test appends the author's landing on the returned clean outcome
+    # (``_land_on_returned_pass``): every outcome, a PASS too, returns before Git.
 ]
 
 
@@ -692,14 +699,15 @@ def test_s1_boot_identity_ws_chat_and_task_contract(e2e_clone, tmp_path_factory)
 def test_s2_commit_reviewed_triad_and_scope_pass_on_doc_only_diff(e2e_clone, tmp_path_factory):
     require_lane(LANE_MOCK)
     root = tmp_path_factory.mktemp("s2")
-    with ScriptedStubModel(S2_SCRIPT) as stub:
+    landing: dict = {}  # the outcome the author landed on, or why the script could not land it
+    script = [*S2_SCRIPT, _land_on_returned_pass(
+        S2_SCRIPT[1], "I read the clean triad+scope review of the smoke note and land exactly it.", landing)]
+    with _HoldingStubModel(script) as stub:
         settings = keyless_settings(
             stub,
             # The review organ needs the self-modification surface: advanced runtime
-            # (light restricts repo writes), BLOCKING enforcement so the landed commit
-            # PROVES the organ passed rather than being waved through.
+            # (light restricts repo writes).
             OUROBOROS_RUNTIME_MODE="advanced",
-            OUROBOROS_REVIEW_ENFORCEMENT="blocking",
         )
         server = start_server(e2e_clone, root, settings)
         try:
@@ -711,10 +719,12 @@ def test_s2_commit_reviewed_triad_and_scope_pass_on_doc_only_diff(e2e_clone, tmp
             )
             result = server.wait_task(task_id, timeout=600)
             assert result.get("status") == "completed", result
+            assert "E2E_SCRIPT_ERROR" not in str(result), (result, landing)
 
             oracle = ArtifactOracle(server.data_root)
             stored = wait_durable_result(oracle, task_id)
             assert stored.get("status") == "completed", stored
+            assert stub.script_consumed(), "S2 script was not fully consumed"
 
             # The review organ ran: the stub answered the packet seats AND the
             # retrieving two-part seat of the one wave.
@@ -723,9 +733,9 @@ def test_s2_commit_reviewed_triad_and_scope_pass_on_doc_only_diff(e2e_clone, tmp
             assert "two_part_review" in kinds, kinds
 
             # The commit LANDED on the root's body candidate (#1539: an ordinary author
-            # never commits the checkout the server imports) — under blocking enforcement
-            # only through PASS verdicts from both organs — and is recorded as reviewed
-            # there; the serving clone did not move.
+            # never commits the checkout the server imports) through the author's
+            # continuation on the returned outcome, and is recorded as reviewed there;
+            # the serving clone did not move.
             rows = [row for path in sorted(server.data_root.rglob("state/private_copies/*.json"))
                     if not path.name.startswith(".")
                     for row in [json.loads(path.read_text(encoding="utf-8"))] if row.get("kind") == "body_candidate"]
@@ -758,6 +768,22 @@ def test_s2_commit_reviewed_triad_and_scope_pass_on_doc_only_diff(e2e_clone, tmp
             assert skipped, f"no commit_gate record with preflight skipped: {records!r}"
             # The one wave's durable record answers both questions (the brief of two parts).
             assert skipped[-1]["verdict"]["per_question"] == {"change": "PASS", "coupling": "PASS"}, skipped[-1]
+            assert skipped[-1]["verdict"]["aggregate"] == "PASS", skipped[-1]["verdict"]
+
+            # The landing went over nothing: the outcome the call returned before Git named
+            # no critical finding and was that record's; no review_advisory_override was
+            # recorded (the event a FAIL or a missing verdict leaves when work goes on past
+            # it); the one paid attempt is what the author's unpaid landing names.
+            returned = landing["returned"]
+            assert not returned["review_outcome"]["critical_findings"] and returned["review_outcome"]["paid"], returned
+            assert returned["review_reference"]["review_record_id"] == skipped[-1]["record_id"], (returned, skipped[-1])
+            assert not task_oracle.events("review_advisory_override") and not oracle.events("review_advisory_override")
+            attempts = [a for a in task_oracle.advisory_review().get("attempts") or []
+                        if isinstance(a, dict) and a.get("task_id") == task_id]
+            assert sum(bool(a.get("paid")) for a in attempts) == 1, attempts
+            landed = [a for a in attempts if a["status"] == "succeeded"]
+            assert len(landed) == 1 and not landed[0]["paid"], attempts
+            assert landed[0]["author_disposition"]["review_reference"] == returned["review_reference"], landed[0]
         finally:
             server.stop()
 

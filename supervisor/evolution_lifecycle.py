@@ -1282,7 +1282,7 @@ def build_evolution_task_text(cycle: int) -> str:
         "- An honest no-op is a legitimate outcome when the objective is unsafe, already solved, too broad, or needs owner input; do not commit just to make a cycle non-empty.",
         "- If the best next step is memory/identity/backlog rather than code, update those durable artifacts with provenance, but do not treat that as an absorbed self-evolution cycle.",
         "- A true absorbed self-evolution cycle requires one reviewed self-modification commit followed by successful restart verification before the next campaign cycle.",
-        "- The review enforcement mode (advisory vs blocking) is the owner's setting. Do NOT hardcode review findings to always block (or always pass) regardless of that mode: forcing per-finding blocks under an owner-chosen advisory mode is forbidden self-modification (BIBLE P3), not a hardening. If advisory pass-through of a critical finding feels wrong, surface it to the owner — never patch the enforcement gate to override their choice.",
+        "- Do NOT hardcode review findings to block or pass: a reviewer's answer informs my decision and never forbids it (BIBLE P3); forcing per-finding blocks is forbidden self-modification, not a hardening. If going on over a critical finding feels wrong, say so to the owner.",
         "- If the objective is complete or needs owner input, say so clearly in the final result.",
     ])
     return "\n".join(parts)
@@ -1306,11 +1306,20 @@ def notify_owner_cycle_outcome(campaign: Dict[str, Any], tx: Dict[str, Any]) -> 
     objective = str(campaign.get("objective") or "").strip()
     obj_short = (objective[:160] + "…") if len(objective) > 160 else objective
     if outcome == "absorbed":
-        commit_sha = str(tx.get("commit_sha") or "").strip()[:12]
+        from ouroboros.review_overrides import landed_outcome
+        from supervisor import queue
+
+        commit_sha = str(tx.get("commit_sha") or "").strip()
+        # Only a landed row says how this commit's review ended (a FAIL or no verdict); nothing here may say PASS.
+        review = landed_outcome(queue.DRIVE_ROOT, commit_sha)
         msg = (
-            f"🧬 Evolution cycle absorbed (commit {commit_sha}).\n"
+            f"🧬 Evolution cycle absorbed (commit {commit_sha[:12]}).\n"
             f"Objective: {obj_short or 'autonomous self-improvement'}\n"
-            "The reviewed self-modification is now live (restart verified). Reply if you want it reverted."
+            "The self-modification is now live (restart verified); "
+            + (f"it landed over a FAIL or no verdict ({review})." if review else
+               "whether it landed over a FAIL or no verdict could not be read." if review is None
+               else "no landing over a FAIL or missing verdict is recorded for it.")
+            + " Reply if you want it reverted."
         )
     else:
         reason = str(tx.get("abandoned_reason") or "unspecified")

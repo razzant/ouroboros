@@ -59,7 +59,9 @@ def _start_leaf(tmp_path, task_id="t-hold", run_id="run-leaf"):
 @pytest.fixture(autouse=True)
 def _quiet_probe(monkeypatch):
     """Default leaf probe: read-only poll sees a live engine state; releases are
-    recorded, not executed."""
+    recorded, not executed. These contracts hold on the leaf: the finish door's one notice about a run still
+    open in custody (its home: tests/test_nanny_finalization_nudge.py) is silenced, so the scripted rounds stay theirs."""
+    monkeypatch.setattr("ouroboros.loop_nudges._claim_pre_delivery_notice", lambda *_a, **_k: "")
     import ouroboros.claudexor_daemon as daemon_mod
     import ouroboros.delegate_progress as progress_mod
 

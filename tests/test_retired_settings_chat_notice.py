@@ -330,3 +330,21 @@ def test_the_environment_notice_names_the_retired_comma_lists_too(no_document):
     assert keys == ("OUROBOROS_REVIEW_MODELS",), "a blank value configures nothing and is not announced"
     text = server_maintenance.environment_review_notice(keys)
     assert "OUROBOROS_REVIEW_MODELS, which is no longer read" in text and "That value was not applied" in text
+
+
+@pytest.mark.parametrize("value", ["blocking", "advisory"])
+def test_the_retired_review_enforcement_key_never_reaches_the_generic_notice(boot_state, sent, value):
+    """The read seam drops the review-enforcement key BEFORE the generic purge: its own value-aware notice
+    (``upgrade_notices.review_enforcement_notice``) speaks for it, so the generic retired-keys sentence never
+    names it and records no set for it; a retired key beside it still reaches the generic notice."""
+    _bind_owner(1)
+    alone = cfg.normalize_settings_raw({"OUROBOROS_REVIEW_ENFORCEMENT": value, "TOTAL_BUDGET": 10.0})
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" not in alone
+    assert all("OUROBOROS_REVIEW_ENFORCEMENT" not in keys for keys in cfg.retired_key_sets_seen())
+    server_maintenance._startup_retired_settings_notice(alone)
+    assert sent == []
+    beside = cfg.normalize_settings_raw({**RETIRED_DOC, "OUROBOROS_REVIEW_ENFORCEMENT": value})
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" not in beside
+    server_maintenance._startup_retired_settings_notice(beside)
+    assert len(sent) == 1 and "OUROBOROS_REVIEW_MODELS" in sent[0][1]
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" not in sent[0][1]

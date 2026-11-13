@@ -16,7 +16,7 @@ import {
     encodeRouteChoice, indexProfilesByHarness, mintStableId, profileOptionsFor,
     routeChoiceGroups, sameEngineAs, selectHtml, serializeRouteSpec, sessionModelOptions, subagentHandle, updateRouteControlOptions,
     PROCESSING_CHOICES, PROCESSING_PREFERENCE_KEY, processingDetailsHtml, processingIntentLabel, accountScopedModelCatalog,
-} from './route_editor_primitives.js';
+    tierPriced } from './route_editor_primitives.js';
 import { catalogPrograms } from './model_program.js';
 import { modelChooserHtml, bindModelChoosers } from './model_chooser.js';
 import { mergeModelCatalog, catalogReadNote, mergeHarnessModelCatalog, refreshModelCatalog, watchAccountModelCatalog } from './settings_catalog.js';
@@ -32,6 +32,7 @@ import { revealNewRow } from './ui_helpers.js';
 import { setResult } from './ui_primitives.js';
 import { effortLabel } from './effort_levels.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
+import { currentLanguage } from './i18n.js';
 
 export const MAX_AVAILABLE_SUBAGENTS = 26;
 const KEY = 'OUROBOROS_SUBAGENTS';
@@ -235,7 +236,7 @@ export function reviewCopiesText(groups, poolSize) {
 }
 
 /** `subagent_runtime.PACKET_ONLY_POOL_WARNING`, the save warning of a pool no row of which reads the repository. */
-export const PACKET_ONLY_POOL_WARNING = 'Every reviewer is a Packet row, so none reads the repository and the coupling question (how the change fits the rest of the code) goes unanswered: with Blocking review, every commit to Ouroboros itself stops as “not performed”. Mark a reviewer that reads the work itself, or choose Advisory.';
+export const PACKET_ONLY_POOL_WARNING = 'Every reviewer is a Packet row, so none reads the repository and the coupling question (how the change fits the rest of the code) goes unanswered: every review of a commit to Ouroboros itself ends without a verdict. Mark a reviewer that reads the work itself.';
 
 /** A non-empty pool whose every row is Packet (`subagent_runtime.coupling_unanswerable`). */
 export function packetOnlyReviewPool(setting) {
@@ -564,7 +565,8 @@ function subagentFormParts(row, state, index) {
                 ${field('Source', selectHtml(`data-subagent-field="route" aria-label="Source for Subagent ${ordinal}"`, routeGroups, encodeRouteChoice(row)))}
                 <div class="ui-field available-subagent-field available-subagent-field-model">Model ${session
                     ? modelChooserHtml(`data-subagent-field="model" aria-label="Agent session model for Subagent ${ordinal}"`, split.model, `actor-${rowKey}-models`, modelOptions, { placeholder: 'Engine default model', programs: catalogPrograms(harnesses[split.harness], {harness: split.harness, profile: row.route.credential_profile_id}) })
-                    : routeModelInputHtml(`data-subagent-field="model" aria-label="${split.subscription ? 'Subscription' : 'API'} model for Subagent ${ordinal}"`, row.route, state.apiModels, `actor-${rowKey}-models`, {programs: split.subscription ? catalogPrograms(state.modelCatalog, {source: split.source, profile: row.route.credential_profile_id, sources: state.modelSources}) : []})}</div>
+                    : routeModelInputHtml(`data-subagent-field="model" aria-label="${split.subscription ? 'Subscription' : 'API'} model for Subagent ${ordinal}"`, row.route, tierPriced(row.processing_preference || state.processingPreference)
+                        ? state.apiModels.map((item) => ({ ...item, price: null })) : state.apiModels, `actor-${rowKey}-models`, {programs: split.subscription ? catalogPrograms(state.modelCatalog, {source: split.source, profile: row.route.credential_profile_id, sources: state.modelSources}) : []})}</div>
                 ${routeSupportsAccount(row.route)
                     ? field('Account', selectHtml(`data-subagent-field="account" aria-label="Account for Subagent ${ordinal}"`, [{ label: '', options: profileOptions }], row.route.credential_profile_id || ''))
                     : ''}
@@ -639,6 +641,7 @@ export function availableSubagentsRenderSignature(state, nowMs = Date.now()) {
         state.apiModels, state.modelSources, state.modelCatalog, state.modelCatalogNote, state.processingPreference,
         state.providers, state.connections, state.providerProfiles, state.reviewPool, state.allowEmptyReviewPool,
         state.filter, state.tickCaption, state.unsavedId,
+        currentLanguage(),  // the suggestions' prices are composed words: another language is another paint
     ]);
 }
 
@@ -983,6 +986,7 @@ export function createAvailableSubagentsEditor({
                     if (value && value !== 'native') row[field] = value;
                     else delete row[field];
                     markDirty();
+                    if (field === 'processing_preference') paint();  // its suggestions' prices follow the tier
                 });
             }
             bindEffortFacet(rowElement, row);
@@ -1287,7 +1291,11 @@ export function createAvailableSubagentsEditor({
         paint({discoveryOnly: true});
     }
 
+    // The suggestions' prices are composed words the overlay leaves alone: a language change paints them again.
+    const onLanguageChanged = () => { if (!state.destroyed) paint(); };
+
     function mount({ bindStatus = true } = {}) {
+        getWin()?.addEventListener?.('ouro:language-changed', onLanguageChanged);
         adoptStatus();
         if (bindStatus && !state.statusDisposer) {
             state.statusDisposer = bindStatusSurface(store, { elementId: hostId, includeModels: true, doc: getDoc, win: getWin,
@@ -1311,6 +1319,7 @@ export function createAvailableSubagentsEditor({
         // An agent page that is left keeps its unsaved form for the next opening; a clean one keeps nothing.
         if (page?.entry) { if (state.dirty && current()) DRAFTS.set(page.entry, current()); else DRAFTS.delete(page.entry); }
         Object.assign(state, { destroyed: true, previewGeneration: state.previewGeneration + 1 });
+        getWin()?.removeEventListener?.('ouro:language-changed', onLanguageChanged);
         disposeChoosers();
         for (const disposer of ['statusDisposer', 'catalogDisposer']) { state[disposer]?.(); state[disposer] = null; }
     }
@@ -1342,7 +1351,7 @@ export function createAvailableSubagentsEditor({
         adopt(settings) {
             const meta = settings?._meta?.available_subagents || {};
             state.processingPreference = String(settings?.[PROCESSING_PREFERENCE_KEY] || '');
-            state.tickCaption = reviewerTickCaption(settings?.OUROBOROS_REVIEW_ENFORCEMENT, settings?.OUROBOROS_RUNTIME_MODE);
+            state.tickCaption = reviewerTickCaption(settings?.OUROBOROS_RUNTIME_MODE);
             setSourceContext({ settings, providerProfiles: settings?._meta?.setup_contract?.providerProfiles });
             return load(availableSubagentsLoadValue(settings), {
                 source: String(meta.source || 'configured'), diagnostics: meta.diagnostics || meta.diagnostic || [], automatic: meta.automatic === true });
@@ -1373,15 +1382,14 @@ export function availableSubagentsEditorHost(hostId = 'available-subagents-edito
     return `<div id="${escapeHtml(hostId)}" class="available-subagents-editor"><div class="available-subagents-empty">Loading Available subagents…</div></div>`;
 }
 
-// What the Reviewer tick means under the SAVED strictness, one line each (IMPL_SPEC §5). Cyber Pro
-// Access outranks the enforcement it keeps but never enforces (review_helpers.review_enforcement_blocks).
+// What the Reviewer tick means under the SAVED Access, one line each (IMPL_SPEC §5): Cyber Pro composes freely
+// (review_helpers.cyber_review_authority).
 export const REVIEWER_TICK_CAPTIONS = Object.freeze({
-    blocking: 'Counts toward review: every ticked reviewer checks each change Ouroboros makes to itself, each skill and each required result; a critical finding stops it.',
     advisory: 'Counts when chosen: for each check Ouroboros asks one, several or all reviewers and writes why; it never skips a check that is owed.',
     cyber_pro: 'Trusted to judge: Ouroboros decides whom to ask, if anyone; reviews inform and never block.',
 });
-export const reviewerTickCaption = (enforcement, access) => REVIEWER_TICK_CAPTIONS[String(access || '').trim().toLowerCase() === 'cyber_pro'
-    ? 'cyber_pro' : String(enforcement || '').trim().toLowerCase() === 'blocking' ? 'blocking' : 'advisory'];
+export const reviewerTickCaption = (access) => REVIEWER_TICK_CAPTIONS[String(access || '').trim().toLowerCase() === 'cyber_pro'
+    ? 'cyber_pro' : 'advisory'];
 
 export function availableSubagentsLoadValue(settings) {
     const raw = settings?.OUROBOROS_SUBAGENTS;

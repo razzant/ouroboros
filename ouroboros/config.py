@@ -77,7 +77,6 @@ from ouroboros.model_slots import (
 from ouroboros.review_model_routes import (
     _exclusive_direct_remote_provider_env,  # noqa: F401
     adaptive_quorum,  # noqa: F401
-    get_review_enforcement,  # noqa: F401
     resolved_review_model_target,  # noqa: F401
 )
 from ouroboros.runtime_limits import (
@@ -760,6 +759,7 @@ def normalize_settings_raw(raw: dict) -> dict:
         _passes = 1  # 1 = shipped legacy default: nothing to seed
     if _passes != 1 and "OUROBOROS_REVIEW_MAX_CYCLES" not in loaded:
         loaded["OUROBOROS_REVIEW_MAX_CYCLES"] = str(max(0, _passes) + 1)
+    loaded.pop("OUROBOROS_REVIEW_ENFORCEMENT", None)  # value-aware notice: upgrade_notices.review_enforcement_notice
     from ouroboros.review_pool_migration import apply_at_read_seam
     _retained = apply_at_read_seam(loaded)  # the lanes become reviewer rows BEFORE the purge
     dropped = tuple(key for key in RETIRED_SETTING_KEYS if key in loaded and key not in _retained)
@@ -984,8 +984,6 @@ def apply_settings_to_env(settings: dict, *, environ=None) -> None:
                     val = json.dumps(val, ensure_ascii=False, separators=(",", ":"))
                 environ[k] = str(val)
         _settings_integrity.note_proposal_projection(environ, before)
-        if not environ.get("OUROBOROS_REVIEW_ENFORCEMENT"):
-            environ["OUROBOROS_REVIEW_ENFORCEMENT"] = str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_ENFORCEMENT"])
         if not environ.get("OUROBOROS_TASK_REVIEW_MODE"):
             environ["OUROBOROS_TASK_REVIEW_MODE"] = str(SETTINGS_DEFAULTS["OUROBOROS_TASK_REVIEW_MODE"])
 

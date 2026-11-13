@@ -7,8 +7,6 @@ and the task's Reviews projection carries the fact without turning any of it int
 """
 from __future__ import annotations
 
-import re
-
 from ouroboros import review_ledger as rl
 from ouroboros.review_doctrine import commit_landing_fact, landed_record, public_commit_landings
 from ouroboros.review_projection import compact_review_projection, ledger_record_panel, task_ledger_records
@@ -26,33 +24,32 @@ def _tree(ctx, rev="HEAD"):
     return git.run_cmd(["git", "rev-parse", f"{rev}^{{tree}}"], cwd=ctx.repo_dir).strip()
 
 
-def _record_of(ctx, result):
-    match = re.search(r"review_record_id: (\S+)", result)
-    assert match, result
-    return rl.load_record(rl.ledger_root(ctx), match.group(1))
-
-
-def test_a_blocking_pass_lands_the_exact_reviewed_tree_with_no_author_decision(candidate, monkeypatch):  # noqa: F811
+def test_a_pass_lands_the_exact_reviewed_tree_through_the_authors_continuation(candidate, monkeypatch):  # noqa: F811
     ctx = candidate
-    _mode(monkeypatch, "pro", "blocking")
+    _mode(monkeypatch, "pro", "advisory")
     _prepare(ctx, monkeypatch)
     _install_reviewer(ctx, monkeypatch, PASSING)
     before = _head(ctx)
+    first = git._commit_reviewed(ctx, "Fix amount", skip_advisory_review=True)
+    assert "returned before commit" in first and _head(ctx) == before  # a PASS returns before Git too
+    reference = _reference(first)
 
-    result = git._commit_reviewed(ctx, "Fix amount", skip_advisory_review=True)
+    result = git._commit_reviewed(ctx, "Fix amount", review_reference=reference,
+                                  author_disposition={"disposition": "accepted", "rationale": "The reviewed bytes."})
 
     head = _head(ctx)
     assert head != before, result
-    record = _record_of(ctx, result)
-    assert record["verdict"]["aggregate"] == "PASS" and not record.get("author_decision")  # the field is None
+    record = _record(ctx, reference)
+    assert record["verdict"]["aggregate"] == "PASS" and record["author_decision"]["disposition"] == "accepted"
     [landed] = record["commit_landings"]
     assert landed["commit_sha"] == head and landed["tree_sha"] == _tree(ctx) == record["subject"]["tree_sha"]
-    assert (landed["parent_sha"], landed["reviewed_subject"], landed["author_subject"]) == (before, "same", "")
-    # The task's Reviews read it through the ledger panel: the verdict and the landing stay separate facts.
+    assert (landed["parent_sha"], landed["reviewed_subject"]) == (before, "same")
+    assert landed["author_subject"] == record["author_decision"]["subject_hash"]
+    # The task's Reviews read it through the ledger panel: the verdict, the decision and the landing stay separate facts.
     records, _omitted = task_ledger_records({"id": ctx.task_id}, ctx.drive_root)
     [panel] = compact_review_projection([], records=records)["panels"]
     assert panel["aggregate_signal"] == "PASS" and panel["commit_landings"] == public_commit_landings(record)
-    assert "author_decision" not in panel
+    assert panel["author_decision"]["rationale"] == "The reviewed bytes."
 
 
 def test_an_advisory_continuation_after_an_edit_lands_code_the_review_did_not_see(candidate, monkeypatch):  # noqa: F811

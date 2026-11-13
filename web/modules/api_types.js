@@ -161,17 +161,6 @@
  * @property {Object|null=} candidate
  * @property {boolean=} automatic The read's own unsaved catalog, following Main and access.
  */
-/** @typedef {Object} SettingsMeta
- * @property {Object<string, 'now'|'next_call'|'next_wake'|'next_task'|'restart'|'local_model'>} effects
- * @property {Object<string, string>} tokens
- * @property {string[]=} custom_secret_keys
- * @property {Object=} setup_contract
- * @property {AvailableSubagentsSettingsMeta=} available_subagents
- * @property {import('./client_contract_types.js').SettingsPolicyState=} policy_state
- * @property {import('./client_contract_types.js').SettingsRestartState=} restart_state Component application and source uncertainty.
- * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string}[]=} connections Every API connection as the picker shows it.
- * @property {string[]=} main_connection_choice The connections an unauthored Main waits to be chosen among.
- */
 /**
  * The wizard payload plus two DECLARATIONS about the onboarding run. Settings
  * keys ride through unchanged (open shape); neither flag is authority — the
@@ -1231,7 +1220,7 @@
  * @property {Array<{adoption_id:string, outcome:'adopted'|'not_applied'|'superseded'|'unconfirmed', commit_sha:string, previous_sha:string, branch:string, note:string, settled_at:string, revision:number, commits?:string[], commits_complete?:boolean, commits_omitted?:number}>=} body_adoptions
  *   Every adoption this task authorized, as boot settled them; `commits` (previous..candidate, newest first, bounded;
  *   a cut range counts the rest in `commits_omitted`) only when adopted.
- * @property {{count:number, latest:{at:string, reason:string, task_id:string, text:string}}=} review_overrides  // a root's decisions Blocking would have stopped (review_overrides.py)
+ * @property {{count?:number, latest?:{at:string, reason:string, task_id:string, text:string}, continued?:{count:number, latest:{at:string, disposition:string, rationale:string, reason:string, record_id:string}}, landed?:{count:number, latest:{sha:string, at:string}}}=} review_overrides  // a root's reviews that returned FAIL or no verdict, the author's continuations over one, the commits landed over one (review_overrides.py)
  * @property {string=} error
  * @property {ContinuationOffer=} continuation_offer
  */

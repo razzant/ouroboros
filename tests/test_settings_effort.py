@@ -1,11 +1,10 @@
-"""Tests for effort, review models, and review enforcement settings."""
+"""Tests for effort and review settings."""
 import json
 import os
 from ouroboros.config import (
     SETTINGS_DEFAULTS,
     apply_settings_to_env,
     resolve_effort,
-    get_review_enforcement,
     get_task_review_mode,
     get_context_mode,
     get_image_input_mode,
@@ -121,9 +120,12 @@ def test_review_models_default_in_config():
     ]
 
 
-def test_review_enforcement_default_in_config():
-    """OUROBOROS_REVIEW_ENFORCEMENT defaults to advisory."""
-    assert SETTINGS_DEFAULTS.get("OUROBOROS_REVIEW_ENFORCEMENT") == "advisory"
+def test_review_enforcement_is_retired_in_config():
+    """The review-enforcement setting left the product: no default, listed as retired."""
+    from ouroboros.settings_defaults import RETIRED_SETTING_KEYS
+
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" not in SETTINGS_DEFAULTS
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" in RETIRED_SETTING_KEYS
 
 
 def test_scope_review_and_task_review_defaults_in_config():
@@ -249,26 +251,6 @@ def test_from_zero_local_only_review_slots_inherit_main_and_stay_local(monkeypat
     assert all(slot.use_local for slot in slots)
 
 
-def test_get_review_enforcement_default(monkeypatch):
-    """get_review_enforcement() returns the config default when env is unset."""
-    monkeypatch.delenv("OUROBOROS_REVIEW_ENFORCEMENT", raising=False)
-    assert get_review_enforcement() == "advisory"
-
-
-def test_get_review_enforcement_custom(monkeypatch):
-    """get_review_enforcement() accepts advisory and blocking."""
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
-    assert get_review_enforcement() == "advisory"
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    assert get_review_enforcement() == "blocking"
-
-
-def test_get_review_enforcement_invalid_falls_back(monkeypatch):
-    """Unknown values fall back to advisory (the default)."""
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "strictest")
-    assert get_review_enforcement() == "advisory"
-
-
 def test_get_task_review_mode_clamps_invalid(monkeypatch):
     monkeypatch.delenv("OUROBOROS_TASK_REVIEW_MODE", raising=False)
     assert get_task_review_mode() == "auto"
@@ -358,13 +340,13 @@ def test_apply_settings_ignores_the_retired_review_models_key(monkeypatch):
     assert [slot.model for slot in review_pool_slots()] == ["vendor/selected"]
 
 
-def test_apply_settings_clears_review_enforcement_restores_default(monkeypatch):
-    """Clearing OUROBOROS_REVIEW_ENFORCEMENT restores the default in env."""
-    settings = {"OUROBOROS_REVIEW_ENFORCEMENT": ""}
-    apply_settings_to_env(settings)
-    env_val = os.environ.get("OUROBOROS_REVIEW_ENFORCEMENT", "")
-    assert env_val == SETTINGS_DEFAULTS["OUROBOROS_REVIEW_ENFORCEMENT"]
-    assert get_review_enforcement() == "advisory"
+def test_apply_settings_ignores_the_retired_review_enforcement_key(monkeypatch):
+    """A stale Blocking value never reaches the env plane; a live key beside it still does."""
+    monkeypatch.delenv("OUROBOROS_REVIEW_ENFORCEMENT", raising=False)
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "auto")
+    apply_settings_to_env({"OUROBOROS_REVIEW_ENFORCEMENT": "blocking", "OUROBOROS_TASK_REVIEW_MODE": "required"})
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" not in os.environ
+    assert os.environ.get("OUROBOROS_TASK_REVIEW_MODE") == "required"
 
 
 def test_apply_settings_clears_task_review_restores_default_and_ignores_retired_scope_key(monkeypatch):
@@ -396,7 +378,7 @@ def test_apply_settings_to_env_includes_effort_keys(monkeypatch, tmp_path):
         # ABI-10: retired comma keys in a stale settings dict are ghosts —
         # apply must NOT export them (asserted below).
         "OUROBOROS_REVIEW_MODELS": "model-a,model-b",
-        "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
+        "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",
         "OUROBOROS_SCOPE_REVIEW_MODELS": "scope-a,scope-b",
         "OUROBOROS_TASK_REVIEW_MODE": "required",
         "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true",
@@ -413,7 +395,7 @@ def test_apply_settings_to_env_includes_effort_keys(monkeypatch, tmp_path):
     # ABI-10: the retired comma-list INPUT is ignored — the env carries neither the
     # retired value nor a projected floor (the lane projection left with the lanes).
     assert os.environ.get("OUROBOROS_REVIEW_MODELS") is None
-    assert os.environ.get("OUROBOROS_REVIEW_ENFORCEMENT") == "advisory"
+    assert os.environ.get("OUROBOROS_REVIEW_ENFORCEMENT") is None
     assert os.environ.get("OUROBOROS_SCOPE_REVIEW_MODELS") is None
     assert os.environ.get("OUROBOROS_TASK_REVIEW_MODE") == "required"
     assert os.environ.get("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS") == "true"

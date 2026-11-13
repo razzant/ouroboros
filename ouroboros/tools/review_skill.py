@@ -472,9 +472,9 @@ _PREAMBLE = """\
 You are performing a SKILL review, not a repo-commit review.
 
 This review vets a single external skill package that lives OUTSIDE the self-modifying Ouroboros
-repository; its manifest and payload are THE SUBJECT below. The skill cannot execute until this
-review leaves no blocking finding, under the current review enforcement (`skill_review_gate`); a
-reviewed skill may still be refused keys, dependencies or enablement by their own gates.
+repository; its manifest and payload are THE SUBJECT below. The skill gate (`skill_review_gate`)
+reads this review's blocking findings before the skill may run; a reviewed skill may still be refused
+keys, dependencies or enablement by their own gates.
 
 Judge the current bytes you were given, never a path on disk that may have moved. Base every
 critical finding on a concrete file, symbol or manifest field inside the package that you can quote.
@@ -726,15 +726,13 @@ def prepare_skill_review(ctx: Any, subject: FrozenSkillSubject, *, goal: str = "
     from ouroboros.review_checking import SUBJECT_WORKTREE, wave_checking_source, writable_seat
     from ouroboros.review_execution import ReviewRouteKind
     from ouroboros.review_ledger import PART_SKILL
-    from ouroboros.review_model_routes import get_review_enforcement
     from ouroboros.reviewer_slot_config import commit_triad_delivery, row_plan_retrieves
     from ouroboros.tools.governance_context import governance_context
     from ouroboros.tools.review_admission import seat_vectors
-    from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET, review_drive_root, review_enforcement_blocks
+    from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET, review_drive_root
     from ouroboros.triad_review import REVIEW_JSON_ARRAY_CONTRACT
     from ouroboros.utils import estimate_tokens
 
-    blocking_review = review_enforcement_blocks(get_review_enforcement())
     try:
         row_plan = seat_vectors(commit_triad_delivery())
     except ValueError as exc:
@@ -817,7 +815,7 @@ def prepare_skill_review(ctx: Any, subject: FrozenSkillSubject, *, goal: str = "
     return {
         "prompt": prompt, "stable_prefix_len": stable_prefix_len,
         "models": row_plan["models"], "routes": routes, "row_plan": row_plan,
-        "session_task": "", "target_repo": str(governance_root), "blocking_review": blocking_review,
+        "session_task": "", "target_repo": str(governance_root),
         "task_evidence": {}, "preflight_execution": {}, "layer": SKILL_LAYER,
         "governance_manifest": governance_manifest, "governance_packet_slots": [str(slot_ids[i]) for i in packet],
         "checking_source": checking if checking is not None else wave_checking_source(

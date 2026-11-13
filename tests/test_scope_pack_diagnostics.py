@@ -1,10 +1,11 @@
 """Brief preparation diagnostics survive the move from packets to the one wave.
 
 A retrieving seat's two-part brief is assembled before anything is dispatched.
-When that assembly fails, the wave is blocked fail-closed and ONE durable,
-seat-local row (`review_brief_preparation_failed`) lands in the task's events
-log, forwarded live by the existing sink; a successful preparation emits
-nothing. Logging can never change the typed block the gate returns.
+When that assembly fails, no seat is dispatched, the signal goes to the author's
+decision, and ONE durable, seat-local row (`review_brief_preparation_failed`)
+lands in the task's events log, forwarded live by the existing sink; a
+successful preparation emits nothing. Logging can never change the typed result
+the gate returns.
 """
 
 from __future__ import annotations
@@ -66,7 +67,6 @@ def brief_env(tmp_path, monkeypatch):
     ctx.task_id = "brief-task"
     ctx.pending_events = []
     ctx._review_history, ctx._review_advisory, ctx._coupling_review_history = [], [], {}
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setattr(brief_mod, "first_send_bound", lambda _brief: 900_000)
     monkeypatch.setattr(slot_cfg, "commit_triad_delivery", lambda: _plan("api_chat"))
     dispatch = Mock(side_effect=AssertionError("preparation must not dispatch a reviewer"))
@@ -89,6 +89,15 @@ def _prepare(ctx, message="Update value"):
     return review_mod._prepare_unified_review(ctx, message)
 
 
+def _brief_rows(rows):
+    """The seat-local diagnostic rows; the override record of the signal is its own row."""
+    return [row for row in rows if row.get("type") == admission.BRIEF_PREPARATION_FAILED_EVENT]
+
+
+def _signal(ctx):
+    return "\n".join(map(str, ctx._review_advisory))
+
+
 @pytest.mark.parametrize("route", ["api_chat", "agent_session"])
 def test_context_failure_persists_and_forwards_one_row(brief_env, monkeypatch, route):
     import ouroboros.reviewer_slot_config as slot_cfg
@@ -100,12 +109,12 @@ def test_context_failure_persists_and_forwards_one_row(brief_env, monkeypatch, r
 
     prepared, early, exited = _prepare(ctx)
 
-    assert prepared is None and exited
-    assert "REVIEW_BLOCKED: Failed to build the review brief" in early
-    assert "Seat seat-1:" in early and "could not be loaded" in early
+    assert prepared is None and exited and early is None  # no seat runs; the author decides on the signal
+    assert "REVIEW_BLOCKED: Failed to build the review brief" in _signal(ctx)
+    assert "Seat seat-1:" in _signal(ctx) and "could not be loaded" in _signal(ctx)
     assert ctx._last_review_block_reason == "infra_failure"
-    event, = _events(ctx)
-    assert forwarded == [{**event, **_TASK_ADDRESS}]
+    event, = _brief_rows(_events(ctx))
+    assert _brief_rows(forwarded) == [{**event, **_TASK_ADDRESS}]
     assert not _TASK_ADDRESS.keys() & event.keys(), "addressing must not mutate the durable row"
     assert event["ts"]
     assert {key: value for key, value in event.items() if key != "ts"} == {
@@ -148,8 +157,8 @@ def test_diagnostic_failure_preserves_exact_preparation_result(brief_env, monkey
     result = _prepare(ctx)
 
     assert result == expected and result[0] is None and result[2] is True
-    assert len(calls) == (0 if failure == "missing_logs" else 1)
-    assert len(_events(ctx)) == (1 if failure == "sink_error" else 0)
+    assert len(_brief_rows(calls) if failure == "sink_error" else calls) == 1
+    assert len(_brief_rows(_events(ctx))) == (1 if failure == "sink_error" else 0)
 
 
 @pytest.mark.parametrize(("delivery", "route"), [("inline", "api_chat"), ("paged", "agent_session")])
@@ -205,15 +214,18 @@ def test_worker_log_envelope_forwards_without_a_new_dispatch_kind(brief_env, mon
     outgoing = queue.Queue()
     monkeypatch.setattr(utils, "_log_sink", lambda row: utils.emit_log_event(outgoing, row))
     _prepare(ctx)
-    durable, = _events(ctx)
+    rows = _events(ctx)
+    durable, = _brief_rows(rows)
     assert durable["type"] not in WORKER_LOG_SINK_SUPPRESSED_TYPES
-    envelope = outgoing.get_nowait()
-    assert outgoing.empty() and envelope == {"type": "log_event", "data": durable}
-    events.dispatch_event(envelope, SimpleNamespace(
+    envelopes = []
+    while not outgoing.empty():
+        envelopes.append(outgoing.get_nowait())
+    assert envelopes == [{"type": "log_event", "data": row} for row in rows]
+    events.dispatch_event({"type": "log_event", "data": durable}, SimpleNamespace(
         DRIVE_ROOT=ctx.drive_root, RUNNING={ctx.task_id: {"task": dict(_TASK_ADDRESS)}},
         bridge=SimpleNamespace(push_log=forwarded.append), append_jsonl=utils.append_jsonl,
     ))
-    assert forwarded == [{**durable, **_TASK_ADDRESS}] and _events(ctx) == [durable]
+    assert forwarded == [{**durable, **_TASK_ADDRESS}] and _events(ctx) == rows
 
 
 def test_a_seat_preparation_failure_names_the_seat_and_blocks_the_whole_wave(brief_env, monkeypatch):
@@ -233,8 +245,8 @@ def test_a_seat_preparation_failure_names_the_seat_and_blocks_the_whole_wave(bri
 
     monkeypatch.setattr(brief_mod, "build_retrieving_brief", build)
     prepared, early, exited = _prepare(ctx)
-    assert prepared is None and exited
-    assert "Seat seat-1: fixture context unavailable" in early
-    event, = _events(ctx)
-    assert forwarded == [{**event, **_TASK_ADDRESS}] and event["slot_id"] == "seat-1"
+    assert prepared is None and exited and early is None
+    assert "Seat seat-1: fixture context unavailable" in _signal(ctx)
+    event, = _brief_rows(_events(ctx))
+    assert _brief_rows(forwarded) == [{**event, **_TASK_ADDRESS}] and event["slot_id"] == "seat-1"
     assert not {"blocked", "verdict", "block_message", "context_manifest"} & event.keys()

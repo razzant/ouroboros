@@ -180,8 +180,6 @@ def test_later_success_does_not_hide_the_initial_execution(tmp_path, initial_sta
     fact = bootstrap.actor_first_unresolved_fact(ctx, task_id="nanny", drive_root=tmp_path)
     if initial_state == "failed":
         assert fact["reason"] == "initial_execution_unresolved" and fact["initial_execution"]["state"] == "failed"
-        assert "Start the exact assigned session now" not in bootstrap.configured_actor_finalization_message(
-            ctx, task_id="nanny", fallback_root=tmp_path)
     else:
         assert fact is None
     assert custody.record_start_requested(tmp_path, task_id="nanny", invocation_id="pending", request={"prompt": "other"})

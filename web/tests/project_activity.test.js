@@ -15,6 +15,7 @@ import {
 import { MARK_SHAPES } from '../modules/status_mark.js';
 import { clock } from '../modules/work_status.js';
 import { SERVER_CASES } from './work_fixture.js';
+import { createStateSnapshotSequencer } from '../modules/state_snapshots.js';
 
 // One server body whose case room is re-keyed to a Project chat id.
 function body(name, chatId = 42, extra = {}) {
@@ -123,6 +124,44 @@ test('a partial body marks only its omissions unknown; a room it lists describes
     assert.equal(restored.rooms.has('43'), false, 'a complete body proves the paused room idle once it is not listed');
 });
 
+test('a question read with a gap keeps its room amber in the sidebar; the complete read that drops it turns it off', () => {
+    // Every reader takes the body the sequencer hands it, so the sidebar's rooms see what the pill keeps.
+    let rooms = new Map();
+    const snapshots = createStateSnapshotSequencer((data) => { rooms = reconcileProjectRooms(rooms, data).rooms; });
+    const apply = (data) => snapshots.apply(snapshots.begin(), data);
+    const item = { kind: 'open_question', task_id: 't', quiz_id: 'q' };
+    const read = (rooms_, extra = {}) => ({ supervisor_ready: true, works: [], works_complete: true, rooms: rooms_, ...extra });
+    apply(read({ 42: { activity: 'idle', transition: 'none', call: '', turn: [item], amber: true, mark: 'none',
+        confirmed: true, works: [] } }, { current_questions_complete: true }));
+    assert.equal(rooms.get('42').owner, true);
+    apply(read({}, { current_questions_complete: false, current_questions_gaps: [{ task_id: 't' }] }));
+    assert.deepEqual([rooms.get('42')?.owner, rooms.get('42')?.note], [true, 'An unanswered question is here']);
+    // Across a failed read too: the next gap still keeps it.
+    snapshots.fail(snapshots.begin());
+    apply(read({}, { current_questions_gaps: [{ reason: 'question_index_unavailable' }] }));
+    assert.equal(rooms.get('42')?.owner, true);
+    apply(read({}, { current_questions_complete: true }));
+    assert.equal(rooms.has('42'), false);
+});
+
+test('a known question survives a room whose works are unconfirmed; an owner turn is never invented', () => {
+    const item = { kind: 'open_question', task_id: 't', quiz_id: 'q' };
+    const served = { activity: 'unknown', transition: 'none', call: '', turn: [item], amber: true, mark: 'ring',
+        confirmed: false, works: [] };
+    assert.deepEqual(summarizeRoom(served), { mark: 'ring', owner: true, word: 'Activity unconfirmed',
+        note: 'An unanswered question is here', label: 'Activity unconfirmed · An unanswered question is here' });
+    assert.equal(summarizeRoom({ ...served, turn: [], amber: false }).owner, false);
+    // The works' census incomplete and the question unreadable: the room keeps the question it had, drawn unconfirmed.
+    let rooms = new Map();
+    const snapshots = createStateSnapshotSequencer((data) => { rooms = reconcileProjectRooms(rooms, data).rooms; });
+    const apply = (data) => snapshots.apply(snapshots.begin(), data);
+    apply({ supervisor_ready: true, works: [], works_complete: true, current_questions_complete: true,
+        rooms: { 42: { ...served, activity: 'idle', mark: 'none', confirmed: true } } });
+    apply({ supervisor_ready: true, works: [], works_complete: false, rooms: {},
+        current_questions_gaps: [{ task_id: 't' }] });
+    assert.deepEqual(['mark', 'owner', 'word'].map((key) => rooms.get('42')[key]), ['ring', true, 'Activity unconfirmed']);
+});
+
 test('the index reads Project rooms only; the header\'s one mark is the strongest shape and the owner\'s move', () => {
     const rooms = new Map([
         ['42', summary('paused_by_owner')], ['43', summary('spending_limit')], ['1', summary('held_continue')],
@@ -144,6 +183,95 @@ test('the index reads Project rooms only; the header\'s one mark is the stronges
     }
     assert.equal(buildProjectActivityIndex(new Map(), [42]).aggregate, IDLE_SUMMARY);
     assert.equal(buildProjectActivityIndex().aggregate, IDLE_SUMMARY);
+});
+
+test('an amber Projects header always has an amber row: what waits counts only the rooms the feed can show', () => {
+    const rooms = new Map([['42', summary('held_continue')], ['43', summary('spending_limit')]]);
+    // The room that waits has its row: the header is the owner's turn.
+    const fed = buildProjectActivityIndex(rooms, [42, 43], [{ chat_id: 42 }, { chat_id: 43 }]);
+    assert.deepEqual([fed.aggregate.mark, fed.aggregate.owner], ['moving', true]);
+    // It has none: the work part still stands for every room, the owner part does not.
+    const unfed = buildProjectActivityIndex(rooms, [42, 43], [{ chat_id: 42 }]);
+    assert.deepEqual([unfed.aggregate.mark, unfed.aggregate.owner, unfed.aggregate.note], ['moving', false, '']);
+    assert.equal(unfed.byChat.get('43').owner, true, 'the room itself still says it');
+    // Without the reserved ids, the rows name the rooms.
+    assert.deepEqual([...buildProjectActivityIndex(rooms, undefined, [{ chat_id: 43 }]).byChat.keys()], ['43']);
+});
+
+test('a carried amber room keeps its feed row and the header its amber; a complete read, or a room set that no longer names the room, drops them', () => {
+    // The page as app.js applies each body: the rooms, then the index over the feed's rows.
+    let rooms = new Map();
+    let index = buildProjectActivityIndex();
+    let feed = [];
+    const snapshots = createStateSnapshotSequencer((data) => {
+        rooms = reconcileProjectRooms(rooms, data).rooms;
+        feed = data.projects;
+        index = buildProjectActivityIndex(rooms, data.project_chat_ids, data.projects);
+    });
+    const apply = (data) => snapshots.apply(snapshots.begin(), data);
+    const recent = { id: 'recent', chat_id: 41 };
+    const old = { id: 'old', chat_id: 42 };
+    const asked = { activity: 'idle', transition: 'none', call: '', turn: [{ kind: 'open_question', task_id: 't', quiz_id: 'q' }],
+        amber: true, mark: 'none', confirmed: true, works: [] };
+    const read = (extra) => ({ supervisor_ready: true, works: [], works_complete: true, rooms: {}, projects: [recent],
+        project_chat_ids: [41, 42], ...extra });
+    // The old Project is in the feed only because its room is the owner's turn.
+    apply(read({ rooms: { 42: asked }, projects: [recent, old], current_questions_complete: true }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner], [['recent', 'old'], true]);
+    // A gap over its question: the server keeps neither the room nor its row; the page keeps both, the row after the
+    // body's own rows, and the header stays amber over a row it can show.
+    const gap = { current_questions_gaps: [{ task_id: 't' }] };
+    apply(read(gap));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, index.byChat.get('42')?.owner], [['recent', 'old'], true, true]);
+    // A complete room set that no longer names the room: its row is not brought back. (A deleted Project's tombstone
+    // stays named, so its row can return until a read vouches against its question.)
+    apply(read({ ...gap, project_chat_ids: [41] }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner], [['recent'], false]);
+    // The complete read that drops the question drops both.
+    apply(read({ rooms: { 42: asked }, projects: [recent, old], current_questions_complete: true }));
+    apply(read({ current_questions_complete: true }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, rooms.has('42')], [['recent'], false, false]);
+});
+
+test('a feed the server could not read keeps the rows the page showed; a read that names the feed replaces them', () => {
+    let rooms = new Map();
+    let index = buildProjectActivityIndex();
+    let feed = [];
+    let revision = null;
+    const snapshots = createStateSnapshotSequencer((data) => {
+        rooms = reconcileProjectRooms(rooms, data).rooms;
+        feed = data.projects;
+        revision = data.project_messages_revision;
+        index = buildProjectActivityIndex(rooms, data.project_chat_ids, data.projects);
+    });
+    const apply = (data) => snapshots.apply(snapshots.begin(), data);
+    const old = { id: 'old', chat_id: 42 };
+    // The work still stands on its question: the room is amber in every body, carried or not.
+    const asked = { activity: 'waiting', transition: 'none', call: '', turn: [{ kind: 'question', task_id: 't', quiz_id: 'q' }],
+        amber: true, mark: 'still', confirmed: true, works: [] };
+    const read = (extra) => ({ supervisor_ready: true, works: [], works_complete: true, rooms: { 42: asked },
+        projects: [old], project_listable_count: 1, project_chat_ids: [42], current_questions_complete: true,
+        project_messages_revision: 'r1', ...extra });
+    apply(read());
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, revision], [['old'], true, 'r1']);
+    // The registry unreadable: the feed comes empty with an unknown count, the room set unknown, the question still held.
+    apply(read({ projects: [], project_listable_count: null, project_chat_ids: null, current_questions_complete: false,
+        current_questions_gaps: [{ reason: 'project_registry_unavailable' }], project_messages_revision: null }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, revision], [['old'], true, 'r1'],
+        'unknown is not empty: the rows stay with the revision they were read at');
+    // A read that names the feed again is the feed, empty included.
+    apply(read({ rooms: {}, projects: [], project_listable_count: 0, project_chat_ids: [], project_messages_revision: 'r0' }));
+    assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, revision], [[], false, 'r0']);
+});
+
+test('the header counts a room the feed shows even when the reserved set the page holds does not name it yet', () => {
+    const rooms = new Map([['41', summary('held_continue')], ['43', summary('spending_limit')]]);
+    // The page holds [41]; a new Project 43 is the owner's turn and has its row: it counts.
+    const held = buildProjectActivityIndex(rooms, [41], [{ chat_id: 41 }, { chat_id: 43 }]);
+    assert.deepEqual([held.aggregate.owner, held.byChat.has('43')], [true, true]);
+    // Without its row it is not counted by the owner part (no row to reach), as before.
+    const unfed = buildProjectActivityIndex(rooms, [41], [{ chat_id: 41 }]);
+    assert.deepEqual([unfed.aggregate.owner, unfed.byChat.has('43')], [false, false]);
 });
 
 test('a mark\'s words: its place\'s label and new messages, in one phrase', () => {

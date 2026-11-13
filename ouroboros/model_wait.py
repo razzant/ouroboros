@@ -960,7 +960,9 @@ class TaskModelWait:
         row = {"wait_id": wait_id, "task_attempt": self.attempt, "role": role,
                "_slot_id": slot_id,
                "model": kwargs["model"], "source": source,
-               "credential_profile_id": "" if reason == "auth_quota" else str(route.get("credentialProfileId") or problem_context.get("credentialProfileId") or account_intent or ""),
+               # The tier this call captured before waiting, which its continuation pays (the picker's catalog price).
+               "processing_preference": str(kwargs.get("processing_preference") or ""),
+               "credential_profile_id":"" if reason == "auth_quota" else str(route.get("credentialProfileId") or problem_context.get("credentialProfileId") or account_intent or ""),
                "credential_harness": "", "reason": reason, "reset_at": str(getattr(error, "reset_at", "") or ""),
                "auto_continue": self.auto_continue.get(role, True) if observes_access else False, "state": "waiting",
                **({"availability_observation": "unavailable"} if not observes_access else {}),
@@ -1222,6 +1224,19 @@ def dispatch_control_reason(owner, *, handed_off=False, before_task_start=False)
 
 def current_model_wait() -> TaskModelWait | None:
     return _CURRENT.get()
+
+
+def answer_owner_fields(task_id: Any, *, task_receiver: bool = True) -> dict:
+    """The SENDING process's answer custody at dispatch: its task's bound receiver, else no receiver and
+    only its own death proof (``tool_custody.owner_proof``), which ``local_custody_repair`` may read.
+    ``task_receiver=False``: a send whose own reader is not the task's model wait (a tool's stream) binds
+    nothing, even inside that wait's copied context."""
+    owner = current_model_wait()
+    if task_receiver and owner is not None and owner.task_id == task_id:
+        return owner.bind_answer_consumer()
+    from ouroboros.tool_custody import owner_proof
+
+    return {"local_answer_owner_proof": owner_proof()}
 
 
 _AFTER_THE_REPLY = frozenset({"post_task", "consolidation"})  # the post-task worker's usage categories

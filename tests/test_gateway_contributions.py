@@ -56,7 +56,6 @@ def client(tmp_path, monkeypatch):
 
 
 def test_live_projection_instruction_review_and_disabled_offers(tmp_path, monkeypatch):
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     live = installed(tmp_path, entries=[STT, CHIP])
     installed(tmp_path, "templates", kind="instruction")
     installed(tmp_path, "off", kind="instruction", enabled=False)
@@ -263,13 +262,13 @@ def test_speech_and_ordinary_uploads_keep_existing_cap(tmp_path, monkeypatch):
     assert len(seen) == 2 and all(row["query_string"] == "lang=en" for row in seen)
 
 
-def test_instruction_review_changes_follow_install_enforcement(tmp_path, monkeypatch):
+def test_instruction_review_changes_follow_the_skill_gate(tmp_path, monkeypatch):
+    """No verdict offers nothing; blockers are recorded and veto nothing; changed bytes offer nothing again."""
     skill = installed(tmp_path, kind="instruction")
-    save_review_state(tmp_path, "demo", SkillReviewState(status="blockers", content_hash=skill.content_hash))
-    monkeypatch.setattr("ouroboros.config.get_review_enforcement", lambda: "blocking")
+    save_review_state(tmp_path, "demo", SkillReviewState(status="pending", content_hash=skill.content_hash))
     with client(tmp_path, monkeypatch) as http:
         assert http.get("/api/ui/contributions").json()["contributions"] == []
-        monkeypatch.setattr("ouroboros.config.get_review_enforcement", lambda: "advisory")
+        save_review_state(tmp_path, "demo", SkillReviewState(status="blockers", content_hash=skill.content_hash))
         assert http.get("/api/ui/contributions").json()["contributions"][0]["key"] == "demo:simpler"
         (skill.skill_dir / "plugin.py").write_text("# changed payload")
         assert http.get("/api/ui/contributions").json()["contributions"] == []

@@ -4,7 +4,8 @@
 
 The operator lane reviews this checkout's staged index. The ``--contributor``
 lane reviews a committed base..head proposal with the configured review pool,
-blocking semantics, and a redacted shareable packet bound to base/head/tree/diff.
+verdict semantics (only a PASS passes), and a redacted shareable packet bound to base/head/tree/diff.
+Both lanes classify by the review record's verdict (``_record_outcome``).
 The runtime freezes the subject and reads it; the review flow and rules that run
 are the installed body's — the checkout this wrapper runs from — never the
 proposal's own copy (D31), so a checkout that already contains the proposal is
@@ -250,7 +251,6 @@ def _git_bytes(args: list[str], *, cwd: pathlib.Path | None = None) -> bytes:
 
 def _apply_contributor_review_env() -> None:
     """Pin readiness policy while preserving the contributor's reviewer slots."""
-    os.environ["OUROBOROS_REVIEW_ENFORCEMENT"] = "blocking"
     # Scope-review applicability follows the context mode (v6.80.0): pin max so the
     # operator review line always asks the blocking whole-repo coupling questions, even
     # when the host happens to sit in the owner's low mode.
@@ -518,8 +518,6 @@ def _assert_contributor_review_config(resolved_config: dict) -> None:
     ]
     if invalid:
         raise RuntimeError("contributor reviewer slots contain an invalid route")
-    if resolved_config.get("review_enforcement") != "blocking":
-        raise RuntimeError("contributor review enforcement did not resolve to blocking")
     if resolved_config.get("context_mode") != "max":
         raise RuntimeError("contributor scope review did not resolve in max context mode")
 
@@ -836,7 +834,7 @@ def _pinned_default_panel_view(profile: str):
 def _resolved_review_config(*, profile: str = "production_commit_gate") -> dict:
     """Return the resolved review pool (catalog rows marked review-eligible) and
     efforts after settings/env loading."""
-    from ouroboros.config import get_context_mode, get_review_enforcement, resolved_review_model_target
+    from ouroboros.config import get_context_mode, resolved_review_model_target
     from ouroboros.model_slots import local_lane_label
     from ouroboros.reviewer_slot_config import review_pool_rows, row_effort
     from ouroboros.settings_integrity import task_settings_scope
@@ -864,7 +862,6 @@ def _resolved_review_config(*, profile: str = "production_commit_gate") -> dict:
         "pool_slots": pool_slots,
         "pool_models": [row["route"]["target_id"] for row in pool_slots],
         "pool_efforts": [row["effort"] for row in pool_slots],
-        "review_enforcement": get_review_enforcement(),
         "context_mode": get_context_mode(),
         "runtime_mode": os.environ.get("OUROBOROS_RUNTIME_MODE", ""),
     }
@@ -1034,7 +1031,7 @@ def _parse_args():
         action="store_true",
         help=(
             "Review the committed base-ref..head-ref proposal with the configured "
-            "triad/scope slots, blocking clean semantics, no Claude advisory, "
+            "triad/scope slots, verdict semantics (only a PASS passes), no Claude advisory, "
             "and a shareable route-aware evidence packet. Run it from a clean "
             "checkout of the installed body (for a contributor, the target base)."
         ),
@@ -1442,7 +1439,11 @@ def _operator_lane(args, host_ctx, commit_message: str, *, goal: str, scope: str
                       file=sys.stderr)
 
     record_id = str(outcome.get("review_record_id") or getattr(ctx, "_current_review_record_id", "") or "")
-    record, _problem = _review_record(ctx, {"record_id": record_id})
+    record, problem = _review_record(ctx, {"record_id": record_id})
+    if not retained and str(outcome.get("status") or "") in {"passed", "reviewed"}:
+        # The record's verdict decides, as in the contributor lane: the review-only cycle hands
+        # a FAIL back as ``reviewed`` (it never refuses on a verdict), and Cyber Pro passes it.
+        outcome = {**outcome, **_record_outcome(record, problem)}
     # Seat evidence reads the ledger record (the contributor packet's vocabulary); the
     # raw ctx rows stand in only when the cycle wrote no record.
     actors = _record_actors(record) if record else [

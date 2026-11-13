@@ -45,170 +45,6 @@ def test_tool_registered(tool_name):
     assert tool_name in names
 
 
-CONTRACT_FP = "contract-fp-1"
-
-
-def _identical_ctx(tmp_path, task_id="t-cap"):
-    return types.SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, task_id=task_id)
-
-
-def _add_attempt(tmp_path, status, fingerprint, *, block_reason="critical_findings",
-                 attempt=1, phase="blocking_review", task_id="t-cap",
-                 block_class="", rebuttal_sha256="",
-                 review_contract_fingerprint=CONTRACT_FP,
-                 critical_findings=None, paid=True):
-    import pathlib
-
-    from ouroboros.review_state import (
-        CommitAttemptRecord,
-        make_repo_key,
-        update_state,
-        _utc_now,
-    )
-
-    repo_key = make_repo_key(pathlib.Path(tmp_path))
-
-    def _mutate(state):
-        state.attempts.append(CommitAttemptRecord(
-            ts=_utc_now(), commit_message="msg", status=status,
-            block_reason=block_reason if status == "blocked" else "",
-            repo_key=repo_key, tool_name="commit_reviewed", task_id=task_id,
-            attempt=attempt, phase=phase,
-            pre_review_fingerprint=fingerprint,
-            block_class=block_class,
-            rebuttal_sha256=rebuttal_sha256,
-            review_contract_fingerprint=review_contract_fingerprint,
-            critical_findings=list(critical_findings or []),
-            paid=paid,
-        ))
-    update_state(pathlib.Path(tmp_path), _mutate)
-
-
-def test_identical_diff_refused_free_from_first_verdict_block(tmp_path, monkeypatch):
-    """Q12/Q16 contract: identical bytes are never re-reviewed for pay. ONE
-    review-verdict block of a staged-diff fingerprint refuses a byte-identical
-    resubmission (quoting the recorded verdict), regardless of the cycles knob;
-    a changed diff starts fresh; a cross-task identical resubmit stays refused
-    (anti-laundering); a success ends the streak."""
-    from ouroboros.tools.commit_gate import check_identical_verdict_refusal
-
-    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "unlimited")  # refusal is knob-independent
-    ctx = _identical_ctx(tmp_path)
-
-    # FIRST verdict-block already refuses — no paid streak of N is required.
-    _add_attempt(tmp_path, "blocked", "fp-same", block_class="verdict",
-                 critical_findings=[{"item": "bug_x", "reason": "boom", "severity": "critical"}])
-    msg = check_identical_verdict_refusal(ctx, "fp-same", contract_fingerprint=CONTRACT_FP)
-    assert "IDENTICAL_DIFF_REFUSED" in msg
-    assert "bug_x" in msg  # quotes the recorded verdict
-    # Cross-task: the byte-identical diff is the identity.
-    other = _identical_ctx(tmp_path, task_id="t-other")
-    assert "IDENTICAL_DIFF_REFUSED" in check_identical_verdict_refusal(
-        other, "fp-same", contract_fingerprint=CONTRACT_FP)
-    # A different staged diff is a fresh paid case.
-    assert check_identical_verdict_refusal(ctx, "fp-other", contract_fingerprint=CONTRACT_FP) == ""
-    # A refusal record must not reset the streak.
-    _add_attempt(tmp_path, "blocked", "fp-same", block_reason="identical_diff_refused",
-                 phase="preflight", attempt=2)
-    assert "IDENTICAL_DIFF_REFUSED" in check_identical_verdict_refusal(
-        ctx, "fp-same", contract_fingerprint=CONTRACT_FP)
-    # A successful commit ends the streak.
-    _add_attempt(tmp_path, "succeeded", "fp-same", attempt=3, phase="commit")
-    assert check_identical_verdict_refusal(ctx, "fp-same", contract_fingerprint=CONTRACT_FP) == ""
-
-
-def test_identical_refusal_rebuttal_by_content_and_contract_lapse(tmp_path, monkeypatch):
-    """Q16/Q22 contract: a rebuttal hash NEW to the streak buys exactly one
-    paid re-review; the SAME hash is refused free; a changed (or unknown)
-    review-contract fingerprint lapses the streak entirely."""
-    from ouroboros.tools.commit_gate import (
-        check_identical_verdict_refusal,
-        compute_rebuttal_sha256,
-    )
-
-    monkeypatch.delenv("OUROBOROS_REVIEW_MAX_CYCLES", raising=False)
-    ctx = _identical_ctx(tmp_path)
-    _add_attempt(tmp_path, "blocked", "fp-r", block_class="verdict")
-
-    new_sha = compute_rebuttal_sha256("the finding is a false positive because ...")
-    assert new_sha and compute_rebuttal_sha256("") == ""
-    # NEW rebuttal content: exempt (buys one paid re-review).
-    assert check_identical_verdict_refusal(
-        ctx, "fp-r", rebuttal_sha256=new_sha, contract_fingerprint=CONTRACT_FP) == ""
-    # That rebuttal is spent on the streak (recorded on the next verdict-block):
-    _add_attempt(tmp_path, "blocked", "fp-r", attempt=2, block_class="verdict",
-                 rebuttal_sha256=new_sha)
-    repeated = check_identical_verdict_refusal(
-        ctx, "fp-r", rebuttal_sha256=new_sha, contract_fingerprint=CONTRACT_FP)
-    assert "IDENTICAL_DIFF_REFUSED" in repeated
-    assert "repeated rebuttal" in repeated
-    # A genuinely different rebuttal buys again.
-    assert check_identical_verdict_refusal(
-        ctx, "fp-r", rebuttal_sha256=compute_rebuttal_sha256("different evidence"),
-        contract_fingerprint=CONTRACT_FP) == ""
-    # A rebuttal is "spent" only when it BOUGHT a dispatch (machine-4/wording-2):
-    # one recorded on an UNDISPATCHED refusal row (e.g. a ceiling refusal) stays
-    # fresh — after the owner raises the cap it still buys its paid re-review.
-    undispatched = compute_rebuttal_sha256("never dispatched")
-    _add_attempt(tmp_path, "blocked", "fp-r", attempt=3,
-                 block_reason="review_cycles_exhausted", phase="preflight",
-                 rebuttal_sha256=undispatched, paid=False)
-    assert check_identical_verdict_refusal(
-        ctx, "fp-r", rebuttal_sha256=undispatched, contract_fingerprint=CONTRACT_FP) == ""
-    # Q22: a changed contract fingerprint invalidates the streak — a paid
-    # review is allowed and the refusal never quotes across the change.
-    assert check_identical_verdict_refusal(
-        ctx, "fp-r", contract_fingerprint="another-contract") == ""
-    # An unknown current contract (fail-open "") never refuses.
-    assert check_identical_verdict_refusal(ctx, "fp-r", contract_fingerprint="") == ""
-    # The lapse applies to the streak HEAD only: an OLDER row from a previous
-    # contract ends the streak but a NEWER verdict under the current contract
-    # keeps its refusal authority.
-    _add_attempt(tmp_path, "blocked", "fp-mixed", attempt=1, block_class="verdict",
-                 review_contract_fingerprint="old-contract")
-    _add_attempt(tmp_path, "blocked", "fp-mixed", attempt=2, block_class="verdict",
-                 review_contract_fingerprint=CONTRACT_FP)
-    assert "IDENTICAL_DIFF_REFUSED" in check_identical_verdict_refusal(
-        ctx, "fp-mixed", contract_fingerprint=CONTRACT_FP)
-
-
-def test_identical_refusal_skips_infra_and_preflight_rows(tmp_path, monkeypatch):
-    """Δ5 contract: infra-blocks (fit/quorum/transport/revalidation) and
-    preflight facts neither build the refusal streak nor reset it — the
-    recorded verdict stays authoritative through infra noise, and infra-only
-    history never refuses anything."""
-    from ouroboros.tools.commit_gate import check_identical_verdict_refusal
-
-    monkeypatch.delenv("OUROBOROS_REVIEW_MAX_CYCLES", raising=False)
-    ctx = _identical_ctx(tmp_path)
-
-    # Infra-only history: retry freely, never a refusal.
-    _add_attempt(tmp_path, "blocked", "fp-i", block_reason="review_quorum",
-                 block_class="infra")
-    _add_attempt(tmp_path, "blocked", "fp-i", block_reason="fixed_overflow",
-                 block_class="infra", attempt=2)
-    assert check_identical_verdict_refusal(ctx, "fp-i", contract_fingerprint=CONTRACT_FP) == ""
-
-    # A verdict-block, then infra + preflight noise: still refused.
-    _add_attempt(tmp_path, "blocked", "fp-i", attempt=3, block_class="verdict")
-    _add_attempt(tmp_path, "blocked", "fp-i", block_reason="review_quorum",
-                 block_class="infra", attempt=4)
-    _add_attempt(tmp_path, "blocked", "fp-i", block_reason="tests_preflight_blocked",
-                 phase="preflight", attempt=5)
-    _add_attempt(tmp_path, "blocked", "", block_reason="tests_preflight_blocked",
-                 phase="preflight", task_id="t-new", attempt=1)
-    # machine-2: a FAILED infra/expired row (lock timeout, path error, expired
-    # reviewing attempt) is a transient too — it must not reset the streak.
-    _add_attempt(tmp_path, "failed", "fp-i", phase="infra", attempt=6, paid=False)
-    _add_attempt(tmp_path, "failed", "fp-i", phase="expired", attempt=7)
-    assert "IDENTICAL_DIFF_REFUSED" in check_identical_verdict_refusal(
-        ctx, "fp-i", contract_fingerprint=CONTRACT_FP)
-    # A POST-REVIEW failure (the paid review completed, usually with a PASS)
-    # supersedes the old verdict and ends the streak.
-    _add_attempt(tmp_path, "failed", "fp-i", phase="post_commit_tests", attempt=8)
-    assert check_identical_verdict_refusal(ctx, "fp-i", contract_fingerprint=CONTRACT_FP) == ""
-
-
 def test_tests_preflight_block_recorded_with_preflight_phase():
     """The tests-preflight `_record_commit_attempt` call site must stamp
     phase="preflight": without it `infer_review_phase` defaults a blocked
@@ -225,16 +61,14 @@ def test_tests_preflight_block_recorded_with_preflight_phase():
 
 def test_legacy_rows_classify_by_block_reason(tmp_path, monkeypatch):
     """Pre-upgrade ledger rows carry no block_class: critical_findings rows
-    keep building the refusal streak (verdict), while quorum/fit/transport
-    rows classify infra and never refuse; preflight/refusal rows stay
-    unclassified."""
+    classify as verdicts, quorum/fit/transport rows as infra; preflight/refusal
+    rows stay unclassified."""
     import types as _types
 
     from ouroboros.tools.commit_gate import (
         BLOCK_CLASS_INFRA,
         BLOCK_CLASS_VERDICT,
         attempt_block_class,
-        check_identical_verdict_refusal,
     )
 
     monkeypatch.delenv("OUROBOROS_REVIEW_MAX_CYCLES", raising=False)
@@ -256,13 +90,6 @@ def test_legacy_rows_classify_by_block_reason(tmp_path, monkeypatch):
     sub_floor = {"raw_results": [{"status": "sub_floor", "critical_findings": []}]}
     assert attempt_block_class(_legacy("blocked", "scope_blocked", scope_raw=responded)) == BLOCK_CLASS_VERDICT
     assert attempt_block_class(_legacy("blocked", "scope_blocked", scope_raw=sub_floor)) == BLOCK_CLASS_INFRA
-
-    # End-to-end on the ledger: a legacy critical_findings row (no block_class)
-    # still refuses the identical resubmission.
-    ctx = _identical_ctx(tmp_path)
-    _add_attempt(tmp_path, "blocked", "fp-legacy", block_class="")
-    assert "IDENTICAL_DIFF_REFUSED" in check_identical_verdict_refusal(
-        ctx, "fp-legacy", contract_fingerprint=CONTRACT_FP)
 
 
 def test_non_committing_review_cycle_exists_and_reuses_shared_stage_cycle():
@@ -613,42 +440,29 @@ def test_commit_schema_states_the_preflight_as_a_fact_not_a_bypass():
 
 
 def test_review_blocked_message_keeps_evidence_based_rebuttal_on_repeat():
-    """REVIEW_BLOCKED coaching (issue #447, В8=A): fix first; rebuttal is legitimate
-    for factual errors, unsupported severity, or disproportionate remedies — but it
-    never overrides owner-chosen enforcement. Repetition is not evidence."""
-    from ouroboros.tools.review import _build_critical_block_message
+    """The retry note (issue #447, В8=A) after the commit block message left with Blocking: from
+    the second round it keeps rebuttal an evidence-based answer to a finding (reasons, the record
+    preserved), and repetition never stands in for evidence: an unchanged subject under the same
+    contract is not re-reviewed without a genuinely new rebuttal. Round one adds nothing."""
+    from ouroboros.tools.review_prompt_text import build_self_verification_template
 
-    class FakeCtx:
-        _review_iteration_count = 1
-        _review_history = []
-
-    msg = _build_critical_block_message(
-        FakeCtx(), "test commit", ["bible_compliance: violation"], [], ""
-    )
-    # Whitespace-normalized: the message wraps lines mid-phrase.
-    lowered = " ".join(msg.lower().split())
-    assert "factually incorrect" in lowered
-    # Proportionality channel is open: disproportionate remedies are arguable.
-    assert "disproportionate" in lowered
-    # Non-override clause: rebuttal is argument, not authority.
-    assert "never overrides owner-chosen enforcement" in lowered
-    assert "repetition alone does not validate a finding" in lowered
-    assert "retaining a justified rebuttal" in lowered
+    assert build_self_verification_template([{"item": "bible_compliance"}], attempt_idx=1) == ""
+    note = build_self_verification_template([{"item": "bible_compliance"}], attempt_idx=2,
+                                            tool_name="skill_review", context_noun="skill pack")
+    lowered = " ".join(note.lower().split())
+    assert "rebut unsupported findings or their current applicability with reasons" in lowered
+    assert "preserving the record and anything unresolved" in lowered
+    assert ("is not re-reviewed without a genuinely new review_rebuttal") in lowered
+    assert "before the next skill_review" in lowered and "unchanged skill pack" in lowered
 
 
 def test_review_blocked_later_attempts_keep_judgment_without_numeric_stop():
     """Later attempts keep reassessment options as examples; no attempt number
     or fix count turns them into a mandatory STOP or message format."""
-    from ouroboros.tools.review import _build_critical_block_message
+    from ouroboros.tools.review_prompt_text import build_self_verification_template
 
-    class FakeCtx:
-        _review_iteration_count = 5
-        _review_history = []
-
-    msg = _build_critical_block_message(
-        FakeCtx(), "test commit", ["tests_affected: missing tests"], [], ""
-    )
-    lowered = " ".join(msg.lower().split())
+    note = build_self_verification_template([{"item": "tests_affected"}], attempt_idx=5)
+    lowered = " ".join(note.lower().split())
     assert "if attempts stop converging, reconsider the approach" in lowered
     assert "split the diff" in lowered and "escalate" in lowered
     for retired in ("circuit-breaker", "two concrete fixes", "stop retrying",
@@ -660,26 +474,15 @@ def test_review_blocked_retry_note_owes_outcome_not_procedure():
     """From attempt 2 the note keeps every open finding and the unchanged review
     state, defers paid/free retry to the gate's recorded eligibility, and leaves
     inspection/grouping/order to the author."""
-    from ouroboros.tools.review import _build_critical_block_message
-    from ouroboros.tools.review_prompt_text import REVIEW_REPAIR_JUDGMENT
+    from ouroboros.tools.review_prompt_text import REVIEW_REPAIR_JUDGMENT, build_self_verification_template
 
-    class FakeCtx:
-        _review_iteration_count = 2
-        _review_history = []
-        _last_review_critical_findings = [
-            {"item": "code_quality"}, {"item": "tests_affected"}]
-        _last_review_advisory_findings = []
-
-    msg = _build_critical_block_message(
-        FakeCtx(), "test commit", ["code_quality: review mismatch"], [], ""
-    )
-    assert "REVIEW_BLOCKED (attempt 2)" in msg
-    note = msg.split("Before the next commit_reviewed:", 1)[1]
+    note = build_self_verification_template([{"item": "code_quality"}, {"item": "tests_affected"}], attempt_idx=2)
+    note = note.split("Before the next commit_reviewed:", 1)[1]
     assert "  - Finding: code_quality" in note and "  - Finding: tests_affected" in note
     assert REVIEW_REPAIR_JUDGMENT in note
     lowered = " ".join(note.lower().split())
     assert "recorded review state and the individual findings below stand" in lowered
-    assert "not rewrite them or the configured enforcement" in lowered
+    assert "your response does not rewrite them." in lowered and "enforcement" not in lowered
     assert ("follows the gate's recorded replay eligibility, custody, budget and "
             "cycle limit, not this note") in lowered
     assert ("an eligible recorded verdict on an unchanged diff under the same review "

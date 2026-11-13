@@ -1,6 +1,6 @@
 import { accountedUpperBound, accountedUpperBoundWithChildren, formatUsd4, isoMicros, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
-import { TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
+import { DETAIL_ONLY_WARNINGS, TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
     failedStepHeadline, heldCallPhrase, heldCallsLine } from './task_reason_words.js';
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
 import { taskCheckpointLabel, taskCheckpointIdentity, checkpointHasProgressRow, waitEpisode } from './task_checkpoints.js';
@@ -49,7 +49,7 @@ export function categorizeLogEvent(evt, view = summarizeLogEvent(evt)) {
     // name substrings below only pick the domain family of a non-error row.
     if (ERROR_LOG_PHASES.has(String(view?.phase || ''))) return 'errors';
     if (wake) return 'consciousness';
-    if (t.includes('llm') || t.includes('model')) return 'llm';
+    if (t.includes('llm') || t.includes('model') || t === 'provider_content_refusal') return 'llm';
     if (t.includes('tool') || evt.tool) return 'tools';
     if (t === 'history_retention' || t.includes('task') || t.includes('evolution') || t.includes('review')) return 'tasks';
     if (t.includes('consciousness') || t.includes('bg_')) return 'consciousness';
@@ -345,13 +345,11 @@ function formatUsageTokens(evt) {
 
 function compactJson(value, maxLen = 220) {
     if (value == null) return '';
-    let txt = '';
     try {
-        txt = JSON.stringify(value);
+        return shortText(JSON.stringify(value), maxLen);
     } catch {
-        txt = String(value);
+        return shortText(String(value), maxLen);
     }
-    return shortText(txt, maxLen);
 }
 
 function extractCommandText(args) {
@@ -466,14 +464,14 @@ function custodyDebtReason(record) {
 }
 
 // The headline's objective warning: a nonempty current debt list warns, and an older row's custody warning
-// stops counting once that list is known empty; other warnings, and one beside an absent list, keep the word.
-// Twin: outcomes.objective_warned.
+// stops counting once that list is known empty; other warnings, and one beside an absent list, keep the word;
+// a detail-only fact asks nothing of the owner (9 Nov 2026). Twin: outcomes.objective_warned.
 function objectiveWarned(record) {
     const objective = record?.outcome_axes?.objective || {};
     const debt = record?.delegated_runs_unreconciled;
     if (Array.isArray(debt) && debt.length) return true;
-    if (!Array.isArray(debt) || objective.warning !== CUSTODY_DEBT_REASON) return Boolean(objective.warning);
-    return (Array.isArray(objective.warnings) ? objective.warnings : []).some((code) => code && code !== CUSTODY_DEBT_REASON);
+    return [objective.warning, ...(Array.isArray(objective.warnings) ? objective.warnings : [])].some((code) => code
+        && !DETAIL_ONLY_WARNINGS.includes(code) && !(Array.isArray(debt) && code === CUSTODY_DEBT_REASON));
 }
 
 // outcome_axes.execution.plan_review picks its sentence by lookup, never by its spelling; absent classes keep fallback.
@@ -822,9 +820,11 @@ export function summarizeLogEvent(evt) {
         });
     }
 
-    if (t === 'llm_round_empty' || t === 'llm_empty_response') {
-        return view('empty', 'Model returned empty response', {
-            meta: taskMeta(evt.model || '', evt.round ? `r${evt.round}` : ''),
+    if (t === 'llm_round_empty' || t === 'llm_empty_response' || t === 'provider_content_refusal') {
+        const refused = t === 'provider_content_refusal';  // no content, the filter's finish; its words are the provider's
+        return view('empty', refused ? "The provider's content filter stopped this request" : 'Model returned empty response', {
+            body: refused && evt.provider_message ? `The provider said: "${shortText(evt.provider_message, 260)}"` : '',
+            meta: taskMeta(evt.model || '', evt.round ? `r${evt.round}` : '', refused ? evt.response_provider || '' : ''),
         });
     }
 
@@ -1388,11 +1388,11 @@ function summarizeChatLiveEventView(evt) {
     }
 
     if (t === 'task_started' || t === 'task_received') {
-        return chatView({ headline: tr('task.progress.working_on_it', 'Working on it'), promote: true, dedupeKey: key() });
+        return chatView({ headline: tr('task.progress.working_on_it', 'Working on it'), dedupeKey: key() });
     }
 
     if (t === 'context_building_started') {
-        return chatView({ headline: tr('task.progress.getting_ready', 'Getting ready'), promote: true, dedupeKey: key() });
+        return chatView({ headline: tr('task.progress.getting_ready', 'Getting ready'), dedupeKey: key() });
     }
 
     if (t === 'context_building_finished') {

@@ -232,23 +232,23 @@ def model_role_slot_override(task_metadata: Mapping) -> Optional[Tuple[str, bool
     if not key or role in ("main", "fallback"):
         return None
     model = str(runtime_setting(key, "") or "").strip()
-    raw_local = str(runtime_setting(f"USE_LOCAL_{role.upper()}", "") or "").strip().lower()
-    use_local = raw_local in ("true", "1")
+    use_local = str(runtime_setting(f"USE_LOCAL_{role.upper()}", "") or "").strip().lower() in ("true", "1")
     if not model:
-        # An empty model slot means Main's model — but the role's own local flag, when the
-        # owner set it and it differs from Main's, still decides the route (В25=B honors
-        # every slot; with equal flags nothing changes and the prefix stays Main's).
+        # An empty model slot means Main's route. Only the role's own local box, checked under a cloud
+        # Main, decides otherwise (В25=B): Main's model on the local runtime. An unchecked box is the row's
+        # resting state and the shipped default ("Uses Main." on the Models page), so it never takes the
+        # role off a local Main (owner, 12.11, #3272); a local call never sends the model name (``llm.py``).
         main_local = str(runtime_setting("USE_LOCAL_MAIN", "") or "").strip().lower() in ("true", "1")
         main_model = str(runtime_setting("OUROBOROS_MODEL", "") or "").strip()
-        if not raw_local or use_local == main_local or not main_model:
+        if not use_local or main_local or not main_model:
             return None
-        return main_model, use_local
+        return main_model, True
     return model, use_local
 
 
 def following_route(role: str, llm: Any = None) -> Tuple[str, bool]:
-    """The binding a following route uses NOW: the role's own slot (an empty slot is Main with the slot's
-    own local flag honoured), else Main and its local flag; ``llm`` is the loop's client when it has one."""
+    """The binding a following route uses NOW: the role's own slot (an empty one is Main's model, local when its
+    own box is checked under a cloud Main), else Main and its local flag; ``llm`` is the loop's client if any."""
     slot = model_role_slot_override({"model_role": role})
     if slot is not None:
         return slot

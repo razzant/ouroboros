@@ -61,6 +61,10 @@ def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscrip
     # The footer's aside leaves only a narrow window, where the pinned footer would take the step's own lines.
     aside = page.locator('.footer-copy')
     expect(aside).to_be_hidden() if viewport[0] <= 900 else expect(aside).to_be_visible()
+    # A warning in the aside is no ornament: every footer keeps it while no reason beside Continue takes its slot.
+    assert page.evaluate("""() => { const aside = document.querySelector('.footer-copy');
+        aside.classList.add('footer-warning'); const shown = getComputedStyle(aside).display !== 'none';
+        aside.classList.remove('footer-warning'); return shown; }"""), viewport
     label = page.locator('.field-grid label').first
     expect(label).to_have_css("font-size", "12px")
     page.screenshot(path=str(evidence / f"{viewport[0]}x{viewport[1]}-accounts.png"), animations="disabled")

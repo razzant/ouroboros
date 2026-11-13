@@ -25,7 +25,7 @@ import json
 import logging
 
 from ouroboros.utils import run_cmd, utc_now_iso
-from ouroboros.tools.review_helpers import format_review_history_entry, review_enforcement_blocks
+from ouroboros.tools.review_helpers import cyber_review_authority, format_review_history_entry
 
 log = logging.getLogger(__name__)
 
@@ -341,7 +341,7 @@ def run_parallel_review(
         # ---- Money admission (owner decision 2026-09-05, on the known-spend
         # rule of #1487): before ANY seat is dispatched, known spend must be
         # below every fence; otherwise every seat is a typed $0 not_dispatched
-        # record and the gate blocks naming the fence. The wave's summed seat
+        # record and the outcome names the fence. The wave's summed seat
         # bounds are disclosure, never an earlier refusal. ----
         from ouroboros.tools.review_admission import admit_commit_gate_wave, commit_gate_paid_seats
 
@@ -365,7 +365,6 @@ def run_parallel_review(
             from ouroboros.tools.review import _handle_review_block_or_warning
             from ouroboros.tools.review_admission import triad_not_dispatched_records
 
-            blocking_review = bool(prepared.get("blocking_review")) and review_enforcement_blocks("blocking")
             if not hasattr(ctx, "_review_degraded_reasons"):
                 ctx._review_degraded_reasons = []
             ctx._review_degraded_reasons.append(
@@ -380,11 +379,8 @@ def run_parallel_review(
             ctx._last_triad_raw_results = list(
                 getattr(ctx, "_triad_withheld_seat_records", []) or []
             ) + triad_not_dispatched_records(prepared.get("row_plan") or {}, wave_refusal)
-            review_err = _handle_review_block_or_warning(
-                ctx, blocking_review, wave_refusal,
-                "Review enforcement=Advisory: the commit-gate review wave was declined "
-                "before dispatch (budget fence); commit proceeding without review. ",
-            )
+            _handle_review_block_or_warning(
+                ctx, wave_refusal, "The commit-gate review wave was declined before dispatch (budget fence); nothing was reviewed. ")
         else:
             # ---- Phase 2: submit the prepared wave to the executor. ----
             try:
@@ -488,15 +484,13 @@ def aggregate_review_verdict(review_err, coupling_result, block_reason, advisory
         adv_text = "\n".join(f"  ⚠️ Advisory: {format_review_history_entry(a)}" for a in advisory)
         combined_msg += f"\n\n---\nAdvisory findings:\n{adv_text}"
 
-    from ouroboros.config import get_review_enforcement
-
-    cyber = not review_enforcement_blocks("blocking")
-    if cyber or (get_review_enforcement() == "advisory" and block_reason == "fixed_overflow"):
+    cyber = cyber_review_authority()
+    if cyber or block_reason == "fixed_overflow":
         from ouroboros.review_overrides import record_override
 
         disclosure = (
             ("Cyber Pro: independent review does not prohibit action " if cyber else
-             "Review enforcement=advisory: technical review failure permits continuing ")
+             "A technical review failure permits continuing ")
             + "on the independently bound candidate; failed or missing review is not a PASS.\n"
             + combined_msg
         )

@@ -21,6 +21,8 @@ export const EFFORT_CHOICES = ['none', 'minimal', 'low', 'medium', 'high', 'xhig
 export const PROCESSING_PREFERENCE_KEY = 'OUROBOROS_PROCESSING_PREFERENCE';
 export const MODEL_PROCESSING_PREFERENCES_KEY = 'OUROBOROS_MODEL_PROCESSING_PREFERENCES';
 export const PROCESSING_CHOICES = ['standard', 'fast', 'economy'];
+/** Fast and Economy send another processing tier, which its own endpoint prices: a catalog's row is not that call's price. */
+export const tierPriced = (preference) => preference === 'fast' || preference === 'economy';
 
 export function processingLabel(value) {
     return { standard: 'Standard', fast: 'Fast', economy: 'Economy', mixed: 'Mixed', unknown: 'Unknown' }[value] || 'Route default';
@@ -222,6 +224,50 @@ export function unavailableConnectionState(id, connections = []) {
     const known = (connections || []).find((entry) => entry?.id === id);
     if (known) return known.enabled === false ? 'off' : 'no key';
     return connectionParts(id).name ? 'removed' : 'no key';
+}
+
+/** What a route whose key cannot send says, on a role's page, the Models list and the home. */
+export const KEY_PROBLEM_WORDS = Object.freeze({ off: 'This key is turned off in Accounts; nothing is sent through it.',
+    removed: 'This key was removed in Accounts; nothing is sent through it.', 'no key': 'This source has no key in Accounts.' });
+
+/** The same fact where the key is not beside it (the Models list): the key named, then why it cannot send. */
+export function keyProblemLine(problem, label) {
+    return { off: `${label} is turned off in Accounts; nothing is sent through it.`,
+        removed: `${label} was removed in Accounts; nothing is sent through it.`, 'no key': `${label} has no key in Accounts.` }[problem] || '';
+}
+
+/** Why a saved route's API key cannot send now (`unavailableConnectionState`), or '' when it can or the route is
+ *  empty or a subscription's. A local route is the caller's to skip. */
+export function routeKeyProblem(value, settings = {}, providerProfiles = {}) {
+    const raw = String(value || '').trim();
+    const { source } = raw ? parseModelSource(raw) : { source: '' };
+    if (!source || source.startsWith('subscription:')) return '';
+    if (configuredApiProviders(settings, providerProfiles).some((provider) => provider.id === source)) return '';
+    return unavailableConnectionState(source, apiConnections(settings, providerProfiles));
+}
+
+const REFERENCE_ROLE_LABELS = Object.freeze({
+    OUROBOROS_MODEL: 'Main', OUROBOROS_MODEL_LIGHT: 'Light', OUROBOROS_MODEL_SAFETY: 'Safety Supervisor',
+    OUROBOROS_MODEL_VISION: 'Vision', OUROBOROS_MODEL_CONSCIOUSNESS: 'Consciousness',
+    OUROBOROS_MODEL_FALLBACKS: 'Fallback', OUROBOROS_MODEL_FALLBACK: 'Fallback', OUROBOROS_WEBSEARCH_MODEL: 'Web search',
+    OUROBOROS_MODEL_DEEP_SELF_REVIEW: 'Deep review', OUROBOROS_SUBAGENTS: 'Agents',
+});
+
+/** The rows a save's answer names as still pointing at a key that cannot send (`connection_references`). */
+export function connectionReferencesText(references, connections = []) {
+    const named = (Array.isArray(references) ? references : []).map((reference) => {
+        if (typeof reference === 'string') return reference.trim();
+        if (!reference || typeof reference !== 'object') return '';
+        const setting = String(reference.setting || '').trim();
+        const role = String(reference.label || REFERENCE_ROLE_LABELS[setting] || setting).trim();
+        const entry = String(reference.entry || '').trim();
+        const where = !entry ? role : setting === 'OUROBOROS_SUBAGENTS' ? `${role} · ${entry}` : `${role} ${entry}`;
+        const route = String(reference.route || '').trim();
+        const { source } = route ? parseModelSource(route) : { source: '' };
+        const id = source && !source.startsWith('subscription:') ? source : String(reference.connection || '').trim();
+        return [where, id ? `(${apiProviderLabel(id, {}, connections)})` : ''].filter(Boolean).join(' ');
+    }).filter(Boolean);
+    return named.length ? `Still naming a key that was removed or turned off, so they cannot send: ${named.join(', ')}` : '';
 }
 
 /** Account binding is supported by agent sessions and subscription model routes. */

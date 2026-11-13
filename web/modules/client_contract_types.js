@@ -88,7 +88,7 @@
  */
 
 /**
- * A `reviewModes` or `runtimeModes` row; `value` is what the setting stores.
+ * A `runtimeModes` row; `value` is what the setting stores.
  * @typedef {Object} SetupModeChoice
  * @property {string} value
  * @property {string} label
@@ -135,7 +135,6 @@
  * @property {SetupProviderField[]} providerFields
  * @property {Object.<string,SetupProviderProfile>} providerProfiles
  * @property {SetupModelSlot[]} modelSlots
- * @property {SetupModeChoice[]} reviewModes
  * @property {SetupModeChoice[]} runtimeModes
  * @property {SetupLocalRoutingMode[]} localRoutingModes
  * @property {SetupBudgetField[]} budgetFields
@@ -159,7 +158,6 @@
  * @property {string} legacyCompatibleBaseUrl Saved OPENAI_BASE_URL, display only: completion never writes it.
  * @property {string} safetyModel
  * @property {string} providerProfile
- * @property {string} reviewEnforcement
  * @property {string} runtimeMode
  * @property {string} skillsRepoPath
  * @property {string} localPreset
@@ -213,16 +211,28 @@
 /**
  * `GET /api/settings`: every effective setting with its (masked) value, plus `_meta`.
  * @typedef {Object} SettingsReadResponse
- * @property {import('./api_types.js').SettingsMeta=} _meta
+ * @property {SettingsMeta=} _meta
+ */
+/** `_meta` of `GET /api/settings`.
+ * @typedef {Object} SettingsMeta
+ * @property {Object<string, 'now'|'next_call'|'next_wake'|'next_task'|'restart'|'local_model'>} effects
+ * @property {Object<string, string>} tokens
+ * @property {string[]=} custom_secret_keys
+ * @property {Object=} setup_contract
+ * @property {import('./api_types.js').AvailableSubagentsSettingsMeta=} available_subagents
+ * @property {SettingsPolicyState=} policy_state
+ * @property {SettingsRestartState=} restart_state Component application and source uncertainty.
+ * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string}[]=} connections Every API connection as the picker shows it.
+ * @property {string[]=} main_connection_choice The connections an unauthored Main waits to be chosen among.
+ * @property {string[]=} known_spend_gaps What spends money the limits cannot count: roles whose route has no known price.
  */
 
 /**
- * `_meta.policy_state`: configured versus effective Access, Supervisor and Review, plus what a managed
+ * `_meta.policy_state`: configured versus effective Access and Supervisor, plus what a managed
  * deployment's policy file fixes.
  * @typedef {Object} SettingsPolicyState
  * @property {{configured:string,effective:string,current_process:string,next_task:string,restart_required:boolean,applies:string}} access
  * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} supervisor
- * @property {{configured:string,effective:string,current_process:string,next_task:string,pending:boolean,applies:string,active_task_snapshot:boolean}} review
  * @property {boolean} running_task_snapshot
  * @property {SettingsDeploymentPolicy=} deployment  // absent outside a managed deployment
  */
@@ -598,6 +608,7 @@
  * @property {ChatHistoryAnchor=} anchor  // an `around` read only
  * @property {string=} error
  * @property {string=} reason_code
+ * @property {string=} detail  // a 503 history_source_unavailable: the store's cause, when it has one
  */
 
 // --- Journey bodies of routes whose handlers check fields by hand (ProjectEntry: ./api_types.js) ---

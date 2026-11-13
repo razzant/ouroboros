@@ -155,7 +155,8 @@ def test_two_overlapping_real_task_entries_keep_readers_and_behavior(monkeypatch
     assert initial["fallbacks"] == new_value["fallbacks"] == []
     assert initial["auto_account"] == new_value["auto_account"] == ""
     assert initial["owner_context"] == "max" and new_value["owner_context"] == "low"
-    assert old_decision == (False, False) and new_decision == (True, True)
+    # Safety follows each task's own snapshot; a skill with blockers runs in both (no setting vetoes it any more).
+    assert old_decision == (False, True) and new_decision == (True, True)
     assert calls == ["full"] and mode == "advanced"
     assert config.load_settings()["OWNER_NOTE"] == "openai::new"
     assert not events  # Neither task metadata nor log facts carry the secret snapshot.

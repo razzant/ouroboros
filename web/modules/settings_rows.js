@@ -41,8 +41,8 @@ export const ROWS = [
         control: { kind: 'choices', options: [
             { value: 'light', label: 'Light', note: 'Works on your projects. Never changes its own code.' },
             { value: 'advanced', label: 'Advanced', note: 'May grow its own skills and outer layer.' },
-            { value: 'pro', label: 'Pro', note: 'May change its protected core. Reviews work as you set them.' },
-            { value: 'cyber_pro', label: 'Cyber Pro', note: 'Full say over itself and this computer. Reviews advise, it decides.' }] },
+            { value: 'pro', label: 'Pro', note: 'May change its protected core. Reads a review before each change.' },
+            { value: 'cyber_pro', label: 'Cyber Pro', note: 'Full say over itself and this computer. Asks for reviews when it judges.' }] },
         aliases: ['Runtime mode', 'self-modification', 'own code', 'Light', 'Advanced', 'Pro', 'Cyber Pro'],
         writer: 'runtimeMode', codec: '', confirm: 'raiseAccess', hiddenWhen: '' },
     { id: 'OUROBOROS_SAFETY_MODE', keys: ['OUROBOROS_SAFETY_MODE'], page: 'permissions', fold: false,
@@ -75,21 +75,13 @@ export const ROWS = [
         writer: '', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_TASK_REVIEW_MODE', keys: ['OUROBOROS_TASK_REVIEW_MODE'], page: 'permissions', fold: false,
         name: 'Results of your tasks', meta: 'Whether a finished task gets a second look.',
-        more: 'Required also reviews an answer its task requires checked. With Advisory, Ouroboros decides after a review whether a revised result '
-            + 'needs another; with Blocking, a result that did not pass is held until a review passes it. A review already running can still answer after Off.',
+        more: 'Required also reviews an answer its task requires checked. After a review, Ouroboros decides whether a revised result '
+            + 'needs another. A review already running can still answer after Off.',
         control: { kind: 'strip', options: [
             { value: 'off', label: 'Off', note: 'Not reviewed. No new review starts, a requested one included.' },
             { value: 'auto', label: 'Auto', note: 'Ouroboros asks for a review when it wants one.' },
             { value: 'required', label: 'Required', note: 'Every result a task produced is reviewed.' }] },
         aliases: ['Task Result Review', 'Review of task results', 'acceptance'],
-        writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
-    { id: 'OUROBOROS_REVIEW_ENFORCEMENT', keys: ['OUROBOROS_REVIEW_ENFORCEMENT'], page: 'permissions', fold: false,
-        name: 'When reviewers find a serious problem', meta: 'Whether a review can stop a change or only advise.',
-        more: 'Blocking stops a commit and the turning on of a reviewed skill while a critical finding stands. Under Cyber Pro a review only advises.',
-        control: { kind: 'strip', options: [
-            { value: 'advisory', label: 'Advisory', note: 'It reads the finding and decides.' },
-            { value: 'blocking', label: 'Blocking', note: 'Changes to itself and new skills wait until a review passes.' }] },
-        aliases: ['Review Enforcement', 'Reviews', 'Advisory', 'Blocking'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'permissions:reviewers', keys: [], page: 'permissions', fold: false,
         name: 'Reviewers', meta: 'The agents that read finished work.', more: '',
@@ -406,7 +398,7 @@ export const ROWS = [
         aliases: ['GGUF Filename (for HF repos)', 'GGUF Filename'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'LOCAL_MODEL_CONTEXT_LENGTH', keys: ['LOCAL_MODEL_CONTEXT_LENGTH'], page: 'models/local', fold: false,
-        name: 'Context length', meta: 'Tokens the model is started with. 0 starts it with 16384.', more: '',
+        name: 'Context length', meta: 'Tokens the model is started with. 0 starts it with 65536.', more: '',
         control: { kind: 'number', min: 0 },
         aliases: ['Context Length'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },

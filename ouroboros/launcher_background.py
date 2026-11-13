@@ -50,6 +50,7 @@ from ouroboros.launcher_window_chrome import WindowChrome
 from ouroboros.platform_layer import request_native_attention, signal_pid
 
 log = logging.getLogger("launcher.background")
+_MACOS = sys.platform == "darwin"
 
 CONSENT_TITLE = "Keep Ouroboros running?"
 CONSENT_MESSAGE = ("Ouroboros will keep working in the background: tasks, schedules, Telegram. "
@@ -129,7 +130,9 @@ def status_line(port: int) -> str:
         line = f"Ouroboros: {unconfirmed} task{'' if unconfirmed == 1 else 's'} unconfirmed"
     else:
         line = "Ouroboros: waiting"
-    waits = sum(bool(work.get("turn")) for work in works)
+    # What waits for the owner, as the server counts it: each work with a turn, and each unanswered question whose
+    # work has ended (``work_status.roll_up_summary``).
+    waits = int(summary.get("turn") or 0)
     if waits:
         line += f" · {waits} {'waits' if waits == 1 else 'wait'} for you"
     if unconfirmed and known:  # after what waits for the owner, which a cut line must keep
@@ -278,9 +281,12 @@ class Indicator:
 
         ``hide()`` runs outside the state lock: on Windows it is a synchronous Invoke onto the UI
         thread, which may itself be waiting for this lock in a second close. The hidden state is
-        committed under the lock only if the icon is still live; otherwise the close quits."""
+        committed under the lock only if the icon is still live; otherwise the close quits. A macOS window in or
+        moving through full screen leaves it first and hides at its DidExit (``WindowChrome.hide_when_windowed``)."""
         if not self.ready.is_set() or self.background.shutdown.is_set():
             return False
+        if not self.background.chrome.hide_when_windowed(lambda: self._hide_later(window)):
+            return True
         try:
             window.hide()
         except Exception:
@@ -291,6 +297,33 @@ class Indicator:
                 return False  # the icon went away while hiding: never a hidden window without it
             self._hidden = True
             return True
+
+    def _hide_later(self, window) -> None:
+        """macOS main thread, the closed window out of full screen: hidden only behind a live icon, committed first so
+        an icon that goes away afterwards shows it again (``_stopped``). An open is a main-thread turn of its own
+        (``Background.show_window``), never inside this one. pywebview queues ``hide`` and ``show`` as main-thread turns
+        in call order, so a stop between the commit and ``hide()`` queued its show before this hide: it is shown once
+        more, after it, unless a quit runs."""
+        with self._state_lock:
+            if not self.ready.is_set() or self.background.shutdown.is_set():
+                log.info("The indicator went away while the window left full screen; it stays open.")
+                return
+            self._hidden = True
+        try:
+            window.hide()
+        except Exception:
+            with self._state_lock:
+                self._hidden = False
+            raise
+        with self._state_lock:
+            again = not self.background.shutdown.is_set() and (not self._hidden or not self.ready.is_set())
+            if again:
+                self._hidden = False
+        if again:
+            try:
+                window.show()
+            except Exception:
+                log.warning("Could not show the window again after its hide; the request can be repeated.", exc_info=True)
 
     def show_if_unavailable(self, window) -> None:
         """Quiet start: the window stays hidden only if the icon actually came up."""
@@ -306,6 +339,16 @@ class Indicator:
         with self._state_lock:
             self._hidden = False
         self._shown()
+
+    def stop_if_visible(self) -> bool:
+        """Background turned off: remove the icon unless the window is hidden. ``ready`` clears under the lock a hide
+        commits under, so no close hides behind an icon this removes."""
+        with self._state_lock:
+            if self._hidden:
+                return False
+            self.ready.clear()
+        self.stop()
+        return True
 
     def stop(self, *, wait: float = 0.0) -> None:
         self.ready.clear()
@@ -572,11 +615,25 @@ class Background:
     def show_window(self) -> None:
         """Open the window: the icon or its Open, a banner, the Dock, a second launch.
 
-        Before pywebview has shown the window (hidden or not) the request is kept, never dropped."""
+        Before pywebview has shown the window (hidden or not) the request is kept, never dropped. On macOS a request
+        from another thread (a notification click, the boot's kept one) opens in a main-thread turn, the thread every
+        close is decided and hidden on: the open comes wholly before or after a hide, never between its steps."""
         with self._opening:
             if not self._can_show:
                 self._open_pending = True
                 return
+        if _MACOS and threading.current_thread() is not threading.main_thread():
+            try:
+                from PyObjCTools import AppHelper
+
+                AppHelper.callAfter(self._open)
+                return
+            except Exception:
+                log.warning("The main thread cannot take the open; opening from here.", exc_info=True)
+        self._open()
+
+    def _open(self) -> None:
+        self.chrome.keep()  # a close still waiting for full screen to end hides nothing
         if self.indicator is not None:
             self.indicator.restore(self.window)
             return
@@ -586,10 +643,11 @@ class Background:
             log.warning("Could not show the window.", exc_info=True)
 
     def attention(self, sound: bool = True, title: str = "", body: str = "", cue_when_visible: bool = True) -> dict:
-        """The bridge's alert cue (D7): never raises a window the owner hid on purpose. A page that
+        """The bridge's alert cue (D7): never raises a window the owner hid on purpose, or one a close is taking out
+        of full screen to hide (``WindowChrome.hiding``; only an open cancels that close). A page that
         will show its own browser banner asks first with ``cue_when_visible=False``: a visible
         window then gets nothing from here (that banner owns the sound) and answers "visible"."""
-        if self.indicator is not None and self.indicator.hidden:
+        if self.indicator is not None and (self.indicator.hidden or self.chrome.hiding):
             banner = self.indicator.notify(title or "Ouroboros", body or "Something needs your attention.",
                                            bool(sound))
             cue = request_native_attention(None, sound=bool(sound) and not banner)
@@ -660,9 +718,9 @@ class Background:
 
     def _poll(self) -> None:
         while self.indicator.ready.is_set() and not self.shutdown.is_set():
-            if not self.indicator.carries_notifications and keep_running_choice() != "true" and not self.indicator.hidden:
-                self.indicator.stop()  # the owner turned background off: no icon while the window is visible
-                return
+            if (not self.indicator.carries_notifications and keep_running_choice() != "true"
+                    and self.indicator.stop_if_visible()):
+                return  # the owner turned background off: no icon while the window is visible
             self.indicator.set_status("Ouroboros: starting" if self.window is None else status_line(self.read_port()))
             if self.shutdown.wait(STATUS_POLL_SEC):
                 return

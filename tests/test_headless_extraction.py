@@ -5,10 +5,8 @@ from __future__ import annotations
 import ast
 import pathlib
 
-from ouroboros import headless, headless_status, review, workspace_file_outputs, workspace_patch_capture
+from ouroboros import headless, headless_status, workspace_file_outputs, workspace_patch_capture
 
-
-REPO = pathlib.Path(__file__).parents[1]
 
 _LEAVES = (headless_status, workspace_patch_capture, workspace_file_outputs)
 
@@ -108,17 +106,6 @@ def test_headless_facade_reexports_every_moved_identity():
         assert getattr(headless, name) is getattr(owner, name), name
     owned = {name for module in _LEAVES for name in vars(module)}
     assert set(_MOVED_OWNERS) <= owned
-
-
-def test_headless_extraction_size_bounds_have_meaningful_headroom():
-    """The headless family meets the repository's line contract as the size lane's tip check reads it: a module in
-    the 1001-1500 band or past the cap has its entry in `ouroboros/size_ratchet_manifest.py` (one at 1501-1600 lines
-    needs none). The `size_ratchet` lane is that contract's blocking home; this test keeps no number of its own."""
-    inventory = review.collect_size_ratchet_inventory(REPO, repo_paths=[
-        pathlib.Path(module.__file__).relative_to(REPO).as_posix() for module in (headless, *_LEAVES)])
-    manifest = review.load_size_ratchet_manifest(REPO / review.SIZE_RATCHET_MANIFEST_PATH)
-    assert inventory.band_paths <= set(manifest.band_paths)
-    assert inventory.giant_paths <= manifest.giant_paths
 
 
 def test_terminal_file_helper_preserves_legacy_ready_without_finalized_timestamp(tmp_path, monkeypatch):

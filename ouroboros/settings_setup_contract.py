@@ -143,9 +143,9 @@ for _profile_defaults in _MODEL_DEFAULTS.values():
 _STEPS = _rows(("id", "title", "railCopy", "copy", "footer"), (
     ("accounts", "Connect your accounts", "Subscriptions + API", "Connect Codex to start without an API key, or add an API key or local model. The same account can serve models and agents.", "Add more subscriptions or API access later in Settings → Accounts and keys."),
     ("models", "Choose models", "model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Each slot names its source. OpenRouter stays the source for ids such as openai/gpt-5.6-terra; a provider's own key routes that slot straight to the provider."),
-    ("review_mode", "Choose review and access", "Strictness + reach", "Choose how reviews affect work and how much access Ouroboros gets.", ""),
+    ("review_mode", "Choose access", "Reach", "Choose how much access Ouroboros gets.", ""),
     ("budget", "Review limits", "Quota + API budget", "Review subscription quotas and optional API spending limits.", ""),
-    ("summary", "Review before launch", "Final check", "Check the final provider, model, review, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
+    ("summary", "Review before launch", "Final check", "Check the final provider, model, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
 ))
 _STEP_ORDER = [step["id"] for step in _STEPS]
 
@@ -196,16 +196,11 @@ _MODEL_SLOTS = _rows(("slot", "stateKey", "settingKey", "inputId", "label", "not
     ("fallback", "fallbackModel", "OUROBOROS_MODEL_FALLBACKS", "fallback-model", "Fallback Model", "Fallback and resilience path.", "s-model-fallback", "s-local-fallback"),
 ))
 
-_REVIEW_MODES = _rows(("value", "label", "tone", "className", "copy"), (
-    ("advisory", "Advisory", "Flexible", "advisory", "Reviewers read plans, results and changes; their findings stay visible and Ouroboros decides what to do with them."),
-    ("blocking", "Blocking", "Strict", "blocking", "Outside Cyber Pro Access, unresolved critical review findings block commits. Cyber Pro keeps the findings as evidence for Ouroboros's decision."),
-))
-
 _RUNTIME_MODES = _rows(("value", "label", "tone", "className", "copy"), (
     ("light", "Light", "Safest", "light", "Works on your projects. Never changes its own code."),
     ("advanced", "Advanced", "Default", "advanced", "May grow its own skills and outer layer."),
-    ("pro", "Pro", "Power", "pro", "May change its protected core. Reviews work as you set them."),
-    ("cyber_pro", "Cyber Pro", "Maximum power", "cyber-pro", "Full say over itself and this computer. Reviews advise, it decides."),
+    ("pro", "Pro", "Power", "pro", "May change its protected core. Reads a review before each change."),
+    ("cyber_pro", "Cyber Pro", "Maximum power", "cyber-pro", "Full say over itself and this computer. Asks for reviews when it judges."),
 ))
 
 _LOCAL_ROUTING_MODES = _rows(("value", "buttonLabel", "label", "flags"), (
@@ -260,10 +255,15 @@ _BUDGET_FIELDS = [
 _BUDGET_FIELDS_BY_KEY = {field["settingKey"]: field for field in _BUDGET_FIELDS}
 BUDGET_SETTING_KEYS = tuple(_BUDGET_FIELDS_BY_KEY)
 
+# Local presets (12.11.2026): the current Qwen generation, trained to 262,144 tokens with full attention in one
+# layer of four, so a long window costs little memory. A fresh install's first turn needs about 34K tokens of input
+# beside the reply's room (measured on Qwen3.8-27B), so each opens at 65,536. Measured memory: Qwen3.8-27B held
+# 19.45 GB resident at 65,536 (macOS footprint showed 37 GB right after a first turn); the 9B and the 35B-A3B are not
+# measured. Their GGUF files need a llama-cpp-python runtime from mid-2026 or later (0.3.36 loads the 27B).
 _LOCAL_PRESETS: Dict[str, Dict[str, Any]] = {
-    "qwen25-7b": {"label": "Qwen2.5-7B Instruct Q3_K_M", "source": "Qwen/Qwen2.5-7B-Instruct-GGUF", "filename": "qwen2.5-7b-instruct-q3_k_m.gguf", "contextLength": 16384, "chatFormat": ""},
-    "qwen3-14b": {"label": "Qwen3-14B Instruct Q4_K_M", "source": "Qwen/Qwen3-14B-GGUF", "filename": "Qwen3-14B-Q4_K_M.gguf", "contextLength": 16384, "chatFormat": ""},
-    "qwen3-32b": {"label": "Qwen3-32B Instruct Q4_K_M", "source": "Qwen/Qwen3-32B-GGUF", "filename": "Qwen3-32B-Q4_K_M.gguf", "contextLength": 32768, "chatFormat": ""},
+    "qwen35-9b": {"label": "Qwen3.5-9B Q4_K_M (5.7 GB file)", "source": "unsloth/Qwen3.5-9B-GGUF", "filename": "Qwen3.5-9B-Q4_K_M.gguf", "contextLength": 65536, "chatFormat": ""},
+    "qwen38-27b": {"label": "Qwen3.8-27B Q4_K_M (16.6 GB file)", "source": "unsloth/Qwen3.8-27B-GGUF", "filename": "Qwen3.8-27B-UD-Q4_K_M.gguf", "contextLength": 65536, "chatFormat": ""},
+    "qwen36-35b-a3b": {"label": "Qwen3.6-35B-A3B Q4_K_M (22 GB file)", "source": "unsloth/Qwen3.6-35B-A3B-GGUF", "filename": "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf", "contextLength": 65536, "chatFormat": ""},
 }
 
 # Agent SUBSCRIPTION intent (install-time presets, D-3/D-4). These two
@@ -410,7 +410,6 @@ def build_setup_contract(host_mode: str = "desktop") -> dict:
         "providerFields": [dict(item) for item in _PROVIDER_FIELDS],
         "providerProfiles": {key: {"label": spec[0], "providerCopy": spec[1], "modelCopy": spec[2]} for key, spec in _PROFILE_SPECS.items()},
         "modelSlots": [{**item, "managed": managed_checker and item["settingKey"] == CHECKER_KEY} for item in _MODEL_SLOTS],
-        "reviewModes": [dict(item) for item in _REVIEW_MODES],
         "runtimeModes": [dict(item) for item in _RUNTIME_MODES
                          if not choice_refusal("OUROBOROS_RUNTIME_MODE", item["value"])],
         "localRoutingModes": [dict(item) for item in _LOCAL_ROUTING_MODES],
@@ -473,7 +472,6 @@ def build_initial_setup_state(settings: dict, host_mode: str = "desktop", docume
         # address is empty (``compatible_endpoint``). No provider field: completion keeps it as saved.
         "legacyCompatibleBaseUrl": _string(settings.get("OPENAI_BASE_URL")),
         "providerProfile": profile,
-        "reviewEnforcement": _string(settings.get("OUROBOROS_REVIEW_ENFORCEMENT")) or str(SETTINGS_DEFAULTS["OUROBOROS_REVIEW_ENFORCEMENT"]),
         "runtimeMode": _string(settings.get("OUROBOROS_RUNTIME_MODE")) or str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"]),
         "skillsRepoPath": _string(settings.get("OUROBOROS_SKILLS_REPO_PATH")),
         "localPreset": local_preset,
@@ -630,7 +628,6 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     local_filename = _string(data.get("LOCAL_MODEL_FILENAME"))
     local_chat_format = _string(data.get("LOCAL_MODEL_CHAT_FORMAT"))
     local_routing_mode = _string(data.get("LOCAL_ROUTING_MODE")) or "cloud"
-    review_enforcement = _string(data.get("OUROBOROS_REVIEW_ENFORCEMENT")) or "advisory"
     raw_runtime_mode = _string(data.get("OUROBOROS_RUNTIME_MODE"))
     runtime_mode = raw_runtime_mode.lower() if raw_runtime_mode else _string(current_settings.get("OUROBOROS_RUNTIME_MODE")) or str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"])
 
@@ -668,8 +665,6 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     keys["MINIMAX_REGION"] = minimax_region
     if has_local and "/" in local_source and not local_source.startswith(("/", "~")) and not local_filename:
         return {}, "Local HuggingFace sources need a GGUF filename."
-    if review_enforcement not in {"advisory", "blocking"}:
-        return {}, "Choose advisory or blocking review mode."
     if runtime_mode not in VALID_RUNTIME_MODES:
         return {}, f"Choose a runtime mode from {sorted(VALID_RUNTIME_MODES)}."
 
@@ -717,7 +712,6 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
     prepared.update(keys)
     prepared.update(parsed_budget)
     prepared.update({
-        "OUROBOROS_REVIEW_ENFORCEMENT": review_enforcement,
         "OUROBOROS_RUNTIME_MODE": runtime_mode,
         "OUROBOROS_SKILLS_REPO_PATH": _string(data.get("OUROBOROS_SKILLS_REPO_PATH")),
         "LOCAL_MODEL_SOURCE": local_source if has_local else "",

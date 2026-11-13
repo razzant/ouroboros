@@ -193,7 +193,7 @@ def browser_request_block_reason(
     if mode_has_unrestricted_agency(runtime_mode):
         return ""
     if any(predicate(request) for predicate in (
-        _is_context_mode_owner_post, _is_effort_range_owner_post, _is_review_enforcement_post,
+        _is_context_mode_owner_post, _is_effort_range_owner_post,
         _is_safety_mode_owner_post, _is_owner_skill_attest_post, _is_owner_settings_self_elevation_post,
         _is_model_wait_owner_post, _is_model_owner_post,
     )) and runtime_service_kind(request.url, ctx):
@@ -339,18 +339,6 @@ def _is_model_wait_owner_post(request: Any) -> bool:
         body = json.loads(text or "{}")
         return (isinstance(body, dict) and str(body.get("decision_id", "")).startswith("model_wait:")
                 and body.get("persist_role") is True)
-    except (AttributeError, TypeError, ValueError):
-        return False
-
-
-def _is_review_enforcement_post(request: Any) -> bool:
-    """The actual Settings field changes enforcement, independently of Access."""
-    import json
-    try:
-        return (str(request.method).upper() == "POST"
-                and urlparse(str(request.url)).path.rstrip("/") == "/api/settings"
-                and ((text := _readable_body(request)) is None
-                     or "OUROBOROS_REVIEW_ENFORCEMENT" in json.loads(text or "{}")))
     except (AttributeError, TypeError, ValueError):
         return False
 

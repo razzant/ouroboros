@@ -33,6 +33,7 @@ const VALUES = {
     [MODEL_PROCESSING_PREFERENCES_KEY]: { consciousness: 'economy' },
     OUROBOROS_WEBSEARCH_BACKEND: 'auto', OUROBOROS_WEBSEARCH_MODEL: '', OUROBOROS_CONTEXT_MODE: 'max', OUROBOROS_IMAGE_INPUT_MODE: 'auto',
     OUROBOROS_PROCESSING_PREFERENCE: '', OUROBOROS_PROMPT_CACHE_TTL: '1h', OUROBOROS_MODEL_MAX_CONCURRENCY: 3, OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC: 45,
+    OPENAI_API_KEY: 'sk-...', ANTHROPIC_API_KEY: 'sk-...', OPENROUTER_API_KEY: 'sk-...',
 };
 const EFFECT_OF = (key) => (key.startsWith('LOCAL_MODEL_') ? 'local_model' : key.startsWith('MCP_') ? 'now'
     : key === MODEL_CONTEXT_KEY ? 'next_task' : /MODEL|USE_LOCAL|WEBSEARCH|PROCESSING/.test(key) ? 'next_call' : 'next_task');
@@ -77,10 +78,12 @@ function fakeServer(routes, values = {}) {
     return server;
 }
 
-async function open(t, path, { values = {} } = {}) {
+async function open(t, path, { values = {}, meta = {} } = {}) {
     forgetSettingRows();
     const env = setup(t);
     const server = fakeServer(env.routes, values);
+    const document = server.document;
+    server.document = () => { const read = document(); Object.assign(read._meta, meta); return read; };
     applyMcpSettings({ MCP_SERVERS: [] });
     const opened = [];
     const asked = [];
@@ -309,6 +312,31 @@ test('one entry of a per-role map changes and every other role\'s entry stays as
     assert.deepEqual(server.values[MODEL_ACCOUNTS_KEY], VALUES[MODEL_ACCOUNTS_KEY]);
 });
 
+test('Web search saves only what the owner changed: the source or the model chosen elsewhere meanwhile stays', async (t) => {
+    const page = await open(t, 'models/role/websearch');
+    const [source, model] = ['#s-websearch-source', '#s-websearch-model'].map((selector) => page.container.querySelector(selector));
+    const save = async () => page.press(page.container.querySelector('[data-editor-save]'));
+    const elsewhere = (key, value) => { page.server.values[key] = value; page.server.tokens[key] = (page.server.tokens[key] || 0) + 1; };
+    // The model typed; the source moves elsewhere before Save: only the model is written, and the page shows the source.
+    model.value = 'gpt-search';
+    await model.fire('input', { target: model });
+    elsewhere('OUROBOROS_WEBSEARCH_BACKEND', 'openrouter');
+    await save();
+    assert.deepEqual(page.server.posts.map((post) => post.settings), [{ OUROBOROS_WEBSEARCH_MODEL: 'gpt-search' }]);
+    assert.deepEqual([page.server.values.OUROBOROS_WEBSEARCH_BACKEND, source.value], ['openrouter', 'openrouter']);
+    // The source chosen; the model moves elsewhere: only the source is written, and the other model stays.
+    source.value = 'ddgs';
+    await source.fire('change', { target: source });
+    elsewhere('OUROBOROS_WEBSEARCH_MODEL', 'gpt-other');
+    await save();
+    assert.deepEqual(page.server.posts.at(-1).settings, { OUROBOROS_WEBSEARCH_BACKEND: 'ddgs' });
+    assert.deepEqual([page.server.values.OUROBOROS_WEBSEARCH_MODEL, model.value], ['gpt-other', 'gpt-other']);
+    // Nothing changed since the read: nothing is sent.
+    await save();
+    assert.equal(page.server.posts.length, 2);
+    assert.equal(page.container.querySelector('[data-editor-result]').textContent, 'Nothing to save.');
+});
+
 test('the fallbacks keep their per-role entries through an order change, a removal and one fallback\'s own Save', () => {
     const list = fallbackEntries(VALUES);
     assert.deepEqual(list.map((entry) => [entry.value, entry.context]), [['anthropic::claude-a', 0], ['moonshotai/kimi', 128000], ['openai::gpt-b', 0]]);
@@ -358,6 +386,39 @@ test('the Models list shows each role\'s route in the picture\'s order, and the 
     await page.press(inside(head(page.container, 'fallback/2'), '[data-entry-open]'));
     await page.press(page.container.querySelector('[data-fallback-add]'));
     assert.deepEqual(page.opened.slice(1), ['models/role/vision', 'models/role/fallback/2', 'models/role/fallback/4']);
+});
+
+test('a role whose key cannot send says so on the Models list, and Main waiting for a key choice says which; a key that sends says nothing', async (t) => {
+    // The Anthropic key is turned off and OpenRouter's is gone: the fallbacks on them and Light (OpenAI, still on) differ.
+    const page = await open(t, 'models', { values: { OPENROUTER_API_KEY: '',
+        OUROBOROS_CONNECTIONS: [{ kind: 'anthropic', name: 'default', enabled: false }] } });
+    const meta = (id) => inside(head(page.container, id), '.ui-row-meta');
+    assert.equal(meta('fallback/1').textContent, 'Anthropic is turned off in Accounts; nothing is sent through it.');
+    assert.equal(meta('fallback/1').getAttribute('data-tone'), 'warn');
+    assert.equal(meta('fallback/2').textContent, 'OpenRouter has no key in Accounts.');
+    assert.equal(meta('fallback/3').textContent, 'OpenAI · by API key', 'a key that sends keeps its plain line');
+    assert.equal(meta('fallback/3').getAttribute('data-tone'), null);
+    const light = () => inside(page.container.querySelector('[data-setting-row="models:light"]'), '[data-setting-meta]');
+    const described = light().textContent;
+    assert.ok(described && light().getAttribute('data-tone') === null, 'Light on a working key keeps its description');
+    // Its OpenAI key turned off: Light's line says so, also after the rows are painted again, and comes back after.
+    page.server.values.OUROBOROS_CONNECTIONS = [{ kind: 'anthropic', name: 'default', enabled: false }, { kind: 'openai', name: 'default', enabled: false }];
+    page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models' } });
+    await settle();
+    assert.equal(light().textContent, 'OpenAI is turned off in Accounts; nothing is sent through it.');
+    assert.equal(light().getAttribute('data-tone'), 'warn');
+    page.server.values.OUROBOROS_CONNECTIONS = [];
+    page.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path: 'models' } });
+    await settle();
+    assert.deepEqual([light().textContent, light().getAttribute('data-tone')], [described, null]);
+    // Main on a Codex subscription has no key to lose; Main waiting for one of two OpenAI keys names both.
+    assert.ok(!inside(page.container.querySelector('.models-main'), '.models-main-meta').dataset.tone);
+    const waiting = await open(t, 'models', { values: { OUROBOROS_MODEL: 'openai::gpt-main',
+        OUROBOROS_CONNECTIONS: [{ kind: 'openai', name: 'work', api_key: 'sk-w' }, { kind: 'openai', name: 'home', api_key: 'sk-h' }] },
+        meta: { main_connection_choice: ['openai@work', 'openai@home'] } });
+    const card = waiting.container.querySelector('.models-main');
+    assert.equal(inside(card, '.models-main-name').textContent, 'Not chosen yet');
+    assert.equal(inside(card, '.models-main-meta').textContent, 'Choose the key it uses: OpenAI · work or OpenAI · home.');
 });
 
 test('the fallbacks\' order and removal are written on the list: the order through the generic save, their windows through the checker; Remove asks first', async (t) => {

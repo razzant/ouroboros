@@ -24,13 +24,13 @@ const CATALOG = {
     items: [codex('gpt-6-astra', { max_context_window: 872000 }), codex('gpt-6.1-sol'),
         codex('gpt-5-old', { availability: 'unavailable' }), openrouter(GLM), openrouter(KIMI), openrouter('x-ai/grok-4.7')],
 };
-const storeOf = ({ catalog = CATALOG, recents = [], connections = [] } = {}) => {
+const storeOf = ({ catalog = CATALOG, recents = [], connections = [], settings = {} } = {}) => {
     const reads = { catalog: 0, recents: 0, settings: 0 };
     const answer = { recents };
     const store = createModelCatalogStore({
         readCatalog: async () => { reads.catalog += 1; if (catalog instanceof Error) throw catalog; return catalog; },
         readPreferences: async () => { reads.recents += 1; return answer.recents === undefined ? {} : { model_recents: answer.recents }; },
-        readSettings: async () => { reads.settings += 1; return { _meta: { connections } }; },
+        readSettings: async () => { reads.settings += 1; return { _meta: { connections }, ...settings }; },
     });
     return { store, reads, answer };
 };
@@ -282,6 +282,44 @@ test('Search is a field in the row and its suggestions stand outside it: Main, t
     assert.equal(r.rows().length, 4);
     r.controls.destroy();
     assert.equal(r.list(), null, 'the list goes with its capsule');
+});
+
+test('where the catalog states prices the list reads the processing tiers once: on Fast or Economy it names none', async () => {
+    const priced = { ...CATALOG, items: CATALOG.items.map((item) => (item.value === KIMI ? { ...item, price: { input: 0.6, output: 2.5 } } : item)) };
+    const kimi = async (settings) => {
+        const r = room({ storeOptions: { catalog: priced, settings, connections: [{ id: 'openrouter', enabled: true, configured: true }] } });
+        await r.open();
+        await flush();
+        await r.press('Search');
+        await r.type('kimi');
+        const said = [r.rows()[0].text, r.reads.settings];
+        r.controls.destroy();
+        return said;
+    };
+    assert.deepEqual(await kimi({}), ['moonshotai/kimi-k3 OpenRouter · $0.60 in / $2.50 out', 1], 'a price to qualify: the tier is read once');
+    assert.deepEqual(await kimi({ OUROBOROS_PROCESSING_PREFERENCE: 'fast' }), ['moonshotai/kimi-k3 OpenRouter · paid by key', 1]);
+    assert.deepEqual(await kimi({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"economy"}' }), ['moonshotai/kimi-k3 OpenRouter · paid by key', 1]);
+    // New work here runs as a lead on the default tier, whatever Main's own one is.
+    assert.deepEqual(await kimi({ OUROBOROS_PROCESSING_PREFERENCE: 'fast', OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"standard"}' }),
+        ['moonshotai/kimi-k3 OpenRouter · paid by key', 1]);
+});
+
+test('Settings\' own document reaches the list without a read, and a failed read is not repeated by every paint', async () => {
+    const reads = { settings: 0 };
+    const priced = { items: [{ ...CATALOG.items[3], price: { input: 1, output: 2 } }] };
+    const store = createModelCatalogStore({ readCatalog: async () => priced, readPreferences: async () => ({}),
+        readSettings: async () => { reads.settings += 1; throw new Error('offline'); } });
+    await store.read();
+    await store.readConnections();
+    await store.readConnections();
+    assert.equal(reads.settings, 1, 'one failed read, not one per paint');
+    const price = () => store.index().row({ model: GLM }).price;
+    assert.equal(price(), null, 'a tier never read names no price');
+    store.adoptSettings({ OUROBOROS_PROCESSING_PREFERENCE: 'economy' });
+    assert.equal(price(), null);
+    store.adoptSettings({ OUROBOROS_PROCESSING_PREFERENCE: 'standard' });
+    assert.deepEqual(price(), { input: 1, output: 2 });
+    assert.equal(reads.settings, 1);
 });
 
 test('typing searches every source; a pick saves and closes the capsule; any id can still be used as typed', async () => {

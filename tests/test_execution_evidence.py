@@ -479,15 +479,14 @@ class TestEvidenceReadHonesty:
         from ouroboros.store import STORE_REL
 
         (tmp_path / STORE_REL).mkdir(parents=True)
-        ctx = SimpleNamespace(_nanny_route_dispatched=True, _nanny_finalization_injected=False,
-                              drive_root=tmp_path)
+        ctx = SimpleNamespace(_nanny_route_dispatched=True, drive_root=tmp_path)
         tools = SimpleNamespace(_ctx=ctx, available_tools=lambda: ["delegate_start"])
         msgs: list = []
         assert _maybe_inject_finalization_nudges(
             tools, tmp_path, "t1",
             {"reasoning_notes": [], "tool_calls": []}, "done", msgs, lambda *_: None,
-        ) is False
-        assert not any("NANNY" in m.get("content", "") for m in msgs)
+        ) is False, "unreadable custody states no open run: no notice line from a guess"
+        assert msgs == []
 
 
 class TestTerminalFrameDelivery:

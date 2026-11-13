@@ -857,9 +857,19 @@ def test_chat_inject_rejects_disabled_skill_token(tmp_path: pathlib.Path) -> Non
     assert response.status_code == 403
 
 
-def test_chat_inject_rejects_failed_review_token(tmp_path: pathlib.Path, monkeypatch) -> None:
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    _seed_token(tmp_path, skill="failed", token="token", permissions=["inject_chat"], review_status="blockers")
+def _seed_blocker_token(data_dir: pathlib.Path, strict_source: bool) -> None:
+    """A token of a skill whose review found blockers; a source that reviews each skill keeps them for the owner."""
+    from ouroboros.skill_install_record import write_install_record
+
+    _seed_token(data_dir, skill="failed", token="token", permissions=["inject_chat"], review_status="blockers")
+    if strict_source:
+        write_install_record(data_dir, "failed", {"basis": "review", "release": {"digest": "d"}, "source": {"id": "hub"}})
+
+
+@pytest.mark.parametrize("strict_source,status", [(False, 202), (True, 403)])
+def test_chat_inject_follows_the_review_gate_of_a_token_with_blocker_findings(tmp_path: pathlib.Path, strict_source,
+                                                                              status) -> None:
+    _seed_blocker_token(tmp_path, strict_source)
     app = create_host_service_app(tmp_path, bridge_getter=FakeBridge)
     client = TestClient(app)
 
@@ -869,18 +879,19 @@ def test_chat_inject_rejects_failed_review_token(tmp_path: pathlib.Path, monkeyp
         json={"text": "hello", "chat_id": 1},
     )
 
-    assert response.status_code == 403
+    assert response.status_code == status
 
 
-def test_identity_rejects_failed_review_token(tmp_path: pathlib.Path, monkeypatch) -> None:
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    _seed_token(tmp_path, skill="failed", token="token", permissions=["inject_chat"], review_status="blockers")
+@pytest.mark.parametrize("strict_source,status", [(False, 200), (True, 403)])
+def test_identity_follows_the_review_gate_of_a_token_with_blocker_findings(tmp_path: pathlib.Path, strict_source,
+                                                                           status) -> None:
+    _seed_blocker_token(tmp_path, strict_source)
     app = create_host_service_app(tmp_path, bridge_getter=FakeBridge)
     client = TestClient(app)
 
     response = client.get("/identity", headers={"X-Skill-Token": "token"})
 
-    assert response.status_code == 403
+    assert response.status_code == status
 
 
 def test_events_websocket_receives_granted_topic(tmp_path: pathlib.Path) -> None:

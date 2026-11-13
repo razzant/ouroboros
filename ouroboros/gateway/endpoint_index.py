@@ -252,7 +252,7 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/health": Shape("200:HealthResponse"),
     "GET /api/contract": Shape("200:GatewayContractResponse"),
     "GET /api/state": Shape("200:StateResponse 500:ErrorResponse", query="bindings_since"),
-    "GET /api/consciousness": Shape("200:json 503:json", note="status/detail, appointment_at, live_wake_held, live_wake_hold, allowance_status/open_rows/room_after, spend by cause, places_brief; RecentWakesView: recent_wakes: RecentWake[] | null, recent_wakes_coverage names the shared 50-wake/48 h cap or read failure; full Places use /api/places"),
+    "GET /api/consciousness": Shape("200:json 503:json", note="status/detail, appointment_at, live_wake_held, live_wake_hold, allowance_status/open_rows/room_after, model_route, spend by cause, places_brief; RecentWakesView: recent_wakes: RecentWake[] | null, recent_wakes_coverage names the shared 50-wake/48 h cap or read failure; full Places use /api/places"),
     "GET /onboarding": Shape("200:html", query="builtin", note="selected setup or builtin wizard; builtin=1 forces builtin"),
     "GET /api/onboarding": Shape("200:html 204:empty", note="204: a ready provider exists, no setup needed"),
     "GET /api/onboarding/bootstrap": Shape("200:OnboardingBootstrapResponse", note="read-only; writes nothing"),
@@ -509,8 +509,9 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/update/apply": Shape(
         "200:UpdateApplySuccessResponse 400,403:ErrorResponse 409,500:UpdateApplyErrorResponse", "UpdateApplyRequest",
         note="200: inspect status (manual, assisted_started, restart_required, or ok with restarting); adoption requires the landed transaction/merge identity and running_sha after startup"),
-    "GET /api/cost-breakdown": Shape("200:CostBreakdownResponse 503:ErrorResponse",
-                                     note="503: the ledger is unavailable (accounting.available false); spend is unknown, not zero"),
+    "GET /api/cost-breakdown": Shape("200:CostBreakdownResponse 503:ErrorResponse", query="period",
+                                     note="503: the ledger is unavailable (accounting.available false); spend is unknown, not zero; "
+                                          "?period=24h|7d|30d adds that period's view"),
     "GET /api/storage": Shape("200:StorageResponse", query="count",
                               note="passive; ?count=<finished_at> omits a count the client already holds"),
     "POST /api/storage/measure": Shape("202:StorageResponse", note="starts one count in a child, or joins the running one"),

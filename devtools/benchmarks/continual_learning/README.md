@@ -137,10 +137,11 @@ audit sidecar of raw per-instance rewards.
 
 The pinned external adapter enforces model slots, effort, worker pool,
 evolution flag, budget, and OpenRouter provider routing through its own
-interface; the launcher feeds those from `settings_base.json`. Three template
+interface; the launcher feeds those from `settings_base.json`. Two template
 knobs are **declared but not forwarded** by the pinned adapter —
-`OUROBOROS_SAFETY_MODE=light` and `OUROBOROS_REVIEW_ENFORCEMENT=blocking`
-(docker path drops both) and
+`OUROBOROS_SAFETY_MODE=light` (the docker path drops it; the retired
+`OUROBOROS_REVIEW_ENFORCEMENT=blocking` left the template on 2026-11-12, and
+rows after that release are a new methodology) and
 `CLBENCH_SOLVE_DISABLED_TOOLS` (incl. `claude_code_edit`) — the launcher
 exports them, records the gap in the manifest, and prints loud warnings. See
 METHODOLOGY.md "Template fidelity" for the two-line adapter patch that closes

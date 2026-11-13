@@ -1065,7 +1065,7 @@ def test_applied_settings_metadata_is_read_back_from_written_snapshot(tmp_path):
     assert applied["OUROBOROS_MAX_WORKERS"] == 3
     assert not RETIRED_REVIEW_KEYS.intersection(applied)
     assert not RETIRED_REVIEW_KEYS.intersection(metadata["model_slots"])
-    assert applied["OUROBOROS_REVIEW_ENFORCEMENT"] == "advisory"
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" not in applied, "the retired key is never applied"
     assert applied["OUROBOROS_REVIEW_MAX_CYCLES"] == "2"
     assert applied["OUROBOROS_SAFETY_MODE"] == "off"
     assert applied["OUROBOROS_MAIN_WEB_SEARCH"] == "off"
@@ -1595,7 +1595,7 @@ def test_reconcile_skips_attempts_already_in_result_index(tmp_path):
 
 def test_the_result_review_of_the_measured_task_is_a_supported_recorded_choice(tmp_path):
     """The runner's own knobs for the measured task's result review (owner, 8 Nov 2026): the stock run keeps it Off;
-    a selected mode, enforcement and paid-wave ceiling are applied and recorded beside the other applied settings."""
+    a selected mode and paid-wave ceiling are applied and recorded beside the other applied settings."""
     from types import SimpleNamespace
 
     from devtools.benchmarks.cybergym.run_cybergym import (
@@ -1603,17 +1603,18 @@ def test_the_result_review_of_the_measured_task_is_a_supported_recorded_choice(t
     )
 
     stock = parse_args([])
-    assert (stock.task_review_mode, stock.review_enforcement, stock.review_max_cycles) == ("off", "advisory", "2")
+    assert (stock.task_review_mode, stock.review_max_cycles) == ("off", "2")
+    assert not hasattr(stock, "review_enforcement"), "the retired flag is gone"
     template = tmp_path / "settings.json"
     template.write_text("{}", encoding="utf-8")
     (tmp_path / "run").mkdir()
     path, metadata = _prepare_applied_settings(template, tmp_path / "run", SimpleNamespace(
         model=OFFICIAL_MODEL, budget_usd=3500, timeout_sec=4, max_rounds=1000, per_task_cost_usd=20, workers=3,
-        task_review_mode="required", review_enforcement="blocking", review_max_cycles="Unlimited"))
+        task_review_mode="required", review_max_cycles="Unlimited"))
     applied = json.loads(path.read_text(encoding="utf-8"))
-    assert (applied["OUROBOROS_TASK_REVIEW_MODE"], applied["OUROBOROS_REVIEW_ENFORCEMENT"],
-            applied["OUROBOROS_REVIEW_MAX_CYCLES"]) == ("required", "blocking", "unlimited")
-    assert metadata["result_review"] == {"mode": "required", "enforcement": "blocking", "max_cycles": "unlimited"}
+    assert (applied["OUROBOROS_TASK_REVIEW_MODE"], applied["OUROBOROS_REVIEW_MAX_CYCLES"]) == ("required", "unlimited")
+    assert "OUROBOROS_REVIEW_ENFORCEMENT" not in applied
+    assert metadata["result_review"] == {"mode": "required", "max_cycles": "unlimited"}
     bad = parse_args(["--review-max-cycles", "0", "--dry-run"])
     with pytest.raises(ValueError, match="review_max_cycles"):
         _validate_launcher_values(bad)

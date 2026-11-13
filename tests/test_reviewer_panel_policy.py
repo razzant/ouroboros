@@ -53,7 +53,7 @@ def test_quorum_counts_the_seats_asked(count, answers, expected):
 
 
 @pytest.mark.parametrize(("surface", "strictness", "reason", "count"), [
-    ("own_body", "blocking", "", 3),
+    ("own_body", "advisory", "focused change", 1),
     ("skill", "advisory", "focused change", 1),
     ("plan_first", "cyber_pro", "", 1),
 ])
@@ -61,7 +61,7 @@ def test_strictness_composes_the_counted_panel(roster, strictness, reason, count
     panel = slots.compose_review_panel(["b", "adviser"], reason, surface=surface, strictness=strictness)
     assert len([seat for seat in panel.seats if not seat.additional]) == count
     assert panel.additional == ("adviser",)
-    assert panel.facts["widened_from"] == (["b", "adviser"] if strictness == "blocking" else [])
+    assert "widened_from" not in panel.facts and "reviewers_subset_ignored" not in panel.facts
     assert panel.facts["reason"] == reason and panel.facts["chosen_by"] == "ouroboros"
     assert [row["seat_id"] for row in panel.facts["pool"]] == ["a", "b", "c"]
 
@@ -75,8 +75,8 @@ def test_advisory_requires_a_counted_seat_and_a_reason(roster, surface):
     assert len(slots.compose_review_panel(surface=surface, strictness="advisory").seats) == 3
 
 
-def test_optional_blocking_change_and_later_plan_remain_composed(roster):
-    assert len(slots.compose_review_panel(["a"], surface="change", strictness="blocking").seats) == 1
+def test_optional_change_and_later_plan_remain_composed(roster):
+    assert len(slots.compose_review_panel(["a"], surface="change", strictness="advisory").seats) == 1
     assert slots.compose_review_panel(["adviser"], surface="plan", strictness="advisory").additional == ("adviser",)
 
 
@@ -175,35 +175,30 @@ def test_owner_skill_job_defaults_to_whole_pool_and_freezes_tick_edits(tmp_path,
         _reset_queue()
 
 
-def test_a_required_root_blocks_by_widening_and_advisory_by_requiring_a_reason(roster):
-    """Blocking seats every ticked reviewer and records the request it widened; Advisory
-    refuses the same narrowing with no reason and composes it once a reason is given."""
-    widened = slots.compose_review_panel(["b", "adviser"], surface="result_required", strictness="blocking")
-    assert [seat.slot.slot_id for seat in widened.seats if not seat.additional] == ["a", "b", "c"]
-    assert widened.additional == ("adviser",)
-    assert widened.facts["widened_from"] == ["b", "adviser"] and widened.facts["composition"] == "full_pool"
-
+def test_a_required_root_requires_a_counted_seat_and_a_reason_when_narrowed(roster):
+    """Outside Cyber Pro a Required root refuses a narrowing with no reason and composes it
+    once a reason is given; nothing widens a named subset."""
     with pytest.raises(slots.PanelCompositionError, match="REVIEW_PANEL_REASON_REQUIRED"):
         slots.compose_review_panel(["b"], surface="result_required", strictness="advisory")
     with pytest.raises(slots.PanelCompositionError, match="REVIEW_PANEL_EMPTY"):
         slots.compose_review_panel(["adviser"], "only a critic", surface="result_required", strictness="advisory")
     narrowed = slots.compose_review_panel(["b"], "the risky claim", surface="result_required", strictness="advisory")
     assert [seat.slot.slot_id for seat in narrowed.seats if not seat.additional] == ["b"]
-    assert narrowed.facts["widened_from"] == [] and narrowed.facts["composition"] == "composed"
+    assert "widened_from" not in narrowed.facts and narrowed.facts["composition"] == "composed"
 
 
 def test_auto_result_cyber_pro_and_omission_do_not_take_the_required_root_floor(roster):
     """The floor is the Required-root surface only. Auto (surface ``result``) and Cyber Pro
     keep the named rows; omitting reviewers, or the host seating them, is the whole pool."""
-    auto = slots.compose_review_panel(["b"], surface="result", strictness="blocking")
-    assert [seat.slot.slot_id for seat in auto.seats] == ["b"] and auto.facts["widened_from"] == []
+    auto = slots.compose_review_panel(["b"], surface="result", strictness="advisory")
+    assert [seat.slot.slot_id for seat in auto.seats] == ["b"] and auto.facts["composition"] == "composed"
     cyber = slots.compose_review_panel(["b"], surface="result_required", strictness="cyber_pro")
     assert [seat.slot.slot_id for seat in cyber.seats] == ["b"]
-    assert cyber.facts["widened_from"] == [] and cyber.facts["reason_missing"] is True
+    assert cyber.facts["reason_missing"] is True
     named_all = slots.compose_review_panel(["a", "b", "c"], surface="result_required", strictness="advisory")
-    assert named_all.facts["widened_from"] == [] and sorted(named_all.facts["assigned"]) == ["a", "b", "c"]
-    host = slots.compose_review_panel(surface="result_required", strictness="blocking", chosen_by="host")
-    assert host.facts["chosen_by"] == "host" and host.facts["widened_from"] == []
+    assert named_all.facts["reason_missing"] is False and sorted(named_all.facts["assigned"]) == ["a", "b", "c"]
+    host = slots.compose_review_panel(surface="result_required", strictness="advisory", chosen_by="host")
+    assert host.facts["chosen_by"] == "host"
     assert host.facts["composition"] == "full_pool" and host.facts["assigned"] == ["a", "b", "c"]
     assert slots.compose_review_panel(surface="result_required", strictness="advisory").facts["chosen_by"] == "ouroboros"
 

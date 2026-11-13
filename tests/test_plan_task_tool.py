@@ -3,7 +3,7 @@ ToolContext, the real plan record and a FAKE review substrate. Pinned in both
 directions: typed $0 refusals write nothing and call nobody; a write records a
 revision and calls nobody; an ask sends exactly to the named participants with each
 participant's own delivery and continuation; replies settle into the record and the
-intention ledger record; only the raiser's withdrawal releases a Blocking hold."""
+intention ledger record; only the raiser's withdrawal closes an objection, which holds nothing."""
 from __future__ import annotations
 
 import json
@@ -103,7 +103,6 @@ def harness(tmp_path, monkeypatch):
         return ctx
 
     state = {"slots": _slots(("s1", "m/a"), ("s2", "m/b"), ("s3", "m/c"))}
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setattr(plan_ask, "plan_review_slots", lambda default_effort="": list(state["slots"]))
     monkeypatch.setattr("ouroboros.tools.plan_dialogue.session_input_limits", lambda _slots: {})
     monkeypatch.setattr("ouroboros.tools.review_checklist.REPO_ROOT", system)
@@ -242,7 +241,7 @@ def test_a_declared_new_source_file_is_a_body_plan_before_it_exists(harness):
     target = harness.system / "ouroboros" / "new" / "deep" / "module.py"
     assert not target.exists() and not target.parent.exists()
     sub = harness.install({})
-    _write(harness.make_ctx(), affected_paths=[str(target)], ask=["s1"])
+    _write(harness.make_ctx(), affected_paths=[str(target)], ask=["s1"], reason="one module")
     revision = _record(harness)["revisions"][0]
     assert revision["body"] is True and "affected_paths" in revision["body_note"] and str(target) in revision["body_note"]
     system_prompt = _user_text(sub.calls[0]["request"].slot_messages["s1"][0]["content"])
@@ -258,7 +257,7 @@ def test_reading_a_repository_file_is_not_changing_it(harness):
     assert _record(harness)["revisions"][0]["body"] is False
     assert "## BIBLE.md (constitution" not in _user_text(sub.calls[0]["request"].slot_messages["s1"][0]["content"])
     sub = harness.install({})
-    _write(harness.make_ctx(task_id="task-2"), affected_paths=[bible], ask=["s1"])
+    _write(harness.make_ctx(task_id="task-2"), affected_paths=[bible], ask=["s1"], reason="one file")
     assert _record(harness, "task-2")["revisions"][0]["body"] is True
     assert "## BIBLE.md (constitution" in _user_text(sub.calls[0]["request"].slot_messages["s1"][0]["content"])
 
@@ -270,7 +269,7 @@ def test_ask_council_sends_each_participant_its_own_delivery_and_settles_replies
                            "s2": CLEAN, "s3": _reply("Fine.")})
     ctx = harness.make_ctx()
     text, result = _write(ctx, ask="council", message="First look, please.")
-    assert result.meta["plan_effect"] == "write+ask" and result.meta["plan_open_objections"] == 1 and result.meta["plan_holding"] == 1
+    assert result.meta["plan_effect"] == "write+ask" and result.meta["plan_open_objections"] == 1 and "plan_holding" not in result.meta
     assert len(sub.calls) == 1 and [s.slot_id for s in sub.calls[0]["slots"]] == ["s1", "s2", "s3"]
     request = sub.calls[0]["request"]
     assert request.surface == "plan_review" and request.reconciliation_identity["plan_ask_id"] == "a1"
@@ -291,8 +290,9 @@ def test_ask_council_sends_each_participant_its_own_delivery_and_settles_replies
     assert ask["participants"][0]["reply"]["objections"] == [{"id": "o1", "text": "five slides is not the bar; the owner asked for a story"}]
     assert ask["participants"][0]["delivery_ref"]["status"] == "retained" and ask["participants"][0]["reply_ref"]["status"] == "retained"
     [objection] = plan_record.open_objections(record)
-    assert objection["seat_id"] == "s1" and objection["holds"] is True
-    assert "s1 / o1" in text and "holds your final answer under Blocking" in text and "HELD" in text
+    assert objection["seat_id"] == "s1" and objection["owner_marked"] is True and "holds" not in objection
+    assert "s1 / o1" in text and "owner-marked reviewer" in text and "HELD" not in text
+    assert "Open objections are disclosed in your final answer; nothing holds it" in text
     assert any("ask a1 on revision 1 — sending to 3 participants" in line for line in harness.progress)
     assert any("m/a answered — 1 objection" in line for line in harness.progress)
     # The ask's exact texts and costs live in ONE intention ledger record.
@@ -307,7 +307,7 @@ def test_ask_council_sends_each_participant_its_own_delivery_and_settles_replies
     assert ledger["cost"]["usd"] == pytest.approx(0.03)
 
 
-def test_ask_names_exactly_its_recipients_and_an_added_critic_never_holds(harness):
+def test_ask_names_exactly_its_recipients_and_an_added_critic_is_named_as_added(harness):
     row = SimpleNamespace(slot_id="critic_x", kind="api_chat", target_id="m/critic", effort="", session_target="", profile_id="",
                           subagent_id="critic_x", use_local=False, processing_preference="", delivery="packet", access="",
                           is_session=False, native_retrieval=False)
@@ -322,28 +322,11 @@ def test_ask_names_exactly_its_recipients_and_an_added_critic_never_holds(harnes
     ask = _record(harness)["asks"][0]
     assert [(p["seat_id"], p["owner_marked"]) for p in ask["participants"]] == [("s2", True), ("critic_x", False)]
     [objection] = plan_record.open_objections(_record(harness))
-    assert objection["holds"] is False and result.meta["plan_holding"] == 0 and result.meta["plan_open_objections"] == 1
-    assert "added participant — never holds" in text and "Open objections are disclosed in your final answer; nothing holds it" in text
+    assert objection["owner_marked"] is False and result.meta["plan_open_objections"] == 1
+    assert "added participant" in text and "Open objections are disclosed in your final answer; nothing holds it" in text
 
 
-def test_a_body_plans_first_ask_includes_every_owner_marked_reviewer_and_says_so(harness):
-    sub = harness.install({})
-    ctx = harness.make_ctx(active_workspace=False)
-    text, _ = _write(ctx, affected_paths=["ouroboros/loop.py"], ask=["s2"])
-    assert [s.slot_id for s in sub.calls[0]["slots"]] == ["s2", "s1", "s3"]
-    ask = _record(harness)["asks"][0]
-    assert ask["body_first_ask"] is True and ask["host_added"] == ["s1", "s3"]
-    assert ask["panel"]["widened_from"] == ["s2"] and ask["panel"]["strictness"] == "blocking"
-    assert "first ask on a body plan" in text and "added s1, s3" in text
-    system_prompt = _user_text(sub.calls[0]["request"].slot_messages["s2"][0]["content"])
-    assert "## BIBLE.md (constitution" in system_prompt and "## ARCHITECTURE.md" in system_prompt
-    # The second ask is the mind's choice.
-    text, _ = _call(ctx, ask=["s2"], message="again")
-    assert [s.slot_id for s in sub.calls[1]["slots"]] == ["s2"] and _record(harness)["asks"][1]["host_added"] == []
-
-
-def test_advisory_first_body_ask_requires_reason_and_preserves_the_named_panel(harness):
-    harness.monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+def test_a_first_body_ask_requires_reason_and_preserves_the_named_panel(harness):
     sub = harness.install({})
     ctx = harness.make_ctx(active_workspace=False)
     text, result = _write(ctx, affected_paths=["ouroboros/loop.py"], ask=["s2"])
@@ -352,17 +335,16 @@ def test_advisory_first_body_ask_requires_reason_and_preserves_the_named_panel(h
     _write(ctx, affected_paths=["ouroboros/loop.py"], ask=["s2"], reason="one area changed")
     assert [s.slot_id for s in sub.calls[0]["slots"]] == ["s2"]
     ask = _record(harness)["asks"][0]
-    assert ask["host_added"] == [] and ask["panel"]["widened_from"] == []
+    assert ask["host_added"] == [] and "widened_from" not in ask["panel"]
     assert ask["reason"] == ask["panel"]["reason"] == "one area changed"
     from ouroboros.review_ledger import load_record
     assert load_record(harness.drive, ask["record_id"])["panel"]["reason"] == "one area changed"
 
 
-def test_first_body_ask_adviser_alone_refuses_in_advisory_and_is_free_in_cyber(harness):
+def test_first_body_ask_adviser_alone_refuses_outside_cyber_and_is_free_in_cyber(harness):
     critic = _slots(("critic", "m/critic"))[0]
     harness.monkeypatch.setattr("ouroboros.reviewer_slot_config.catalog_review_row", lambda *_: critic)
     harness.monkeypatch.setattr("ouroboros.reviewer_slot_config._delivery_slot", lambda *_a, **_kw: critic)
-    harness.monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     sub = harness.install({"critic": _reply("A concern", objections=[("x", "explain this")])})
     ctx = harness.make_ctx(active_workspace=False)
     text, result = _write(ctx, affected_paths=["ouroboros/loop.py"], ask=["critic"], reason="optional critic")
@@ -371,7 +353,7 @@ def test_first_body_ask_adviser_alone_refuses_in_advisory_and_is_free_in_cyber(h
     harness.monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
     _, result = _write(ctx, affected_paths=["ouroboros/loop.py"], ask=["critic"])
     assert [s.slot_id for s in sub.calls[0]["slots"]] == ["critic"]
-    assert result.meta["plan_holding"] == 0
+    assert result.meta["plan_open_objections"] == 1  # disclosed; nothing holds it
 
 
 def test_later_ask_continues_each_participant_with_delta_cross_talk_and_own_objections(harness):
@@ -391,7 +373,7 @@ def test_later_ask_continues_each_participant_with_delta_cross_talk_and_own_obje
     assert "### Ask a1" in user and "s2 (m/b) answered:" in user and "Peer says fine." in user  # cross-talk since its last answer
     assert "## YOUR OPEN OBJECTIONS" in user and "- o1 (raised in ask a1 about revision 1): the bar is low" in user
     assert "I raised the bar; is o1 answered?" in user
-    assert plan_record.open_objections(_record(harness)) == [] and result.meta["plan_holding"] == 0
+    assert plan_record.open_objections(_record(harness)) == [] and result.meta["plan_open_objections"] == 0
     assert "withdrawn: s1/o1 in ask a2" in text and "Nothing holds your final answer" in text
     ask = _record(harness)["asks"][1]
     assert ask["participants"][0]["continued"] is True
@@ -404,9 +386,9 @@ def test_omission_flags_not_adjudicated_and_another_seat_cannot_withdraw(harness
     sub.answers.update({"s1": _reply("Something else entirely."), "s2": _reply("I withdraw s1's point.", withdrawn=[("o1", "I disagree with it")])})
     text, result = _call(ctx, ask=["s1", "s2"], message="again")
     [objection] = plan_record.open_objections(_record(harness))
-    assert objection["not_adjudicated"] is True and objection["holds"] is True
+    assert objection["not_adjudicated"] is True and objection["owner_marked"] is True
     assert "NOT ADJUDICATED" in text and "ignored withdrawals of objections the seat never raised: s2/o1 in ask a2" in text
-    assert result.meta["plan_holding"] == 1
+    assert result.meta["plan_open_objections"] == 1
 
 
 def test_unreadable_reply_and_a_failed_seat_change_nothing_and_never_hold(harness):
@@ -436,7 +418,7 @@ def test_pending_seats_settle_from_the_custody_hook_and_wake_the_mailbox(harness
         for fact in ("a pending ask holds no ending", "kept in its plan record", "when the room is known"):
             assert fact in words, fact
         assert "before your final" not in words and "before an unhurried finish" not in words
-    decision = plan_record.gate_projection(record, enforcement="blocking", cyber_pro=False, hurry=False)
+    decision = plan_record.gate_projection(record, cyber_pro=False)
     assert decision["status"] == "awaiting" and decision["allow"] is True  # silence never holds
     from ouroboros.review_records import ReviewActorRecord
 
@@ -516,7 +498,7 @@ def test_a_structurally_dead_seat_is_not_dispatched_and_unknown_health_dispatche
     for sid, code in (("s2", "subscription_window_exhausted"), ("s3", "credential_pool_exhausted")):
         assert rows[sid]["dispatched"] is False and rows[sid]["status"] == "not_dispatched"
         assert f"health_skip[{code}]" in rows[sid]["not_dispatched_reason"]
-    assert "not sent: s2 — health_skip[subscription_window_exhausted]" in text and result.meta["plan_holding"] == 0
+    assert "not sent: s2 — health_skip[subscription_window_exhausted]" in text and "plan_holding" not in result.meta
 
     monkeypatch.setattr(runtime, "plan_panel_health_snapshot", lambda slots: None)
     sub = harness.install({})

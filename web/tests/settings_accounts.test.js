@@ -9,7 +9,7 @@ import test from 'node:test';
 import { claudexorStatus } from '../modules/claudexor_status_store.js';
 import { accountGroups, destroyHarnessAccounts, harnessFamilyMarkup } from '../modules/harness_accounts.js';
 import { otherKeyRows, providerRowFacts, quotaBars, quotaLeft } from '../modules/settings_accounts.js';
-import { editorLine, keyHeads, keyPath, keyTitle, parseKeyPath, setKeyEnabled } from '../modules/settings_connections.js';
+import { editorLine, keyHeads, keyPath, keyTitle, parseKeyPath, referencesLine, setKeyEnabled } from '../modules/settings_connections.js';
 import { forgetSettingRows, readSettings } from '../modules/settings_controls.js';
 import { settingsPageFor } from '../modules/settings_pages.js';
 import { PROVIDER_CARDS, providerSettingsCard } from '../modules/settings_provider_cards.js';
@@ -111,7 +111,8 @@ function server(t, { values = {}, status = statusAnswer(), skills = [] } = {}) {
                     state.values[key] = value;
                 }
             }
-            return response({ status: 'saved', saved: true, changes });
+            // The rows that still name a key which cannot send ride on the answer, as the gateway sends them.
+            return response({ status: 'saved', saved: true, changes, ...(state.references ? { connection_references: state.references } : {}) });
         }
         if (path === '/api/extensions') return response({ skills, live: { settings_sections: [] } });
         if (path === '/api/claudexor/status') return response(state.status);
@@ -548,3 +549,62 @@ test('the wizard\'s provider step renders and collects as before', async (t) => 
     assert.equal(world.posts().length, 0);
     editor.destroy();
 });
+
+test('a key saved, turned off or removed names the rows that still point at a key which cannot send; none, nothing is added', () => {
+    const references = [{ setting: 'OUROBOROS_MODEL_LIGHT', route: 'openai@work::gpt-light', connection: 'openai@work' },
+        { setting: 'OUROBOROS_MODEL_FALLBACKS', entry: '2', route: 'anthropic::claude-a', connection: 'anthropic' }];
+    const saved = { state: 'saved', effect: 'next_call', withheld: 'structure', message: '', code: '', references };
+    assert.deepEqual(referencesLine(saved), { tone: 'warn',
+        text: 'Still naming a key that was removed or turned off, so they cannot send: Light (OpenAI · work), Fallback 2 (Anthropic)' });
+    assert.match(editorLine(saved).text, /^Saved.*Still naming a key that was removed or turned off, so they cannot send: Light \(OpenAI · work\)/);
+    // The read's keys give a key its own label.
+    assert.match(referencesLine(saved, [{ id: 'openai@work', label: 'Work account' }]).text, /Light \(Work account\)/);
+    assert.equal(editorLine(saved).tone, 'warn');
+    const clean = { ...saved, references: [] };
+    assert.deepEqual(referencesLine(clean), {});
+    assert.doesNotMatch(editorLine(clean).text, /Still naming/);
+});
+
+test('a key turned off, added or removed on its page while a role names a key that cannot send: the line names it by its label, and the list says it after the page', async (t) => {
+    const world = server(t, { values: { OUROBOROS_CONNECTIONS: [{ kind: 'openai', name: 'work', label: 'Work account', api_key: 'sk-work' },
+        { kind: 'openrouter', name: 'research-credits', label: 'Research credits', api_key: 'sk-or-second' }] } });
+    const list = await world.mount('accounts');
+    // A key's page opens as its own level above the list, which stays underneath to be told what the page did.
+    const onPage = async (path, act) => {
+        const box = new Stub('div');
+        const page = await settingsPageFor(path).mount(box, { path, row: '', ctx: world.ctx });
+        await settle();
+        await act(box);
+        await settle();
+        page.unmount();
+    };
+    const press = (selector) => async (box) => box.fire('click', { target: box.querySelector(selector) });
+    const line = () => world.find('[data-entry-result]');
+    const naming = 'Still naming a key that was removed or turned off, so they cannot send: Light (OpenAI · Work account)';
+    world.state.references = [{ setting: 'OUROBOROS_MODEL_LIGHT', route: 'openai@work::gpt-light', connection: 'openai@work' }];
+    // Turned off on its page: the page's line names the key by the label the owner gave it, not its stored name.
+    await onPage('accounts/key/openai/work', async (box) => {
+        await press('[data-key-toggle]')(box);
+        await settle();
+        assert.equal(box.querySelector('[data-editor-result]').textContent, naming);
+        assert.equal(box.querySelector('[data-editor-result]').dataset.tone, 'warn');
+    });
+    // A key added meanwhile: the list says what was added and the roles still unable to send.
+    await onPage('accounts/key/new', async (box) => {
+        box.querySelector('[data-connection-label]').value = 'Night batch';
+        box.querySelector('[data-connection-field="api_key"]').value = 'sk-or-third';
+        await press('[data-editor-save]')(box);
+    });
+    assert.equal(line().textContent, `Added OpenRouter · Night batch. ${naming}`);
+    assert.equal(line().dataset.tone, 'warn');
+    await onPage('accounts/key/openai/work', press('[data-editor-remove]'));
+    assert.equal(line().textContent, `Removed OpenAI · Work account. ${naming}`);
+    assert.equal(line().dataset.tone, 'warn');
+    // Nothing names the next one: the line says only what was removed, in the plain colour.
+    world.state.references = null;
+    await onPage('accounts/key/openrouter/research-credits', press('[data-editor-remove]'));
+    assert.equal(line().textContent, 'Removed OpenRouter · Research credits.');
+    assert.notEqual(line().dataset.tone, 'warn');
+    list.unmount();
+});
+

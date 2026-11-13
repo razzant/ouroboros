@@ -931,6 +931,26 @@ def test_knowledge_history_input_budget_counts_rows_without_their_bodies(ctx, mo
     assert [r["n"] for r in narrowed["data"]] == [3]
 
 
+def test_knowledge_history_leaves_out_a_change_rows_texts_and_keeps_its_base(ctx, monkeypatch):
+    """A row that stores a change carries the removed and added text of a note: like whole bodies it is left out
+    before filtering and before the input budget is spent; the row's ``base``, an address, stays."""
+    from ouroboros import query_data_sql
+
+    base = {"offset": 0, "sha256": "a" * 64}
+    rows = [{"ts": "2026-11-12T00:00:00Z", "topic": "lessons/tests", "mode": "edit", "publication": "source_capture",
+             "base": base, "change": [[0, "REMOVED_TEXT " * 300, "ADDED_TEXT " * 300]], "chain_bytes": 7200,
+             "summary": "Exit codes.", "n": n} for n in range(6)]
+    write(ctx, "memory/knowledge_history.jsonl", b"".join(json.dumps(r).encode() + b"\n" for r in rows))
+    result = call(ctx, op="jsonl", kind="knowledge_history", tail=10)
+    assert result["status"] == "ok" and "REMOVED_TEXT" not in json.dumps(result) and "ADDED_TEXT" not in json.dumps(result)
+    assert [(r["base"], r["chain_bytes"], "change" in r) for r in result["data"]] == [(base, 7200, False)] * 6
+    assert call(ctx, op="jsonl", kind="knowledge_history",  # a filter never sees the texts it would return
+                filter={"field": "change", "op": "contains", "value": "REMOVED"})["data"] == []
+    monkeypatch.setattr(query_data_sql, "MAX_BYTES", 2048)  # six rows' 7.2 KB changes would not fit; their facts do
+    kept = call(ctx, op="jsonl", kind="knowledge_history", tail=0, max_bytes=2048)
+    assert kept["status"] == "ok" and [r["n"] for r in kept["data"]] == list(range(6))
+
+
 def test_the_retired_chat_log_kind_names_the_conversation_readers(ctx):
     """logs/chat.jsonl froze at the dialogue-store cutover; the kind that advertised it is gone from the
     schema, a call that still names it is told where the conversation lives (13 not_found reads in
@@ -963,3 +983,15 @@ def test_a_failed_sql_statement_names_the_readable_schema_and_a_served_one_does_
     assert "schema" not in call(ctx, op="sql", query="SELECT 1")
     assert "schema" not in call(ctx, op="sql", query="SELECT 1")
     assert query_data_sql.schema_hint("money") == "tables: PRAGMA table_list; columns: PRAGMA table_info(<table>)"
+
+
+def test_a_malformed_knowledge_history_line_is_a_named_gap_and_later_rows_still_return(ctx):
+    rows = [{"ts": "2026-11-01T00:00:00Z", "topic": "before", "mode": "edit"},
+            {"ts": "2026-11-02T00:00:00Z", "topic": "after", "mode": "overwrite"}]
+    head = json.dumps(rows[0]).encode() + b"\n"
+    write(ctx, "memory/knowledge_history.jsonl", head + b'{"topic": "torn\n' + json.dumps(rows[1]).encode() + b"\n")
+    result = call(ctx, op="jsonl", kind="knowledge_history", tail=10)
+    assert result["status"] == "ok" and [r["topic"] for r in result["data"]] == ["before", "after"]
+    assert result["source"]["gaps"] == {"malformed_lines": 1, "first_malformed_offset": len(head)}
+    write(ctx, "memory/knowledge_history.jsonl", b"".join(json.dumps(r).encode() + b"\n" for r in rows))
+    assert "gaps" not in call(ctx, op="jsonl", kind="knowledge_history", tail=10)["source"]

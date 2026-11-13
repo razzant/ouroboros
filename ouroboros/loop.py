@@ -16,11 +16,12 @@ import logging
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros import task_pacing  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
-from ouroboros.config import adaptive_quorum, get_context_mode, get_light_model, get_review_enforcement, get_task_review_mode, resolve_effort  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
+from ouroboros.config import adaptive_quorum, get_context_mode, get_light_model, get_task_review_mode, resolve_effort  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
-from ouroboros.outcomes import REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION, RESULT_INFRA_FAILED, extract_final_answer, latest_agent_defined_verification, latest_unreconciled_failed_verification, latest_unreconciled_masked_verification, reviewable_effect_projection, should_nudge_verification, turn_has_reviewable_effects  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
+from ouroboros.outcomes import REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION, RESULT_INFRA_FAILED, extract_final_answer, latest_unreconciled_failed_verification, reviewable_effect_projection, turn_has_reviewable_effects  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.observability import new_execution_id  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.observability import task_timing_scope, timed_phase
+from ouroboros.context_timing import measured_sections, section_spans
 from ouroboros.llm_observability import round_starts, round_window
 from ouroboros.tool_policy import CAPABILITY_OMISSION_HEADER, format_capability_omissions, initial_tool_schemas, list_non_core_tools  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.tools.registry import ToolRegistry
@@ -58,6 +59,7 @@ from ouroboros.loop_tool_execution import (
 )
 from ouroboros.loop_llm_call import TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY, call_llm_with_retry, emit_llm_usage_event, forced_response_is_incomplete, forced_response_parts, provider_no_call_source  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.loop_llm_call import TRANSPORT_WAIT_REDIAL_KEY
+from ouroboros.primary_route_observation import ROUND_REFUSALS_KEY, round_failure_words
 from ouroboros.preflight_receipts import canonical_data_root
 from ouroboros.transcript_prefix import count_history_change, observe_send as _observe_transcript_send
 from ouroboros.transcript_prefix import retire_main_reasoning as _retire_main_reasoning  # noqa: F401 -- shared send boundary
@@ -238,11 +240,17 @@ def _provider_unavailable_result(
         # Host presentation is separate from the byte-exact model/salvage result.
         # Use the final usage facts: a forced call can itself end unresolved.
         if str(usage.get("reason_code") or "") not in {"", "deadline_local"}:
-            usage["terminal_provider_notice"] = _provider_terminal_fallback_text(
-                usage, is_context_overflow=is_context_overflow, is_transport_wait=is_transport_wait,
+            usage["terminal_provider_notice"] = notice = _provider_terminal_fallback_text(
+                usage, round_idx=ctx.round_idx, is_context_overflow=is_context_overflow, is_transport_wait=is_transport_wait,
                 waited_sec=waited_sec, interactive=interactive,
                 is_deadline_exhausted=is_deadline_exhausted, control_reason=control_reason, wait_cause=wait_cause,
             )
+            if (not salvaged and text == fallback != notice and usage.get("terminal_origin") == TERMINAL_ORIGIN_HOST_NOTICE
+                    and round_failure_words(usage, ctx.round_idx)):  # any other round keeps the words of its own failure
+                text = notice  # a refusal round's host words, composed before a forced call that itself failed: now its facts too
+                if (published := _publish_model_forced_candidate(ctx, trace, text, str(usage["reason_code"]))) is not None:
+                    trace.get("forced_finalization", {}).update(candidate_sha256=published.content_sha256, candidate_revision=published.revision)
+        usage.pop(ROUND_REFUSALS_KEY, None)  # the round ended: its record of content refusals goes with it
         return text, usage, trace
 
     candidate = _live_delivery_candidate(ctx)
@@ -257,7 +265,7 @@ def _provider_unavailable_result(
         fallback = salvaged
     else:
         fallback = _provider_terminal_fallback_text(
-            ctx.accumulated_usage, is_context_overflow=is_context_overflow,
+            ctx.accumulated_usage, round_idx=ctx.round_idx, is_context_overflow=is_context_overflow,
             is_transport_wait=is_transport_wait, waited_sec=waited_sec,
             interactive=interactive, is_deadline_exhausted=is_deadline_exhausted,
             control_reason=control_reason, wait_cause=wait_cause,
@@ -301,9 +309,12 @@ def _provider_unavailable_result(
             source=no_call, provider_terminal=wall, host_words=not salvaged,
         )
         return with_terminal_notice(text, usage, llm_trace)
+    met = round_failure_words(ctx.accumulated_usage, ctx.round_idx)  # a provider content refusal is named as itself, never an outage
     prompt = (
         "[DEADLINE] Primary model work reached the owner deadline. Produce the best final answer now from verified work and state what remains undone."
         if is_deadline_exhausted else
+        f"[PROVIDER_UNAVAILABLE] No route returned a usable response.{met} The task is being INTERRUPTED, not "
+        "completed. Summarize the verified work so far and state plainly what remains undone." if met else
         "[PROVIDER_UNAVAILABLE] The model provider failed to return a usable response. "
         "The task is being INTERRUPTED by this outage, not completed. Summarize the "
         "verified work so far and state plainly what remains undone."
@@ -446,6 +457,7 @@ def _reset_turn_state(ctx: Any) -> None:
     ctx._primary_view = None  # a return resumes only the view this turn left (primary_route_observation.held_primary_view)
     ctx._accepted_model_route = ctx._left_review_wait = None  # a new turn waits on no left review
     ctx._pending_task_wait = None  # nor owes an earlier turn's native task wait (``native_task_wait``)
+    ctx._pre_delivery_noticed = False  # each turn's answer may be told once (a continuation restores its own)
 
 
 def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dict, usage: dict, seen: set,
@@ -461,27 +473,29 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
     """
     from ouroboros.presence_carrier import reenter
 
-    carried, (saved, saved_pause, saved_working) = reenter(tools._ctx), carriers
-    if saved:
-        resumed = (*resume_native_loop(tools, saved, messages, trace, usage, seen), cost_ceiling, True, False, False)
-    elif saved_pause:
-        resumed = resume_paused_loop(tools, saved_pause, messages, trace, usage, seen,
-                                     budget_remaining_usd=budget_remaining_usd)
-        no_tool = saved_pause.get("resume_point", {}).get("budget_tail") == "no_tool"
-        resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), not no_tool, no_tool, no_tool)
-    elif saved_working:
-        *resumed, tool_tail = working_checkpoint.resume_from_working(tools, saved_working, messages, trace, usage, seen)
-        no_tool = not tool_tail and (saved_working.get("working") or {}).get("boundary") == working_checkpoint.RESUMED
-        resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), tool_tail, no_tool, not tool_tail)
-    else:
-        resumed = (*route, cost_ceiling, False, False, False)
-        apply_current(tools._ctx)
-        from ouroboros.place_reply import seed_no_send
-        seed_no_send(tools._ctx, trace)  # a fresh place-carrying lineage starts having said nothing there
-    if carried is not None:
-        carried.reentered(tools._ctx, messages)
-    from ouroboros.subagent_bootstrap import append_startup_receipt
-    append_startup_receipt(tools._ctx, messages, getattr(tools._ctx, "_configured_startup_wake", ""), seen)
+    with measured_sections():  # restore, route rebind and tools: the first round's receipt names their spans
+        carried, (saved, saved_pause, saved_working) = reenter(tools._ctx), carriers
+        if saved:
+            resumed = (*resume_native_loop(tools, saved, messages, trace, usage, seen), cost_ceiling, True, False, False)
+        elif saved_pause:
+            resumed = resume_paused_loop(tools, saved_pause, messages, trace, usage, seen,
+                                         budget_remaining_usd=budget_remaining_usd)
+            no_tool = saved_pause.get("resume_point", {}).get("budget_tail") == "no_tool"
+            resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), not no_tool, no_tool, no_tool)
+        elif saved_working:
+            *resumed, tool_tail = working_checkpoint.resume_from_working(tools, saved_working, messages, trace, usage, seen)
+            no_tool = not tool_tail and (saved_working.get("working") or {}).get("boundary") == working_checkpoint.RESUMED
+            resumed = (*resumed, _resolve_task_cost_ceiling(tools._ctx, budget_remaining_usd), tool_tail, no_tool, not tool_tail)
+        else:
+            resumed = (*route, cost_ceiling, False, False, False)
+            apply_current(tools._ctx)
+            from ouroboros.place_reply import seed_no_send
+            seed_no_send(tools._ctx, trace)  # a fresh place-carrying lineage starts having said nothing there
+        if carried is not None:
+            carried.reentered(tools._ctx, messages)
+        from ouroboros.subagent_bootstrap import append_startup_receipt
+        append_startup_receipt(tools._ctx, messages, getattr(tools._ctx, "_configured_startup_wake", ""), seen)
+        tools._ctx._round_prologue = section_spans()
     return resumed
 
 
@@ -666,6 +680,7 @@ def run_llm_loop(
                 if final_result is not None:
                     return final_result
                 continue
+            model_call = None  # this round's call, once it starts: a yield before it keeps the loop's own state
             try:
                 from ouroboros.loop_llm_call import timeout_repeat_blocked
                 if timeout_repeat_blocked(accumulated_usage):  # before compaction can buy a call on re-entry
@@ -729,6 +744,9 @@ def run_llm_loop(
                     text, accumulated_usage, forced_trace = controlled
                     _merge_finalization_trace(llm_trace, forced_trace)
                     return text, accumulated_usage, llm_trace
+                if model_call is not None:  # the redial starts from what the yielded call applied (wait card, view, low)
+                    active_model, active_use_local = model_call.active_model, model_call.active_use_local
+                    context_fit_plan, active_context_mode = model_call.context_fit_plan, model_call.active_context_mode
                 free_redial = True
                 continue
             # A wait-card switch can change the route within this very call.
@@ -876,8 +894,9 @@ from ouroboros.loop_nudges import (  # noqa: E402, F401 -- intentional public re
     _maybe_inject_cost_budget_milestone,
     _inject_round_checkpoints,
     _forced_delegation_note,
-    _nanny_finalization_message,
     _maybe_inject_finalization_nudges,
+    _claim_pre_delivery_notice,
+    _pre_delivery_notice,
     _answer_protocol_active,
 )
 from ouroboros.loop_model_call import (  # noqa: E402, F401 -- intentional public re-exports
@@ -946,7 +965,6 @@ from ouroboros.loop_delivery import (  # noqa: E402, F401 -- intentional public 
     _classify_parsed_delivery_control,
     _resolve_forced_delivery_control_body,
     _resolve_delivery_control,
-    _CHILD_ABSORPTION_HOLD_CONTROL,
     _DELIVERY_HOLD_CONTROLS,
     _SKILL_ACTION_HOLD_CONTROL,
     _compose_delivery_suffix,
@@ -962,7 +980,6 @@ from ouroboros.loop_forced_finalization import (  # noqa: E402, F401 -- intentio
     _claimed_child_dispositions,
     _undispositioned_children,
     _undecided_children_listing,
-    _maybe_enforce_child_absorption_gate,
     _enforce_plan_gate,
     _finalize_forced_services,
     _disclose_service_finalization,

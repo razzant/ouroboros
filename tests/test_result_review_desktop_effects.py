@@ -359,11 +359,10 @@ def test_an_unavailable_producer_source_is_a_named_gap_never_a_guess(tmp_path, m
     assert rr.result_review_at_delivery(ctx, "Clicked.", trace_of(ctx), lambda _text: None) is False and sends == []
 
 
-@pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
-def test_the_same_receipt_is_reviewed_once_and_a_new_receipt_is_a_new_subject(tmp_path, monkeypatch, enforcement):
-    """A new receipt is new material, a new subject. Under Advisory the author who received the earlier PASS decides
-    on it (owner, 8 Nov 2026): no wave is bought, the PASS stays the earlier version's; Blocking re-reviews it."""
-    ctx = _floor_ctx(tmp_path, monkeypatch, enforcement=enforcement)
+def test_the_same_receipt_is_reviewed_once_and_a_new_receipt_is_a_new_subject(tmp_path, monkeypatch):
+    """A new receipt is new material, a new subject. The author who received the earlier PASS decides on it
+    (owner, 8 Nov 2026): no wave is bought, the PASS stays the earlier version's."""
+    ctx = _floor_ctx(tmp_path, monkeypatch)
     sends: list[dict] = []
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends))
     desktop = mac(ctx, tmp_path, monkeypatch)
@@ -378,18 +377,10 @@ def test_the_same_receipt_is_reviewed_once_and_a_new_receipt_is_a_new_subject(tm
     desktop.call("key", keys="cmd+s")
     clicked, saved = (effect["receipt"] for effect in rr.produced_material(ctx)["effects"])
     assert clicked in first and saved not in first
-    if enforcement == "advisory":
-        assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is False
-        assert len(sends) == 3, "the revised result is the author's to accept: nothing is bought"
-        [run] = trace_of(ctx)["review_runs"]
-        assert run["earlier_revision"] is True and run["aggregate_signal"] == "PASS"
-        return
-    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is True  # the new PASS
-    assert len(sends) == 6, "Blocking: the new material is reviewed again"
-    second = subject_text(ctx)
-    assert clicked in second and saved in second
-    current = [run for run in trace_of(ctx)["review_runs"] if not run.get("superseded_by_revision")]
-    assert [run["aggregate_signal"] for run in current] == ["PASS"]
+    assert rr.result_review_at_delivery(ctx, answer, trace_of(ctx), lambda _text: None) is False
+    assert len(sends) == 3, "the revised result is the author's to accept: nothing is bought"
+    [run] = trace_of(ctx)["review_runs"]
+    assert run["earlier_revision"] is True and run["aggregate_signal"] == "PASS"
 
 
 # --- Modes and roles are unchanged ----------------------------------------------------------------
@@ -405,15 +396,16 @@ def test_auto_off_and_a_child_are_never_forced_by_a_desktop_input(tmp_path, monk
     assert sends == [] and not trace_of(ctx).get("review_runs")
 
 
-def test_blocking_holds_a_failed_desktop_result_and_presence_is_never_held(tmp_path, monkeypatch):
-    ctx = _floor_ctx(tmp_path / "blocking", monkeypatch, enforcement="blocking")
+def test_a_failed_desktop_result_is_shown_once_then_delivered_and_presence_is_never_held(tmp_path, monkeypatch):
+    ctx = _floor_ctx(tmp_path / "root", monkeypatch)
     sends: list[dict] = []
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends, {"t1": CRITICAL}))
-    mac(ctx, tmp_path / "blocking", monkeypatch).call("click", x=1, y=2, raw=True)
+    mac(ctx, tmp_path / "root", monkeypatch).call("click", x=1, y=2, raw=True)
     shown: list[str] = []
     assert rr.result_review_at_delivery(ctx, "Clicked.", trace_of(ctx), shown.append) is True
-    assert rr.result_review_at_delivery(ctx, "Clicked.", trace_of(ctx), shown.append) is True
-    assert "not delivered until a review passes it" in shown[-1] and len(sends) == 3
+    assert "You decide" in shown[-1] and len(shown) == 1 and len(sends) == 3
+    assert rr.result_review_at_delivery(ctx, "Clicked.", trace_of(ctx), shown.append) is False, "the author decided"
+    assert len(shown) == 1 and len(sends) == 3
 
     ctx = _floor_ctx(tmp_path / "presence", monkeypatch)
     # The host stamps a Presence turn before any review (``presence_runner._build_task``).

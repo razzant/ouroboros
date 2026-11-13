@@ -17,7 +17,7 @@ def _book(chapter):
     ("authentication refusals once with it alone, without a credential helper", "retrying only auth refusals once with the configured token"),
     ("`pending_update` names release; review keeps separate payload/lifecycle snapshots",
      "retain payload/lifecycle as `pending_update`"),
-    ("Preflight failure persists as PENDING, never advisory-overridable BLOCKERS", ""),
+    ("Preflight failure persists as PENDING, never overridable BLOCKERS", ""),
 ])
 def test_skill_lifecycle_facts_match_the_current_contract(fact, obsolete):
     text = _book("13-external-skills-layer.md")

@@ -191,7 +191,6 @@ def test_external_review_script_resolves_models_and_efforts(monkeypatch):
         pool_seat("r1", "anthropic/claude-opus-4.8", effort="high"),
         pool_seat("r2", "google/gemini-3.5-flash", effort="high"),
         pool_seat("r3", "openai/gpt-5.5", delivery="native", effort="xhigh")))
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
 
     config = _resolved_review_config()
@@ -204,7 +203,7 @@ def test_external_review_script_resolves_models_and_efforts(monkeypatch):
     assert config["pool_efforts"] == ["high", "high", "xhigh"]
     assert all(row["route"]["kind"] == "api_chat" for row in config["pool_slots"])
     assert [row["delivery"] for row in config["pool_slots"]] == ["packet", "packet", "native"]
-    assert config["review_enforcement"] == "blocking"
+    assert "review_enforcement" not in config, "the retired setting is neither pinned nor resolved"
     # v6.80.0: the scope-review floor key is gone; the operator line pins the context
     # mode instead, because that is now what decides scope-review applicability.
     assert config["context_mode"] == "max"
@@ -243,7 +242,7 @@ def _run_golden_contributor_review(tmp_path: Path, monkeypatch) -> SimpleNamespa
     drive, output = (tmp_path / "drive").resolve(), (tmp_path / "out").resolve()
     host = tmp_path / "host-data"
     host.mkdir()
-    (host / "settings.json").write_text('{"OUROBOROS_REVIEW_ENFORCEMENT": "advisory"}\n', encoding="utf-8")
+    (host / "settings.json").write_text('{"OUROBOROS_CONTEXT_MODE": "low"}\n', encoding="utf-8")
     _contributor_fakes(module, monkeypatch, Path(fixture["repo"]), drive)
     monkeypatch.setattr(module, "DATA", host)
     monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "1")
@@ -683,7 +682,7 @@ def test_contributor_policy_preserves_configured_routes(monkeypatch):
     config = _resolved_review_config(profile="external_pr_readiness")
 
     assert os.environ["OUROBOROS_SUBAGENTS"] == raw
-    assert os.environ["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
+    assert os.environ["OUROBOROS_REVIEW_ENFORCEMENT"] == "", "the retired key is never pinned"
     assert os.environ["OUROBOROS_OBSERVABILITY_KEEP_RAW"] == "0"
     # The review operation runs no tests (its record says tests NOT_RUN), so the
     # wrapper no longer pins the commit gate's test-preflight knob.
@@ -718,7 +717,7 @@ def test_agent_session_only_preflight_needs_no_api_budget_or_key(monkeypatch):
             "effort": "high"}, {"slot_id": "s1", "route": {
             "kind": "agent_session", "target_id": "cursor=claude-fable-5"},
             "effort": "high"}],
-        "review_enforcement": "blocking", "context_mode": "max",
+        "context_mode": "max",
     }
     monkeypatch.delenv("TOTAL_BUDGET", raising=False)
     isolation = {"run_cap_usd": 3.0, "review_data_root": "/isolated/drive"}
@@ -1167,7 +1166,6 @@ def test_contributor_receipts_bind_session_and_api_execution(tmp_path):
             "profile_id": "pinned"}, "effort": "high"}, {"slot_id": "s1", "route": {
             "kind": "api_chat", "target_id": "openai/gpt-5.6-sol"},
             "effort": "xhigh"}],
-        "review_enforcement": "blocking",
         "context_mode": "max",
     }
     _assert_contributor_review_config(config)
@@ -1255,7 +1253,7 @@ def test_contributor_receipts_fail_closed_on_blob_provider_model_and_status_drif
             "effort": "high"}, {"slot_id": "s1", "route": {
             "kind": "agent_session", "target_id": "codex=gpt-5.6-sol"},
             "effort": "high"}],
-        "review_enforcement": "blocking", "context_mode": "max",
+        "context_mode": "max",
     }
     api_prompt = _persist_review_prompt(tmp_path, call_id="api_prompt_bad", slot={
         "slot_id": "t1", "model": "anthropic::claude-fable-5", "effort": "high",
@@ -1320,7 +1318,7 @@ def test_contributor_receipts_require_settlement_but_keep_advisory_delta(tmp_pat
     config = {
         "pool_slots": [{"slot_id": "t1", "route": {
             "kind": "agent_session", "target_id": "codex=gpt-5.6-sol"},
-            "effort": "high"}], "review_enforcement": "blocking", "context_mode": "max",
+            "effort": "high"}], "context_mode": "max",
     }
     prompt_ref = _persist_review_prompt(tmp_path, call_id="session_prompt_terminal", slot={
         "slot_id": "t1", "model": "codex=gpt-5.6-sol", "effort": "high",
@@ -1364,7 +1362,7 @@ def test_contributor_receipts_accept_present_usage_less_error_payload(tmp_path):
     config = {
         "pool_slots": [{"slot_id": "t1", "route": {
             "kind": "api_chat", "target_id": "openai/gpt-5.6-sol"},
-            "effort": "high"}], "review_enforcement": "blocking", "context_mode": "max",
+            "effort": "high"}], "context_mode": "max",
     }
     prompt_ref = _persist_review_prompt(tmp_path, call_id="error_prompt", slot={
         "slot_id": "t1", "model": "openai/gpt-5.6-sol", "effort": "high",
