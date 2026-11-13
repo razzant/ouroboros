@@ -2,11 +2,14 @@
 
 Split verbatim out of ``tests/test_context.py`` by theme. This module owns the typed
 drive-state section and its pointer, the review ledger that caps runs and attempts with
-omission notes, the continuations that retire after their age window, and the ones an
-earlier obligation mark keeps until a commit lands in their checkout.
+omission notes, the continuations that retire after their age window, and the ones kept
+while an earlier obligation they name is still open.
 """
 
 from __future__ import annotations
+
+import pytest
+
 from tests._store_shared import seed_result
 
 
@@ -179,9 +182,10 @@ def test_a_settled_continuation_stays_while_an_earlier_obligation_mark_awaits_a_
     snapshot = [{"obligation_id": "obl-0002", "fingerprint": "finding:tests_affected:abc", "status": "still_open"}]
 
     def _row(obligation_id, written, fingerprint=""):
-        return {"obligation_id": obligation_id, "item": "tests_affected", "severity": "critical", "status": "still_open",
-                "reason": "Coverage still missing", "repo_key": repo_key, "fingerprint": fingerprint or obligation_id,
-                "created_ts": written, "updated_ts": written, "source_attempt_ts": written}
+        return {"obligation_id": obligation_id, "item": "tests_affected", "severity": "critical",
+                "status": "still_open", "reason": "Coverage still missing", "repo_key": repo_key,
+                "fingerprint": fingerprint or obligation_id, "created_ts": written, "updated_ts": written,
+                "source_attempt_ts": written}
 
     (tmp_path / "state").mkdir(parents=True, exist_ok=True)
     (tmp_path / "state" / "advisory_review.json").write_text(_json.dumps({  # the retired layer's stored rows
@@ -280,9 +284,10 @@ def test_a_continuation_written_again_without_a_landing_keeps_the_stored_obligat
 
     for writer in ("exception", "gate"):
         task_id = f"marked-{writer}"
+        snapshot = [{"obligation_id": "obl-0007", "fingerprint": row["fingerprint"], "status": "still_open"}]
         save_review_continuation(tmp_path, ReviewContinuation(  # written before the update: a snapshot, no ids
             task_id=task_id, source="blocked_review", stage="blocking_review", repo_key=repo_key,
-            open_obligations=[{"obligation_id": "obl-0007", "fingerprint": row["fingerprint"], "status": "still_open"}]))
+            open_obligations=snapshot))
         if writer == "exception":
             update_state(tmp_path, lambda state, tid=task_id: state.record_attempt(CommitAttemptRecord(
                 ts="2026-01-02T00:00:00+00:00", commit_message="retry", status="failed", repo_key=repo_key,
@@ -302,3 +307,56 @@ def test_a_continuation_written_again_without_a_landing_keeps_the_stored_obligat
         ts="2026-01-03T00:00:00+00:00", finished_ts="2026-01-03T00:00:00+00:00", commit_message="landed",
         status="succeeded", repo_key=repo_key, task_id="other", attempt=1)))
     assert not held("marked-exception") and not held("marked-gate")
+
+
+@pytest.mark.parametrize(("stored", "landings", "open_ids"), [
+    ([("obl-r", "R", "still_open")], ["LEGACY"], ["obl-r"]),  # a landing recorded without a key is not one in R
+    ([("obl-r", "R", "still_open")], ["F"], ["obl-r"]),
+    ([("obl-r", "R", "still_open")], ["R"], []),
+    ([("obl-u", "", "still_open"), ("obl-q", "Q", "resolved")], ["Q"], ["obl-u"]),  # a closed row names Q too
+    ([("obl-u", "", "still_open")], ["F"], []),
+    ([("obl-u", "", "still_open"), ("obl-x", "R", "still_open")], ["R"], ["obl-u"]),  # R's own rows go first
+    ([("obl-u", "", "still_open"), ("obl-x", "R", "still_open")], ["R", "R"], []),  # then the keyless ones
+])
+def test_a_stored_obligation_clears_where_the_retired_layer_cleared_it_in_view_and_hold_alike(
+        tmp_path, stored, landings, open_ids):
+    """The commits that landed since the update clear the stored open obligations in order, the way the retired
+    layer's on_successful_commit did: the rows of the landing's checkout while one remains, then the rows stored
+    without a checkout key. Review Continuity shows a row, a continuation naming it is held, and R's own view
+    falls back to the keyless rows once R has none left, all by that one reading."""
+    import json as _json
+
+    from ouroboros.review_state import (
+        _LEGACY_CURRENT_REPO_KEY,
+        CommitAttemptRecord,
+        load_state,
+        make_repo_key,
+        update_state,
+    )
+    from ouroboros.task_continuation import ReviewContinuation, open_work_matcher
+
+    for name in ("R", "Q", "F"):
+        (tmp_path / name / ".git").mkdir(parents=True, exist_ok=True)
+    keys = {name: make_repo_key(tmp_path / name) for name in ("R", "Q", "F")}
+    keys.update({"": "", "LEGACY": _LEGACY_CURRENT_REPO_KEY})
+    stamp = "2026-01-01T00:00:00+00:00"
+    rows = [{"obligation_id": oid, "item": "tests_affected", "severity": "critical", "status": status,
+             "reason": "still owed", "repo_key": keys[key], "fingerprint": f"finding:{oid}",
+             "created_ts": stamp, "updated_ts": stamp} for oid, key, status in stored]
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "advisory_review.json").write_text(_json.dumps(
+        {"state_version": 3, "attempts": [], "open_obligations": rows, "next_obligation_seq": 9}), encoding="utf-8")
+    for number, landing in enumerate(landings, start=1):
+        update_state(tmp_path, lambda state, n=number, key=keys[landing]: state.record_attempt(CommitAttemptRecord(
+            ts=f"2026-01-0{n + 1}T00:00:00+00:00", finished_ts=f"2026-01-0{n + 1}T00:00:00+00:00",
+            commit_message="landed", status="succeeded", repo_key=key, task_id="other", attempt=n)))
+
+    state = load_state(tmp_path)
+    shown = [row["obligation_id"] for row in state.earlier_open_obligations(keys["R"])]  # R's own, else unkeyed
+    everywhere = [row["obligation_id"] for row in state.earlier_open_obligations(None)]
+    named = [{"obligation_id": stored[0][0]}]
+    held = open_work_matcher(state)(ReviewContinuation(
+        task_id="t", source="task_exception", stage="task_exception", open_obligations=named))
+    assert shown == everywhere == open_ids
+    assert held is bool(open_ids)
+
