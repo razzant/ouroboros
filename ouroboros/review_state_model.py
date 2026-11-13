@@ -130,6 +130,8 @@ class AdvisoryReviewState:
         it as that layer's ``get_open_obligations`` did: that checkout's rows when one remains, else the keyless."""
         stored = (getattr(self, "retired_review_rows", None) or {}).get("open_obligations")
         remaining = [row for row in (stored if isinstance(stored, list) else []) if isinstance(row, dict)]
+        if not remaining:  # an install that never had Blocking reads no landing at all
+            return []
         unkeyed = {"", _rs()._LEGACY_CURRENT_REPO_KEY}
         landings = []
         for item in self.attempts:
