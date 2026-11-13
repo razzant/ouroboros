@@ -38,6 +38,12 @@ installed script skill's verified payload copy, ``work_skill_payloads``).
 ``dedicated_containers`` belong to this domain alone. Panic stops them by the identity this server generation
 measured (``panic_request``), never by name, and never waits; its settlement reads whether each stopped
 (``panic_settle``); a container recreated after the measurement stays unconfirmed. Nothing restarts them.
+
+The same binding carries a named remote engine (``remote_engines``): a route that names one starts its native run
+there, records ``{"kind": "remote", "connection", "store", ...}`` before the POST, and every later operation reopens
+that connection (``bound_gateway``); the helpers below compare, group and reach owned, work and remote engines alike,
+and an answer of one never speaks for a run another holds. A managed deployment's domain owns every native run, so a
+remote route refuses there (``remote_engine_not_permitted``).
 """
 
 from __future__ import annotations
@@ -206,6 +212,17 @@ def is_work_ref(ref: Any) -> bool:
     return isinstance(ref, dict) and ref.get("kind") == WORK_ENGINE
 
 
+def is_remote_ref(ref: Any) -> bool:
+    from ouroboros.remote_engines import REMOTE_ENGINE
+
+    return isinstance(ref, dict) and ref.get("kind") == REMOTE_ENGINE and bool(ref.get("connection"))
+
+
+def is_bound_ref(ref: Any) -> bool:
+    """A record bound to an engine other than the owned one (a work engine or a named remote one)."""
+    return is_work_ref(ref) or is_remote_ref(ref)
+
+
 def recorded_ref(record: Any) -> dict:
     """The engine a custody row, invocation record or reference names; ``{}`` is the owned engine."""
     if isinstance(record, dict):
@@ -218,16 +235,25 @@ def recorded_ref(record: Any) -> dict:
 def same_engine(gateway: Any, record: Any) -> bool:
     """Whether ``gateway`` reaches the engine ``record`` is bound to, so its answer (404 included) speaks for it."""
     ref, held = recorded_ref(record), getattr(gateway, "engine_ref", None)
-    if not is_work_ref(ref):
-        return not is_work_ref(held)
-    return (is_work_ref(held) and held.get("descriptor") == ref.get("descriptor")
+    if not is_bound_ref(ref):
+        return not is_bound_ref(held)
+    return (engine_key(held) is not None and engine_key(held)[0] == engine_key(ref)[0]
             and (not ref.get("store") or held.get("store") == ref.get("store")))
 
 
 def engine_key(record: Any) -> Optional[Tuple[str, str]]:
-    """A work engine's identity as ``record`` names it (descriptor, store); ``None`` for the owned engine."""
+    """A bound engine's identity as ``record`` names it (a work engine's descriptor, or a remote engine's connection
+    WITH its recorded SSH address and engine home, and its store); ``None`` for the owned engine. A connection
+    re-pointed at another address or home is another engine even when it proves the same store."""
     ref = recorded_ref(record)
-    return (str(ref.get("descriptor") or ""), str(ref.get("store") or "")) if is_work_ref(ref) else None
+    if is_work_ref(ref):
+        return str(ref.get("descriptor") or ""), str(ref.get("store") or "")
+    if is_remote_ref(ref):
+        import json
+
+        place = json.dumps([str(ref["connection"]), str(ref.get("ssh_host") or ""), str(ref.get("engine_home") or "")])
+        return f"remote:{place}", str(ref.get("store") or "")
+    return None
 
 
 def engine_groups(*collections: Iterable[Any]) -> List[Tuple[dict, List[List[Any]]]]:
@@ -309,9 +335,26 @@ def work_gateway(ref: dict, *, timeout_sec: Optional[float] = None) -> Any:
     return gateway
 
 
-def native_gateway(**owned_kwargs: Any) -> Any:
-    """The engine a NEW native run and its route checks use: the domain's work engine, else the owned engine."""
+def bound_gateway(ref: dict, *, timeout_sec: Optional[float] = None) -> Any:
+    """The gateway of the bound engine ``ref`` names: the deployment's work engine or a named remote engine."""
+    if is_remote_ref(ref):
+        from ouroboros import remote_engines
+
+        return remote_engines.bound_gateway(ref, timeout_sec=timeout_sec)
+    return work_gateway(ref, timeout_sec=timeout_sec)
+
+
+def native_gateway(engine: str = "", **owned_kwargs: Any) -> Any:
+    """The engine a NEW native run and its route checks use: a route's named remote engine, else the domain's work
+    engine, else the owned engine."""
     domain = current()
+    if engine:
+        if domain is not None:
+            raise _unavailable("remote_engine_not_permitted", "This deployment's execution domain owns every native "
+                               f"run, so the remote engine {engine!r} a route names is not used; nothing was started.")
+        from ouroboros import remote_engines
+
+        return remote_engines.gateway(engine)
     if domain is None:
         from ouroboros import claudexor_daemon
 
@@ -324,13 +367,22 @@ def native_gateway(**owned_kwargs: Any) -> Any:
 
 def run_gateway(record: Any, default: Callable[[], Any], *, timeout_sec: Optional[float] = None) -> Any:
     """The gateway of the engine ``record`` is bound to: ``default()`` for the owned engine (the caller's own
-    discovery, unchanged), else the recorded work engine, its handshake bounded by ``timeout_sec``."""
+    discovery, unchanged), else the recorded work engine, its handshake bounded by ``timeout_sec``. Every path that
+    gives a task its remote run again passes here: a stop Emergency Stop owes that run is carried out and proven
+    first (``remote_stops.discharged``), or the run is refused."""
     ref = recorded_ref(record)
-    return work_gateway(ref, timeout_sec=timeout_sec) if is_work_ref(ref) else default()
+    if not is_bound_ref(ref):
+        return default()
+    gateway = bound_gateway(ref, timeout_sec=timeout_sec)
+    if is_remote_ref(ref):
+        from ouroboros.remote_stops import discharged
+
+        return discharged(record, gateway)
+    return gateway
 
 
 def engine_factory(ref: dict, default: Callable[[], Any]) -> Callable[[], Any]:
-    return (lambda: work_gateway(ref)) if is_work_ref(ref) else default
+    return (lambda: bound_gateway(ref)) if is_bound_ref(ref) else default
 
 
 class _Unreachable:
@@ -372,7 +424,7 @@ class EngineClients:
         client = self.held(record)
         if client is not None:
             return client
-        client = work_gateway(recorded_ref(record))
+        client = bound_gateway(recorded_ref(record))
         with self._lock:
             kept = self._clients.setdefault(engine_key(record), client)
         if kept is not client:
@@ -382,19 +434,22 @@ class EngineClients:
     def reach(self, record: Any) -> Any:
         """``record``'s own engine: ``owned()`` when unbound, else its work engine's client, or a stand-in raising the
         typed cause while that engine cannot be reached (what it holds waits for a later pass)."""
-        if not is_work_ref(recorded_ref(record)):
+        if not is_bound_ref(recorded_ref(record)):
             return self._owned() if self._owned is not None else None
         try:
             return self.get(record)
         except Exception as exc:
             return _Unreachable(exc)
 
-    def for_store(self, store_id: Any = "") -> Any:
+    def for_store(self, store_id: Any = "", *, engine_ref: Optional[dict] = None) -> Any:
         """The engine whose store answers for ``store_id``: the owned engine unless the domain's work engine serves
-        that store (a mismatch then keeps the caller waiting, as the store check of each owner decides)."""
+        that store (a mismatch then keeps the caller waiting, as the store check of each owner decides). An object
+        recorded on a named remote engine (``engine_ref``) is reached through that connection and store alone."""
+        if is_remote_ref(engine_ref):
+            return self.reach(engine_ref)
         owned = self._owned() if self._owned is not None else None
         if not store_id or str(getattr(owned, "store_identity", "") or "") == store_id or current() is None:
-            return owned
+            return owned  # a remote engine is reached only by its recorded connection, never found by a store
         work = self.reach({"kind": WORK_ENGINE})
         return work if str(getattr(work, "store_identity", "") or "") == store_id else owned
 
@@ -408,45 +463,59 @@ class EngineClients:
         return bool(gone)
 
 
-def start_engine(drive: Any, retry_token: str = "", continuation_token: str = "") -> Tuple[dict, Any]:
+def start_engine(drive: Any, retry_token: str = "", continuation_token: str = "", route: Any = None) -> Tuple[dict, Any]:
     """``(custody facts, gateway)`` of one delegate start: a retry replays the engine its pending invocation recorded,
-    a continuation its predecessor's, a fresh start ``native_gateway``. The facts ride the pending invocation before
-    the POST and the STARTED row (``{}`` for the owned engine, so those rows stay as they were)."""
+    a continuation its predecessor's, a fresh start ``native_gateway`` (the remote engine ``route`` names, if any).
+    The facts ride the pending invocation before the POST and the STARTED row (``{}`` for the owned engine, so those
+    rows stay as they were)."""
     if retry_token or continuation_token:
         try:
             if retry_token:
                 from ouroboros.delegate_invocation import invocation_record
 
-                ref = recorded_ref(invocation_record(drive, retry_token) or {})
+                record = ref = recorded_ref(invocation_record(drive, retry_token) or {})
             else:
                 from ouroboros.delegate_custody_current import runs as current_runs
 
-                ref = recorded_ref(current_runs(drive, "run_id=?", (continuation_token,)).get(continuation_token))
+                record = current_runs(drive, "run_id=?", (continuation_token,)).get(continuation_token)
+                ref = recorded_ref(record)
         except Exception as exc:  # the binding decides the engine: unread, nothing is sent anywhere
             raise _unavailable("engine_binding_unreadable", "The engine this start must reuse could not be read "
                                f"({type(exc).__name__}); nothing was started.") from exc
+        if retry_token and is_remote_ref(ref):  # an owed start is found again by the sweep, never re-sent
+            from ouroboros.remote_stops import refuse_owed_start
+
+            refuse_owed_start(drive, retry_token)
         from ouroboros import claudexor_daemon
 
-        gateway = run_gateway(ref, claudexor_daemon.ensure_owned_gateway)
+        gateway = run_gateway(record, claudexor_daemon.ensure_owned_gateway)  # a continued run's owed stop first
     else:
-        gateway = native_gateway()
+        engine = str(getattr(route, "engine", "") or "")
+        gateway = native_gateway(engine=engine) if engine else native_gateway()
+        if getattr(route, "workspace", "") and is_remote_ref(getattr(gateway, "engine_ref", None)):
+            gateway.engine_ref = {**gateway.engine_ref, "workspace": str(route.workspace)}  # ``remote_workspace``
     ref = getattr(gateway, "engine_ref", None)
-    return ({"engine_ref": dict(ref)} if is_work_ref(ref) else {}), gateway
+    if is_remote_ref(ref):
+        gateway.custody_root = drive  # where its POST handoff is recorded (``remote_engines``)
+    return ({"engine_ref": dict(ref)} if is_bound_ref(ref) else {}), gateway
 
 
-def seat_gateway(record: Any, root: str) -> Tuple[dict, Any]:
+def seat_gateway(record: Any, root: str, engine: str = "", custody_root: Any = None) -> Tuple[dict, Any]:
     """``(custody facts, gateway)`` of one review seat: a recovered invocation's recorded engine, else the native
-    engine, whose domain must see the seat's root at the same address."""
+    engine (the remote one a seat's route names stages the root on its host, recording its start phases in
+    ``custody_root``), whose domain must see the seat's root at the same address."""
     if record:
         from ouroboros import claudexor_daemon
 
         gateway = run_gateway(record, claudexor_daemon.ensure_owned_gateway)
     else:
-        if refusal := request_paths_refusal({"scope": {"root": root}}):
+        if not engine and (refusal := request_paths_refusal({"scope": {"root": root}})):
             raise _unavailable("work_path_unmapped", refusal)
-        gateway = native_gateway()
+        gateway = native_gateway(engine=engine) if engine else native_gateway()
     ref = getattr(gateway, "engine_ref", None)
-    return ({"engine_ref": dict(ref)} if is_work_ref(ref) else {}), gateway
+    if is_remote_ref(ref) and custody_root is not None:
+        gateway.custody_root = custody_root  # where its start phases are recorded (``remote_engines``)
+    return ({"engine_ref": dict(ref)} if is_bound_ref(ref) else {}), gateway
 
 
 # --- attached launches: stdio MCP servers, skill scripts, dependency builds -----------------------------

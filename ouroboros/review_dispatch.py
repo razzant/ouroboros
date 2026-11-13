@@ -239,7 +239,8 @@ def review_reconciliation_identity(request: Any, slots: list, *, root_task_id: s
         roster.append({k: v for k, v in values.items()
                        if k not in {"timeout_sec", "transport_timeout_sec"}
                        and (k != "processing_preference" or v is not None)
-                       and (k != "session_access" or str(v or "readonly") != "readonly")})
+                       and (k != "session_access" or str(v or "readonly") != "readonly")
+                       and (k != "engine" or v)})  # a seat on the owned engine keeps its recorded identity
     retry_key = getattr(request, "retry_key", None)
     return {
         "subject_hash": digest(retry_key or {

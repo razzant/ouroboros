@@ -731,6 +731,7 @@ def _attempt_key(request: Any, slot: Any) -> str:
         slot_data["processing_preference"] = slot.processing_preference
     if str(getattr(slot, "session_access", "") or "readonly") != "readonly":
         slot_data["session_access"] = slot.session_access  # writable rights are identity
+    slot_data.update({"engine": slot.engine} if getattr(slot, "engine", "") else {})  # where a seat runs; owned: old key
     identity = {
         "retry_key": retry_key,
         "surface": getattr(request, "surface", ""),

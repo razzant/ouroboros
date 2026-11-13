@@ -115,6 +115,11 @@ _ADDED_OWNERS = {
     "CLAUDEXOR_STOP_EXIT_WAIT_SEC": runtime_limits,
     # Thread-export and retirement responses may re-hash all named bytes before answering.
     "CLAUDEXOR_WHOLE_BYTES_READ_SEC": runtime_limits,
+    # A remote engine's SSH transport bounds (``remote_engines``): one short command, the forward's readiness,
+    # one whole staged copy or result.
+    "REMOTE_ENGINE_SSH_COMMAND_SEC": runtime_limits,
+    "REMOTE_ENGINE_FORWARD_READY_SEC": runtime_limits,
+    "REMOTE_ENGINE_TRANSFER_SEC": runtime_limits,
     # The native platform build envelope is owned by the common runtime-limits leaf.
     "EXTERNAL_PLATFORM_UPDATE_TIMEOUT_SEC": runtime_limits,
     # Consciousness settings scaffolding: the alarm's SSOT default interval, the closed

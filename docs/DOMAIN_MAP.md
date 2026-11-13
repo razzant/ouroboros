@@ -14,11 +14,11 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 55 | 0 |
 | D06 | Review stack | 101 | 0 |
-| D07 | Delegation, subagents & Claudexor | 113 | 0 |
+| D07 | Delegation, subagents & Claudexor | 116 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 79 | 0 |
 | D09 | Cancellation, owner control & process custody | 28 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
-| D11 | Gateway, server & Web UI | 119 | 0 |
+| D11 | Gateway, server & Web UI | 120 | 0 |
 | D12 | Settings & configuration | 28 | 0 |
 | D13 | Safety, guards & runtime mode | 12 | 0 |
 | D14 | Skills & extensions | 73 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 42 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 26 | 0 |
-| **total** | | **1041** | **0** |
+| **total** | | **1045** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -65,12 +65,13 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 
 ## Hidden coupling (classified out of the strict graph)
 
-- lazy-only cross-domain pairs: **129**
+- lazy-only cross-domain pairs: **130**
   - D01->D08
   - D01->D10
   - D01->D11
   - D02->D05
   - D02->D11
+  - D02->D17
   - D03->D05
   - D03->D06
   - D03->D07
@@ -636,6 +637,9 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/owner_keep.py`
 - `ouroboros/owner_stop_receipt.py`
 - `ouroboros/private_copy_read.py`
+- `ouroboros/remote_engines.py`
+- `ouroboros/remote_stops.py`
+- `ouroboros/remote_workspace.py`
 - `ouroboros/review_thread_retention.py`
 - `ouroboros/subagent_bootstrap.py`
 - `ouroboros/subagent_dispatch_notes.py`
@@ -856,6 +860,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateway/decision_contracts.py`
 - `ouroboros/gateway/desktop_autostart.py`
 - `ouroboros/gateway/endpoint_index.py`
+- `ouroboros/gateway/engine_connections.py`
 - `ouroboros/gateway/extension_receipts.py`
 - `ouroboros/gateway/extensions.py`
 - `ouroboros/gateway/files.py`

@@ -92,6 +92,11 @@ def pending_invocations(
             }
         elif kind == c.STARTED:
             state[invocation_id] = "started"
+        elif kind in (c.CONTAINMENT_FAULT, c.CONTAINMENT_RESOLVED) and not row.get("run_id") and invocation_id in found:
+            # A start without a run id carries its incident on the invocation (``remote_stops``).
+            _invocation_fault(found[invocation_id], row)
+        elif kind == c.REMOTE_START_PHASE and invocation_id in found:
+            _advance_phase(found[invocation_id], row)  # how far its remote start got (``remote_engines``)
         elif (
             kind == c.START_FAILED
             and row.get("definite") is True
@@ -114,6 +119,28 @@ def pending_invocations(
     return pending
 
 
+_PHASES = ("staging", "posting")
+
+
+def _advance_phase(record: Dict[str, Any], row: Dict[str, Any]) -> None:
+    """A remote start's phase only moves forward: once ``posting``, never back to ``staging``."""
+    phase = str(row.get("phase") or "")
+    if phase in _PHASES and _PHASES.index(phase) >= _PHASES.index(record.get("remote_start_phase") or "staging"):
+        record["remote_start_phase"] = phase
+
+
+def _invocation_fault(record: Dict[str, Any], row: Dict[str, Any]) -> None:
+    """Apply one invocation-keyed incident row to ``record`` as the run reducer does to a run's row."""
+    from ouroboros import delegate_custody as c
+
+    if row.get("type") == c.CONTAINMENT_FAULT:
+        from ouroboros.remote_stops import incident_after
+
+        record["containment_fault"] = incident_after(record.get("containment_fault") or {}, row)
+    elif not row.get("expected_reason") or row["expected_reason"] == (record.get("containment_fault") or {}).get("reason"):
+        record.pop("containment_fault", None)
+
+
 def current_rows(root, rows):
     """Typed open facts only. Legacy gaps keep their identity until the child backfills them."""
     pending = []
@@ -123,6 +150,10 @@ def current_rows(root, rows):
         source = facts["request"]
         for record in projected:
             record.update(store_facts(source))  # a cached projection may predate a store fact its row holds
+            if isinstance(facts.get("containment_fault"), dict):  # the open row's own incident (``remote_stops``)
+                record["containment_fault"] = copy.deepcopy(facts["containment_fault"])
+            if facts.get("remote_start_phase"):  # how far its remote start got (``remote_engines``)
+                record["remote_start_phase"] = str(facts["remote_start_phase"])
         if source.get("request_ref") is not None and not (isinstance(source.get("request"), dict) and source["request"]):
             for record in projected:
                 # Older projections cached a body without its ref. The source row

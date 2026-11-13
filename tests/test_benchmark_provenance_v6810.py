@@ -194,6 +194,12 @@ _TRUNCATION_DECISIONS: dict[str, tuple[bool, str]] = {
         False,
         "llm_claudexor.py check_control sends a model-operation cancel request; the POST proves neither operation terminality nor the root task's outcome",
     ),
+    "owner_panic": (
+        False,
+        "remote_stops.py Emergency Stop's best-effort cancel of a remote engine's model operation carries it as that "
+        "engine control's reasonCode; the POST proves neither operation terminality nor any task's outcome, and no "
+        "task terminal or trial records it",
+    ),
     "model_wait_decision_failed": (
         False,
         "gateway/task_model_wait.py owner-action ingress refusal (503); it does not terminalize the waiting task",

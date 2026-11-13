@@ -14,6 +14,8 @@ Rejoin keeps the copy; remaking uses its frozen tree, original root and retained
 At terminal, ``capture_seat_evidence`` retains whole Git deltas (through a host-owned control
 directory over the objects recorded at creation) or changed skill entries, comparing same-stat
 bytes, plus whole ``.review-evidence/``; workspace folders have no delta. Nothing is applied.
+A seat that ran on a remote engine's staged copy first brings that host copy's result and evidence
+into its own copy (``remote_workspace.mirror_seat_result``); the host copy waits for this receipt.
 Receipts precede one-shot deletion regardless of process census (owner 2026-10-12).
 Named gaps release; unreadable/unlistable paths keep copies for recovery.
 Threads keep their active copy; a failed predecessor moves under its operation for retry.
@@ -306,18 +308,20 @@ def seat_dir(data_root: Any, task_id: str, operation_id: str) -> pathlib.Path:
     return pathlib.Path(data_root) / "state" / "review_checkouts" / "seats" / key
 
 
-def prepare_seat_area(data_root: Any, task_id: str, operation_id: str, source: Mapping[str, Any]) -> str:
+def prepare_seat_area(data_root: Any, task_id: str, operation_id: str, source: Mapping[str, Any], *,
+                      remote: bool = False) -> str:
     """The seat's checking copy: reused as the reviewer left it, else materialized. A copy
     made again under an operation that already holds a receipt starts a new capture
     generation, so that receipt never stands for the new copy's work; a copy kept for its
-    failed capture is reused, and its next capture is a new generation too."""
+    failed capture is reused, and its next capture is a new generation too. ``remote``: the
+    seat runs on a remote engine's staged copy of it, whose work its capture brings home."""
     home = seat_dir(data_root, task_id, operation_id)
     with _seat_locked(home):
-        return _prepare_locked(data_root, task_id, operation_id, source, home)
+        return _prepare_locked(data_root, task_id, operation_id, source, home, remote)
 
 
 def _prepare_locked(data_root: Any, task_id: str, operation_id: str, source: Mapping[str, Any],
-                    home: pathlib.Path) -> str:
+                    home: pathlib.Path, remote: bool = False) -> str:
     area, marker = unindexed(home, "area"), home / "checking.json"
     if area.is_symlink():
         raise CheckingAreaUnavailable("checking area was replaced by a symlink; copy retained")
@@ -339,7 +343,8 @@ def _prepare_locked(data_root: Any, task_id: str, operation_id: str, source: Map
     # The new copy's own generation is durable before the copy exists.
     capture_id = uuid.uuid4().hex if receipt else str(recorded.get("capture_id") or "")
     fresh = {"schema": 1, "created_at": utc_now_iso(), "task_id": task_id, "operation_id": operation_id,
-             "source": dict(source), "area": str(area), **({"capture_id": capture_id} if capture_id else {})}
+             "source": dict(source), "area": str(area), **({"capture_id": capture_id} if capture_id else {}),
+             **({"remote": True} if remote else {})}
     home.mkdir(parents=True, exist_ok=True)
     atomic_write_json(marker, {**fresh, "materializing": True})
     try:
@@ -434,9 +439,18 @@ def bound_directory_source(folder: Any, *, data_root: Any, expected_hash: str, c
     return {"kind": "directory", "root": str(folder), "view": str(view), "content_hash": str(expected_hash)}
 
 
-def checking_instructions(area: str, source: Mapping[str, Any], root: str = "", scratch: str = "") -> str:
-    """What a writable reviewer seat is told about its copy, the pristine subject and its granted ``scratch``."""
-    if source.get("kind") == "git_tree":
+def checking_instructions(area: str, source: Mapping[str, Any], root: str = "", scratch: str = "", *,
+                          remote: bool = False) -> str:
+    """What a writable reviewer seat is told about its copy, the pristine subject and its granted ``scratch``;
+    ``remote``: a staged copy on a remote engine's host, a fresh repository of one commit (``remote_workspace``)."""
+    if source.get("kind") == "git_tree" and remote:
+        pristine = (f"The frozen subject is tree {source.get('tree')} over parent {source.get('parent') or '(none)'}. "
+                    "On the engine's host your copy is a fresh Git repository whose one commit is this copy as the run "
+                    "started (the subject's files as frozen, plus an earlier turn's changes): Git there shows only your "
+                    f"own changes, and that tree, that parent and the original root {source.get('root')} are not on "
+                    "that host. Read the subject's change where your brief gives it: inline, or the `.review-drive/` "
+                    "view it names in this copy. HEAD and the index are yours.")
+    elif source.get("kind") == "git_tree":
         pristine = (f"The frozen subject is tree {source.get('tree')} over parent "
                     f"{source.get('parent') or '(none: an empty root commit)'}: your copy starts with HEAD at that "
                     "parent and the subject in its index and worktree, so `git diff --cached` is the subject until "
@@ -703,12 +717,16 @@ def _capture_locked(data_root: Any, task_id: str, operation_id: str, *, hold: bo
         evidence.mkdir(parents=True, exist_ok=True)
         kind = str(source.get("kind"))
         try:  # a workspace seat's folder started empty: what it publishes is its output
+            from ouroboros.remote_workspace import mirror_seat_result  # a remote seat's host work comes home first
+            returned = mirror_seat_result(data_root, task_id, area, evidence / "remote") if physical.get("remote") else {}
             if kind == "git_tree":
                 delta = _git_delta(area, source, evidence, gaps, marker.get("git"))
             elif kind == "directory":
                 delta = _directory_delta(area, source, evidence, gaps)
             elif kind != "workspace":
                 raise CheckingAreaUnavailable("the original checking source is unknown; copy retained")
+            for key, value in returned.items():  # what came home; the host copy's ignored outputs join the local names
+                delta[key] = sorted({*delta.get(key, ()), *value}) if key == "ignored_not_retained" else value
         except Exception as exc:
             errors.append(f"{type(exc).__name__}: {exc}")
         # Named outputs still matter when the repository delta cannot be read.
@@ -780,15 +798,16 @@ CHECKING_REVIEWER_INSTRUCTIONS = (
 def checking_material() -> list:
     """Review-contract material (``commit_gate.commit_review_contract_fingerprint``): a writable seat's checking
     instructions over placeholder copies of every source kind (a frozen tree with and without a parent, a live
-    folder, a retained view), beside a reference root of their own or none. The scratch wording every delegated run
-    shares is not review text; folders, trees and roots are data."""
+    folder, a retained view), beside a reference root of their own or none, a frozen tree also as staged on a remote
+    engine's host. The scratch wording every delegated run shares is not review text; folders, trees and roots are data."""
     tree = {"kind": "git_tree", "tree": "⟨tree⟩", "parent": "⟨parent⟩", "root": "⟨root⟩"}
     shared = scratch_fact(granted="⟨scratch⟩")
     return list(dict.fromkeys(
-        (CHECKING_REVIEWER_INSTRUCTIONS + checking_instructions("⟨area⟩", source, reference, "⟨scratch⟩")).replace(
-            shared, "⟨scratch fact⟩") for source in (tree, {**tree, "parent": ""}, {"kind": "workspace", "root": "⟨root⟩"},
-                                                    {"kind": "directory", "view": "⟨view⟩", "root": "⟨root⟩"})
-        for reference in ("⟨reference⟩", "")))
+        (CHECKING_REVIEWER_INSTRUCTIONS + checking_instructions("⟨area⟩", source, reference, "⟨scratch⟩", remote=remote)
+         ).replace(shared, "⟨scratch fact⟩")
+        for source in (tree, {**tree, "parent": ""}, {"kind": "workspace", "root": "⟨root⟩"},
+                       {"kind": "directory", "view": "⟨view⟩", "root": "⟨root⟩"})
+        for reference in ("⟨reference⟩", "") for remote in (False, True)))
 
 
 def thread_seat_area(data_root: Any, task_id: str, seat: str, source: Mapping[str, Any], *,
@@ -907,7 +926,7 @@ def session_checking(gateway: Any, *, custody_drive: Any, task_id: str, operatio
             "this reviewer seat holds configured write access but its wave froze no checking source"
             + (f" ({source['unavailable']})" if source else "") + "; nothing was started",
             code="review_checking_source_missing")
-    thread_binding = {}
+    thread_binding, remote = {}, bool(getattr(gateway, "stages_workspace", False))  # a remote engine's staged copy
     if thread_seat:
         from ouroboros.review_thread_continuity import require_delegated_review_threads
 
@@ -934,7 +953,7 @@ def session_checking(gateway: Any, *, custody_drive: Any, task_id: str, operatio
                 "the serving engine cannot bind a private execution root, so a reviewer with write access "
                 "cannot be kept out of the reviewed root; nothing was started", code="review_checking_root_unsupported")
         try:
-            area = prepare_seat_area(custody_drive, task_id, operation_id, source)
+            area = prepare_seat_area(custody_drive, task_id, operation_id, source, remote=remote)
         except (CheckingAreaUnavailable, OSError) as exc:
             raise ReviewRouteUnavailable(f"private checking copy unavailable: {exc}",
                                          code="review_checking_copy_unavailable") from exc
@@ -947,7 +966,8 @@ def session_checking(gateway: Any, *, custody_drive: Any, task_id: str, operatio
                  **({"workspaceKind": "directory"} if source.get("kind") != "git_tree" else {}),
                  **({"auxiliaryWritableRoots": list(service.roots)} if service.roots else {})}
     return {**thread_binding, "execution": execution,
-            "instructions": (CHECKING_REVIEWER_INSTRUCTIONS + checking_instructions(area, source, str(root), service.scratch)
+            "instructions": (CHECKING_REVIEWER_INSTRUCTIONS + checking_instructions(area, source, str(root), service.scratch,
+                                                                                    remote=remote)
                              + seat_environment_facts(area, source, custody_drive, service)),
             "custody": {"authority_source": INVESTIGATION_AUTHORITY, "execution_root": area,
                         "target_root": str(root)}}

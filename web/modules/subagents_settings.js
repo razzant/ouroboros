@@ -15,6 +15,7 @@ import {
     routeModelInputHtml, routeTargetFromModel, routeSupportsAccount, effortSelectHtml,
     encodeRouteChoice, indexProfilesByHarness, mintStableId, profileOptionsFor,
     routeChoiceGroups, sameEngineAs, selectHtml, serializeRouteSpec, sessionModelOptions, subagentHandle, updateRouteControlOptions,
+    remoteCatalogItems, remoteProfileOptions, remoteWorkspaceOptions,
     PROCESSING_CHOICES, PROCESSING_PREFERENCE_KEY, processingDetailsHtml, processingIntentLabel, accountScopedModelCatalog,
     tierPriced } from './route_editor_primitives.js';
 import { catalogPrograms } from './model_program.js';
@@ -27,6 +28,7 @@ import {
 import { bindRecheckMarks, recheckMarkHtml, syncRecheckState } from './safety_recheck.js';
 import { CODECS, CONFIRMS, bindSettingRows, doorSign, outcomeLine, setButtonBusy, settingsRow, writeEntry } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
+import { readRemoteEngines } from './settings_engine_connections.js';
 import { rowById, rowsOf } from './settings_rows.js';
 import { revealNewRow } from './ui_helpers.js';
 import { setResult } from './ui_primitives.js';
@@ -45,7 +47,7 @@ const ROW_KEYS = new Set([
     'subagent_id', 'name', 'recommended_use', 'route', 'effort', 'processing_preference', 'access', 'enabled',
     'review_eligible', 'delivery', 'minted_from', 'rechecks_flags',
 ]);
-const ROUTE_KEYS = new Set(['kind', 'target_id', 'credential_profile_id']);
+const ROUTE_KEYS = new Set(['kind', 'target_id', 'credential_profile_id', 'engine', 'workspace']);  // engine: a remote one
 
 function ownUnknownKeys(value, allowed) {
     return Object.keys(value || {}).filter((key) => !allowed.has(key));
@@ -550,27 +552,38 @@ function subagentFormParts(row, state, index) {
     const routeGroups = routeChoiceGroups({
         harnesses: state.catalogKnown ? (state.snapshot?.harnesses || []) : [],
         modelSources: state.modelSources, providers: state.providers, connections: state.connections,
-        providerProfiles: state.providerProfiles, currentChoice: encodeRouteChoice(row),
+        providerProfiles: state.providerProfiles, currentChoice: encodeRouteChoice(row), remoteEngines: state.remoteEngines,
         catalogKnown: state.catalogKnown, accountsKnown: state.accountsKnown,
     });
+    // A remote engine's row offers what that engine reported (a session: the models of its sources for that harness)
+    // and that engine's own accounts, never this computer's accounts, programs or catalog.
+    const engine = row.route.engine || split.engine;  // a session's engine, or a remote model row's
+    const remoteEntry = engine ? (state.remoteEngines || []).find((entry) => entry?.name === engine) : null;
+    const remote = row.route.engine ? (remoteEntry?.sources || []).filter((source) => (source?.credentialHarness || source?.id) === split.harness)
+        .flatMap((source) => remoteCatalogItems([remoteEntry], { source: source.id })) : null;
     // Only a confirmed Accounts read narrows the catalog's carriers; the catalog read still labels the model.
-    const modelOptions = sessionModelOptions(accountScopedModelCatalog(harnesses[split.harness], row.route.credential_profile_id), split.model,
-        { catalogKnown: state.catalogKnown, snapshot: state.accountsKnown ? state.snapshot : null, pin: row.route.credential_profile_id });
-    const profileOptions = profileOptionsFor((indexProfilesByHarness(state.snapshot)[split.harness]) || [], row.route.credential_profile_id || '',
-        { accountsKnown: state.accountsKnown && Boolean(split.harness), labelled: true });
+    const modelOptions = sessionModelOptions(remote ? { models: remote.map(({ id, label }) => ({ id, label })) }
+        : accountScopedModelCatalog(harnesses[split.harness], row.route.credential_profile_id), split.model,
+        { catalogKnown: remote ? remote.length > 0 : state.catalogKnown, snapshot: !remote && state.accountsKnown ? state.snapshot : null, pin: row.route.credential_profile_id });
+    const harness = row.route.engine ? split.harness : (remoteEntry?.sources || []).find((entry) => entry.id === split.source)?.credentialHarness || '';
+    const profileOptions = engine ? remoteProfileOptions(state.remoteEngines, engine, harness, row.route.credential_profile_id || '')
+        : profileOptionsFor((indexProfilesByHarness(state.snapshot)[split.harness]) || [], row.route.credential_profile_id || '',
+            { accountsKnown: state.accountsKnown && Boolean(split.harness), labelled: true });
     const meta = rowMeta(row, state, rowErrors(row, index, new Set()));
     const field = (label, control) => `<label class="ui-field available-subagent-field">${label} ${control}</label>`;
     return {
         route: `<div class="available-subagent-route">
                 ${field('Source', selectHtml(`data-subagent-field="route" aria-label="Source for Subagent ${ordinal}"`, routeGroups, encodeRouteChoice(row)))}
                 <div class="ui-field available-subagent-field available-subagent-field-model">Model ${session
-                    ? modelChooserHtml(`data-subagent-field="model" aria-label="Agent session model for Subagent ${ordinal}"`, split.model, `actor-${rowKey}-models`, modelOptions, { placeholder: 'Engine default model', programs: catalogPrograms(harnesses[split.harness], {harness: split.harness, profile: row.route.credential_profile_id}) })
-                    : routeModelInputHtml(`data-subagent-field="model" aria-label="${split.subscription ? 'Subscription' : 'API'} model for Subagent ${ordinal}"`, row.route, tierPriced(row.processing_preference || state.processingPreference)
-                        ? state.apiModels.map((item) => ({ ...item, price: null })) : state.apiModels, `actor-${rowKey}-models`, {programs: split.subscription ? catalogPrograms(state.modelCatalog, {source: split.source, profile: row.route.credential_profile_id, sources: state.modelSources}) : []})}</div>
+                    ? modelChooserHtml(`data-subagent-field="model" aria-label="Agent session model for Subagent ${ordinal}"`, split.model, `actor-${rowKey}-models`, modelOptions, { placeholder: 'Engine default model', programs: remote ? [] : catalogPrograms(harnesses[split.harness], {harness: split.harness, profile: row.route.credential_profile_id}) })
+                    : routeModelInputHtml(`data-subagent-field="model" aria-label="${split.subscription ? 'Subscription' : 'API'} model for Subagent ${ordinal}"`, row.route, split.remote ? remoteCatalogItems(state.remoteEngines, { engine })
+                        : tierPriced(row.processing_preference || state.processingPreference) ? state.apiModels.map((item) => ({ ...item, price: null })) : state.apiModels, `actor-${rowKey}-models`, {programs: split.subscription && !split.remote ? catalogPrograms(state.modelCatalog, {source: split.source, profile: row.route.credential_profile_id, sources: state.modelSources}) : []})}</div>
                 ${routeSupportsAccount(row.route)
                     ? field('Account', selectHtml(`data-subagent-field="account" aria-label="Account for Subagent ${ordinal}"`, [{ label: '', options: profileOptions }], row.route.credential_profile_id || ''))
                     : ''}
                 ${field('Reasoning effort', `<span class="available-subagent-effort-facet" data-subagent-effort-facet data-named="${escapeHtml(namedRowEffort(row))}">${effortFacetHtml(row, ordinal)}</span>`)}
+                ${session && row.route.engine ? field('Works in', selectHtml(`data-subagent-field="workspace" aria-label="Where Subagent ${ordinal} works"`, [{ label: '', options: remoteWorkspaceOptions(state.remoteEngines, row.route.engine, row.route.workspace || '') }], row.route.workspace || '')
+                    + '<span class="ui-field-help" data-subagent-remote-note>Its tools and files are on that host. An Emergency Stop here may leave it working until this computer reconnects.</span>') : ''}
                 ${session ? field('Access', selectHtml(`id="actor-${escapeHtml(rowKey)}-access" data-subagent-field="access" aria-label="Access for Subagent ${ordinal}"`, [{ label: '', options: ACCESS_CHOICES }], row.access || 'full')) : ''}
                 ${reviewDeliveryHtml(row, state, index)}
             </div>`,
@@ -639,6 +652,7 @@ export function availableSubagentsRenderSignature(state, nowMs = Date.now()) {
         (state.setting?.items || []).map((row) => row?.route?.kind === ROUTE_KIND_AGENT_SESSION
             ? sessionRouteVerdict(row, state, nowMs).text : ''),
         state.apiModels, state.modelSources, state.modelCatalog, state.modelCatalogNote, state.processingPreference,
+        state.remoteEngines,
         state.providers, state.connections, state.providerProfiles, state.reviewPool, state.allowEmptyReviewPool,
         state.filter, state.tickCaption, state.unsavedId,
         currentLanguage(),  // the suggestions' prices are composed words: another language is another paint
@@ -685,6 +699,8 @@ export function createAvailableSubagentsEditor({
         dirty: false, saveAttempted: false, baseline: baseline === 'generated' ? 'generated' : 'saved', automatic: false,
         statusError: '', catalogKnown: false, accountsKnown: false, quotaKnown: false, snapshot: null,
         apiModels: [], modelSources: [], modelCatalogNote: '', processingPreference: '',
+        // The saved remote engines and what a connected one serves (settings_engine_connections.readRemoteEngines).
+        remoteEngines: [],
         // Sources with a stored key, and every connection for a saved one's label (setSourceContext).
         providers: [], connections: [], providerProfiles: {},
         signature: '', statusDisposer: null, catalogDisposer: null, previewSignature: '', previewGeneration: 0,
@@ -972,13 +988,16 @@ export function createAvailableSubagentsEditor({
                 markDirty({ structural });
                 if (structural) paint(); else renderValidation(); // keeps the disclosed id current, caret intact
             });
-            rowElement.querySelector('[data-subagent-field="account"]')?.addEventListener('change', (event) => {
-                const pin = String(event.target.value || '');
-                if (pin) row.route.credential_profile_id = pin;
-                else delete row.route.credential_profile_id;
-                markDirty({ structural: true });
-                paint();
-            });
+            // The account pin, and a remote session's folder (a staged copy when empty): stored only when chosen.
+            for (const [field, key] of [['account', 'credential_profile_id'], ['workspace', 'workspace']]) {
+                rowElement.querySelector(`[data-subagent-field="${field}"]`)?.addEventListener('change', (event) => {
+                    const value = String(event.target.value || '');
+                    if (value) row.route[key] = value;
+                    else delete row.route[key];
+                    markDirty({ structural: true });
+                    paint();
+                });
+            }
             // Processing, Access and Delivery: a plain choice, stored unless it is the default (inherit; Reads the work itself).
             for (const field of ['processing_preference', 'access', 'delivery']) {
                 rowElement.querySelector(`[data-subagent-field="${field}"]`)?.addEventListener('change', (event) => {
@@ -1357,6 +1376,14 @@ export function createAvailableSubagentsEditor({
                 source: String(meta.source || 'configured'), diagnostics: meta.diagnostics || meta.diagnostic || [], automatic: meta.automatic === true });
         },
         setPreviewFailure, adoptCatalog,
+        /** What the saved remote engines serve (settings_engine_connections.readRemoteEngines): a remote row's
+         *  sources, models, accounts and folders. Nothing is claimed about one before this is adopted. */
+        adoptRemoteEngines(list = []) {
+            if (state.destroyed) return;
+            state.remoteEngines = Array.isArray(list) ? list : [];
+            state.signature = '';
+            paint({ discoveryOnly: true });
+        },
         validate: validationErrors,
         noteSaveAttempt,
         /** Adopt GET /api/review-pool for the catalog loaded last. */
@@ -1443,6 +1470,7 @@ function mountAgents(container, { path, ctx }) {
         try { settings = await ctx.readSettings(); } catch { if (!editor.loaded) editor.load(undefined); return; }
         syncRecheckState(recheckFromSettings(settings), container);
         editor.adopt(settings);
+        readEngines(settings);
         // The fold's rows are drawn once their values are read: a row the page was opened for takes the focus filled.
         if (foldRows && !fold) foldRows.innerHTML = rowsOf('agents', { fold: true }).map((row) => settingsRow(row)).join('');
         fold = fold || (foldRows ? bindSettingRows(foldRows) : null);
@@ -1450,6 +1478,12 @@ function mountAgents(container, { path, ctx }) {
         if (delegation) Object.assign(delegation, { checked: editor.setting.enabled, disabled: !editor.loaded }).setAttribute('aria-checked', String(editor.setting.enabled));
         void readReviewPool().then((payload) => editor.setReviewPool(payload));
         void editor.reloadStatus().then(() => accountCatalog?.arm());
+    };
+    // What the saved remote engines serve, read by this page itself (not through Accounts); the newest answer counts.
+    let engineReads = 0;
+    const readEngines = (settings) => {
+        const mine = ++engineReads;
+        void readRemoteEngines({ settings }).then((list) => { if (mine === engineReads) editor.adoptRemoteEngines(list); });
     };
     // One read at a time: opening a page and the shell's "shown" for it are one read.
     const reload = () => (reading ||= read().finally(() => { reading = null; }));

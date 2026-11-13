@@ -519,8 +519,18 @@ def session_service_directories(ctx: Any, gateway: Any, route: Any, authority: A
 
 def in_place_scratch(ctx: Any, gateway: Any, route: Any, authority: Any, invocation_id: str, target_root: str) -> Any:
     """One in-place run's scratch preparation, deferred: ``delegate_directory.in_place_start`` calls it
-    only after accepting the start (``session_service_directories`` with ``in_place``)."""
+    only after accepting the start (``session_service_directories`` with ``in_place``). A remote engine cannot
+    edit this computer's folder: it would edit a copy on its host that no in-place capture brings back, so that
+    start is refused here, before anything is recorded or sent."""
     from functools import partial
+
+    if getattr(gateway, "stages_workspace", False):
+        from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+        raise ClaudexorUnavailable("remote_in_place_unsupported", "workspace='in_place' edits your folder directly, "
+                                   "which a remote engine cannot reach. Omit workspace to work in a private copy (its "
+                                   "result comes back for apply or reject), or use one of the engine's declared remote "
+                                   "workspaces. Nothing was started.")
 
     return partial(session_service_directories, ctx, gateway, route, authority, snapshot=None, payload=False,
                    execution_root=target_root, in_place=invocation_id)
@@ -638,6 +648,35 @@ def session_host_references(ctx: Any, *, target_root: str, source_root: str,
         return text + session_environment_facts(root, data_root=canonical_data_root(ctx), body=body, write_root=start,
                                                 **({"service": service} if service is not None else {})) + tail
     return text + tail
+
+
+def session_host_sources(ctx: Any, gateway: Any, inputs: Any, *, target_root: str, source_root: str,
+                         payload_skill: str = "") -> dict:
+    """For an engine that cannot read this computer (``gateway.stages_workspace``; ``{}`` for any other, so a local
+    start's request stays as it was), the typed manifest of host files a start's text names for its work, beside
+    that text: host-only (``remote_workspace`` sends each, and every engine POST drops the key):
+    ``input`` rows are this run's prepared inputs (``ReadonlyInputs.sources``, host-minted copies), ``reference``
+    rows the governance files ``session_host_references`` names (the own body's DESIGN and BIBLE, installed
+    instruction skills, a payload builder's skill contract). The same owners select both; no text is parsed."""
+    from pathlib import Path
+
+    from ouroboros.skill_catalogue import session_skill_reference_dirs
+
+    if not getattr(gateway, "stages_workspace", False):
+        return {}
+    rows = [{"path": str(path), "kind": "input"} for path in getattr(inputs, "sources", ()) or ()]
+    source, _prepared = _own_body_source(ctx, target_root, source_root)
+    references = [str(source / name) for name in ("docs/DESIGN.md", "BIBLE.md")] if source is not None else []
+    references += session_skill_reference_dirs(ctx)
+    if payload_skill:
+        from ouroboros.body_candidate import serving_repo_dir_for
+        from ouroboros.tools.governance_context import (CREATING_SKILLS_PATH, SKILL_PLUGIN_API_PATH,
+                                                        SKILL_UI_VALIDATION_PATH)
+
+        serving = Path(serving_repo_dir_for(ctx))
+        references += [str(serving / rel) for rel in (CREATING_SKILLS_PATH, SKILL_PLUGIN_API_PATH, SKILL_UI_VALIDATION_PATH)]
+    rows += [{"path": path, "kind": "reference"} for path in dict.fromkeys(references) if Path(path).exists()]
+    return {"_host_inputs": rows} if rows else {}
 
 
 def start_binding_fingerprints(ctx: Any, prompt: str) -> tuple[str, str]:

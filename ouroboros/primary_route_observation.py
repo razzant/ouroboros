@@ -421,7 +421,7 @@ def observe_primary_route(ctx) -> str:
             local = {}
         observed = {"kind": "local_serving_metadata", "source": local.get("source")} if local.get("confirmed") else {}
     else:
-        from ouroboros.provider_models import parse_claudexor_model, provider_for_model
+        from ouroboros.provider_models import claudexor_engine_kwargs, parse_claudexor_model, provider_for_model
         if provider_for_model(target[0]) == "claudexor":
             from ouroboros.claudexor_observations import quota_observation
             # Quota first: a read inside the engine, so the catalog's upstream discovery
@@ -430,7 +430,8 @@ def observe_primary_route(ctx) -> str:
                 source, native = parse_claudexor_model(target[0])
             except ValueError:  # no engine binding to read; the catalog check reports it unconfirmed
                 source = native = ""
-            quota = quota_observation(source, native, target[2], timeout_sec=timeout) if source else None
+            quota = quota_observation(source, native, target[2], timeout_sec=timeout,
+                                      **claudexor_engine_kwargs(target[0])) if source else None
             if stopped():
                 return ""
         remaining = timeout - (time.monotonic() - now)

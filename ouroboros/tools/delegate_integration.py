@@ -769,6 +769,9 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
 
     if entry is None or entry.review_owned:
         return None  # the review owner compares against its frozen subject, never a product baseline
+    if (entry.engine_ref or {}).get("workspace"):  # worked in a declared remote workspace: its effects are there
+        from ouroboros.remote_workspace import remote_workspace_block
+        return remote_workspace_block(entry, gateway, drive=drive)
     from ouroboros.delegate_directory import in_place_block, is_in_place_run
     if is_in_place_run(entry):
         from ouroboros.headless import refresh_in_place_native_capture
@@ -826,6 +829,15 @@ def capture_terminal_patch_for_drive(drive: Any, entry: _RunCustody, *, gateway=
             return _capture_block(entry, cap_dir, manifest)
         if entry.patch_captured and str(manifest.get("status") or "") in ready:
             return finish(_capture_block(entry, cap_dir, manifest))
+    from ouroboros.execution_domain import is_remote_ref
+    if is_remote_ref(entry.engine_ref) and not entry.patch_captured:  # the host's staged copy: bring it home first
+        from ouroboros.remote_workspace import mirror_result
+        mirrored = mirror_result(entry, entry.engine_ref, cap_dir)
+        if mirrored["state"] not in {"applied", "already_applied", "no_changes"}:
+            return {"status": "failed", "capture_kind": "remote_staged", "authority_target_root": entry.target_root,
+                    "retry": "transient" if mirrored["state"] in {"unreachable", "evidence_unread"} else "changed_input",
+                    "remote_result": mirrored, "note": "The run's result could not be brought back from its remote "
+                    f"engine ({mirrored['state']}): {mirrored.get('note') or mirrored.get('detail') or ''}"[:900]}
     from ouroboros.subagent_worktrees import find_execution_snapshot
     snapshot = find_execution_snapshot(entry.snapshot_id) or {}
     from ouroboros import work_domain  # a work copy's presence through the confined descent

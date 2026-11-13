@@ -2789,7 +2789,10 @@ in the same order: Subscriptions · models, API keys (one entry per connection:
 each enabled key holding its credential, named "OpenRouter" or "OpenRouter ·
 Claude credits", then one disabled pointer to Accounts; a saved choice that
 cannot send stays selectable as "(no key)", "(off)" or "(removed)"), Agents · sessions where a session
-is possible. The model chooser lists only the chosen source's catalog, so a
+is possible. Where a remote engine is saved, the Models roles and Available subagents add one Remote engines group
+before those: each connected engine's models and agents named where they run ("On Build box · Codex (model)"), an
+engine not connected said so, and a saved choice there kept selectable as not checked under the same names.
+The model chooser lists only the chosen source's catalog, so a
 suggestion's transport is the selected source; any id can still be typed. The composer's
 Model capsule alone searches across sources, each row naming its own. The
 stored spellings (`provider::model`, `claudexor::source=model`,

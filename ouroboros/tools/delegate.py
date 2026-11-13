@@ -34,7 +34,7 @@ from ouroboros.subagent_work_order import (  # noqa: F401 - compatibility re-exp
     session_design_navigation,
     session_host_references,
 )
-from ouroboros.subagent_work_order import in_place_scratch, session_service_directories
+from ouroboros.subagent_work_order import in_place_scratch, session_host_sources, session_service_directories
 from ouroboros.delegate_source_coverage import (
     add_terminal_source_verification,  # noqa: F401  (leaf reads it through _delegate() at call time)
     prepare_work_order_start_binding,
@@ -478,7 +478,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
     access = authority.access
     start_attempted = recovering  # Recovery may already own a physical run.
     try:  # a retry or continuation keeps its recorded engine; a fresh start the domain's (``execution_domain``)
-        engine, gateway = start_engine(drive, retry_token, continuation_token)
+        engine, gateway = start_engine(drive, retry_token, continuation_token, route)
     except ClaudexorUnavailable as exc:
         resolution = resolve_subagent_executor("harness", route=route, unavailable_reason=exc.code)
         return _fail("delegate_start", exc.code, str(exc), executor=resolution.executor)
@@ -583,7 +583,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             request_body = _start_request(ctx, route, authority, scope_root, continuation.prompt or text,
                                           seconds, instructions, execution_root, continuation=continuation.request, ephemeral=ephemeral, service_roots=service.roots,
                                           **({"directory_options": directory_options} if directory_options else {}))
-            request_body, processing_info = _processing_start_request({**request_body, **documents.request}, actor, gateway, route)
+            request_body, processing_info = _processing_start_request({**request_body, **documents.request, **session_host_sources(ctx, gateway, inputs, target_root=record_auth["target_root"], source_root=root, payload_skill=payload_skill)}, actor, gateway, route)
             continuation = bind_start(gateway, request_body, route, invocation_id, continuation, authority,
                                       ceiling_authority, actor_facts, target_root, root if snapshot else "")
             project_persistent = project_persistent or bool(continuation.custody.get("thread_id"))
@@ -647,8 +647,9 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         status = int(getattr(exc, "status_code", 0) or 0) if typed else 0
         # A request row is not a POST; an entered callable stays unknown unless
         # its typed refusal proves otherwise. Recovery retains its original fate.
+        # A remote refusal before its POST (``unsent``) sent nothing; a replay keeps its original fate.
         definite = not start_attempted or 400 <= status < 500 or (
-            isinstance(exc, OwnerPauseRefused) and not recovering)
+            isinstance(exc, OwnerPauseRefused) or bool(getattr(exc, "unsent", False))) and not recovering
         try:
             cleanup = _retire_orphaned_registration(
                 ctx, gateway, owned_project_id, project_persistent=project_persistent, history_facts=history_facts,

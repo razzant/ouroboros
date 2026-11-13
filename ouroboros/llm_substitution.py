@@ -103,10 +103,14 @@ def _identity(route: Any) -> dict:
 
 def plan_account(plan: Any, target: dict, role: str) -> dict:
     """The account an Auto plan of this route and role rests on: its exact account-bound record of the same source
-    and model with a known, fresh window. A pool bound, an unknown window and a profile without its fingerprint
-    qualify nothing (``{}``)."""
+    and model with a known, fresh window, on the same engine (a plan built for another engine's route, the owned one
+    or a named remote one, names none of this engine's accounts). A pool bound, an unknown window and a profile
+    without its fingerprint qualify nothing (``{}``)."""
+    from ouroboros.provider_models import claudexor_engine
+
     route = _identity(getattr(plan, "model_route", None))
     if (not route or getattr(plan, "provider", "") != "claudexor" or getattr(plan, "account_pin", "")
+            or claudexor_engine(str(getattr(plan, "model", "") or "")) != str(target.get("connection") or "")
             or str(getattr(plan, "model_role", "") or "") != str(role or "")
             or not getattr(plan, "window_witness_bound", False) or getattr(plan, "stale", True)
             or getattr(plan, "status", "") != "confirmed"

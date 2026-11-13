@@ -88,6 +88,10 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/claudexor/restart` | passive preview of what ends (§3) |
 | POST | `/api/claudexor/restart` | preview `{token}`: stop, then the ordinary start |
 | GET | `/api/claudexor/maintenance/harnesses` | selection/newest/actions/receipt; `checkLatest` reads vendor HTTPS |
+| GET | `/api/engine-connections` | saved remote engines with this installation's last observation, plus a removed one still owed an Emergency Stop stop (`removed`); no host contact, no token |
+| POST | `/api/engine-connections/{name}/check` | attach-only Check: reuses the live tunnel, else reads the running engine's descriptor over SSH; never starts an engine |
+| POST | `/api/engine-connections/{name}/disconnect` | stops this installation's forward only (a removed row's name too; 404 outside the connection-name grammar); the engine and its runs continue |
+| GET | `/api/engine-connections/{name}/catalog` | model sources (with their credential harness), models, harnesses and that engine's own account roster (`accounts_state` `ok` or `unread` with its code) through an already open tunnel; `offline` otherwise |
 | POST | `/api/claudexor/maintenance/operations` | 202 latest/exact handle; same-key rejoin; refusal covers this attempt (§6) |
 | GET | `/api/claudexor/maintenance/operations/{operation_id}` | retained engine facts |
 | POST | `/api/claudexor/maintenance/operations/{operation_id}/cancel` | acknowledgement does not prove termination |

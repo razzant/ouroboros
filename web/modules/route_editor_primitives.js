@@ -66,6 +66,15 @@ export function processingExecutionText(processing) {
 
 export function parseModelSource(value) {
     const raw = String(value || '').trim();
+    const remote = /^claudexor@([a-z0-9][a-z0-9_-]{0,31})::/.exec(raw);
+    if (remote && remote[1] !== 'default') {
+        // A subscription model on a named remote engine (OUROBOROS_ENGINE_CONNECTIONS): where it runs is the source.
+        const target = raw.slice(remote[0].length);
+        const split = target.indexOf('=');
+        return { source: `remote:${remote[1]}:${split < 0 ? target : target.slice(0, split)}`,
+            model: split < 0 ? '' : target.slice(split + 1) };
+    }
+    if (raw.startsWith('claudexor@default::')) return parseModelSource(`claudexor::${raw.slice('claudexor@default::'.length)}`);
     if (raw.startsWith('claudexor::')) {
         const target = raw.slice('claudexor::'.length);
         const split = target.indexOf('=');
@@ -86,6 +95,10 @@ export function composeModelSource(source, model) {
     if (!value) return '';
     if (value.includes('::')) return value;
     if (source.startsWith('subscription:')) return `claudexor::${source.slice(13)}=${value}`;
+    if (source.startsWith('remote:')) {
+        const [, engine, harness] = source.split(':');
+        return `claudexor@${engine}::${harness}=${value}`;
+    }
     return source === 'openrouter' ? value : `${source}::${value}`;
 }
 
@@ -237,11 +250,12 @@ export function keyProblemLine(problem, label) {
 }
 
 /** Why a saved route's API key cannot send now (`unavailableConnectionState`), or '' when it can or the route is
- *  empty or a subscription's. A local route is the caller's to skip. */
+ *  empty, a subscription's or a remote engine's (no key: that engine answers for itself). A local route is the
+ *  caller's to skip. */
 export function routeKeyProblem(value, settings = {}, providerProfiles = {}) {
     const raw = String(value || '').trim();
     const { source } = raw ? parseModelSource(raw) : { source: '' };
-    if (!source || source.startsWith('subscription:')) return '';
+    if (!source || source.startsWith('subscription:') || source.startsWith('remote:')) return '';
     if (configuredApiProviders(settings, providerProfiles).some((provider) => provider.id === source)) return '';
     return unavailableConnectionState(source, apiConnections(settings, providerProfiles));
 }
@@ -270,11 +284,60 @@ export function connectionReferencesText(references, connections = []) {
     return named.length ? `Still naming a key that was removed or turned off, so they cannot send: ${named.join(', ')}` : '';
 }
 
-/** Account binding is supported by agent sessions and subscription model routes. */
+/** Account binding is supported by agent sessions and subscription model routes, a remote engine's included. */
 export function routeSupportsAccount(route) {
+    const source = parseModelSource(route?.target_id).source;
     return route?.kind === ROUTE_KIND_AGENT_SESSION
         || (['api_model', 'api_chat'].includes(route?.kind)
-            && parseModelSource(route?.target_id).source.startsWith('subscription:'));
+            && (source.startsWith('subscription:') || source.startsWith('remote:')));
+}
+
+/**
+ * Where a remote session row works (``route.workspace``): a staged copy of the local project (the default, ``''``) or
+ * one of the folders its connection declares (``OUROBOROS_ENGINE_CONNECTIONS[].workspaces``), worked in place on that
+ * host; a saved folder the connection no longer declares stays selectable and says so (a start then refuses it).
+ */
+export function remoteWorkspaceOptions(remoteEngines, engine, saved = '') {
+    const entry = (remoteEngines || []).find((item) => item?.name === engine);
+    const where = entry?.label || engine;
+    const declared = Array.isArray(entry?.workspaces) ? entry.workspaces : [];
+    const options = [{ value: '', label: `A copy of the local project, staged on ${where}` },
+        ...declared.map((folder) => ({ value: folder, label: `${folder} on ${where}, in place` }))];
+    if (saved && !declared.includes(saved)) options.push({ value: saved, label: `${saved} · not declared on ${where}` });
+    return options;
+}
+
+/** The value of the unselectable line that says a remote roster is not known (never a pin). */
+export const REMOTE_ROSTER_UNKNOWN = '__remote_roster_unknown__';
+
+/**
+ * A remote engine's own accounts as pin options for one harness (``/api/engine-connections/<name>/catalog``):
+ * automatic rotation first, then that engine's rows with their disabled / not-verified facts, the saved pin kept and
+ * named when the roster lacks it, and, while the roster is unread or the engine not connected, one disabled line
+ * that says so. This computer's accounts are never offered for another host's engine.
+ */
+export function remoteProfileOptions(remoteEngines, engine, harness, savedPin, { labelled = true } = {}) {
+    const entry = (remoteEngines || []).find((item) => item?.name === engine);
+    const where = entry?.label || engine;
+    const prefix = labelled ? '' : 'Account: ';
+    const options = [{ value: '', label: `${prefix}automatic on ${where}` }];
+    const roster = entry?.accounts_state === 'ok' ? (entry.accounts || []) : null;
+    for (const account of roster || []) {
+        if (harness && account.harness_id !== harness) continue;
+        const facts = [account.enabled === false ? 'disabled' : '',
+            account.verification && account.verification !== 'passed' ? 'not verified' : ''].filter(Boolean);
+        const name = account.label && account.label !== account.profile_id ? `${account.label} · ${account.profile_id}` : account.profile_id;
+        options.push({ value: account.profile_id, label: `${prefix}${name}${facts.length ? ` (${facts.join(', ')})` : ''}` });
+    }
+    if (savedPin && !options.some((option) => option.value === savedPin)) {
+        options.push({ value: savedPin, label: `${prefix}${savedPin} · ${roster ? `not on ${where}` : 'not checked'}` });
+    }
+    if (!roster) {
+        options.push({ value: REMOTE_ROSTER_UNKNOWN, disabled: true, label: entry?.accounts_state === 'unread'
+            ? `Accounts on ${where} could not be read (${entry.accounts_code || 'engine'})`
+            : `Accounts on ${where}: check it in Accounts › Remote engines` });
+    }
+    return options;
 }
 
 /**
@@ -294,6 +357,11 @@ export function routeModelFields(route, modelSources = [], { providerProfiles = 
             provider: '', providerLabel: '' };
     }
     const parsed = parseModelSource(route?.target_id);
+    if (parsed.source.startsWith('remote:')) {  // a subscription model on a named remote engine
+        const [, engine, source] = parsed.source.split(':');
+        return { source, sourceLabel: source, subscription: true, remote: true, engine, model: parsed.model,
+            provider: '', providerLabel: '', harness: '' };
+    }
     const subscription = parsed.source.startsWith('subscription:');
     const source = subscription ? parsed.source.slice(13) : '';
     const descriptor = modelSources.find((entry) => entry.id === source);
@@ -309,7 +377,8 @@ export function routeTargetFromModel(route, model) {
     if (route?.kind === ROUTE_KIND_AGENT_SESSION) {
         return composeSessionTarget(splitSessionTarget(route.target_id).harness, model);
     }
-    const { source, subscription, provider } = routeModelFields(route);
+    const { source, subscription, provider, remote, engine } = routeModelFields(route);
+    if (remote) return composeModelSource(`remote:${engine}:${source}`, model) || `claudexor@${engine}::${source}=`;
     if (subscription) {
         return composeModelSource(`subscription:${source}`, model) || `claudexor::${source}=`;
     }
@@ -325,6 +394,10 @@ function emptyApiTarget(provider) {
 export function changeRouteChoice(route, choice, { apiKind = ROUTE_KIND_API_MODEL } = {}) {
     if (encodeRouteChoice({ route }) === choice) return { ...route };
     const decoded = decodeRouteChoice(choice, { apiKind });
+    if (decoded.engine && decoded.kind === ROUTE_KIND_AGENT_SESSION) {
+        return { kind: decoded.kind, target_id: decoded.harness, engine: decoded.engine };
+    }
+    if (decoded.engine) return { kind: decoded.kind, target_id: `claudexor@${decoded.engine}::${decoded.source}=` };
     return { kind: decoded.kind, target_id: decoded.harness || (decoded.source
         ? `claudexor::${decoded.source}=` : emptyApiTarget(decoded.provider)) };
 }
@@ -333,7 +406,9 @@ export function changeRouteChoice(route, choice, { apiKind = ROUTE_KIND_API_MODE
 function routeCatalogItems(route, items = []) {
     const fields = routeModelFields(route);
     const pin = route?.credential_profile_id || route?.profile_id || '';
-    const wanted = fields.subscription ? `subscription:${fields.source}` : fields.provider;
+    // A remote engine's route offers that engine's models only, never this computer's same-named source.
+    const wanted = fields.remote ? `remote:${fields.engine}:${fields.source}`
+        : fields.subscription ? `subscription:${fields.source}` : fields.provider;
     return items.filter((item) => (!wanted || parseModelSource(item?.value || item?.id || item).source === wanted)
         && (!pin || !item?.credential_profile_id || item.credential_profile_id === pin));
 }
@@ -362,6 +437,18 @@ export function priceWords(price, { unit = false } = {}) {
     };
     const params = { input: span('input'), output: span('output') };
     return unit ? fmt('{input} in / {output} out per 1M tokens', params) : fmt('{input} in / {output} out', params);
+}
+
+/**
+ * What connected remote engines serve (`/api/engine-connections/<name>/catalog`, published by the Accounts editor)
+ * as catalog items whose value is the stored route (`claudexor@<engine>::<source>=<model>`); `engine` and `source`
+ * narrow it. An engine that is not connected contributes nothing: its saved choices stay "not checked".
+ */
+export function remoteCatalogItems(remoteEngines = [], { engine = '', source = '' } = {}) {
+    return (remoteEngines || []).filter((entry) => entry?.name && (!engine || entry.name === engine))
+        .flatMap((entry) => (entry.sources || []).filter((row) => !source || row?.id === source))
+        .flatMap((row) => (row.models || []).filter((model) => model?.id && model.value)
+            .map((model) => ({ id: model.id, value: model.value, label: model.label || model.id })));
 }
 
 /**
@@ -443,18 +530,20 @@ export function mintStableId(prefix, takenIds) {
 // a row without its own value runs under, and an omitted session access is full.
 function engineIdentity(row, inherited = '') {
     const route = row?.route || {};
+    const engine = String(route.engine || '').trim();
     return [
         String(route.kind || ''), String(route.target_id || '').trim(),
         String(route.credential_profile_id || '').trim(), String(row?.effort || ''),
         String(row?.processing_preference || inherited || ''),
         route.kind === ROUTE_KIND_AGENT_SESSION ? String(row?.access || 'full') : '',
+        engine ? `on:${engine}${route.workspace ? `:${route.workspace}` : ''}` : '',
     ];
 }
 
-/** Route target plus THIS row's facets, each omitted at its baseline (full access, standard processing). */
+/** Route target plus THIS row's facets, each omitted at its baseline (owned engine, full access, standard processing). */
 export function subagentHandle(row, inherited = '') {
-    const [, target, pin, effort, processing, access] = engineIdentity(row, inherited);
-    return [target, effort, access === 'full' ? '' : access, pin ? `@${pin}` : '',
+    const [, target, pin, effort, processing, access, place] = engineIdentity(row, inherited);
+    return [target, place, effort, access === 'full' ? '' : access, pin ? `@${pin}` : '',
         processing === 'standard' ? '' : processing].filter(Boolean).join('/');
 }
 
@@ -507,14 +596,24 @@ export function compoundSessionEffortConflict(target, effort) {
 /** Choice values never contain `::`; the editor composes that spelling itself. */
 export function encodeRouteChoice(row) {
     if (row?.route?.kind === ROUTE_KIND_AGENT_SESSION) {
-        return `session:${splitSessionTarget(row.route.target_id).harness}`;
+        const harness = splitSessionTarget(row.route.target_id).harness;
+        return row.route.engine ? `remote-session:${row.route.engine}:${harness}` : `session:${harness}`;
     }
-    const { source, subscription, provider } = routeModelFields(row?.route);
+    const { source, subscription, provider, remote, engine } = routeModelFields(row?.route);
+    if (remote) return `remote:${engine}:${source}`;
     return subscription ? `subscription:${source}` : `${API_CHOICE_PREFIX}${provider}`;
 }
 
 export function decodeRouteChoice(value, { apiKind = ROUTE_KIND_API_MODEL } = {}) {
     const raw = String(value || '');
+    if (raw.startsWith('remote-session:')) {
+        const [, engine, harness] = raw.split(':');
+        return { kind: ROUTE_KIND_AGENT_SESSION, harness, engine };
+    }
+    if (raw.startsWith('remote:')) {
+        const [, engine, source] = raw.split(':');
+        return { kind: apiKind, source, engine };
+    }
     if (raw.startsWith('session:')) {
         return { kind: ROUTE_KIND_AGENT_SESSION, harness: raw.slice('session:'.length) };
     }
@@ -524,16 +623,19 @@ export function decodeRouteChoice(value, { apiKind = ROUTE_KIND_API_MODEL } = {}
         && raw.slice(API_CHOICE_PREFIX.length)) || DEFAULT_API_PROVIDER };
 }
 
-/** The chip text for a route's source: who serves it, in the owner's words. */
+/** The chip text for a route's source: who serves it, in the owner's words (a remote engine by its saved name,
+ *  `remoteEngines`, when the caller read them). */
 export function sourceIdentityLabel(route, {
-    modelSources = [], providerProfiles = {}, harnesses = [], connections = [],
+    modelSources = [], providerProfiles = {}, harnesses = [], connections = [], remoteEngines = [],
 } = {}) {
+    const where = (engine) => (remoteEngines || []).find((entry) => entry?.name === engine)?.label || engine;
     if (route?.kind === ROUTE_KIND_AGENT_SESSION) {
         const { harness } = splitSessionTarget(route?.target_id);
         const descriptor = (harnesses || []).find((entry) => entry?.id === harness);
-        return `${descriptor?.display_name || harness} · agent`;
+        return `${route.engine ? `On ${where(route.engine)} · ` : ''}${descriptor?.display_name || harness} · agent`;
     }
     const fields = routeModelFields(route, modelSources, { providerProfiles, connections });
+    if (fields.remote) return `On ${where(fields.engine)} · ${fields.source} · model`;
     return fields.subscription ? `${fields.sourceLabel || fields.source} · model`
         : `API · ${fields.providerLabel}`;
 }
@@ -551,6 +653,9 @@ export function normalizeRouteSpec(route, {
         target_id: String(input.target_id || ''),
         credential_pin: String(input.credential_pin
             || input.credential_profile_id || input.profile_id || ''),
+        // A session's remote engine and declared remote workspace travel with the row, never dropped by an edit.
+        ...(kind === ROUTE_KIND_AGENT_SESSION && input.engine ? { engine: String(input.engine) } : {}),
+        ...(kind === ROUTE_KIND_AGENT_SESSION && input.engine && input.workspace ? { workspace: String(input.workspace) } : {}),
     };
 }
 
@@ -567,6 +672,8 @@ export function serializeRouteSpec(route, {
     if (routeSupportsAccount(out) && normalized.credential_pin) {
         out[credentialField] = normalized.credential_pin;
     }
+    if (normalized.engine) out.engine = normalized.engine;
+    if (normalized.workspace) out.workspace = normalized.workspace;
     return out;
 }
 
@@ -593,7 +700,7 @@ function undiscoveredLabel(value, known) {
 export function routeChoiceGroups({
     harnesses = [], modelSources = [], providers = [], connections = [], currentChoice = '',
     catalogKnown = true, accountsKnown = true, includeSessions = true,
-    includeSubscriptions = true, providerProfiles = {}, hasConfiguredAccounts = false,
+    includeSubscriptions = true, providerProfiles = {}, hasConfiguredAccounts = false, remoteEngines = [],
 } = {}) {
     const sessionValues = (harnesses || [])
         .filter((harness) => harness && harness.id)
@@ -630,7 +737,9 @@ export function routeChoiceGroups({
             + ` (${unavailableConnectionState(savedApi, connections)})` });
     }
     apiValues.push({ value: '', disabled: true, label: 'Add a key in Accounts for more' });
+    const remoteGroup = remoteChoiceGroup(remoteEngines, savedChoice, { includeSessions, includeSubscriptions });
     return [
+        ...(remoteGroup ? [remoteGroup] : []),
         ...(includeSubscriptions ? [{ label: 'Subscriptions · models', options: modelValues.length
             ? modelValues
             : [{ value: '', disabled: true, label: catalogKnown && accountsKnown
@@ -650,6 +759,42 @@ export function routeChoiceGroups({
                     : 'Could not be listed — see the service banner above',
             }] }] : []),
     ];
+}
+
+/**
+ * "Remote engines": per saved connection (`{name, label, state, sources:[{id,label}], harnesses:[id]}`, the
+ * catalog read through an open tunnel), its models and agents as choices that name where they run. An engine
+ * not connected keeps a saved choice selectable and says so; availability never rewrites a selection.
+ */
+function remoteChoiceGroup(remoteEngines, savedChoice, { includeSessions, includeSubscriptions }) {
+    const options = [];
+    for (const engine of remoteEngines || []) {
+        if (!engine?.name) continue;
+        const where = engine.label || engine.name;
+        if (includeSubscriptions) {
+            for (const source of engine.sources || []) {
+                options.push({ value: `remote:${engine.name}:${source.id}`, label: `On ${where} · ${source.label || source.id} (model)` });
+            }
+        }
+        if (includeSessions) {
+            for (const harness of engine.harnesses || []) {
+                options.push({ value: `remote-session:${engine.name}:${harness}`, label: `On ${where} · ${harnessPresentation(harness).label} (agent)` });
+            }
+        }
+        if (engine.state && engine.state !== 'connected' && !options.some((option) => option.value.includes(`:${engine.name}:`))) {
+            options.push({ value: '', disabled: true, label: `On ${where} · not connected — Check it in Accounts` });
+        }
+    }
+    if ((savedChoice.startsWith('remote:') || savedChoice.startsWith('remote-session:'))
+            && !options.some((option) => option.value === savedChoice)) {
+        // The engine's saved name and the source's own word, as a connected engine's choice reads (and the local
+        // saved fallback above): one engine is never named two ways on one page.
+        const [kind, engine, source] = savedChoice.split(':');
+        const where = (remoteEngines || []).find((entry) => entry?.name === engine)?.label || engine;
+        options.push({ value: savedChoice, label: `On ${where} · ${harnessPresentation(source).label}`
+            + ` (${kind === 'remote' ? 'model' : 'agent'}) · not checked` });
+    }
+    return options.length ? { label: 'Remote engines', options } : null;
 }
 
 // The PIN-SIDE projection of `accountRows`: one payload, one reader, so the

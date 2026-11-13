@@ -31,7 +31,7 @@ from ouroboros.configured_subagents import (
     roster_handles,
 )
 from ouroboros.delegate_shared import delegate_payload
-from ouroboros.route_spec import ROUTE_KIND_API_MODEL, RouteSpec, model_named_effort, route_spec_dict
+from ouroboros.route_spec import ROUTE_KIND_API_MODEL, RouteSpec, model_named_effort, route_spec_dict, session_location
 from ouroboros.runtime_mode_policy import effort_range_binds
 from ouroboros.settings_integrity import SETTINGS_ENV_LOCK, TaskSettingsSnapshot, live_effort_range, runtime_setting
 from ouroboros.settings_scales import choose_effort, effort_fact, effort_range
@@ -926,7 +926,7 @@ def resolve_configured_actor_dispatch(
     else:
         # The LEAF runs the decided level; the nanny below keeps the parent's.
         exact_route = dataclass_replace(
-            parsed, effort=derived_effort,
+            parsed, effort=derived_effort, **session_location(route_spec),
             profile_id=str(route_spec.get("credential_profile_id") or ""),
         )
         if not saved_supervision:
@@ -943,7 +943,7 @@ def resolve_configured_actor_dispatch(
             try:
                 from ouroboros.execution_domain import native_gateway
 
-                gateway = native_gateway()  # the engine a new native run uses: the domain's work engine, else owned
+                gateway = native_gateway(engine=exact_route.engine)  # the run's engine: remote, the domain's, else owned
                 unavailable, reset_at = route_health(
                     gateway, exact_route.route_id, shape, route_model=exact_route.model,
                     pinned_profile=exact_route.profile_id,
@@ -1055,7 +1055,7 @@ def exact_session_binding(raw_snapshot: Any, leaf_effort: Optional[str] = None) 
     return snapshot, dataclass_replace(
         route,
         effort=str(snapshot.get("effort") or route.effort) if leaf_effort is None else str(leaf_effort),
-        profile_id=str(route_spec.get("credential_profile_id") or ""),
+        profile_id=str(route_spec.get("credential_profile_id") or ""), **session_location(route_spec),
     )
 
 

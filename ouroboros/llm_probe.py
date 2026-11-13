@@ -338,7 +338,7 @@ def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
     import time
     from ouroboros.deadline_utils import parse_deadline_ts
     from ouroboros.utils import utc_now_iso
-    from ouroboros.provider_models import parse_claudexor_model, provider_for_model
+    from ouroboros.provider_models import claudexor_engine_kwargs, parse_claudexor_model, provider_for_model
     from ouroboros.transport_custody import is_loopback_base_url
     try:
         if provider_for_model(model) == "claudexor":
@@ -356,7 +356,7 @@ def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
             account = account or effective_profile
             started = time.time() if observed_after is None else observed_after
             catalog = model_catalog(source, account or None, requested_model=native_model,
-                                    timeout_sec=timeout)
+                                    timeout_sec=timeout, **claudexor_engine_kwargs(model))
             observed = parse_deadline_ts(catalog.get("observedAt"))
             # The existing model catalog owner performs fresh upstream discovery.
             # Old/cache-only metadata cannot establish recovery from this outage.

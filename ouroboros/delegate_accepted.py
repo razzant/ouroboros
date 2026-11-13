@@ -12,6 +12,9 @@ engine the invocation recorded and validates the engine's union:
 - ``turn_only``: an accepted thread turn with no retained command (run id or null; its enqueue error);
 - ``not_found``: this store's current partition holds no matching binding.
 
+A start on a remote engine is never read by its recorded body (that engine accepted the copy staged on its host): its
+own store answers by the start's task group and run folder instead (``remote_stops.locate_started``), in this union.
+
 Everything else is a typed gap: an engine that does not declare the route (``unsupported``, an old
 route's bare 404 and a build without durable turn reads, 501, too), a transport fault, a 503 or an
 answer missing its store identity (``unavailable``), a
@@ -91,6 +94,11 @@ def locate(gateway: Any, record: Dict[str, Any]) -> Lookup:
     if not isinstance(body, dict) or not body or not key:
         return Lookup("unavailable", detail="the recorded request or its invocation key is unavailable")
     thread_id = str(body.get("_thread_id") or "")
+    if getattr(gateway, "stages_workspace", False) and not thread_id:
+        # A remote engine accepted the copy staged on its host, never this body: its own store is read instead.
+        from ouroboros.remote_stops import locate_started
+
+        return locate_started(gateway, record)
     method, path = TURN_LOOKUP if thread_id else RUN_LOOKUP
     try:
         catalog = gateway.operations() if callable(getattr(gateway, "operations", None)) else []

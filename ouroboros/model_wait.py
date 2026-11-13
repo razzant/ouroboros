@@ -937,7 +937,7 @@ class TaskModelWait:
         from ouroboros import config
         from ouroboros.gateways.claudexor import ClaudexorUnavailable
         from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
-        from ouroboros.provider_models import parse_claudexor_model
+        from ouroboros.provider_models import claudexor_engine_kwargs, parse_claudexor_model
 
         role = kwargs["model_role"]
         binding = (_REPREPARE.get() or {}).get(role)
@@ -1019,7 +1019,7 @@ class TaskModelWait:
                 if observes_access and now >= next_check:
                     try:
                         if not row["credential_harness"]:
-                            sources = llm.claudexor_model_sources()
+                            sources = llm.claudexor_model_sources(**claudexor_engine_kwargs(kwargs["model"]))
                             match = next((item for item in sources.get("sources", []) if item.get("id") == source), {})
                             harness = str(match.get("credentialHarness") or "")
                             if harness:
@@ -1031,8 +1031,8 @@ class TaskModelWait:
                             account = kwargs.get("model_account_override")
                             if account is None:
                                 account = model_role_option(MODEL_ACCOUNTS_KEY, role)
-                            catalog = llm.claudexor_model_catalog(source, account or None,
-                                                                 requested_model=native_model)
+                            catalog = llm.claudexor_model_catalog(source, account or None, requested_model=native_model,
+                                                                 **claudexor_engine_kwargs(kwargs["model"]))
                             if (catalog.get("source") == source
                                     and (not account or catalog.get("credentialProfileId") == account)
                                     and not (unproven and not account and catalog.get("credentialProfileId") == unproven)

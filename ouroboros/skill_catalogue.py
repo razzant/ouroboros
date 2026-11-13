@@ -142,6 +142,23 @@ def _serving_identities(root: Any, contents: dict) -> dict:
             for path, blob in blobs.items()}
 
 
+def session_skill_reference_dirs(ctx: Any) -> List[str]:
+    """The folders ``session_skill_index`` names for ``ctx`` (each listed skill's directory, whose files a
+    session may read), the same selection and order; [] where that index names none."""
+    from ouroboros.contracts.task_contract import task_input_sources
+    from ouroboros.skill_loader import discover_skills
+    from ouroboros.tool_access_paths import canonical_data_root
+
+    task = {"task_contract": getattr(ctx, "task_contract", {}), "metadata": getattr(ctx, "task_metadata", {})}
+    if task_input_sources(task) == "declared":
+        return []
+    try:
+        return [str(skill.skill_dir.resolve()) for skill in _reviewed_instructions(discover_skills(canonical_data_root(ctx)))]
+    except Exception:
+        logging.getLogger(__name__).warning("Session skill reference folders unavailable", exc_info=True)
+        return []
+
+
 def skill_contract_references(serving_root: Any) -> str:
     """The serving host's skill contract for a payload builder (#818): the files skill review
     judges a payload by (the paths owned by ``governance_context``), named, never copied.

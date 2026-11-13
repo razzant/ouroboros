@@ -224,8 +224,13 @@ def reconcile_orphaned_runs(
     recoverable_handles: Optional[set] = None,
     replay_pending: Optional[Callable[[], bool]] = None,
     observe_pending: Optional[Callable[[], bool]] = None,
+    remote_engines: bool = True,
 ) -> List[Dict[str, Any]]:
     """Settle or cancel every open run whose owning task is no longer running.
+
+    ``remote_engines=False`` (the boot pass) leaves every remote engine's work to the periodic sweep, off the loop,
+    whose first pass follows readiness: a boot never waits on SSH. A sent-unknown remote start is read at a bounded
+    pace (``remote_stops.lookup_due``) on its own store (``remote_stops.locate_started``), its owner's or an orphan's.
 
     The owner-is-gone predicate is the SAME one ``process_custody.reap_orphaned_processes``
     already uses (the supervisor's live task set), so a delegated run and a spawned
@@ -271,23 +276,38 @@ def reconcile_orphaned_runs(
         from ouroboros.delegate_recovery import recoverable_handles as saved_handles
 
         protected.update(pair for pair in saved_handles(drive_root) if pair[0] in recoverable_task_ids)
-    orphans = [c for c in candidates if c.task_id and c.task_id not in live_or_reserved
+    from ouroboros.execution_domain import is_remote_ref, recorded_ref
+    from ouroboros.remote_stops import lookup_due, owed
+
+    orphans = [c for c in candidates if (c.task_id and c.task_id not in live_or_reserved
                and (c.task_id, c.run_id, c.invocation_id) not in protected
-               and (c.task_id, c.run_id, "") not in protected]
+               and (c.task_id, c.run_id, "") not in protected)
+               or owed(c)]  # Emergency Stop's durable remote stop intent: stopped whoever owns the run now
+
+    def paced(record: Dict[str, Any]) -> bool:
+        # A remote start read on its engine's store, an SSH attach when its tunnel is down, is asked at a bounded
+        # pace and never by the boot pass; an owed one is paced where it is resolved (``_reconcile_engine``).
+        return not is_remote_ref(recorded_ref(record)) or owed(record) or (remote_engines and lookup_due(record))
+
     # A review surface's pending invocation belongs to its panel, which rejoins it by
     # its exact key (#1006): this sweep would only re-report "retained" every pass.
     held = [record for record in unbound
             if record["task_id"] and not _custody().review_owned_source(record.get("source"))]
-    stray = [record for record in held if record["task_id"] not in live_or_reserved
-             and (record["task_id"], "", record["invocation_id"]) not in protected]
+    # A remote start Emergency Stop owes a stop is resolved whoever owns it (a review panel's too), and never
+    # re-POSTed (``remote_stops.resolve_owed_start``).
+    stray = [record for record in unbound if owed(record) or (
+        record["task_id"] and not _custody().review_owned_source(record.get("source"))
+        and record["task_id"] not in live_or_reserved
+        and (record["task_id"], "", record["invocation_id"]) not in protected and paced(record))]
     # The rest have an owner holding their retry token (live, reserved or protected, a paused
-    # one included): only what the engine already accepted for them is read and bound (#3138).
+    # one included): only what the engine already accepted for them is read and bound (#3138);
+    # a remote start's by its own store (``remote_stops.locate_started``), never by its body.
     strays = {record["invocation_id"] for record in stray}
-    watched = ([record for record in held if record["invocation_id"] not in strays]
+    watched = ([record for record in held if record["invocation_id"] not in strays and paced(record)]
                if observe_pending is not None else [])
     return _reconcile_each(drive_root, orphans, gateway_factory or attach_only_gateway, pending=stray,
                            live_task_ids=live_or_reserved, recoverable_handles=protected, replay_pending=replay_pending,
-                           watched=watched, observe_pending=observe_pending)
+                           watched=watched, observe_pending=observe_pending, remote_engines=remote_engines)
 
 
 def _reconcile_each(drive_root: Any, runs: List[RunCustody],
@@ -296,7 +316,8 @@ def _reconcile_each(drive_root: Any, runs: List[RunCustody],
                     deliberate_terminal: str = "", live_task_ids=None, recoverable_handles=(),
                     replay_pending: Optional[Callable[[], bool]] = None,
                     watched: Optional[List[Dict[str, Any]]] = None,
-                    observe_pending: Optional[Callable[[], bool]] = None) -> List[Dict[str, Any]]:
+                    observe_pending: Optional[Callable[[], bool]] = None,
+                    remote_engines: bool = True) -> List[Dict[str, Any]]:
     """One settle-or-cancel pass, one transport per engine. Shared by every reconcile surface.
 
     ``gateway_factory`` has NO default: the caller names whether this pass may ensure
@@ -322,7 +343,7 @@ def _reconcile_each(drive_root: Any, runs: List[RunCustody],
     # a deferred one must not spin the daemon up.
     from ouroboros.delegate_continuation import still_continuable
     from ouroboros.delegate_custody_current import held_runs
-    from ouroboros.execution_domain import engine_factory, engine_groups
+    from ouroboros.execution_domain import engine_factory, engine_groups, is_remote_ref
 
     # Owned registrations and unsettled runs are HELD rows: one indexed read.
     snapshot = list(held_runs(drive_root).values())
@@ -335,12 +356,18 @@ def _reconcile_each(drive_root: Any, runs: List[RunCustody],
                 and (not row.settled or still_continuable(
                     drive_root, row, live_task_ids, recoverable_handles=recoverable_handles))):
             unsettled_projects.add(row.project_id)
+    from ouroboros.remote_workspace import copy_due, owns_remote_copy
+
     registrations = [row for row in snapshot
-                     if row.project_owned and row.project_id
-                     and row.project_id not in unsettled_projects]
+                     if (row.project_owned and row.project_id and row.project_id not in unsettled_projects)
+                     # a remote run's host folder whose retention has ended and removal is due: its engine's pass
+                     or (owns_remote_copy(row) and not copy_due(drive_root, row, live_task_ids=live_task_ids,
+                                                                 recoverable_handles=recoverable_handles))]
     outcomes: List[Dict[str, Any]] = []
     for ref, (bound_runs, bound_pending, bound_registrations, bound_watched) in engine_groups(
             runs, pending or [], registrations, watched or []):
+        if not remote_engines and is_remote_ref(ref):
+            continue  # the periodic sweep reaches it, off the loop (``reconcile_orphaned_runs``)
         outcomes.extend(_reconcile_engine(
             drive_root, bound_runs, engine_factory(ref, gateway_factory), bound_pending if pending is not None else None,
             bound_registrations, deliberate_terminal=deliberate_terminal, live_task_ids=live_task_ids,
@@ -355,24 +382,32 @@ def _reconcile_engine(drive_root: Any, runs: List[RunCustody], gateway_factory: 
                       replay_pending: Optional[Callable[[], bool]], watched=(),
                       observe_pending: Optional[Callable[[], bool]] = None) -> List[Dict[str, Any]]:
     """``_reconcile_each``'s pass over one engine: its runs, pending invocations and registrations."""
+    from ouroboros.remote_stops import lookup_due, owed, resolve_owed_start, resolve_unsent_start, unsent
+
     def _replay_admitted() -> bool:
         return replay_pending is not None and bool(replay_pending())
 
     def _read_admitted() -> bool:
         return observe_pending is not None and bool(observe_pending())
 
+    owed_starts = [record for record in pending or [] if owed(record)]  # resolved without a POST: no admission asked
+    pending = None if pending is None else [record for record in pending if not owed(record)]
+    # A start whose POST never left is closed here and now, with no engine asked; a sent-unknown one is looked
+    # for when its lookup is due (``remote_stops.lookup_due``), never re-read every tick.
+    closed = [resolve_unsent_start(drive_root, record) for record in owed_starts if unsent(record)]
+    owed_starts = [record for record in owed_starts if not unsent(record) and lookup_due(record)]
     reading = _read_admitted()
     retained = [] if reading or _replay_admitted() else [
         {"invocation_id": str(record["invocation_id"]), "task_id": str(record["task_id"]),
          "action": "invocation_retained", "reason": "replay_not_admitted"}
         for record in pending or []]
     watched = list(watched or ()) if reading else []
-    if not runs and not registrations and not watched and (not pending or retained):
-        return retained  # no transport is opened for rows this pass may not read or replay
+    if not runs and not registrations and not watched and not owed_starts and (not pending or retained):
+        return closed + retained  # no transport is opened for rows this pass may not read or replay
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     gateway = None
-    outcomes: List[Dict[str, Any]] = list(retained)
+    outcomes: List[Dict[str, Any]] = [*closed, *retained]
     settlement_pending = any(not row.settled for row in runs)
     try:
         try:
@@ -382,12 +417,18 @@ def _reconcile_engine(drive_root: Any, runs: List[RunCustody], gateway_factory: 
             # The body collects retained sources independently. A transport gap
             # proves nothing about execution; control custody stays open.
             log.debug("delegated-run reconciliation: transport unavailable", exc_info=True)
-            return retained
+            return [*closed, *retained]
+        if getattr(gateway, "stages_workspace", False):
+            # A remote engine's start facts (its phases, the body it POSTed, a replay's handoff) live in this pass's
+            # custody root (``remote_engines``): its reads and replays look there, never in another root.
+            gateway.custody_root = drive_root
         for custody in runs:
             outcomes.append(_custody()._reconcile_one(
                 drive_root, gateway, custody,
                 deliberate_terminal=deliberate_terminal,
             ))
+        for record in owed_starts:
+            outcomes.extend(resolve_owed_start(drive_root, gateway, record, deliberate_terminal=deliberate_terminal))
         for record in [] if retained else (pending or []):
             may_read, may_replay = _read_admitted(), _replay_admitted()  # rechecked at dispatch: a stop defers the rest
             if not (may_read or may_replay):
@@ -411,6 +452,12 @@ def _reconcile_engine(drive_root: Any, runs: List[RunCustody], gateway_factory: 
         if registrations or settlement_pending:
             _custody().retire_settled_registrations(drive_root, gateway, live_task_ids=live_task_ids,
                                                   recoverable_handles=recoverable_handles)
+        from ouroboros.remote_workspace import owns_remote_copy, retire_settled_copies
+
+        copies = [row for row in registrations if owns_remote_copy(row)]
+        if copies:
+            outcomes.extend(retire_settled_copies(drive_root, copies, live_task_ids=live_task_ids,
+                                                  recoverable_handles=recoverable_handles))
     finally:
         try:
             if gateway is not None:
@@ -570,24 +617,24 @@ def recovered_custody(drive_root: Any, gateway: Any, record: Dict[str, Any], run
 
     Every fact comes from the invocation's record and its stored ``request`` (the replay's
     body), verbatim; ``daemon_store_id`` is the store whose own answer named the run (a replay
-    receipt's ``storeId``, a lookup's). Current access, target validity and model health are
-    never inferred from these old start facts.
+    receipt's ``storeId``, a lookup's, a remote start's task-group read: ``remote_stops``). Current
+    access, target validity and model health are never inferred from these old start facts.
     """
     body = record["request"]
     invocation_id, task_id = str(record["invocation_id"]), str(record["task_id"])
     execution = body.get("execution") if isinstance(body.get("execution"), dict) else {}
     scope = body.get("scope") if isinstance(body.get("scope"), dict) else {}
     from ouroboros.delegate_plan import plan_facts
-    from ouroboros.execution_domain import is_work_ref, recorded_ref
+    from ouroboros.execution_domain import engine_key, is_bound_ref, recorded_ref
 
     # The engine this invocation was bound to before its POST (this pass reached it there): the recovered row
     # keeps it, with the store that engine proved, as a fresh start's row does; else a later pass would ask the
-    # owned engine about a work run and take its 404 for the run's absence.
+    # owned engine about a work or remote run and take its 404 for the run's absence.
     bound = recorded_ref(record)
-    engine = dict(bound) if is_work_ref(bound) else {}
+    engine = dict(bound) if is_bound_ref(bound) else {}
     if engine and not engine.get("store"):
         proven = getattr(gateway, "engine_ref", None)
-        if is_work_ref(proven) and proven.get("descriptor") == engine.get("descriptor") and proven.get("store"):
+        if is_bound_ref(proven) and engine_key(proven)[0] == engine_key(engine)[0] and proven.get("store"):
             engine["store"] = str(proven["store"])
     custody = _custody().RunCustody(
         engine_ref=engine,
@@ -749,6 +796,11 @@ def _reconcile_one(drive_root: Any, gateway: Any, custody: RunCustody, *,
         str(deliberate_terminal or "") == STATUS_CANCELLED if review_owned
         else bool(deliberate_terminal)
     )
+    from ouroboros.remote_stops import PANIC_STOP_UNCONFIRMED
+
+    # Emergency Stop's durable intent for a remote run (``remote_stops``) is a verdict.
+    panic_intent = (custody.containment_fault or {}).get("reason") == PANIC_STOP_UNCONFIRMED
+    claimed_verdict_cancels = claimed_verdict_cancels or panic_intent
     try:
         detail = gateway.get_run(custody.run_id)
     except ClaudexorUnavailable as exc:
@@ -792,7 +844,11 @@ def _reconcile_one(drive_root: Any, gateway: Any, custody: RunCustody, *,
                   **({"reason": "review_panel_owns_run"} if review_owned else {}),
                   **_custody().output_disposition(custody)}
     else:
-        cancelled = _custody().cancel_and_verify(drive_root, gateway, custody, "owner_task_gone")
+        cancelled = _custody().cancel_and_verify(drive_root, gateway, custody,
+                                                 "owner_panic" if panic_intent else "owner_task_gone")
+        if panic_intent and cancelled["outcome"] != _custody().CANCEL_CONFIRMED:  # still owed until proven
+            _custody().record_containment_fault(drive_root, custody, PANIC_STOP_UNCONFIRMED,
+                                                f"Emergency Stop's stop is still unconfirmed: {cancelled['outcome']}")
         result = {"run_id": custody.run_id, "task_id": custody.task_id, "action": "cancelled",
                   "outcome": cancelled["outcome"], **_custody().output_disposition(custody)}
         # settle_run retained a verified terminal read-back. Bulk capture stays

@@ -241,10 +241,10 @@ def parse_model_route(value: Any) -> RouteParts:
 
     A bare id is OpenRouter's, ``kind::model`` a kind's built-in connection,
     ``kind@name::model`` a named API connection (``@default`` is the built-in one),
-    ``claudexor::source=model`` the subscription engine, a trailing `` (local)`` the
-    local lane. A ``claudexor@`` head (Claudexor keeps its own account axis) or a
-    malformed name is ``valid=False``; an unknown head stays an opaque OpenRouter id.
-    The model part is returned as written."""
+    ``claudexor::source=model`` the owned subscription engine and ``claudexor@name::source=model``
+    the named remote engine ``name`` (``remote_engines``: where it runs, never an account, which
+    keeps its own axis), a trailing `` (local)`` the local lane. A malformed name is
+    ``valid=False``; an unknown head stays an opaque OpenRouter id. The model part is returned as written."""
     text = str(value or "").strip()
     if text.endswith(" (local)"):
         return RouteParts("local", "", text[:-len(" (local)")], local=True)
@@ -254,7 +254,7 @@ def parse_model_route(value: Any) -> RouteParts:
         return RouteParts("openrouter", "", text)
     if not at:
         return RouteParts(kind, "", model)
-    if kind not in PROVIDER_KINDS or not _CONNECTION_NAME.fullmatch(name):
+    if kind not in ROUTE_KINDS or not _CONNECTION_NAME.fullmatch(name):
         return RouteParts(kind, name, model, valid=False)
     return RouteParts(kind, "" if name == BUILTIN_CONNECTION else name, model)
 
@@ -282,13 +282,33 @@ def tool_schema_limit(model: str, *, use_local: bool = False) -> int | None:
 
 
 def parse_claudexor_model(model: str) -> tuple[str, str]:
-    """Split the model transport's opaque source and model, never an account pin."""
-    if not str(model).startswith("claudexor::"):
+    """Split the model transport's opaque source and model, never an account pin; the engine
+    (``claudexor_engine``) is the route head's, so a remote engine's model splits the same way."""
+    head, sep, rest = str(model).partition("::")
+    kind, at, name = head.partition("@")
+    if not sep or kind != "claudexor" or (at and not _CONNECTION_NAME.fullmatch(name)):
         raise ValueError("Not a Claudexor model identity")
-    source, separator, native_model = str(model)[len("claudexor::"):].partition("=")
+    source, separator, native_model = rest.partition("=")
     if not separator or not source.strip() or not native_model.strip():
         raise ValueError("Claudexor models use claudexor::<source>=<model>")
     return source.strip(), native_model.strip()
+
+
+def claudexor_engine(model: str) -> str:
+    """The named remote engine a Claudexor route runs on ("" for the owned engine or another kind)."""
+    route = parse_model_route(model)
+    return route.connection if route.kind == "claudexor" and route.valid else ""
+
+
+def claudexor_engine_kwargs(model: str) -> dict:
+    """``{"engine": name}`` for a remote engine's route, ``{}`` otherwise: a catalog read's keyword."""
+    engine = claudexor_engine(model)
+    return {"engine": engine} if engine else {}
+
+
+def claudexor_route(engine: str, source: str, model: str) -> str:
+    """The route id of ``source=model`` on ``engine`` ("" = the owned engine): the inverse of the two readers."""
+    return f"claudexor{'@' + engine if engine else ''}::{source}={model}"
 
 
 def resolve_model_target(
@@ -362,8 +382,13 @@ def compatible_endpoint_configured(value: Callable[[str], str]) -> bool:
 
 def _route_has_credentials(route: RouteParts, settings: Mapping[str, Any] | None) -> bool:
     """Whether ``route``'s connection can serve: enabled, with its credential/endpoint."""
-    if route.kind == "claudexor":
-        return route.valid  # A selected engine route needs no API key in Ouroboros.
+    if route.kind == "claudexor":  # A selected engine route needs no API key in Ouroboros; a remote one its row.
+        if not route.valid or not route.connection:
+            return route.valid
+        from ouroboros.remote_engines import engine_connection_rows
+
+        return any(row.get("name") == route.connection and row.get("enabled", True) is not False
+                   for row in engine_connection_rows(settings))
     if route.kind == "local":
         return settings is None or bool(str(settings.get("LOCAL_MODEL_SOURCE") or "").strip())
     from ouroboros.provider_connections import connection_configured, settings_view
@@ -921,7 +946,7 @@ def supports_vision(model_id: str, *, model_role: str = "",
                    else model_role_option(MODEL_ACCOUNTS_KEY, model_role))
         try:
             catalog = LLMClient.claudexor_model_catalog(
-                source, account or None, requested_model=native_model)
+                source, account or None, requested_model=native_model, **claudexor_engine_kwargs(model_id))
         except ClaudexorUnavailable:
             return None
         if catalog.get("source") != source or (account and catalog.get("credentialProfileId") != account):

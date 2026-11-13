@@ -78,6 +78,10 @@ _SPAWN_ALLOWLIST = {
     "ouroboros/local_model.py",           # custody record added at spawn
     "ouroboros/extension_companion.py",   # custody write-through added at spawn
     "ouroboros/tools/services.py",        # routed through spawn_supervised
+    # A remote engine's short SSH commands: each ONE waited child published through
+    # shell_process.tracked_start (Panic and the generation's stop reach it), killed at its
+    # transport bound; its long-lived forward goes through spawn_supervised.
+    "ouroboros/remote_engines.py",
     "supervisor/update_merge.py",        # bounded pre-restart import/compile smoke
     "supervisor/git_ops.py",             # shared bounded Git/dependency helpers (waited + panic-tracked)
     # v7 G1 split: sync_runtime_dependencies (the waited + panic-tracked pip

@@ -533,7 +533,9 @@ reference shape is the service on a trusted Linux host and the work in container
   (wait, cancel, answers, messages, continuation, retry, recovery, collection, cleanup) reaches that
   engine only: another engine's answer never settles it, and a policy naming another engine later
   leaves it refused, not moved. Its sessions read work paths as the service names them: map them at
-  the same address, or the start is refused. Without `engine`, native sessions are refused.
+  the same address, or the start is refused. Without `engine`, native sessions are refused. A route
+  naming an owner's remote engine (`OUROBOROS_ENGINE_CONNECTIONS`) is refused under this section
+  (`remote_engine_not_permitted`): the domain owns every native run.
 - `skill_state_root` is a persistent work folder, mapped at the same address, where each skill's own
   processes keep their state (`<root>/<skill>`, made there as the container's user): its
   `OUROBOROS_SKILL_STATE_DIR`, Deno's write permission and Go's cache and builds. The service keeps

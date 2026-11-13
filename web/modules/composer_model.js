@@ -139,7 +139,8 @@ function offList(doc, rows) {
  * Resolves false when the owner cancels, else `{ moves }`: the ticked rows, each to be moved by its own act.
  */
 export async function confirmMainChange({ next, previous, census = null, dialog = openConfirmDialog, doc = globalThis.document }) {
-    const resets = previous?.lane === 'subscription' && next.source !== previous.source
+    // A pin names one engine's account: a change of source or of engine (`remote:<engine>:…`) drops it.
+    const resets = ['subscription', 'remote'].includes(previous?.lane) && next.source !== previous.source
         ? 'If Main\'s account is pinned it becomes Auto, and a context window set by hand for Main is cleared.'
         : 'A context window set by hand for Main is cleared.';
     const lists = mainSheetLists(census || {});

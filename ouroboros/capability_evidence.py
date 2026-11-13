@@ -230,6 +230,13 @@ def route_fingerprint(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
 
 
+def _engine_route(model_id: Any) -> bool:
+    """A Claudexor engine route, on the owned engine or a named remote one."""
+    from ouroboros.provider_models import parse_model_route
+
+    return parse_model_route(model_id).kind == "claudexor"
+
+
 def model_account_options(model: str, *, role: str = "", settings: Any = None,
                           credential_profile_id: Optional[str] = None,
                           model_route: Any = None) -> Dict[str, Any]:
@@ -672,7 +679,7 @@ def resolve_main_token_density(
         if route_pairs:
             return newest(route_pairs), "fresh_route_usage"
         model_pairs = [item for item in _fresh_density_pairs(store, _normalized_density_model(model_id), basis=MAIN_DENSITY_BASIS)
-                       if str(model_id).startswith("claudexor::") and item[0].get("route_fp") and comparable(item)]
+                       if _engine_route(model_id) and item[0].get("route_fp") and comparable(item)]
         if model_pairs:
             return newest(model_pairs), "fresh_model_usage"
     except Exception:
@@ -838,14 +845,14 @@ def _claudexor_metadata_evidence(model: str, base_url: str, headers: Any,
     """
     from ouroboros.context_timing import counted
     from ouroboros.llm import LLMClient
-    from ouroboros.provider_models import parse_claudexor_model
+    from ouroboros.provider_models import claudexor_engine_kwargs, parse_claudexor_model
 
     source, native_model = parse_claudexor_model(model)
     options = dict(options or {})
     requested_profile = str(options.get("credential_profile_id") or "")
     counted("catalog_calls", key=(source, requested_profile, native_model))
     catalog = LLMClient.claudexor_model_catalog(source, requested_profile or None,
-                                              requested_model=native_model)
+                                              requested_model=native_model, **claudexor_engine_kwargs(model))
     profile = str(catalog.get("credentialProfileId") or "")
     fingerprint = str(catalog.get("accountFingerprint") or "")
     observed = str(catalog.get("observedAt") or "")

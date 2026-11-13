@@ -37,7 +37,7 @@ export function rowIdentity(row, state = {}) {
         providerProfiles: state.providerProfiles, connections: state.connections,
     });
     const label = sourceIdentityLabel(row?.route, {
-        modelSources: state.modelSources,
+        modelSources: state.modelSources, remoteEngines: state.remoteEngines,
         providerProfiles: state.providerProfiles, connections: state.connections,
         harnesses: [{
             id: fields.harness,
@@ -240,6 +240,19 @@ export function sessionRouteVerdict(row, state, nowMs = Date.now()) {
 // (`subagents_settings.js` toolbar). An API model's availability is only ever
 // known when a child starts, so its word says exactly that.
 export function rowStatus(row, state) {
+    const session = row.route.kind === ROUTE_KIND_AGENT_SESSION;
+    const remote = session ? row.route.engine : routeModelFields(row.route).engine;
+    if (remote) {  // this computer's accounts and quotas say nothing about another host's engine
+        const where = (state.remoteEngines || []).find((entry) => entry?.name === remote)?.label || remote;
+        // A session works on that host; a model there only answers, and the tools its child calls run here.
+        return { label: 'Checked at start', tone: 'neutral', reason: '', text: session
+            ? `On ${where} · its tools and files are on that host and availability is checked there when a child `
+                + 'starts; plan turns are not offered there. An Emergency Stop here may leave it working until this computer '
+                + 'reconnects, and it is never moved to another engine, this computer\'s included'
+            : `On ${where} · its requests go to that host under that engine's accounts while the tools it calls run on `
+                + 'this computer; availability is checked there when a child starts. An Emergency Stop here may leave a '
+                + 'request running there until it ends, and it is never moved to another engine, this computer\'s included' };
+    }
     if (row.route.kind !== ROUTE_KIND_AGENT_SESSION) {
         // The sentence names the SOURCE the owner picked, not a bare channel:
         // "API model" alone left two rows on different providers reading

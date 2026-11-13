@@ -50,6 +50,7 @@ def capture_required(entry):
 
     return (entry.mode != "plan" and not entry.patch_disposed and not entry.superseded_by
             and not is_in_place_run(entry)  # its edits are already in place: nothing to capture
+            and not (entry.engine_ref or {}).get("workspace")  # nor a declared remote workspace's (``remote_workspace``)
             and bool(entry.execution_root or entry.resource_ref.get("workspace_kind") == "directory"))
 
 

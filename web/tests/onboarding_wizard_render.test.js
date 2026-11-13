@@ -1043,3 +1043,38 @@ test('a fresh local-only setup saves Light and Fallbacks that follow the local M
         inputs: { ...local, 'openrouter-key': 'sk-or-v1-test-not-a-secret' } });
     assert.deepEqual([mixed.OUROBOROS_MODEL_LIGHT, mixed.OUROBOROS_MODEL_FALLBACKS], [routerDefaults.light, routerDefaults.fallback]);
 });
+
+test('the Models step takes a Main on a remote engine with no account or key here; this computer\'s routes without access are refused', async () => {
+    // A remote engine's Main is configured access there (server_runtime.has_remote_provider counts it): it needs no
+    // account connected here and no key. The controls are the real validator's refusals for this computer's own
+    // subscription with no account connected and an API route with no key.
+    const modelIndex = BOOTSTRAP.stepOrder.indexOf('models');
+    const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState },
+        stepOrder: [...BOOTSTRAP.stepOrder.slice(modelIndex), ...BOOTSTRAP.stepOrder.slice(0, modelIndex)] };
+    // Next with Main typed: the validator's sentence (the step's error line) and the step the wizard then shows.
+    const next = async (query, main) => {
+        const said = inertElement();
+        let html = '';
+        await withWizard(bootstrap, query, async ({ doc }) => {
+            const input = doc.getElementById('main-model');
+            input.value = main;
+            input.fire('input');
+            doc.getElementById('next-btn').fire('click');
+            html = doc.getElementById('root').innerHTML;
+        }, { prepare: (doc) => {
+            const root = doc.getElementById('root');
+            const find = root.querySelector;
+            root.querySelector = (selector) => (selector === '.wizard-error' ? said : find(selector));
+        } });
+        return { said: said.textContent, html };
+    };
+    const remote = await next('main=remote-only', 'claudexor@vps::codex=gpt-6-remote');
+    assert.equal(remote.said, '', 'nothing refuses a remote Main');
+    assert.match(remote.html, /How far Ouroboros reaches into its own code and this computer\./, 'Next moved on to Access');
+    const local = await next('main=local-subscription', 'claudexor::codex=gpt-6');
+    assert.equal(local.said, 'Main uses codex, which has no configured access in this setup.');
+    assert.doesNotMatch(local.html, /How far Ouroboros reaches/);
+    const api = await next('main=api-without-key', 'openai::gpt-x');
+    assert.equal(api.said, 'Main uses OpenAI, which has no configured access in this setup.');
+    assert.doesNotMatch(api.html, /How far Ouroboros reaches/);
+});

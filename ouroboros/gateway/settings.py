@@ -9,7 +9,7 @@ import os
 import pathlib
 import socket
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
@@ -49,6 +49,7 @@ from ouroboros.gateway.owner_settings import (
 from ouroboros.onboarding_wizard import render_onboarding_html
 from ouroboros.platform_layer import is_container_env
 from ouroboros.provider_connections import connection_references, connections_meta, normalize_connections
+from ouroboros.remote_engines import ENGINE_CONNECTIONS_KEY, normalize_engine_connections
 from ouroboros.provider_models import CONNECTIONS_KEY, normalize_builtin_choices
 from ouroboros.gateway.secret_rows import (
     ConnectionSecretIdentityAmbiguous, MCPSecretIdentityAmbiguous, mask_connections, rehydrate_connections,
@@ -1111,6 +1112,31 @@ def _network_exposure_warning(current: Dict[str, Any]) -> str:
     return ""
 
 
+def _retire_unsaved_engine_tunnels(before: Dict[str, Any], after: Dict[str, Any]) -> List[str]:
+    """After a save removed a remote engine or re-pointed its address or home, this computer's tunnel to the old one
+    closes (nothing on that host is touched). Work already recorded there continues there; it is reached again only
+    through a row naming the same address and home. Returns the save's warnings."""
+    from ouroboros import remote_engines
+
+    old = {row["name"]: row for row in remote_engines.engine_connection_rows(before)}
+    new = {row["name"]: row for row in remote_engines.engine_connection_rows(after)}
+    warnings = []
+    for name, row in old.items():
+        kept = new.get(name)
+        if kept is not None and all(kept.get(key) == row.get(key) for key in ("ssh_host", "engine_home")):
+            continue
+        try:
+            closed = remote_engines.retire(name, reason="removed" if kept is None else "repointed")
+        except Exception:
+            log.warning("The tunnel to the remote engine %s did not close", name, exc_info=True)
+            closed = None
+        warnings.append(f"Remote engine {row.get('label') or name}: " + (
+            "this computer's tunnel to it is closed" if closed is not None else
+            "this computer could not confirm its tunnel to it stopped; its process stays in custody")
+            + "; work already running there continues on that host.")
+    return warnings
+
+
 def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True) -> JSONResponse:
     """Merge a patch; the boundary separates its durable commit from subsequent projection."""
     boundary = CommitBoundary()
@@ -1223,6 +1249,8 @@ def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True
                 return unsaved_error(str(exc), 409, code=exc.code)
             except ValueError as exc:
                 return unsaved_error(str(exc), 400, code="MCP_CONFIG_ERROR")
+        if ENGINE_CONNECTIONS_KEY in body and (engines_error := normalize_engine_connections(body[ENGINE_CONNECTIONS_KEY])[1]):
+            return unsaved_error(engines_error, 400, code="engine_connections_invalid")
         if CONNECTIONS_KEY in body:
             rows, connections_error = normalize_connections(body.get(CONNECTIONS_KEY))
             if connections_error:
@@ -1349,6 +1377,7 @@ def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True
                 changes = merged_changes(changes, followup)
                 boundary.receipt = settings_receipt(changes)
                 os.environ["GITHUB_REPO"] = resolved_slug
+        warnings.extend(_retire_unsaved_engine_tunnels(old_effective_settings, current))  # a removed or re-pointed engine
         immediate_changed, next_task_changed = _effect_buckets(all_changed)
         # Owner decision (2026-08-05): the task-start snapshot boundary STAYS for reviewers, subagents, context and
         # effort, said loudly so "Saved" never reads as "applied to the task you are watching". Models, accounts and

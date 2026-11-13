@@ -182,13 +182,14 @@ def _api_owner_chat_model_sync(request: Request, body: Any) -> JSONResponse:
 
 
 def _write_main_route(request: Request | None, choice: dict, *, origin: dict | None = None) -> dict:
-    """Main's role writer owns the save; only same-source subscription pins survive."""
+    """Main's role writer owns the save; only a pin of the same subscription source on the same engine survives
+    (a pin names one engine's account: the owned engine's, or a remote engine's own)."""
     from ouroboros.gateway.settings import _active_main_route
     from ouroboros.model_slots import (
         MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, apply_model_role_override,
         model_role_option, normalize_model_role_options,
     )
-    from ouroboros.provider_models import parse_claudexor_model, provider_for_model
+    from ouroboros.provider_models import claudexor_engine, parse_claudexor_model, provider_for_model
 
     result = {"ok": True, "project_id": ""}
 
@@ -198,7 +199,8 @@ def _write_main_route(request: Request | None, choice: dict, *, origin: dict | N
         subscription = not local and provider_for_model(model) == "claudexor"
         pin = str(model_role_option(MODEL_ACCOUNTS_KEY, "main", settings=current) or "")
         keep = (subscription and not old["use_local"] and old["provider"] == "claudexor"
-                and parse_claudexor_model(model)[0] == parse_claudexor_model(old["model"])[0])
+                and parse_claudexor_model(model)[0] == parse_claudexor_model(old["model"])[0]
+                and claudexor_engine(model) == claudexor_engine(old["model"]))
         updated = apply_model_role_override(current, role="main", model=model,
                                             credential_profile_id=pin if keep else "", use_local=local)
         reset = False

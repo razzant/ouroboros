@@ -490,6 +490,12 @@ export const HAND_WRITTEN = [
     { id: 'accounts:key:zai', keys: ['ZAI_API_KEY', 'ZAI_PLAN'], page: 'accounts/key/zai', name: 'Z.ai key', aliases: ['Z.ai (GLM)', 'GLM', 'More providers'] },
     { id: 'accounts:key:gigachat', keys: ['GIGACHAT_CREDENTIALS', 'GIGACHAT_SCOPE', 'GIGACHAT_USER', 'GIGACHAT_PASSWORD', 'GIGACHAT_BASE_URL', 'GIGACHAT_VERIFY_SSL_CERTS'],
         page: 'accounts/key/gigachat', name: 'GigaChat key', aliases: ['GigaChat', 'More providers'] },
+    // Accounts and keys: the remote engines are a list of heads too, each opening its engine's page
+    // (settings_engine_connections.js); a head's switch and an engine's Save, Turn off and Remove write one entry of
+    // OUROBOROS_ENGINE_CONNECTIONS.
+    { id: 'OUROBOROS_ENGINE_CONNECTIONS', keys: ['OUROBOROS_ENGINE_CONNECTIONS'], page: 'accounts', name: 'Remote engines',
+        meta: 'A Claudexor engine already running on a host your SSH reaches.',
+        aliases: ['Add remote engine', 'Remote engine', 'SSH', 'VPS', 'Claudexor'], writer: 'generic' },
     // Settings › Tools: the list of tool servers, a head each; a head's switch and a server's Save write one entry.
     { id: 'MCP_SERVERS', keys: ['MCP_SERVERS'], page: 'tools', name: 'Tool servers', aliases: ['MCP Servers', 'Add server'], writer: 'generic' },
     // Settings › Models: a line per role, each opening its own page. The routes of Main, Light and the Safety

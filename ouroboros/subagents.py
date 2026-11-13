@@ -171,6 +171,8 @@ class DelegationRoute:
     model: str = ""
     effort: str = ""
     profile_id: str = ""
+    engine: str = ""  # the remote engine connection the run starts on (``remote_engines``); "" = owned
+    workspace: str = ""  # a declared remote workspace there (``remote_workspace``); "" = a staged copy
 
     def resolved_target(self) -> ResolvedModelTarget:
         """The ABI-4 typed target this route pins.

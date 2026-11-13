@@ -53,7 +53,7 @@ export function connectionUsage(settings = {}, slots = []) {
     const sourceOf = (value) => {
         const raw = String(value || '').trim();
         const { source } = parseModelSource(raw);
-        return raw && !source.startsWith('subscription:') ? source : '';
+        return raw && !/^(subscription|remote):/.test(source) ? source : '';  // a remote engine's route names no key
     };
     const note = (value, label) => {
         const source = sourceOf(value);

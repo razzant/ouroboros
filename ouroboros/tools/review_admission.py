@@ -320,7 +320,7 @@ def drop_api_rows(row_plan: dict) -> dict:
     # already carries them — by the SAME indices, so a critic the author added
     # beside the pool stays an added (uncounted) seat after the drop.
     vectors += [key for key in ("parts", "session_tasks", "session_policies", "brief_shas", "additional",
-                               "processing_preferences", "session_accesses")
+                               "processing_preferences", "session_accesses", "engines")
                 if key in row_plan]
     for key in vectors:
         rows = list(row_plan.get(key) or [])

@@ -244,6 +244,21 @@ def _fence_snapshot_running_rows(rows: Any, *, restored_ids: "set[str]") -> "lis
     return fenced
 
 
+def _owe_remote_stops(root) -> None:
+    """A Panic boot's remote step: nothing without a remote engine connection or recorded remote work; else the owed
+    stops are recorded durably, and a failure here is retried by boot's receipt step (``worker_chat_lane``)."""
+    from ouroboros.delegate_recovery import remote_engines_named
+
+    if not remote_engines_named(root):
+        return
+    try:
+        from ouroboros.remote_stops import record_owed_stops
+
+        record_owed_stops(root)
+    except Exception:
+        log.error("Panic's owed remote stops were not recorded at restore; boot's receipt step retries.", exc_info=True)
+
+
 def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stale: bool, certified: bool = True,
                              direct_caught: "list[str]" = (), handoffs: Optional[dict] = None) -> tuple:
     """Which snapshot rows survive the restore, and the RUNNING rows parked beside them.
@@ -303,6 +318,8 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
     door = boot_door(_queue().DRIVE_ROOT)
     owner_restart, panicked = door == "owner_restart", door == "panic"
     panic = panicked
+    if panicked:  # before any work is restored: remote work owes its stop (``remote_stops``)
+        _owe_remote_stops(_queue().DRIVE_ROOT)
     sleep_hold_reason = HOLD_PANIC if panicked else HOLD_OWNER_RESTART if owner_restart else HOLD_SAVED_SLEEP_RECOVERY
     transaction = {} if panicked else fresh_return_transaction(_queue().DRIVE_ROOT)
     returning_queue = set(transaction.get("queue_ids") or []) | set(transaction.get("return_ids") or [])

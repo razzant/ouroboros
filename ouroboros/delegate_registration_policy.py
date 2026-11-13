@@ -219,8 +219,8 @@ def resolve_registration(gateway, scope_root: str, execution_root: str, access: 
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
 
     version = str(getattr(gateway, "engine_version", "") or "")
-    if minted and ephemeral_scope(gateway, thread=thread):
-        return "", "", False, True
+    if (minted or getattr(gateway, "stages_workspace", False)) and ephemeral_scope(gateway, thread=thread):
+        return "", "", False, True  # a remote engine runs only its staged copy of a root (``remote_workspace``)
     persistent = persistent_registration(execution_root, access)
     register = getattr(gateway, "project_registration", None)
     identity = (version, str(getattr(gateway, "engine_build_sha", "") or ""))

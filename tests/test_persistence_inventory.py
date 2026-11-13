@@ -994,7 +994,11 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (``ouroboros/subagent_metrics.py``); their own row.
 # 468 -> 470: the accepted wake transition chain, ``state/consciousness_transitions`` and its
 # ``<sha256>.json`` links (``ouroboros/consciousness_transitions.py``); its own row.
-EXPECTED_SCAN_PATHS = 470
+# 470 -> 479 (remote engines, exact sets compared against the clean base: nine added, none removed): the seven
+# ``state/remote_engines/*`` spellings (a connection's tunnel folder and its run fact snapshots, ``remote_engines.py``)
+# and the two ``task_results/artifacts/*/delegated_runs/*/remote_workspace`` capture spellings (``remote_workspace.py``);
+# their own rows.
+EXPECTED_SCAN_PATHS = 479
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

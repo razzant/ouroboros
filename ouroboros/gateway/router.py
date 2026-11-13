@@ -122,6 +122,7 @@ def collect_routes(
         api_claudexor_wake,
     )
     from ouroboros.gateway.claudexor_quota import api_claudexor_account_reset, api_claudexor_quota_refresh
+    from ouroboros.gateway.engine_connections import engine_connection_routes
     from ouroboros.gateway.harness_maintenance import harness_maintenance_routes
     from ouroboros.gateway.onboarding import (
         api_onboarding_complete,
@@ -331,7 +332,7 @@ def collect_routes(
         Route("/api/claudexor/status", endpoint=api_claudexor_status, methods=["GET"]),
         Route("/api/claudexor/account-resets", endpoint=api_claudexor_account_reset, methods=["POST"]),
         Route("/api/claudexor/account-resets/{operation_id}", endpoint=api_claudexor_account_reset, methods=["GET"]),
-        *harness_maintenance_routes(),
+        *harness_maintenance_routes(), *engine_connection_routes(),
         Route("/api/claudexor/quota/refresh", endpoint=api_claudexor_quota_refresh, methods=["POST"]),
         Route("/api/claudexor/wake", endpoint=api_claudexor_wake, methods=["POST"]),
         Route("/api/claudexor/restart", endpoint=api_claudexor_restart, methods=["GET", "POST"]),

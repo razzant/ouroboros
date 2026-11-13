@@ -36,6 +36,12 @@ GIT_READ_CAPTURE_TIMEOUT_SEC = 300.0
 # Read bound for one Claudexor answer the engine gives only after re-hashing every byte it names (a thread export
 # item, a thread retirement or its abandon); expiry leaves the outcome unknown, never refused.
 CLAUDEXOR_WHOLE_BYTES_READ_SEC = 900.0
+# A remote engine's SSH transport (``remote_engines``): one short command (descriptor, token, a folder step), the
+# loopback forward's readiness, and one whole staged copy or result patch streamed over SSH. Transport bounds,
+# never a judgment of the work: an expired command is stopped here and its effect on the host stays unknown.
+REMOTE_ENGINE_SSH_COMMAND_SEC = 30.0
+REMOTE_ENGINE_FORWARD_READY_SEC = 15.0
+REMOTE_ENGINE_TRANSFER_SEC = 1800.0
 
 
 EXTENSION_STREAM_CHUNK_BYTES = 64 * 1024

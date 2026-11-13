@@ -296,6 +296,8 @@ def join_recorded_review_continuation(gateway: Any, root: Any, entry: Any, detai
     if remaining <= 0 or dispatch_fenced(entry.task_id):
         return None
     source = SimpleNamespace(drive_root=root, task_id=entry.task_id, root_task_id=entry.root_task_id)
+    if getattr(gateway, "stages_workspace", False):
+        gateway.custody_root = root  # a remote replay records its POST handoff here (``remote_engines``)
     try:  # the recorded legacy POST may have been accepted: replay its exact key and body only
         handle = run_operation(source, lambda: gateway.start_run(body, idempotency_key=token))
     except (ClaudexorUnavailable, OwnerPauseRefused) as exc:

@@ -132,6 +132,10 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/review-pool",
     "GET /api/claudexor/status",
     "GET /api/claudexor/maintenance/harnesses",
+    "GET /api/engine-connections",
+    "POST /api/engine-connections/{name}/check",
+    "POST /api/engine-connections/{name}/disconnect",
+    "GET /api/engine-connections/{name}/catalog",
     "POST /api/claudexor/maintenance/operations",
     "GET /api/claudexor/maintenance/operations/{operation_id}",
     "POST /api/claudexor/maintenance/operations/{operation_id}/cancel",
@@ -554,6 +558,20 @@ HTTP_SHAPES: dict[str, Shape] = {
     "GET /api/claudexor/status": Shape(
         "200:ClaudexorStatusResponse|ClaudexorQuotaResponse", query="view include",
         note=f"passive read, never starts the engine; view=quota answers ClaudexorQuotaResponse; {_ENGINE}"),
+    "GET /api/engine-connections": Shape(
+        "200:EngineConnectionsResponse", note="saved remote engines, this installation's last observation of each and "
+        "the stops Emergency Stop still owes there, plus a removed connection still owed one (removed); no host is "
+        "contacted and no token is returned"),
+    "POST /api/engine-connections/{name}/check": Shape(
+        "200:EngineConnectionCheckResponse 404:ErrorResponse", note="attach-only: reuses the live tunnel, else reads "
+        "the running engine's descriptor over SSH; never starts an engine; a refusal is 200 with ok false and its "
+        "typed code; it reads the SAVED row"),
+    "POST /api/engine-connections/{name}/disconnect": Shape(
+        "200:EngineConnectionDisconnectResponse 404:ErrorResponse", note="stops this installation's forward only; the "
+        "engine and its runs continue; a removed row's name works too, one outside the connection-name grammar is 404"),
+    "GET /api/engine-connections/{name}/catalog": Shape(
+        "200:EngineConnectionCatalogResponse", note="sources, models, harnesses and that engine's own accounts through "
+        "an already open tunnel; offline is a state, not empty"),
     "GET /api/claudexor/maintenance/harnesses": Shape(
         "200:ClaudexorMaintenanceInventory 400,503:ClaudexorMaintenanceProblem", query="harness fresh checkLatest",
         note=f"passive; an engine refusal keeps the engine's status; {_ENGINE}"),

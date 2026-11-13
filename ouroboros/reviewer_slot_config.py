@@ -90,6 +90,9 @@ class ConfiguredReviewerSlot:
     delivery: str = ""
     # Captured catalog rights; absent historical rows remain read-only.
     access: str = ""
+    # A session row's remote engine connection (``remote_engines``): its seat starts there through the same staged
+    # transport as a delegated run; '' = the owned engine. Never run locally in its place.
+    engine: str = ""
 
     @property
     def is_session(self) -> bool:
@@ -156,7 +159,7 @@ def _catalog_row_slot(row: Any, settings: Any, *, where: str = "") -> Configured
         return ConfiguredReviewerSlot(
             slot_id=row.subagent_id, kind=ROUTE_KIND_SESSION, target_id=route.target_id,
             effort=row.effort, session_target=route.target_id, profile_id=route.credential_profile_id,
-            subagent_id=row.subagent_id, processing_preference=processing, access=row.access,
+            subagent_id=row.subagent_id, processing_preference=processing, access=row.access, engine=route.engine,
         )
     return ConfiguredReviewerSlot(
         slot_id=row.subagent_id, kind=ROUTE_KIND_API, target_id=route.target_id,
@@ -517,6 +520,7 @@ def _delivery_slot(
         session_target=row.session_target,
         session_profile=row.profile_id,
         session_access=row.access if row.is_session else "",
+        engine=row.engine if row.is_session else "",  # where the seat runs travels with it (``remote_engines``)
         subagent_id=row.subagent_id,
         processing_preference=row.processing_preference,
         # The row's saved delivery is its own fact, stated explicitly in BOTH
@@ -606,6 +610,7 @@ def commit_triad_delivery() -> Dict[str, Any]:
         "session_targets": [slot.session_target for slot in slots],
         "session_profiles": [slot.session_profile for slot in slots],
         "session_accesses": [slot.session_access for slot in slots],
+        "engines": [slot.engine for slot in slots],  # a session seat's remote engine ('' = owned)
         "slot_ids": [slot.slot_id for slot in slots],
         "subagent_ids": [slot.subagent_id for slot in slots],
         # Per-row delivery class (#1334, F8): the row's own explicit fact; no

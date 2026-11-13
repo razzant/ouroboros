@@ -226,8 +226,10 @@ test('showing the list reads no status, starts no daemon and calls no provider; 
     assert.deepEqual(world.all('[data-provider-rows]')[0].children.map((head) => head.dataset.entryId), ['codex', 'claude', 'cursor']);
     assert.match(world.find('[data-provider-rows]').textContent, /Not checked/);
     assert.equal(world.find('[data-accounts-check]').hidden, false);
-    assert.deepEqual([...new Set(world.state.calls.map((call) => `${call.method} ${call.path}`))].sort(), ['GET /api/extensions', 'GET /api/settings'],
-        'only the settings document and the skills are read');
+    // The remote engines' read is what this computer last observed of them: it contacts no host (CLIENT_CONTRACT).
+    assert.deepEqual([...new Set(world.state.calls.map((call) => `${call.method} ${call.path}`))].sort(),
+        ['GET /api/engine-connections', 'GET /api/extensions', 'GET /api/settings'],
+        'only the settings document, the skills and the remote engines\' last observation are read');
     list.unmount();
 
     // The provider's page: its showing is the owner's act. One status read, one program read, and the idle daemon it

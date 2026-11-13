@@ -2,8 +2,15 @@
 
 The two settings keep different public wire vocabularies (``api_model`` versus
 ``api_chat`` and different credential-pin keys).  This module owns only the
-common mechanical facts: route kind, target identity, optional account pin,
-and the ban on provider ``::`` syntax for agent-session targets.
+common mechanical facts: route kind, target identity, optional account pin, the
+engine a session runs on, and the ban on provider ``::`` syntax for agent-session targets.
+
+A session route's ``engine`` names a remote engine connection (``remote_engines``): where the
+session runs, orthogonal to its harness, model and account; "" is the owned engine and is not
+written, so a local route's bytes stay as they were. ``workspace`` (with an engine only) names a
+remote workspace that connection declares: the session then works in that folder on the host
+instead of a staged copy (``remote_workspace``). An ``api_model`` route names its engine in its
+target (``claudexor@<engine>::source=model``) and carries neither field.
 """
 
 from __future__ import annotations
@@ -20,6 +27,8 @@ class RouteSpec:
     kind: str  # api_model | agent_session
     target_id: str
     credential_profile_id: str = ""
+    engine: str = ""  # a session's remote engine connection; "" = the owned engine
+    workspace: str = ""  # a declared remote workspace on that engine's host; "" = a staged copy
 
     @property
     def is_session(self) -> bool:
@@ -49,7 +58,7 @@ def parse_route_spec(
     if not isinstance(raw, dict):
         raise ValueError(f"{setting}: {where} route must be an object {{kind, target_id}}")
     if reject_unknown:
-        unknown = sorted(set(raw) - {"kind", "target_id", pin_key})
+        unknown = sorted(set(raw) - {"kind", "target_id", pin_key, "engine", "workspace"})
         if unknown:
             raise ValueError(f"{setting}: {where} route has unknown keys: {unknown}")
 
@@ -82,10 +91,44 @@ def parse_route_spec(
     if strict_strings and raw_pin is not None and not isinstance(raw_pin, str):
         raise ValueError(f"{setting}: {where} route.{pin_key} must be a string")
     pin = str(raw_pin or "").strip()
-    route = RouteSpec(kind=kind, target_id=target, credential_profile_id=pin)
+    engine = _engine(raw.get("engine"), kind, setting=setting, where=where)
+    route = RouteSpec(kind=kind, target_id=target, credential_profile_id=pin, engine=engine,
+                      workspace=_workspace(raw.get("workspace"), engine, setting=setting, where=where))
     if reject_api_pin and pin and not route.supports_account_pin:
         raise ValueError(f"{setting}: {where} route.{pin_key} is meaningful only for agent_session or a managed model source")
     return route
+
+
+def _engine(raw: Any, kind: str, *, setting: str, where: str) -> str:
+    """A session route's remote engine name (the connection-name grammar), "" when absent."""
+    if raw is None or raw == "":
+        return ""
+    from ouroboros.remote_engines import _RESERVED_NAMES, CONNECTION_NAME
+
+    if kind != ROUTE_KIND_AGENT_SESSION:
+        raise ValueError(f"{setting}: {where} route.engine is meaningful only for agent_session; an API route "
+                         "names its engine in its target (claudexor@<engine>::source=model)")
+    if not isinstance(raw, str) or not CONNECTION_NAME.fullmatch(raw) or raw in _RESERVED_NAMES:
+        raise ValueError(f"{setting}: {where} route.engine must name an engine connection")
+    return raw
+
+
+def _workspace(raw: Any, engine: str, *, setting: str, where: str) -> str:
+    """A session route's declared remote workspace: an absolute folder on its engine's host, "" when absent."""
+    if raw is None or raw == "":
+        return ""
+    from ouroboros.remote_engines import remote_path_error
+
+    if not engine:
+        raise ValueError(f"{setting}: {where} route.workspace needs route.engine: it is a folder on that engine's host")
+    if (error := remote_path_error(raw, home_ok=False)):
+        raise ValueError(f"{setting}: {where} route.workspace {error}")
+    return raw
+
+
+def session_location(route: Mapping[str, Any]) -> dict[str, str]:
+    """``{engine, workspace}`` of a stored session route object, "" for the owned engine and a staged copy."""
+    return {"engine": str(route.get("engine") or ""), "workspace": str(route.get("workspace") or "")}
 
 
 def route_spec_dict(route: RouteSpec, *, api_kind: str, pin_key: str) -> dict[str, str]:
@@ -96,6 +139,10 @@ def route_spec_dict(route: RouteSpec, *, api_kind: str, pin_key: str) -> dict[st
     }
     if route.supports_account_pin:
         payload[pin_key] = route.credential_profile_id
+    if route.engine:
+        payload["engine"] = route.engine
+    if route.workspace:
+        payload["workspace"] = route.workspace
     return payload
 
 
@@ -173,5 +220,6 @@ __all__ = [
     "RouteSpec",
     "parse_route_spec",
     "route_spec_dict",
+    "session_location",
     "validate_compound_session_effort",
 ]

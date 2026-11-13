@@ -7,12 +7,15 @@
  *   program's row above the accounts, then the accounts, the ones that need sign-in first.
  * - `accounts/key/<provider>[/<name>]`, `accounts/key/new`: one API key's page; `accounts/key/custom`: a key of the
  *   owner's own.
+ * - `accounts/engine/<name>`, `accounts/engine/new`: one remote engine's page (settings_engine_connections.js); the list
+ *   draws a head per saved engine from what this computer last observed, which reads no host.
  *
  * What starts a read: showing a provider's page is the owner's act that reads the accounts and the program, and may
  * start an idle agent daemon, as opening the Accounts tab was. The home and the list never do: the list draws the
  * shared accounts store as it stands (its subscriber is never a visible surface, so it arms no poll), says "Not
  * checked" for what nobody read, and offers one Check, which only reads. */
 
+import { apiClient } from './api_client.js';
 import { RESTART_LABEL } from './claudexor_restart.js';
 import { FACET_ACCOUNTS, FACET_QUOTA, READ_OK, accountRows, claudexorStatus, familyLabel } from './claudexor_status_store.js';
 import { accountGroups, destroyHarnessAccounts, initHarnessAccounts, needsSignIn, quotaSummary, renderAgentsServiceBanner,
@@ -22,6 +25,8 @@ import { harnessPresentation } from './harness_presentation.js';
 import { strokeIcon } from './page_icons.js';
 import { apiConnections } from './route_editor_primitives.js';
 import { editorLine, keyHeads, keyPath, keyTitle, mountKeyPage, parseKeyPath, referencesLine, setKeyEnabled } from './settings_connections.js';
+import { ENGINE_CONNECTIONS_KEY, ENGINE_DETAILS, engineConnectionRows, engineHeads, engineSaveWords, engineTitle, mountEnginePage,
+    parseEnginePath, removedOwedLine, setEngineEnabled } from './settings_engine_connections.js';
 import { bindSettingRows, doorSign, settingsRow } from './settings_controls.js';
 import { readSkills } from './settings_extension_forms.js';
 import { registerSettingsPage } from './settings_pages.js';
@@ -42,6 +47,9 @@ const switchHtml = (attrs, on) => `<label class="ui-switch"><input type="checkbo
 const landed = (outcome) => outcome?.state === 'saved' || outcome?.state === 'saved_then_failed';
 // The key of the home's row for this page (settings_home.js), for a key whose provider has no mark of its own.
 const KEY_GLYPH = strokeIcon('<path d="m15.5 7.5 2.3 2.3a1 1 0 0 0 1.4 0l2.1-2.1a1 1 0 0 0 0-1.4L19 4"/><path d="m21 2-9.6 9.6"/><circle cx="7.5" cy="15.5" r="5.5"/>', 16);
+// A remote engine's head: a host.
+const ENGINE_GLYPH = strokeIcon('<rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><path d="M6 7h.01"/><path d="M6 17h.01"/>', 16);
+const isEnginePath = (path) => path === 'accounts/engine' || String(path).startsWith('accounts/engine/');
 
 /** A provider's mark for a head: its brand mark, else the neutral one (harness_presentation.js). */
 function providerMarkHtml(harness) {
@@ -142,6 +150,19 @@ function keyHeadHtml(head, busy) {
     </div>`;
 }
 
+// A remote engine's head: its name, its SSH destination and state, the switch that takes it out of new work, its door.
+function engineHeadHtml(head, busy) {
+    const use = switchHtml(`data-engine-switch aria-label="${escapeHtml(`Use ${head.title}`)}"${busy ? ' disabled aria-busy="true"' : ''}`, head.enabled);
+    return `<div class="ui-row settings-head" data-entry-id="engine:${escapeHtml(head.name)}" data-engine-name="${escapeHtml(head.name)}" data-open-path="${escapeHtml(head.path)}">
+        <span class="settings-head-glyph" aria-hidden="true">${ENGINE_GLYPH}</span>
+        <button type="button" class="settings-head-open ui-hit-area" data-entry-open>
+            <span class="ui-row-title" data-i18n-skip>${escapeHtml(head.title)}${chipHtml(head.chip)}</span>
+            <span class="ui-row-meta">${escapeHtml(head.meta)}</span>
+        </button>
+        <div class="ui-row-actions">${use}${CHEVRON}</div>
+    </div>`;
+}
+
 const doorHtml = (card) => `<button type="button" class="ui-row settings-row" data-kind="door" data-open-path="${keyPath(card.kind)}">
         <span class="ui-row-title">${escapeHtml(card.title)}</span><span class="ui-row-meta"><span>${escapeHtml(card.hint || '')}</span></span>
         <span class="ui-row-actions">${CHEVRON}</span></button>`;
@@ -177,6 +198,15 @@ function mountList(container, { ctx = {} }) {
             <p class="settings-card-note accounts-engine"><span class="ui-status" data-accounts-engine></span>
                 <button type="button" class="btn btn-ghost btn-sm" data-accounts-check hidden>Check</button></p>
         </section>
+        <section class="ui-card settings-card" data-setting-row="${ENGINE_CONNECTIONS_KEY}">
+            <div class="settings-card-head"><h3 class="settings-card-title">Remote engines</h3>
+                <span class="ui-result" data-engine-result role="status" aria-live="polite"></span>
+                <button type="button" class="btn btn-default btn-sm" data-open-path="accounts/engine/new">Add remote engine</button></div>
+            <p class="settings-card-lead">A Claudexor engine already running on a host your SSH reaches. Models and Agents can then choose to run there.</p>
+            <p class="settings-card-note" data-engine-owed data-tone="warn" hidden></p>
+            <div class="settings-rows" data-engine-rows></div>
+            <details class="ui-disclosure" data-engine-more><summary>More: what runs where</summary><p class="settings-card-note">${escapeHtml(ENGINE_DETAILS)}</p></details>
+        </section>
         <section class="ui-card settings-card" data-setting-row="OUROBOROS_CONNECTIONS">
             <div class="settings-card-head"><h3 class="settings-card-title">API keys</h3>
                 <span class="ui-result" data-entry-result role="status" aria-live="polite"></span>
@@ -194,8 +224,13 @@ function mountList(container, { ctx = {} }) {
         </section>`;
     const find = (selector) => container.querySelector(selector);
     const [providersEl, keysEl, moreEl, otherEl, fold] = ['[data-provider-rows]', '[data-key-rows]', '[data-more-rows]', '[data-other-rows]', '[data-settings-fold]'].map(find);
-    const drawn = { providers: '', keys: '', more: '', other: '' };
+    const enginesEl = find('[data-engine-rows]');
+    const drawn = { providers: '', keys: '', more: '', other: '', engines: '' };
     const busy = new Set();   // keys whose switch is in flight
+    const engineBusy = new Set();  // engines whose switch is in flight
+    let engineStatus = null;  // GET /api/engine-connections: what this computer last observed; null while unread
+    let engineUnread = false;  // the last status read failed
+    let revealEngine = '';
     let settings = null;
     let skills = [];
     const otherRows = new Map();  // each row keeps its field, caret and result while the skills list arrives
@@ -270,7 +305,31 @@ function mountList(container, { ctx = {} }) {
             revealNewRow(neighbour?.node, control);
         }
     }
-    const paint = () => { paintProviders(); paintKeys(); paintOther(); };
+    function paintEngines() {
+        if (!settings) return;
+        // A status read that failed says every saved engine's status is unknown (never "none"), whenever the rows arrive.
+        const observed = engineUnread ? engineConnectionRows(settings[ENGINE_CONNECTIONS_KEY])
+            .map((row) => ({ name: row.name, observation: { state: 'unread' }, owed_stops: null })) : engineStatus;
+        put('engines', enginesEl, engineHeads(settings, observed).map((head) => engineHeadHtml(head, engineBusy.has(head.name))).join('')
+            || '<p class="settings-card-note">No remote engine yet.</p>');
+        const owed = removedOwedLine(observed || []);
+        Object.assign(find('[data-engine-owed]'), { textContent: owed, hidden: !owed });
+        const added = revealEngine && [...enginesEl.querySelectorAll('[data-engine-name]')].find((node) => node.dataset.engineName === revealEngine);
+        if (added) { revealEngine = ''; revealNewRow(added, added.querySelector('[data-entry-open]')); }
+    }
+
+    // What this computer last observed of each engine (no host is contacted).
+    async function readEngineStatus() {
+        try {
+            engineStatus = (await apiClient.engineConnections())?.connections || [];
+            engineUnread = false;
+        } catch {
+            engineUnread = true;
+        }
+        if (!gone) paintEngines();
+    }
+
+    const paint = () => { paintProviders(); paintKeys(); paintOther(); paintEngines(); };
 
     async function read({ withSkills = false } = {}) {
         // Skills enrich the page independently: their read cannot hold up a key or erase a field being edited.
@@ -299,6 +358,20 @@ function mountList(container, { ctx = {} }) {
         await read();
     }
 
+    async function switchEngine(input) {
+        const head = input.closest('[data-engine-name]');
+        const name = head.dataset.engineName;
+        engineBusy.add(name);
+        Object.assign(input, { disabled: true }).setAttribute('aria-busy', 'true');
+        const outcome = await setEngineEnabled(name, input.checked, head.querySelector('.ui-row-title')?.textContent || name);
+        engineBusy.delete(name);
+        if (gone) return;
+        setResult(find('[data-engine-result]'), engineSaveWords(outcome));
+        drawn.engines = '';   // the switch shows what is stored again, whatever the write answered
+        await read();
+        void readEngineStatus();
+    }
+
     const onClick = (event) => {
         const hit = (selector) => event.target?.closest?.(selector);
         if (hit('[data-accounts-check]')) { void store.refresh(); paintProviders(); return; }
@@ -306,8 +379,11 @@ function mountList(container, { ctx = {} }) {
         const door = hit('[data-open-path]');
         if (door && container.contains(door)) ctx.openSettings?.(door.dataset.openPath);
     };
-    const onChange = (event) => { if (event.target?.matches?.('[data-entry-switch]')) void switchKey(event.target); };
-    const onShown = (event) => { if (event.detail?.path === 'accounts') void read({ withSkills: true }); };
+    const onChange = (event) => {
+        if (event.target?.matches?.('[data-entry-switch]')) void switchKey(event.target);
+        else if (event.target?.matches?.('[data-engine-switch]')) void switchEngine(event.target);
+    };
+    const onShown = (event) => { if (event.detail?.path === 'accounts') { void read({ withSkills: true }); void readEngineStatus(); } };
     // One of the keys here was written (a row of this page, a key's page): the document is read again, and a stored
     // key whose write landed puts its field away.
     const onSaved = (event) => {
@@ -323,12 +399,12 @@ function mountList(container, { ctx = {} }) {
     win?.addEventListener?.('ouro:settings-page-shown', onShown);
     win?.addEventListener?.('ouro:settings-updated', onSaved);
     win?.addEventListener?.('ouro:page-shown', onPage);
-    paintProviders();
+    paintProviders();  // the settings and the engines' status are read when the list is shown, as the shell says it is
     const mine = list = {
-        // What a key's page did, said where the key stands (or stood): the head of a key just added takes the caret.
-        say(note, { added = '', other = false, warning = '' } = {}) {
-            reveal = added;
-            setResult(find(other ? '[data-other-result]' : '[data-entry-result]'),
+        // What a key's or an engine's page did, said where it stands (or stood): the head just added takes the caret.
+        say(note, { added = '', other = false, engine = false, warning = '' } = {}) {
+            if (engine) revealEngine = added; else reveal = added;
+            setResult(find(engine ? '[data-engine-result]' : other ? '[data-other-result]' : '[data-entry-result]'),
                 warning ? { text: `${note} ${warning}`, tone: 'warn' } : { text: note, tone: 'ok' });
         },
     };
@@ -395,15 +471,23 @@ function mountProvider(container, { path }) {
 
 /* ---- The family ---------------------------------------------------------------------------------------------------- */
 
-/** A key's page tells the list what it did and returns there. */
-const backToList = (ctx, other = false) => (note, added = '', warning = '') => {
+/** A key's or an engine's page tells the list what it did and returns there. */
+const backToList = (ctx, other = false, engine = false) => (note, added = '', warning = '') => {
     ctx.openSettings?.('accounts');
-    list?.say(note, { added, other, warning });
+    list?.say(note, { added, other, engine, warning });
 };
 
 function mount(container, { path, row, ctx = {} }) {
     if (path === 'accounts') return mountList(container, { ctx, row });
     if (path === CUSTOM_KEY_PATH) return mountCustomKeyPage(container, { ctx, left: backToList(ctx, true) });
+    if (isEnginePath(path)) {
+        if (parseEnginePath(path)) {
+            const handle = mountEnginePage(container, { path, ctx, left: backToList(ctx, false, true) });
+            return handle.ready.then(() => handle);  // the shell titles the page once the read names its engine
+        }
+        container.innerHTML = '<p class="settings-page-lead">No remote engine has this name.</p>';
+        return null;
+    }
     if (path.startsWith('accounts/key/') || path === 'accounts/key') {
         if (parseKeyPath(path)) {
             const handle = mountKeyPage(container, { path, ctx, left: backToList(ctx) });
@@ -418,6 +502,7 @@ function mount(container, { path, row, ctx = {} }) {
 function title(path) {
     if (path === 'accounts') return 'Accounts and keys';
     if (path === CUSTOM_KEY_PATH) return 'New key';
+    if (isEnginePath(path)) return engineTitle(path);
     if (path.startsWith('accounts/key')) return keyTitle(path);
     return familyLabel(decodeURIComponent(path.split('/')[1] || ''), claudexorStatus.snapshot, { catalogKnown: claudexorStatus.catalogKnown });
 }

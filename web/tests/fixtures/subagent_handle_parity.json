@@ -411,6 +411,74 @@
           "same_engine_as": null
         }
       ]
+    },
+    {
+      "case": "where a session runs is its identity: the owned engine, a remote engine's staged copy and its declared workspace are three engines; the same place twice is a twin",
+      "global_processing": "",
+      "items": [
+        {
+          "subagent_id": "local",
+          "recommended_use": "",
+          "route": {
+            "kind": "agent_session",
+            "target_id": "codex=gpt-6-remote"
+          }
+        },
+        {
+          "subagent_id": "copy",
+          "recommended_use": "",
+          "route": {
+            "kind": "agent_session",
+            "target_id": "codex=gpt-6-remote",
+            "engine": "vps",
+            "credential_profile_id": "remote-main"
+          }
+        },
+        {
+          "subagent_id": "inplace",
+          "recommended_use": "",
+          "route": {
+            "kind": "agent_session",
+            "target_id": "codex=gpt-6-remote",
+            "engine": "vps",
+            "workspace": "/srv/project",
+            "credential_profile_id": "remote-main"
+          }
+        },
+        {
+          "subagent_id": "twin",
+          "recommended_use": "",
+          "route": {
+            "kind": "agent_session",
+            "target_id": "codex=gpt-6-remote",
+            "engine": "vps",
+            "workspace": "/srv/project",
+            "credential_profile_id": "remote-main"
+          }
+        }
+      ],
+      "expected": [
+        {
+          "handle": "codex=gpt-6-remote",
+          "roster": "codex=gpt-6-remote",
+          "same_engine_as": null
+        },
+        {
+          "handle": "codex=gpt-6-remote/on:vps/@remote-main",
+          "roster": "codex=gpt-6-remote/on:vps/@remote-main",
+          "same_engine_as": null
+        },
+        {
+          "handle": "codex=gpt-6-remote/on:vps:/srv/project/@remote-main",
+          "roster": "codex=gpt-6-remote/on:vps:/srv/project/@remote-main~inplace",
+          "same_engine_as": null
+        },
+        {
+          "handle": "codex=gpt-6-remote/on:vps:/srv/project/@remote-main",
+          "roster": "codex=gpt-6-remote/on:vps:/srv/project/@remote-main~twin",
+          "same_engine_as": 2
+        }
+      ]
     }
   ],
   "snapshots": [

@@ -201,7 +201,8 @@ def _session_route_reason(row: ConfiguredReviewerSlot) -> str:
     try:
         from ouroboros.execution_domain import native_gateway
 
-        gateway = native_gateway(admission_wait_sec=0)  # where its seat runs: the domain's work engine, else owned
+        # Where its seat runs: the row's remote engine, else the domain's work engine, else the owned one.
+        gateway = native_gateway(engine=row.engine, admission_wait_sec=0)
     except Exception as exc:
         return f"agent_service_unavailable: {type(exc).__name__}: {exc}"
     try:
@@ -682,7 +683,7 @@ def _run_retrieving_review(
         use_local=row.use_local if row.use_local is not None else review_model_uses_local(sendable),
         route=ReviewRouteKind.AGENT_SESSION if row.is_session else ReviewRouteKind.API_CHAT,
         session_target=row.session_target, session_profile=row.profile_id,
-        session_access=row.access if row.is_session else "",
+        session_access=row.access if row.is_session else "", engine=row.engine if row.is_session else "",
         subagent_id=row.subagent_id, processing_preference=row.processing_preference,
     )
     from ouroboros.review_checking import wave_checking_source

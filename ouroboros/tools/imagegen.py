@@ -59,6 +59,8 @@ def _route(model: str) -> tuple[str, str]:
     if ("::" not in text or not text.startswith(route.kind) or not route.valid
             or route.kind not in {*image_api.IMAGE_API_SOURCES, "claudexor"} or not route.model.strip()):
         raise ValueError("model must select an image route: openai::<model>, openrouter::<model>, zai::<model>, or claudexor::<source>=<model>. Use list_image_models; no default is chosen.")
+    if route.kind == "claudexor" and route.connection:  # never served locally in its place
+        raise ValueError(f"Image generation runs on Ouroboros's own engine; the remote engine {route.connection!r} is not used for images.")
     return route.kind, route.model.strip()
 
 
@@ -241,8 +243,9 @@ def _record_unknown(ctx: ToolContext, request_id: str, model: str, code: str) ->
 def _retain_call(ctx: ToolContext, request_id: str, model: str, stage: str, payload: dict, **facts) -> dict:
     """Use the existing private call/CAS custody, beside the ORIGINAL money ledger."""
     from ouroboros.observability import persist_call
+    from ouroboros.provider_models import provider_for_model
 
-    subscription = model.startswith("claudexor::")
+    subscription = provider_for_model(model) == "claudexor"  # an engine's operation custody, read by the one parser
     family = "model" if subscription else "image"
     return persist_call(pathlib.Path(getattr(ctx, "budget_drive_root", None) or ctx.drive_root),
         task_id=task_id_for_artifacts(ctx), call_id=f"{request_id}_{family}_{stage}",

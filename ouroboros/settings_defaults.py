@@ -79,6 +79,7 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "ZAI_API_KEY": "",
     "ZAI_PLAN": "",
     "OUROBOROS_CONNECTIONS": [],  # extra keys/endpoints per kind, one row each (provider_connections)
+    "OUROBOROS_ENGINE_CONNECTIONS": [],  # named remote Claudexor engines over SSH, one row each (remote_engines)
     "OUROBOROS_NETWORK_PASSWORD": "",
     "OUROBOROS_SERVER_HOST": "127.0.0.1",
     "OUROBOROS_HOST_SERVICE_PORT": 8767,
@@ -539,6 +540,8 @@ SETTINGS_KEYS_NOT_EXPORTED_TO_ENV = frozenset({
     "MCP_SERVERS",
     # The same for the API connection rows, whose keys would otherwise ride every child's environment.
     "OUROBOROS_CONNECTIONS",
+    # And the remote engine rows (no secret, but the same structured list a child never needs).
+    "OUROBOROS_ENGINE_CONNECTIONS",
     # ENV IS THE AUTHORITY for the bind host, not settings. `ouroboros server --host 0.0.0.0` puts the choice in
     # the environment, and both consumers (server.main, server_control.restart_current_process) deliberately read
     # env BEFORE settings. Exporting this key stamped the settings value — usually the shipped 127.0.0.1 default,

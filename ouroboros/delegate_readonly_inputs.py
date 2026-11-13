@@ -66,11 +66,13 @@ class ReadonlyInputs(NamedTuple):
     instruction: str      # appended to the run's instructions
     selected: Optional[List[Dict[str, Any]]]  # the receipt: None when nothing was asked, else one row per entry
     selection_note: str   # the selection's own text, restated in a continuation's prompt
+    sources: tuple = ()   # every host path the instructions name for these inputs (``session_host_sources``)
 
     @property
     def custody(self) -> Dict[str, Any]:
         """The durable source map on the start's START_REQUESTED row."""
         return {"input_files": self.selected} if self.selected is not None else {}  # an explicit [] is a fact too
+
 
 
 NO_INPUTS = ReadonlyInputs("", "", None, "")
@@ -320,10 +322,11 @@ def prepare_readonly_inputs(ctx: Any, invocation_id: str, entries: Optional[List
         outside = [{**row, "local": str(delivered / _selected_rel(row))} for row in outside]  # what the work reads
         manifest = delivered / "inputs.json"
     note = _selection_note(manifest, outside, inside_scope=False) if outside else ""
+    named = tuple(dict.fromkeys([*(str(row["local"]) for row in outside), *([str(manifest)] if manifest else [])]))
     if container is None:
-        return ReadonlyInputs("", "\n" + note, outside, note)
+        return ReadonlyInputs("", "\n" + note, outside, note, named)
     if turn:
-        return ReadonlyInputs(thread_folder, "\n" + note if note else "", outside, note)
+        return ReadonlyInputs(thread_folder, "\n" + note if note else "", outside, note, named)
     root = container / invocation_id
     root.mkdir(parents=True, exist_ok=False)
     lineage = [] if rows else _lineage_copies(ctx, root)  # a nonempty selection is the whole set
@@ -338,7 +341,7 @@ def prepare_readonly_inputs(ctx: Any, invocation_id: str, entries: Optional[List
         "inputs.json maps the selected files, or default native lineage sources, to verified local copies. "
         "Read those local paths when the work order names the original sources. "
         "The manifest describes staged copies, not an additional filesystem-read boundary.\n"
-    ) + note, receipt, note)
+    ) + note, receipt, note, (str(root),))
 
 
 def _selected_rel(row: Dict[str, Any]) -> str:

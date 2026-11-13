@@ -341,6 +341,12 @@ def execute_panic_stop(
     recycled descriptor ports never authorize signalling an unrelated process.
     A managed execution domain's dedicated containers are killed by the identity
     this generation measured (``execution_domain``); their settlement only reports.
+    A remote engine's open runs and model operations get one best-effort stop each on
+    their own thread, never awaited and never ahead of a local kill: the census ends our
+    SSH forwards with every other local process, so such a stop is often cut. The
+    remote engine itself is never stopped; the run's owed stop stays in its custody row
+    and the next start delivers it (``remote_stops``). Without a remote engine connection
+    the step imports and reads nothing remote.
     """
     global _restart_stop_requested
     _restart_stop_requested = True  # claim termination before any import, stop callback or I/O
@@ -427,6 +433,9 @@ def execute_panic_stop(
         attempt("services", lambda: kill_all_services(data_dir, request_only=True))
         attempt("companions", lambda: panic_kill_all(request_only=True))
         attempt("restart-successor", stop_restart_successor)
+        # Remote engines: one best-effort stop each, on its own thread, imported there (a broken remote module ends
+        # that attempt only). The census below ends our SSH forwards with every other local process.
+        attempt("remote-engines", lambda: _remote_panic_step(data_dir))
         # One more bounded request attempt: every live member of the installation scope
         # (marker, recorded task groups, the engine's recorded runs) by re-measured identity,
         # excluding this server, its launcher and pid 1; a restart successor carries the
@@ -467,6 +476,7 @@ def execute_panic_stop(
         attempt("executors", lambda: kill_all_foreground(data_dir, wait=False), settle=True)
         attempt("services", lambda: kill_all_services(data_dir, wait=False), settle=True)
         attempt("companions", panic_kill_all, settle=True)
+        attempt("remote-engines", lambda: _remote_panic_step(data_dir, settle=True), settle=True)
         # Workers received private lifeline requests above. Root-first tree cleanup
         # here would destroy their local child ownership before those requests run.
         # Queue/custody reconciliation belongs to the following supervisor boot.
@@ -482,6 +492,23 @@ def execute_panic_stop(
                                           requests, settlements, flag_written, controls_written, panic_exit_code), 0.5)
         finally:
             os._exit(panic_exit_code)
+
+
+def _remote_panic_step(data_dir: pathlib.Path, *, settle: bool = False) -> Any:
+    """Panic's remote-engine step, inside its own ``attempt`` thread: nothing on an installation with no remote
+    engine connection and no recorded remote work, otherwise best-effort stops (request phase) or the ledgered
+    forwards' stop (settlement)."""
+    from ouroboros.delegate_recovery import remote_engines_named
+
+    if not remote_engines_named(data_dir):  # the raw setting, else current custody: nothing remote is opened
+        return {"requested": True, "remote_engines": 0}
+    if settle:
+        from ouroboros.remote_engines import panic_close
+
+        return panic_close()
+    from ouroboros.remote_stops import panic_stop_work
+
+    return panic_stop_work(data_dir)
 
 
 def _bounded(fn, timeout_sec: float) -> bool:

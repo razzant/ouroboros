@@ -71,6 +71,7 @@ def collection_pending(entry, root=None) -> bool:
 
 def _held(entry) -> bool:
     return (not entry.settled or entry.project_owned or collection_pending(entry)
+            or ((entry.engine_ref or {}).get("kind") == "remote" and not entry.remote_copy_retired)  # its host copy
             or (entry.mode != "plan" and (entry.snapshot_id or (entry.resource_ref.get("workspace_kind") == "directory"
                                       and entry.resource_ref.get("strategy") == "copy"))
                 and not entry.patch_disposed))
@@ -462,6 +463,25 @@ def _reduce(txn, event: Dict[str, Any], state: Dict[str, Any], marks_by_task: Di
                 txn.put_row("delegated_runs", entry.task_id, {**debt, "task_id": entry.task_id, "closed_runs": receipts})
             if run_id == late:
                 owed = entry.task_id
+    if iid and not rid and kind in (c.CONTAINMENT_FAULT, c.CONTAINMENT_RESOLVED):
+        # A start with no run id yet keeps its incident on its open invocation row (``remote_stops``).
+        from ouroboros.delegate_pending import _invocation_fault
+
+        open_row = txn.get_row("custody_open", f"invocation:{iid}")
+        if open_row is not None:
+            record = {"containment_fault": open_row["containment_fault"]} if "containment_fault" in open_row else {}
+            _invocation_fault(record, event)
+            updated = {key: value for key, value in open_row.items() if key != "containment_fault"}
+            txn.put_row("custody_open", f"invocation:{iid}", {**updated, **record})
+    if iid and kind == c.REMOTE_START_PHASE:  # how far the open invocation's remote start got (``remote_engines``)
+        from ouroboros.delegate_pending import _advance_phase
+
+        open_row = txn.get_row("custody_open", f"invocation:{iid}")
+        if open_row is not None:
+            advanced = dict(open_row)
+            _advance_phase(advanced, event)
+            if advanced != open_row:
+                txn.put_row("custody_open", f"invocation:{iid}", advanced)
     if iid and (kind == c.STARTED or (kind == c.START_FAILED and event.get("definite") is True)):
         request = txn.get_row("custody_open", f"invocation:{iid}")
         txn.delete_row("custody_open", f"invocation:{iid}")
@@ -709,6 +729,8 @@ def fold(rows) -> Dict[str, Any]:
     state: Dict[str, Any] = {}
     requests: Dict[str, Dict[str, Any]] = {}
     pending_ids: List[str] = []
+    incidents: Dict[str, Dict[str, Any]] = {}  # a start without a run id: its incident (``remote_stops``)
+    phases: Dict[str, Dict[str, Any]] = {}  # how far a remote start got (``remote_engines``)
     refused: Dict[str, Dict[str, Any]] = {}
     marks_by_task: Dict[str, Dict[str, Any]] = {}
     invocations, operations, event_ordinals, cost_revisions = {}, {}, {}, {}
@@ -727,6 +749,14 @@ def fold(rows) -> Dict[str, Any]:
         if kind == c.START_REQUESTED and iid and iid not in requests:
             requests[iid] = row
             pending_ids.append(iid)
+        if iid and not rid and kind in (c.CONTAINMENT_FAULT, c.CONTAINMENT_RESOLVED) and iid in requests:
+            from ouroboros.delegate_pending import _invocation_fault
+
+            _invocation_fault(incidents.setdefault(iid, {}), row)
+        if iid and kind == c.REMOTE_START_PHASE and iid in requests:
+            from ouroboros.delegate_pending import _advance_phase
+
+            _advance_phase(phases.setdefault(iid, {}), row)
         c._apply(state, row)
         if kind == c.STARTED and rid in state:
             state[rid]._invocation_started_ordinal = ordinal
@@ -752,7 +782,8 @@ def fold(rows) -> Dict[str, Any]:
                        (requests[iid].get("task_id"), requests[iid].get("root_task_id")))
     return {
         "runs": {rid: (vars(entry), HELD if _held(entry) else CLOSED) for rid, entry in state.items()},
-        "open": {f"invocation:{iid}": {"request": requests[iid]} for iid in pending_ids},
+        "open": {f"invocation:{iid}": {"request": requests[iid], **incidents.get(iid, {}), **phases.get(iid, {})}
+                 for iid in pending_ids},
         "refused": refused,
         "marks": {tid: mark for tid, mark in marks_by_task.items() if set(mark) - {"task_id"}},
         "invocations": invocations, "operations": operations, "event_ordinals": event_ordinals,

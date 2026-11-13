@@ -144,6 +144,38 @@ def test_a_non_git_write_root_is_refused_toward_the_folder_strategy(tmp_path, mo
     assert "not a Git working tree" in payload["detail"] and "directory_strategy='direct'" in payload["detail"]
 
 
+@pytest.mark.parametrize("workspace", [None, "copy", "in_place"])
+def test_on_a_remote_engine_only_the_in_place_choice_is_refused(tmp_path, monkeypatch, workspace):
+    """A remote engine (a gateway that stages the work on its host, ``stages_workspace``) cannot edit this computer's
+    write root, so ``workspace='in_place'`` there is refused typed and unrun, before any row, copy, scratch or POST.
+    The ordinary invocation a row with a declared remote workspace uses (``route.workspace`` rides the engine binding,
+    never this argument) starts as before and records its binding. Only the engine binding is a stand-in here; a local
+    in-place start is the rest of this module."""
+    from ouroboros import execution_domain
+
+    ref = {"kind": "remote", "connection": "vps", "ssh_host": "u@h", "engine_home": "/e", "store": "s",
+           "remote_root": "/r", "workspace": "/srv/project"}
+    real = execution_domain.start_engine
+
+    def remote(drive, retry_token="", continuation_token="", route=None):
+        _facts, gateway = real(drive, retry_token, continuation_token, route)  # the module's stub engine
+        gateway.stages_workspace, gateway.engine_ref, gateway.engine_version = True, dict(ref), "9.0.0"
+        return {"engine_ref": dict(ref)}, gateway
+
+    monkeypatch.setattr(execution_domain, "start_engine", remote)
+    options = {} if workspace is None else {"workspace": workspace}
+    request, payload, ctx, calls = _start(tmp_path, monkeypatch, acting=True, run_id="run-remote", start_kwargs=options)
+    if workspace == "in_place":
+        assert request is None and calls == [], payload
+        assert payload["reason"] == "remote_in_place_unsupported" and payload["definitely_unrun"] is True, payload
+        assert "run-remote" not in custody.replay(tmp_path) and custody.pending_invocations(tmp_path) == []
+        assert _records(tmp_path) == [] and not _in_place_owners(ctx).exists()
+        return
+    assert payload["status"] == "started" and payload["workspace"] == "copy" and len(calls) == 1, payload
+    entry = custody.replay(tmp_path)["run-remote"]
+    assert entry.engine_ref == ref and entry.snapshot_id and not is_in_place_run(entry)
+
+
 def test_a_continuation_of_an_undisposed_copy_stays_in_that_copy(tmp_path, monkeypatch):
     first, _payload, ctx, _calls = _start(tmp_path, monkeypatch, acting=True, run_id="run-copy")
     _settle(tmp_path, "run-copy", ctx.task_id)

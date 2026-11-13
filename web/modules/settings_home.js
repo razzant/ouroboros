@@ -312,7 +312,10 @@ function liveGlyphs({ settings, state, device = {} } = {}) {
     const out = {};
     if (settings) {
         const source = routeSource({ model: String(settings.OUROBOROS_MODEL || ''), use_local: truthy(settings.USE_LOCAL_MAIN) });
-        const brand = source.startsWith('subscription:') ? harnessPresentation(source.slice('subscription:'.length)) : null;
+        // A subscription's harness, a remote engine's (`remote:<engine>:<source>`) included.
+        const harness = source.startsWith('subscription:') ? source.slice('subscription:'.length)
+            : source.startsWith('remote:') ? source.split(':')[2] : '';
+        const brand = harness ? harnessPresentation(harness) : null;
         out.models = brand && !brand.generic ? markHtml(brand) : glyphHtml('sparkle');
         const access = settings._meta?.policy_state?.access;
         out.permissions = barsHtml(ACCESS_LEVELS.indexOf(String(access?.current_process || access?.effective || '')) + 1);

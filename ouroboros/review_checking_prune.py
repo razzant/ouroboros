@@ -73,6 +73,23 @@ def seat_scratch_released(data_root: Any, key: str) -> bool:
     return not _checking_area_present(unindexed(home, "area"))
 
 
+def seat_capture_owed(data_root: Any, row: Any) -> bool:
+    """Whether the seat copy a custody ``row`` ran in (``execution_root``) still waits for its capture receipt: until
+    one stands, a remote run's host copy keeps what that capture brings home (``remote_workspace.copy_hold``). A run in
+    no seat copy owes nothing here; an unreadable marker or receipt is owed (a host copy goes only on a receipt)."""
+    root = str(getattr(row, "execution_root", "") or "")
+    try:
+        marker = json.loads((pathlib.Path(root).parent / "checking.json").read_text(encoding="utf-8")) if root else {}
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        return True
+    if not marker:
+        return False
+    holder = str(marker.get("holder_operation_id") or marker.get("operation_id") or "")  # a handed-on copy's holder
+    return _receipt(data_root, str(marker.get("task_id") or ""), holder).get("status") not in _RECEIPTED
+
+
 def _last_use(path: pathlib.Path) -> float:
     """ctime too: a copy's mtime is its source's (copystat); a reuse touches a view."""
     try:

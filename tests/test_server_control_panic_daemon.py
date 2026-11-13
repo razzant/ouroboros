@@ -252,7 +252,7 @@ def test_accepted_panic_completes_despite_early_failure(monkeypatch, tmp_path, f
             assert set(diagnostics[0]["requests"]) == {
                 "local-model", "daemon", "commands", "executors", "services", "companions",
                 "restart-successor", "scope-census", "child-123", "startup-audit", "maintenance", "storage-count",
-                "storage-free",
+                "storage-free", "remote-engines",
             }
             # The installation-scope census is one more independent request; this root planted no marker.
             assert diagnostics[0]["requests"]["scope-census"] == {"requested": False, "reason": "no installation marker planted"}

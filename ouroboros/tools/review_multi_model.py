@@ -226,7 +226,7 @@ async def _query_model(
     native_retrieval: bool = False, resolved_wave_id: str = "",
     session_access: str = "", checking_source: dict = None, preflight_execution: dict = None,
     processing_preference: str | None = None, parts: Any = None,
-    additional: bool = False, severity_policy: dict = None,
+    additional: bool = False, severity_policy: dict = None, engine: str = "",
 ):
     slot = None
     try:
@@ -298,6 +298,7 @@ async def _query_model(
             # Explicit both ways for an api row: the slot's own delivery fact.
             native_retrieval_override=None if delegated else bool(native_retrieval),
             session_access=str(session_access or "") if delegated else "",
+            engine=str(engine or "") if delegated else "",  # the row's remote engine, never dropped to local
         )
         loop = asyncio.get_running_loop()
         # run_in_executor copies no context: carry the usage scope (and its
@@ -371,6 +372,7 @@ async def _multi_model_review_async(content: str, prompt: str,
     # None is an unbound historical row; a captured empty preference stays empty.
     row_processing = _row_vector("processing_preferences", lambda idx: None)
     row_access = _row_vector("session_accesses", lambda idx: "")
+    row_engines = _row_vector("engines", lambda idx: "")  # '' = the owned engine (an absent tail too)
     # One brief per seat (PR-3 B): a retrieving row carries ITS OWN two-part
     # brief, answer policy and reading root; an absent entry keeps the shared one.
     row_tasks = _row_vector("session_tasks", lambda idx: "")
@@ -440,6 +442,7 @@ async def _multi_model_review_async(content: str, prompt: str,
                      retry_key=retry_key, subagent_id=row_actors[idx], use_local=row_local[idx], task_evidence=task_evidence,
                      preflight_execution=preflight_execution,
                      resolved_wave_id=fan_out_wave, session_access=row_access[idx], checking_source=checking_source,
+                     engine=row_engines[idx],
                      native_retrieval=row_retrieves[idx] and row_routes[idx] is ReviewRouteKind.API_CHAT)
         for idx, m in enumerate(models)
     ]

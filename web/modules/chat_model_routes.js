@@ -12,8 +12,11 @@ import { harnessPresentation } from './harness_presentation.js';
 export const MAIN_CHOICE = Object.freeze({ kind: 'main' });
 export const LOCAL_SOURCE = 'local';
 const SUBSCRIPTION = 'subscription:';
+// A subscription model on a named remote engine (`remote:<engine>:<source>`, route_editor_primitives.parseModelSource):
+// that engine's own accounts pay for it and no key of this computer does. No catalog read here lists one.
+const REMOTE = 'remote:';
 // How a source is paid for, in the owner's words (a local model is neither).
-export const PAY_WORDS = Object.freeze({ subscription: 'subscription', api: 'paid by key', local: 'on this computer' });
+export const PAY_WORDS = Object.freeze({ subscription: 'subscription', remote: 'subscription', api: 'paid by key', local: 'on this computer' });
 
 /** The canonical room choice; anything unreadable follows Main, which is what the room then runs as. */
 export function normalizeChoice(raw) {
@@ -33,13 +36,17 @@ export const sameRoute = (a, b) => Boolean(a && b) && a.model === b.model && Boo
 /** One string per route, for a DOM attribute and a set. */
 export const routeKey = (route) => (route ? `${route.use_local ? 'local' : 'route'}|${route.model}` : '');
 
-/** The source a route is reached through: `subscription:<id>`, an API connection (`kind`, `kind@name`) or local. */
+/** The source a route is reached through: `subscription:<id>`, `remote:<engine>:<id>`, an API connection (`kind`,
+ *  `kind@name`) or local. */
 export function routeSource(route) {
     if (route?.use_local) return LOCAL_SOURCE;
     return parseModelSource(route?.model).source || 'openrouter';
 }
 
-const laneOf = (source) => (source === LOCAL_SOURCE ? 'local' : source.startsWith(SUBSCRIPTION) ? 'subscription' : 'api');
+const laneOf = (source) => (source === LOCAL_SOURCE ? 'local' : source.startsWith(SUBSCRIPTION) ? 'subscription'
+    : source.startsWith(REMOTE) ? 'remote' : 'api');
+// A remote source's engine and its subscription source (`remote:vps:codex` reads `{ engine: 'vps', sub: 'codex' }`).
+const remoteParts = (source) => { const [, engine = '', sub = ''] = String(source).split(':'); return { engine, sub }; };
 const modelPart = (route) => (route.use_local ? route.model : parseModelSource(route.model).model || route.model);
 /** The model's own name without its vendor path: `z-ai/glm-5.3` reads `glm-5.3`. */
 export const shortName = (route) => { const id = route ? modelPart(route) : ''; return id.slice(id.lastIndexOf('/') + 1) || id; };
@@ -212,14 +219,16 @@ export function describeRoute(index, raw) {
         && !index.connections.some((entry) => entry.id === id && entry.enabled && entry.configured);
     const base = own?.label || (lane === 'local' ? 'Local' : lane === 'subscription'
         ? harnessPresentation(id.slice(SUBSCRIPTION.length)).label : apiProviderLabel(id, {}, index?.connections || []));
-    const sourceLabel = cannotSend ? `${base} (${unavailableConnectionState(id, index.connections)})` : base;
+    const remote = lane === 'remote' ? remoteParts(id) : null;  // named where it runs, never as a key that cannot send
+    const sourceLabel = cannotSend ? `${base} (${unavailableConnectionState(id, index.connections)})`
+        : remote ? `On ${remote.engine} · ${harnessPresentation(remote.sub).label}` : base;
     const window = windowWords(listed?.window);
     const price = priceWords(listed?.price);
     return {
         route, key: routeKey(route), id: modelPart(route), short: shortName(route), source: id, lane,
         sourceLabel, pay: PAY_WORDS[lane], price, window, listed: Boolean(listed),
         available: listed?.available ?? null,
-        harness: own?.harness || (lane === 'subscription' ? id.slice(SUBSCRIPTION.length) : ''),
+        harness: own?.harness || (lane === 'subscription' ? id.slice(SUBSCRIPTION.length) : remote ? remote.sub : ''),
         kind: own?.kind || (lane === 'api' ? connectionParts(id).kind : ''),
         facts: [sourceLabel, price || PAY_WORDS[lane], window ? `${window} window` : ''].filter(Boolean).join(' · '),
     };

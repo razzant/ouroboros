@@ -286,6 +286,9 @@ class ReviewSlot:
     native_retrieval_override: Optional[bool] = None
     # Configured technical rights; absent historical seats preserve readonly.
     session_access: str = ""
+    # agent_session rows only: the catalog row's remote engine connection (``route.engine``, ``remote_engines``);
+    # '' = the owned engine (or the domain's). Execution starts the seat there, never locally in its place.
+    engine: str = ""
 
     @property
     def native_retrieval(self) -> bool:

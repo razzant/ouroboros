@@ -420,10 +420,10 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         // Only Main is required; the remaining active slots are optional or
         // already carry a default. Don't force the owner to fill every slot.
         if (!trim(state.mainModel)) return 'Confirm the Main model before starting Ouroboros.';
-        const { source } = parseModelSource(state.mainModel);
-        const supported = source.startsWith('subscription:')
+        const { source } = parseModelSource(state.mainModel);  // a remote engine's Main is configured access there (server_runtime.has_remote_provider)
+        const supported = source.startsWith('remote:') || (source.startsWith('subscription:')
             ? modelSources.some((entry) => entry.id === source.slice(13) && state.agentsConnected.includes(entry.credentialHarness))
-            : configuredApiProviders(draftSettings(), PROVIDER_PROFILES).some((entry) => entry.id === source);
+            : configuredApiProviders(draftSettings(), PROVIDER_PROFILES).some((entry) => entry.id === source));
         if (!supported && !(hasLocalModel() && state.localRoutingMode === 'all')) {
             return `Main uses ${source.startsWith('subscription:') ? source.slice(13) : apiProviderLabel(source, PROVIDER_PROFILES)}, which has no configured access in this setup.`;
         }
@@ -568,7 +568,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
             ['Access level', runtimeModeLabel(state.runtimeMode)],
             ...((hasApiAccess() || !hasModelSubscription()) ? [['Total API budget', formatUsd(state.totalBudget)],
                 ['Per-task API cap', formatUsd(state.perTaskCostUsd)]] : []),
-            ...(MODEL_SLOTS.some((slot) => trim(state[slot.stateKey]).split(',').some((value) => parseModelSource(value.trim()).source.startsWith('subscription:'))) ? [['When quota runs out', trim(state.fallbackModel) ? 'Tries the Fallback, then waits for the reset' : 'Waits for the reset, then continues']] : []),  // a subscription serves a slot
+            ...(MODEL_SLOTS.some((slot) => trim(state[slot.stateKey]).split(',').some((value) => /^(subscription|remote):/.test(parseModelSource(value.trim()).source))) ? [['When quota runs out', trim(state.fallbackModel) ? 'Tries the Fallback, then waits for the reset' : 'Waits for the reset, then continues']] : []),  // a subscription (a remote engine's too) serves a slot
             // The Consciousness offer above already uses that word alone (#1603); its model row says what it is.
             ...MODEL_SLOTS.map((slot) => [slot.slot === 'consciousness' ? 'Consciousness model' : slot.label.replace(/ Model$/, ''), modelSummary(slot)]),
         ];
@@ -603,7 +603,9 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
             const account = slot.slot === 'fallback' ? state.modelAccounts.fallback?.[index] : state.modelAccounts[slot.slot];
             const context = slot.slot === 'fallback' ? state.modelContextWindows.fallback?.[index] : state.modelContextWindows[slot.slot];
             const processing = slot.slot === 'fallback' ? state.modelProcessingPreferences?.fallback?.[index] : state.modelProcessingPreferences?.[slot.slot];
-            const assignment = source.startsWith('subscription:') ? `${modelSources.find((entry) => entry.id === source.slice(13))?.label || source.slice(13)} · ${model} · ${account ? `Account: ${account}` : 'Auto rotation'}`
+            const [kind, engine, remoteSource] = source.split(':');  // `remote:<engine>:<source>` runs on that engine, under its own accounts
+            const assignment = kind === 'remote' ? `On ${engine} · ${remoteSource} · ${model} · ${account ? `Account: ${account}` : 'Auto rotation'}`
+                : source.startsWith('subscription:') ? `${modelSources.find((entry) => entry.id === source.slice(13))?.label || source.slice(13)} · ${model} · ${account ? `Account: ${account}` : 'Auto rotation'}`
                 : `${local ? 'Local' : apiProviderLabel(source, PROVIDER_PROFILES)} · ${model}`;  // a source in words, never its id
             return `${inherited ? `Uses ${from.label.replace(/ Model$/, '')} · ` : ''}${assignment} · Processing: ${processingIntentLabel(processing, state.processingPreference)}${Number(context) > 0 ? ` · ${Number(context).toLocaleString('en-US')} tokens, set by you` : ''}`;
         }).join(' → ') || 'None';

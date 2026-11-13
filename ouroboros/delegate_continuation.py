@@ -44,6 +44,11 @@ supersedes the predecessor's capture (``delegate_custody._supersede``); the
 claim re-checks the predecessor under the snapshot's one disposition lock, the
 lock every apply/reject takes, so a hand-over and a disposition never
 interleave, and a superseded predecessor can be neither applied nor rejected.
+A predecessor that ran on a remote engine's staged copy left its work on that
+host: under the same lock its own capture brings it into the snapshot first
+(``_remote_result_home``), or the start is refused before anything is recorded
+or sent, and the host copy keeps that work; a start that reaches staging
+without that capture is refused there, unsent (``unreturned_predecessor``).
 """
 
 from __future__ import annotations
@@ -72,6 +77,7 @@ REFUSAL_TARGET_MISMATCH = "continuation_target_mismatch"
 REFUSAL_SNAPSHOT_MISSING = "continuation_snapshot_missing"
 REFUSAL_SNAPSHOT_RELEASED = "continuation_snapshot_released"
 REFUSAL_ENGINE_UNSUPPORTED = "continuation_engine_unsupported"
+REFUSAL_REMOTE_RESULT_UNREAD = "continuation_remote_result_unread"
 
 _ACCESS_RANK = {"readonly": 0, "workspace_write": 1, "full": 2}
 # Advice for the continuing child: one sentence per fact that no longer refuses.
@@ -655,9 +661,62 @@ def snapshot_handover(drive: Any, row: Dict[str, Any]) -> Iterator[Dict[str, Any
                 refusal = {"reason": REFUSAL_SNAPSHOT_MISSING,
                            "detail": f"The continued run's checkout could not be restored from its saved result "
                                      f"({type(exc).__name__}: {exc}); nothing was started."}
-        yield refusal
+        yield refusal or _remote_result_home(drive, str(row.get("continuation_of") or ""))
     finally:
         release_exclusive_file_lock(lock_path, fd)
+
+
+def _remote_result_home(drive: Any, run_id: str) -> Dict[str, Any]:
+    """Under the hand-over's lock: a predecessor that worked in a remote engine's staged copy has its result and
+    evidence on that host, not in the snapshot its successor runs in, so its own capture (the one every collection
+    makes under this lock: ``remote_workspace.mirror_result``, then the snapshot's result commit) runs first. ``{}``
+    once it is captured; otherwise a refusal before any row or POST, and the host copy keeps the work."""
+    from ouroboros.delegate_custody_current import run
+    from ouroboros.execution_domain import is_remote_ref
+
+    prior = run(drive, run_id)
+    ref = prior.engine_ref if prior is not None else {}
+    if prior is None or not is_remote_ref(ref) or ref.get("workspace") or prior.patch_captured:
+        return {}  # a remote workspace run worked where its successor works; a captured result is already here
+    from ouroboros.tools.delegate_integration import capture_terminal_patch_for_drive
+
+    try:
+        block = capture_terminal_patch_for_drive(drive, prior, retain_investigation=False) or {}
+    except Exception as exc:  # a capture that raised brought nothing home
+        block = {"status": "failed", "note": f"{type(exc).__name__}: {exc}"}
+    if getattr(run(drive, run_id), "patch_captured", False):
+        return {}
+    returned = block.get("remote_result") if isinstance(block.get("remote_result"), dict) else {}
+    state = str(returned.get("state") or block.get("status") or "not captured")
+    return {"reason": REFUSAL_REMOTE_RESULT_UNREAD,
+            "remote_result": {key: returned[key] for key in ("state", "code") if returned.get(key)},
+            "detail": (f"Run {run_id} worked on the remote engine {ref.get('connection')!r}, and its result could not "
+                       f"be brought into the private snapshot this continuation would run in ({state}: "
+                       f"{str(block.get('note') or '')[:300]}). Nothing was started; that work stays in its copy on "
+                       "that host. Continue again once its engine can be reached.")}
+
+
+def unreturned_predecessor(drive: Any, request: Dict[str, Any]) -> str:
+    """The staging seam's check (``RemoteEngineGateway._prepare_start``): why a start that continues
+    (``continueFrom``) a remote staged run IN that run's private snapshot may not be staged ("" when it may). Its
+    claim's hand-over captures that run's work first (``_remote_result_home``); a start that reaches staging without it
+    would send a copy lacking that work, so it is refused there before anything is sent. A reviewer seat's copy (no
+    snapshot) comes home through its own seat capture instead."""
+    from ouroboros.delegate_custody_current import run
+    from ouroboros.execution_domain import is_remote_ref
+
+    rid = str(request.get(ENGINE_CONTINUE_KEY) or "")
+    prior = run(drive, rid) if rid and drive is not None else None
+    execution = request.get("execution") if isinstance(request.get("execution"), dict) else {}
+    scope = request.get("scope") if isinstance(request.get("scope"), dict) else {}
+    if (prior is None or prior.review_owned or prior.patch_captured or not prior.snapshot_id
+            or not is_remote_ref(prior.engine_ref) or prior.engine_ref.get("workspace") or not prior.execution_root
+            or prior.execution_root != str(execution.get("workspaceRoot") or scope.get("root") or "")):
+        return ""
+    return (f"This start continues run {rid} in its private copy, but that run's work on the remote engine "
+            f"{prior.engine_ref.get('connection')!r} was never brought into the copy (its capture is still owed), so "
+            "the copy sent would lack it. Nothing was sent; a continuation through delegate_start brings it home "
+            "first.")
 
 
 def disposition_refusal(drive: Any, entry: Any) -> str:
@@ -732,5 +791,6 @@ __all__ = [
     "snapshot_handover",
     "start_binding",
     "terminal_continuity",
+    "unreturned_predecessor",
     "with_run_binding",
 ]

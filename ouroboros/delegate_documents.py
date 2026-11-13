@@ -252,7 +252,8 @@ def fold_document_import(mark: Dict[str, Any], event: Dict[str, Any]) -> None:
         if record:  # an explicit new intent supersedes; the earlier record stays visible
             previous.append(record)
         record = {name: copy.deepcopy(event[name]) for name in
-                  ("store_id", "import_key", "request", "input", "origin", "intent", "owner_task_id") if name in event}
+                  ("store_id", "import_key", "request", "input", "origin", "intent", "owner_task_id", "engine_ref")
+                  if name in event}
         record["state"] = str(event.get("state") or "send_possible") if event.get("origin") == "inherited" else "minted"
         if previous:
             record["previous"] = previous[-MAX_PREVIOUS_RECORDS:]
@@ -311,7 +312,9 @@ def _fold_owed(owed: Dict[str, Any], material: str, key: str, kind: Any, event: 
     if kind == DOCUMENT_IMPORT_REQUESTED:
         if opens_release(event):
             owed[key] = {"store_id": str(event.get("store_id") or ""), "import_key": key, "material": material,
-                         "request": copy.deepcopy(event["request"]), "state": "minted"}
+                         "request": copy.deepcopy(event["request"]), "state": "minted",
+                         **({"engine_ref": copy.deepcopy(event["engine_ref"])} if isinstance(event.get("engine_ref"), dict)
+                            else {})}
         return
     entry = dict(owed.get(key) or {})
     if not entry:
@@ -612,6 +615,7 @@ def _import(gateway: Any, drive: pathlib.Path, task_id: str, store: str, row: Di
             superseded = str((record or {}).get("import_key") or "")
             # A managed intent's REQUESTED fact is also this task's release obligation (``managed_imports``).
             intent = {"store_id": store, "import_key": f"ouroboros-document-{uuid.uuid4().hex}",
+                      **_bound_engine(gateway),  # a remote engine's import is released through it alone
                       "request": _request_for(task_id, store, row, managed),
                       **({"owner_task_id": task_id} if managed else {}),
                       **({"intent": new_intent} if new_intent else {})}
@@ -772,7 +776,9 @@ def _release_one(drive: pathlib.Path, task_id: str, entry: Dict[str, Any], engin
         return settle("released", resource=resource, released_at=entry.get("released_at"))
     if not resource.get("resourceId") and state in _UNASKED:
         return settle(_UNASKED[state])  # never sent, or a key no answer can name a resource for
-    gateway = engine(entry["store_id"])  # the engine whose store holds the import (``execution_domain``)
+    # The engine whose store holds the import (``execution_domain``): a remote one by its recorded connection and
+    # store only, never another engine that happens to serve the same store.
+    gateway = engine(entry["store_id"], **({"engine_ref": entry["engine_ref"]} if entry.get("engine_ref") else {}))
     why = _release_unusable(gateway, entry["store_id"])
     if why:
         return why
@@ -833,6 +839,14 @@ def managed_keep_places(root: Any, task_id: str) -> Dict[str, str]:
     places.update({f"managed_import:{key}": ("release_unconfirmed" if entry.get("release_state") == "bound" else "held")
                    for key, entry in (mark.get("managed_imports") or {}).items()})
     return places
+
+
+def _bound_engine(gateway: Any) -> Dict[str, Any]:
+    """``{"engine_ref": ...}`` when ``gateway`` is a named remote engine (``remote_engines``), else ``{}``."""
+    from ouroboros.execution_domain import is_remote_ref
+
+    ref = getattr(gateway, "engine_ref", None)
+    return {"engine_ref": dict(ref)} if is_remote_ref(ref) else {}
 
 
 def _release_unusable(gateway: Any, store_id: str) -> str:

@@ -1338,6 +1338,120 @@ class CostBreakdownResponse(TypedDict, total=False):
     period: Dict[str, Any]
 
 
+
+# --- Remote engines (``gateway/engine_connections.py``, ``remote_engines``) --------------------------------------
+
+class EngineConnectionObservation(TypedDict, total=False):
+    """This installation's last observation of one saved remote engine; never the engine's token."""
+
+    state: Required[str]  # unknown | connecting | connected | offline | needs_interaction | failed | removed
+    at: str
+    code: str
+    message: str
+    reason: str
+    engine_version: str
+    store: str
+    connected_at: str
+    transport_uid: Optional[int]
+    engine_owner_uid: Optional[int]
+
+
+class EngineOwedStops(TypedDict):
+    """Stops this installation's Emergency Stop still owes on one engine, until each is read back stopped."""
+
+    runs: int
+    starts: int
+
+
+class EngineConnectionRow(TypedDict):
+    """One saved ``OUROBOROS_ENGINE_CONNECTIONS`` row with its defaults, observation and owed stops (``None`` when
+    custody could not be read). A connection no longer saved that Emergency Stop still owes a stop on is listed too,
+    ``removed`` (observation ``removed``, empty fields: no row says them now)."""
+
+    name: str
+    label: str
+    ssh_host: str
+    engine_home: str
+    remote_root: str
+    workspaces: List[str]
+    enabled: bool
+    observation: EngineConnectionObservation
+    owed_stops: Optional[EngineOwedStops]
+    removed: NotRequired[bool]
+
+
+class EngineConnectionsResponse(TypedDict):
+    """``GET /api/engine-connections``: no host is contacted."""
+
+    connections: List[EngineConnectionRow]
+
+
+class EngineConnectionCheckResponse(TypedDict, total=False):
+    """``POST /api/engine-connections/{name}/check``: the saved row proven through its tunnel, or its typed refusal."""
+
+    name: Required[str]
+    ok: Required[bool]
+    code: str
+    message: str
+    engine_version: str
+    store: str
+    user_mismatch: bool
+    harnesses: List[str]
+    model_sources: List[str]
+
+
+class EngineConnectionDisconnectResponse(TypedDict):
+    """``POST /api/engine-connections/{name}/disconnect``: this installation's forward only. ``closed`` is true when
+    it was stopped, false when none was running and null when its stop could not be confirmed."""
+
+    name: str
+    closed: Optional[bool]
+
+
+class EngineCatalogModel(TypedDict):
+    id: str
+    label: str
+    value: str  # the stored route, ``claudexor@<engine>::<source>=<model>``
+
+
+class EngineCatalogSource(TypedDict):
+    id: str
+    label: str
+    credentialHarness: str
+    models: List[EngineCatalogModel]
+
+
+class EngineCatalogAccount(TypedDict):
+    harness_id: str
+    profile_id: str
+    label: str
+    enabled: bool
+    verification: str
+    availability: str
+
+
+class EngineCatalogError(TypedDict):
+    source: str
+    code: str
+    message: str
+
+
+class EngineConnectionCatalogResponse(TypedDict, total=False):
+    """``GET /api/engine-connections/{name}/catalog``: what a connected engine serves (an engine not connected is
+    ``offline``, never empty), with that engine's own accounts or why they are unknown."""
+
+    name: Required[str]
+    state: Required[str]  # connected | offline | unavailable
+    code: str
+    message: str
+    sources: List[EngineCatalogSource]
+    harnesses: List[str]
+    errors: List[EngineCatalogError]
+    accounts_state: str  # ok | unread
+    accounts_code: str
+    accounts: List[EngineCatalogAccount]
+
+
 __all__ = [
     "InstalledSkill", "ExtensionsIndexResponse", "ExtensionManifestResponse", "ExtensionSettingsSectionResponse",
     "SkillToggleRequest", "SkillRevisionRequest", "SkillReviewRequest", "SkillGrantRequest", "SkillDeleteRequest",
@@ -1365,4 +1479,7 @@ __all__ = [
     "UpdateProgress", "UpdateLetter", "UpdateTransactionState", "UpdateStatusResponse",
     "CommandRequest", "CommandResponse", "CommandRefusal", "GitRollbackRequest", "GitRollbackResponse", "GitPromoteResponse",
     "ResetResponse", "CostBreakdownResponse",
+    "EngineConnectionObservation", "EngineOwedStops", "EngineConnectionRow", "EngineConnectionsResponse",
+    "EngineConnectionCheckResponse", "EngineConnectionDisconnectResponse", "EngineCatalogModel", "EngineCatalogSource",
+    "EngineCatalogAccount", "EngineCatalogError", "EngineConnectionCatalogResponse",
 ]

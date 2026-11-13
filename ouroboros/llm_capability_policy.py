@@ -72,11 +72,17 @@ def recorded_openrouter_catalog() -> tuple[dict, str]:
 
 
 def model_catalog(source: str, credential_profile_id: str | None = None, *,
-                  requested_model: str | None = None, timeout_sec: float | None = None) -> dict:
+                  requested_model: str | None = None, timeout_sec: float | None = None, engine: str = "") -> dict:
     """Metadata-only transport under one connect, negotiation and read budget; the capability
-    evidence owner interprets the envelope. An elapsed budget reads nothing more."""
+    evidence owner interprets the envelope. An elapsed budget reads nothing more. ``engine`` names
+    the remote engine whose catalog answers (``remote_engines``), "" the owned one."""
     started = time.monotonic()
-    gateway = read_owned_gateway(**({} if timeout_sec is None else {"timeout_sec": timeout_sec}))
+    if engine:
+        from ouroboros import remote_engines
+
+        gateway = remote_engines.gateway(engine, timeout_sec=timeout_sec)
+    else:
+        gateway = read_owned_gateway(**({} if timeout_sec is None else {"timeout_sec": timeout_sec}))
 
     def budget() -> dict:
         if timeout_sec is None:

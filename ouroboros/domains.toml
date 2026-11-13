@@ -188,6 +188,9 @@ D20 = "Presence"
 "ouroboros/density_probe.py" = "D03"
 "ouroboros/response_limits.py" = "D03"
 "ouroboros/claudexor_daemon.py" = "D07"
+"ouroboros/remote_engines.py" = "D07"  # named remote Claudexor engines: attach-only SSH tunnel, gateway, binding
+"ouroboros/remote_stops.py" = "D07"  # Emergency Stop's owed remote stops, unknown starts and the re-adoption gate
+"ouroboros/remote_workspace.py" = "D07"  # what crosses to a remote engine's host for one run, and what comes back
 "ouroboros/claudexor_exit_facts.py" = "D07"
 "ouroboros/claudexor_runtime.py" = "D07"
 "ouroboros/claudexor_runtime_retention.py" = "D07"
@@ -355,6 +358,7 @@ D20 = "Presence"
 "ouroboros/gateway/claudexor_passive.py" = "D11"
 "ouroboros/gateway/claudexor_contracts.py" = "D11"
 "ouroboros/gateway/harness_maintenance.py" = "D11"
+"ouroboros/gateway/engine_connections.py" = "D11"  # /api/engine-connections: list, Check, Disconnect, catalog
 "ouroboros/gateway/claudexor_quota.py" = "D11"
 "ouroboros/gateway/client_contracts.py" = "D11"
 "ouroboros/gateway/contracts.py" = "D11"
@@ -1332,6 +1336,7 @@ lazy_only = [
   "D01->D11",
   "D02->D05",
   "D02->D11",
+  "D02->D17",
   "D03->D05",
   "D03->D06",
   "D03->D07",

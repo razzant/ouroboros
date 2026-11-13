@@ -204,6 +204,9 @@ def _route(value: Any, where: str) -> str:
 
     if not isinstance(value, str) or not value.strip() or value != value.strip() or not parse_model_route(value).valid:
         raise DeploymentPolicyError(f"{where} must be a model route such as 'anthropic::<model>'")
+    if parse_model_route(value).kind == "claudexor" and parse_model_route(value).connection:
+        raise DeploymentPolicyError(f"{where} names an owner's remote engine; a deployment's routes run on its own "
+                                    "engines")
     return value
 
 

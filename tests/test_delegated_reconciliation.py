@@ -65,11 +65,13 @@ def test_the_startup_sweep_reconciles_delegated_runs_too(monkeypatch, startup_ow
     seen = {}
     monkeypatch.setattr(pc, "reap_orphaned_processes", lambda root, **kw: [])
     monkeypatch.setattr(dc, "reconcile_orphaned_runs",
-                        lambda root, **kw: seen.setdefault("live", kw.get("running_task_ids")) or [])
+                        lambda root, **kw: seen.update(remote=kw.get("remote_engines"))
+                        or seen.setdefault("live", kw.get("running_task_ids")) or [])
     monkeypatch.setattr(sm, "_installed_skill_names", lambda: None)
     sm._startup_custody_sweep()
     assert seen["live"] is sm._live_task_ids
     assert seen["live"]() == set(), "an empty live set is the point: nothing survived the restart"
+    assert seen["remote"] is False, "a boot never waits on SSH: remote engines are the periodic sweep's, off the loop"
 
 
 def test_startup_revival_keeps_actual_current_owners(tmp_path, monkeypatch, startup_owners):

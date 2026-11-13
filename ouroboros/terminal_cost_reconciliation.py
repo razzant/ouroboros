@@ -438,7 +438,7 @@ def reconcile_abandoned_usage(drive_root: pathlib.Path) -> None:
                 raise
         return gateway
 
-    def probe_gateway(row):
+    def probe_gateway(row, request=None):
         from ouroboros.deadline_utils import parse_deadline_ts
 
         fact = row.get("recovery") or {}
@@ -447,6 +447,10 @@ def reconcile_abandoned_usage(drive_root: pathlib.Path) -> None:
         due = parse_deadline_ts(fact.get("due_at")) if fact.get("basis") else None
         if due is not None and due > datetime.now(timezone.utc):
             raise ClaudexorUnavailable("recovery_not_due", "Provider Retry-After has not elapsed")
+        if request is not None:  # created on a remote engine: read there and nowhere else, this probe only
+            from ouroboros.execution_domain import run_gateway
+
+            return _RecoveryGateway(run_gateway(request, read_owned_gateway))
         return _RecoveryGateway(borrowed_gateway())
 
     try:
@@ -473,7 +477,9 @@ def reconcile_abandoned_usage(drive_root: pathlib.Path) -> None:
                 if remote and row.get("state") != "reserved":
                     # Offline receipts still win during Retry-After; only the HTTP probe is
                     # suppressed. A recorded terminal outcome ends selection (``_RECOVERABLE``).
-                    recovered = recover_model_attempt(root, row, gateway_factory=lambda: probe_gateway(row))
+                    # One probe policy (Retry-After, terminal facts) for the owned engine and a recorded remote one.
+                    recovered = recover_model_attempt(root, row,
+                                                      gateway_factory=lambda request=None: probe_gateway(row, request))
                     if recovered is None:
                         _unresolved(observations, row, "receipt_or_terminal_custody_unavailable")
                         continue

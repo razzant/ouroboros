@@ -723,7 +723,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
                 checking["custody"] = {k: str(record.get(k) or "") for k in ("authority_source", "execution_root", "target_root")}
             thread_id = str(run_request.get("_thread_id") or thread_id)
             use_thread = bool(thread_id or run_request.get("_use_thread"))
-            seat_engine, gateway = seat_gateway(record, root)  # the recorded engine first reads what it accepted (#3138)
+            seat_engine, gateway = seat_gateway(record, root, custody_root=custody_drive)  # the recorded engine first reads what it accepted (#3138)
             run_id, started_custody, generation_end = rejoin_recorded_review(invocation, custody_drive, gateway, record, run_id, started_custody)
         else:
             route = session_route if session_route is not None else review_session_route()
@@ -735,7 +735,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
         if invocation.reconcile_only and not recovering:
             raise ReviewRouteUnavailable("the exact delegated review invocation is no longer available for "
                 "reconciliation; refusing to start a second paid run", code="review_custody_lost")
-        seat_engine, gateway = (seat_engine, gateway) if recovering else seat_gateway(None, root)  # else the domain's
+        seat_engine, gateway = (seat_engine, gateway) if recovering else seat_gateway(None, root, getattr(route, "engine", ""), custody_drive)  # else the route's
         if recovering and not run_id and (unproven := custody.replay_store_unproven(record, getattr(gateway, "store_identity", ""))):
             raise ReviewRouteUnavailable(f"{unproven}; the review start was not re-sent", code="invocation_store_unproven")
         if use_thread and shape.investigation and not run_id:
@@ -828,7 +828,7 @@ def run_delegated_review_session(*, prompt: str, root: str, custody_drive: Any,
             except (ClaudexorUnavailable, OwnerPauseRefused) as exc:
                 code = getattr(exc, "code", str(exc))
                 status = int(getattr(exc, "status_code", 0) or 0)
-                start_refused = isinstance(exc, OwnerPauseRefused) or 400 <= status < 500
+                start_refused = isinstance(exc, OwnerPauseRefused) or 400 <= status < 500 or bool(getattr(exc, "unsent", False))
                 engine_refused = bool(status) and start_refused and code != "idempotency_conflict" and continuation_send(invocation)
                 if isinstance(exc, OwnerPauseRefused):
                     raise ReviewRouteUnavailable("New delegated review start is fenced.", code=code) from exc
@@ -1229,7 +1229,7 @@ def session_route_for_review_slot(slot: Any) -> Any:
                 f"agent_session slot {slot.slot_id} has an unparsable session target {spec!r}",
                 code="session_target_unparsable")
         # The slot owns effort; a target string cannot silently override it.
-        route = dataclasses.replace(route, effort=str(slot.effort or ""))
+        route = dataclasses.replace(route, effort=str(slot.effort or ""), engine=str(getattr(slot, "engine", "") or ""))
         pin = str(getattr(slot, "session_profile", "") or "")
         return dataclasses.replace(route, profile_id=pin) if pin else route
     route = review_session_route()

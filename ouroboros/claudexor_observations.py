@@ -250,12 +250,13 @@ def _dated_row(row: dict, *, snapshot: bool) -> dict:
 
 
 def quota_observation(harness: str, model: str | None, profile: str = "", *, timeout_sec: float,
-                      request_kind: str = "text") -> dict[str, Any]:
+                      request_kind: str = "text", engine: str = "") -> dict[str, Any]:
     """Quota-only facts for one exact binding: the shared verdict and every scoped row, compact and dated.
 
     One deadline covers the metadata connection and every legacy view. A failed read,
     an unread envelope and an empty one stay distinct. Nothing refreshes, starts,
     selects, reads the roster or reads money. Auto sees every subject of the harness.
+    ``engine`` names the remote engine whose accounts answer (``remote_engines``).
     """
     from ouroboros.claudexor_daemon import read_owned_gateway
 
@@ -270,7 +271,12 @@ def quota_observation(harness: str, model: str | None, profile: str = "", *, tim
     fact: dict[str, Any] = {"requested_scope": {"model": model, "requestKind": request_kind,
                                                 "account": profile or "Auto"}}
     try:
-        gateway = read_owned_gateway(timeout_sec=left())
+        if engine:  # the named remote engine's own accounts (``remote_engines``)
+            from ouroboros.llm_claudexor import metadata_gateway
+
+            gateway = metadata_gateway(engine, timeout_sec=left())
+        else:
+            gateway = read_owned_gateway(timeout_sec=left())
         try:
             value = read_quota(gateway, model=model, request_kind=request_kind, timeout_sec=left())
         finally:

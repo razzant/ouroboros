@@ -384,6 +384,8 @@ def engine_identity(row: ConfiguredSubagent, settings: Mapping[str, Any]) -> dic
         "processing_preference": resolve_processing_preference(
             override=row.processing_preference or None, settings=dict(settings)),
         **({"access": row.access} if row.route.is_session else {}),
+        # Where a session runs is execution identity; a local row's identity keeps its old shape.
+        **{key: value for key, value in (("engine", row.route.engine), ("workspace", row.route.workspace)) if value},
     }
 
 
@@ -392,14 +394,18 @@ def engine_handle(identity: Mapping[str, Any]) -> str:
 
     A pure function of one identity (a live row, a frozen snapshot or a history
     record), so a neighbour row can never rename it and the past is never
-    relabelled from the live roster. Facets, in fixed order: effort, session
-    access, account pin as ``@<profile>``, processing — each omitted at its
-    baseline (``full`` access, ``standard`` processing). Compared, never parsed.
+    relabelled from the live roster. Facets, in fixed order: a remote session's
+    place (``on:<engine>[:<workspace>]``), effort, session access, account pin
+    as ``@<profile>``, processing — each omitted at its baseline (the owned
+    engine, ``full`` access, ``standard`` processing). Compared, never parsed.
     """
     access = str(identity.get("access") or "") if identity.get("kind") == ROUTE_KIND_AGENT_SESSION else ""
     pin = str(identity.get("credential_profile_id") or "")
     processing = str(identity.get("processing_preference") or "")
+    engine, workspace = str(identity.get("engine") or ""), str(identity.get("workspace") or "")
     facets = (
+        # Where a session runs: a named remote engine (``on:<engine>``), in one of its declared workspaces when set.
+        f"on:{engine}" + (f":{workspace}" if workspace else "") if engine else "",
         str(identity.get("effort") or ""),
         "" if access == "full" else access,
         f"@{pin}" if pin else "",

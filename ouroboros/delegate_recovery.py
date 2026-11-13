@@ -190,6 +190,27 @@ def boot_door(root) -> str:
     return "owner_restart" if pending_owner_restart(root) else ""
 
 
+def remote_engines_named(root: Any = None) -> bool:
+    """Whether this installation has remote engine work to attend to: a connection the raw setting names, else (a
+    removed last connection leaves its recorded work behind) current custody at ``root`` still holding a remote run,
+    start or model operation (``remote_stops.remote_holdings``; unreadable custody counts as holding one, unless the
+    installation never reached a remote engine: then nothing is read). A Panic boot of an installation with neither
+    opens nothing remote and reads no further than that."""
+    from ouroboros.settings_integrity import runtime_setting
+
+    raw = runtime_setting("OUROBOROS_ENGINE_CONNECTIONS", None)
+    if bool(raw) and str(raw).strip() not in ("[]", "null"):
+        return True
+    if root is None:
+        return False
+    from ouroboros.remote_stops import remote_holdings
+
+    try:
+        return remote_holdings(root)
+    except Exception:  # unknown is not "none": a stop Emergency Stop may owe is never skipped on a guess
+        return True
+
+
 def pending_owner_restart(root: Any) -> dict:
     """The unconsumed prior-generation door; ACK separately governs returns."""
     row = active_restart_transaction(root)

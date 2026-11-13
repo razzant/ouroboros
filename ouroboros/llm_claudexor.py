@@ -1,5 +1,8 @@
 """Caller-owned physical accounting and engine continuation; private CAS precedes ACK.
-Dispatch, turn-slot, pricing and engine-version semantics: ARCHITECTURE §6."""
+Dispatch, turn-slot, pricing and engine-version semantics: ARCHITECTURE §6. A target's ``connection``
+names the remote engine it runs on (``remote_engines``): the operation opens that engine, its request
+manifest records the bound ``engine_ref`` before the create, and every rejoin or recovery reopens
+the recorded engine only; a change of engine ends the live turn."""
 
 from __future__ import annotations
 
@@ -45,9 +48,27 @@ from ouroboros.utils import append_jsonl, read_json_dict, sanitize_tool_result_f
 log = logging.getLogger(__name__)
 
 
-def model_sources(*, processing_view: bool = False) -> dict:
+def metadata_gateway(engine: str = "", *, timeout_sec: float | None = None):
+    """The engine a metadata read asks: the named remote engine (attached when needed), else the owned one."""
+    if engine:
+        from ouroboros import remote_engines
+
+        return remote_engines.gateway(engine, timeout_sec=timeout_sec)
+    return read_owned_gateway(**({} if timeout_sec is None else {"timeout_sec": timeout_sec}))
+
+
+def serving_engine_version(engine: str = "") -> str:
+    """The version a previous handshake proved for the engine a target names, no new I/O ("" unproven)."""
+    if engine:
+        from ouroboros import remote_engines
+
+        return str((remote_engines.published(engine) or {}).get("engine_version") or "")
+    return owned_engine_version()
+
+
+def model_sources(*, processing_view: bool = False, engine: str = "") -> dict:
     """Expose declared model sources and their credential owners, without a routing table."""
-    gateway = read_owned_gateway()
+    gateway = metadata_gateway(engine)
     try:
         if processing_view:
             try:
@@ -73,7 +94,8 @@ def prepare_processing_target(target: dict) -> dict:
         return target
     prepared = {**target, "processing_preferences": []}
     try:
-        sources = timed("claudexor.processing", model_sources, processing_view=True)
+        sources = timed("claudexor.processing", model_sources, processing_view=True,
+                        engine=str(target.get("connection") or ""))
     except ClaudexorUnavailable:
         return prepared
     source = next((row for row in sources.get("sources", [])
@@ -176,10 +198,14 @@ class ModelTurnState:
     is stored here — no route comparison, no expiry, no history.
     """
 
-    __slots__ = ("envelope",)
+    __slots__ = ("envelope", "engine", "identity")
 
-    def __init__(self, envelope: dict | None = None):
+    def __init__(self, envelope: dict | None = None, engine: str = ""):
         self.envelope = envelope
+        self.engine = engine  # the engine the envelope belongs to ("" = owned)
+        # That engine's full identity as the dispatch bound it (``turn_engine_identity``; "" = owned): a connection
+        # name re-pointed at another address, home or store is another engine, and its token never goes there.
+        self.identity = ""
 
     def __deepcopy__(self, memo):
         return self
@@ -202,10 +228,49 @@ def turn_state_for_route(slot: ModelTurnState | None, provider: str) -> ModelTur
     return slot
 
 
-def _requested_turn_state(slot: ModelTurnState | None) -> tuple[bool, dict | None]:
-    """(opted in, value to send) for one request, honoring the engine schema floor."""
+def turn_engine_identity(gateway) -> str:
+    """The full identity of the engine ``gateway`` reaches, for a turn token: a remote engine's connection, SSH
+    address, engine home and proven store; "" for the owned engine (whose continuity is unchanged)."""
+    ref = getattr(gateway, "engine_ref", None)
+    if not (isinstance(ref, dict) and ref.get("kind") == "remote"):
+        return ""
+    return json.dumps([str(ref.get(key) or "") for key in ("connection", "ssh_host", "engine_home", "store")])
+
+
+# The host's own record, in a remote answer's continuation route, of the engine that issued it (its identity's parts):
+# it stays with the transcript and its checkpoints and is removed from every send copy (``_request``).
+CONTINUATION_ENGINE_KEY = "_host_engine"
+# The round's own scratch on its target (as its requested effort is), never part of a send copy: the identity that issued
+# the newest continuation its messages carry on the target's connection, proven before any upload whether or not the
+# caller keeps a turn slot (a reviewer's tool rounds keep none: ``_ModelInvocation.bind_engine_identity``).
+_CONTINUATION_ISSUER = "_continuation_issuer"
+
+
+def bind_continuation_engine(message: Any, identity: str) -> None:
+    """Record on a remote engine's answer the engine identity (``turn_engine_identity``) that issued its native
+    continuation and the account its route names, so a conversation restored into a fresh turn slot stays bound to
+    that engine as a live one is. The owned engine ("") records nothing."""
+    native = message.get("nativeContinuation") if isinstance(message, dict) else None
+    if identity and isinstance(native, dict) and isinstance(native.get("route"), dict):
+        native["route"][CONTINUATION_ENGINE_KEY] = json.loads(identity)
+
+
+def bind_turn_engine(slot: ModelTurnState | None, target: dict) -> None:
+    """A dispatch on another engine than the slot's ends that turn: a token another engine holds is never sent here,
+    and the slot then belongs to this engine (a route the owner switched, whose history the loop also leaves behind at
+    its switch seam). Within one engine name the slot keeps the engine identity it first dispatched on: the gateway
+    proves it before anything is uploaded (``_ModelInvocation.bind_engine_identity``)."""
+    if slot is None:
+        return
+    engine = str(target.get("connection") or "")
+    if getattr(slot, "engine", "") != engine:
+        slot.envelope, slot.engine, slot.identity = None, engine, ""
+
+
+def _requested_turn_state(slot: ModelTurnState | None, engine: str = "") -> tuple[bool, dict | None]:
+    """(opted in, value to send) for one request, honoring the serving engine's schema floor."""
     if slot is None or not engine_at_least(
-        owned_engine_version(), config.CLAUDEXOR_MODEL_TURN_STATE_MIN_VERSION
+        serving_engine_version(engine), config.CLAUDEXOR_MODEL_TURN_STATE_MIN_VERSION
     ):
         return False, None
     return True, copy.deepcopy(slot.envelope)
@@ -263,7 +328,13 @@ def _request(target: dict, messages: list, tools: list | None, parameters: dict)
     # Claudexor payloads and tool schemas are opaque here and are never walked.
     # Every model source (today: Codex) shares a donor's cached prefix only up to an input-item boundary (33,024 vs 213,888).
     prepared = project_declared_system_prefix(target, scrub_native_custody(_MessageShapingMixin._normalize_system_message_placement(messages)))
+    issued = ""  # the engine (identity) that issued this conversation's newest continuation on this connection
     for message in prepared:
+        native = message.get("nativeContinuation")
+        issuer = native["route"].pop(CONTINUATION_ENGINE_KEY, None) if isinstance(native, dict) and isinstance(
+            native.get("route"), dict) else None  # the host's own record never reaches an engine
+        if isinstance(issuer, list) and issuer and issuer[0] == str(target.get("connection") or ""):
+            issued = json.dumps(issuer)
         for name in ("_context_capsule", "acceptance_observation", "_acceptance_observation", "review_feedback",
                      "reasoning", "reasoning_details", "reasoning_content", "response_id", "stop_reason", "_stable_prefix_blocks",
                      HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, TOOL_RESULT_RECORD_KEY, REVIEW_HISTORY_MESSAGE_KEY,
@@ -311,7 +382,15 @@ def _request(target: dict, messages: list, tools: list | None, parameters: dict)
     processing = parameters.get("_processing_submission", target.get("processing_preference"))
     if processing and processing in target.get("processing_preferences", []):
         options["processingPreference"] = processing
-    opted_in, turn_state = _requested_turn_state(parameters.get("model_turn_state"))
+    # A copy rebuilt from an already stripped send copy (a substitution's re-request) keeps the round's issuer.
+    target[_CONTINUATION_ISSUER] = issued or str(target.get(_CONTINUATION_ISSUER) or "")
+    slot = parameters.get("model_turn_state")
+    bind_turn_engine(slot, target)
+    if slot is not None and issued and not getattr(slot, "identity", ""):
+        # A slot that has not dispatched yet (a new loop: a cold restore's) belongs to the engine that issued this
+        # conversation, so ``bind_engine_identity`` refuses another engine behind the same name before any upload.
+        slot.identity = issued
+    opted_in, turn_state = _requested_turn_state(slot, str(target.get("connection") or ""))
     return {"source": target["source"], "model": target["resolved_model"], "account": account,
             "messages": prepared, "tools": copy.deepcopy(tools or []),
             # Absent is the legacy stateless shape; explicit null opts into an
@@ -410,8 +489,10 @@ class _ModelInvocation:
                 if remaining <= 0:
                     raise last_error or ClaudexorUnavailable("daemon_not_answering", "Call deadline elapsed before model creation")
                 try:
-                    self.gateway = timed("daemon.gateway", model_gateway, lambda: ensure_owned_gateway(
-                        admission_wait_sec=remaining, startup_wait_sec=remaining))
+                    engine = str(self.target.get("connection") or "")
+                    self.gateway = (timed("daemon.gateway", metadata_gateway, engine, timeout_sec=remaining) if engine
+                                    else timed("daemon.gateway", model_gateway, lambda: ensure_owned_gateway(
+                                        admission_wait_sec=remaining, startup_wait_sec=remaining)))
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise ClaudexorUnavailable("daemon_not_answering", "Call deadline elapsed before model creation")
@@ -427,6 +508,7 @@ class _ModelInvocation:
                     last_error = error
                     self.close()
                     time.sleep(min(config.CLAUDEXOR_MODEL_POLL_INTERVAL_SEC, max(0, deadline - time.monotonic())))
+            self.bind_engine_identity()  # before any byte of this request reaches the engine
             # Freeze capabilities before the one create attempt.
             self.capture_failure_evidence = model_failure_evidence_supported(operations)
             self.capture_effort_evidence = operation_query_supported(operations, method="POST",
@@ -436,12 +518,49 @@ class _ModelInvocation:
             self.request_manifest_ref = persist_call(self.root, task_id=self.task_id, call_id=f"{self.invocation_id}_model_request",
                          call_type="llm_claudexor_request", payload=self.payload, keep_raw=True,
                          manifest={"invocation_id": self.invocation_id, "request_ref": self.request_ref,
-                                   "model_role": self.role,
+                                   "model_role": self.role, **self.engine_binding(),
                                    "capture_failure_evidence": self.capture_failure_evidence,
                                    "capture_effort_evidence": self.capture_effort_evidence})["manifest_ref"]
             host_step("daemon_upload")
         except ClaudexorUnavailable as error:
             raise ClaudexorModelNotDispatched({"code": error.code, "message": str(error)}, model_role=self.role) from None
+
+    def bind_engine_identity(self) -> None:
+        """Bind the task's turn slot to the engine identity it first dispatches on, and keep it there. The same
+        connection name re-pointed at another address, home or store is another engine: everything this conversation
+        holds from the first (its native continuations, the account it prefers, its turn token) was issued there, so a
+        later request of the task is refused before its upload, typed, and nothing reaches the other engine. A new task
+        binds to the engine its connection names then; a restored conversation's fresh slot was already bound by
+        ``_request`` to the engine its continuations name (``bind_continuation_engine``). The engine that issued the
+        continuations a request carries (``_request`` records it on the round's target) is proven the same way with or
+        without a slot: a caller that keeps none (a reviewer's tool rounds) uploads them to that engine only. Both
+        compare the identity this gateway's handshake already proved; no further read is made. The owned engine's
+        identity is "" as before, and an unstamped (legacy) conversation is sent as before."""
+        slot = self.model_turn_state
+        actual = turn_engine_identity(self.gateway)
+        held = (getattr(slot, "identity", "") if slot is not None else "",
+                str(self.target.get(_CONTINUATION_ISSUER) or ""))
+        if any(identity and identity != actual for identity in held):
+            raise ClaudexorUnavailable("model_turn_engine_changed", "This task's conversation runs on the engine its "
+                                       "connection named when it began, and that connection now reaches another "
+                                       "engine (another address, home or store); nothing was sent there. A new task "
+                                       "starts on it; pointing the connection back resumes this one.")
+        if slot is not None:
+            slot.identity = actual
+
+    def engine_binding(self) -> dict:
+        """``{"engine_ref": ...}`` of a remote engine this operation is bound to; ``{}`` for the owned engine."""
+        ref = getattr(self.gateway, "engine_ref", None)
+        return {"engine_ref": dict(ref)} if isinstance(ref, dict) and ref.get("kind") == "remote" else {}
+
+    def reopen(self):
+        """This operation's own engine again (a rejoin never moves to another one)."""
+        binding = self.engine_binding().get("engine_ref")
+        if binding:
+            from ouroboros.remote_engines import bound_gateway
+
+            return bound_gateway(binding)
+        return read_owned_gateway()
 
     def observe_operation(self, *, accepted: bool = False, phase: str = "") -> None:
         """Publish changed custody/activity facts, never account or provider content.
@@ -604,7 +723,7 @@ class _ModelInvocation:
             outcome_custody={"operation_id": self.operation_id, "invocation_id": self.invocation_id})
         episode.wait_iterations += 1
         try:
-            replacement = read_owned_gateway()
+            replacement = self.reopen()
         except ClaudexorUnavailable:
             replacement = None
         if replacement is not None:
@@ -720,7 +839,9 @@ class _ModelInvocation:
                 "length" if ((result.get("problem") or {}).get("context") or {}).get("reason") == "max_output_tokens"
                 else "incomplete"
             )
-        return copy.deepcopy(message), usage
+        message = copy.deepcopy(message)
+        bind_continuation_engine(message, turn_engine_identity(self.gateway))
+        return message, usage
     async def offload(self, function, *args):
         """A cancelled caller leaves the current I/O thread owning its gateway."""
         with self.io_lock:
@@ -946,7 +1067,9 @@ def chat_claudexor(target: dict, messages: list, tools: list | None, **parameter
 
 def recover_model_attempt(drive_root, row: dict, *, gateway_factory=None):
     """Read retained receipts offline; without terminal facts (custody's ``TERMINAL_STATES``, ``interrupted`` too), read the
-    exact operation. Missing/live/unknown custody defers, unknown dispatch abandons at unknown price; never create or cancel."""
+    exact operation. Missing/live/unknown custody defers, unknown dispatch abandons at unknown price; never create or cancel.
+    An operation created on a remote engine is read only there: ``gateway_factory(request)`` opens its recorded engine (the
+    caller's own probe policy, Retry-After included), else ``run_gateway`` does."""
     from ouroboros.delegate_custody import TERMINAL_STATES
     from ouroboros.observability import call_manifest_path, read_call_payload
     task_id, attempt_id = str(row.get("task_id") or ""), str(row.get("attempt_id") or "")
@@ -967,11 +1090,15 @@ def recover_model_attempt(drive_root, row: dict, *, gateway_factory=None):
     operation_state, dispatch_state = manifest.get("operation_state"), manifest.get("dispatch_state")
     image = request.get("request_kind") == "image"
     raw = payload.get("result_json_utf8") if isinstance(payload, dict) else None
-    gateway = None
+    from ouroboros.execution_domain import is_remote_ref, run_gateway
+
+    gateway, remote = None, is_remote_ref(request.get("engine_ref"))
     try:
         if (operation_state not in TERMINAL_STATES or not dispatch_state
                 or (raw is None and (image or dispatch_state == "response_received"))):
-            gateway = (gateway_factory or read_owned_gateway)()
+            # The engine this operation was created on, never another (``remote_engines``).
+            gateway = ((gateway_factory or (lambda bound: run_gateway(bound, read_owned_gateway)))(request) if remote
+                       else (gateway_factory or read_owned_gateway)())
             detail = gateway.get_model_operation(operation_id, timeout_sec=_READ_TIMEOUT_SEC)
             operation_state = detail.get("state")
             dispatch_state = (detail.get("dispatch") or {}).get("state")
@@ -1007,7 +1134,7 @@ def recover_model_attempt(drive_root, row: dict, *, gateway_factory=None):
         usage, cost, final = _usage(result, row.get("effort"), request_kind=request.get("request_kind", "chat"))
         return "settled", usage, cost, final
     finally:
-        if gateway is not None and gateway_factory is None:
+        if gateway is not None and (gateway_factory is None or remote):
             gateway.close()
 
 

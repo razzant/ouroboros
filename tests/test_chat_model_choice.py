@@ -67,11 +67,13 @@ def _registry_row(root, pid: str) -> dict:
 def test_the_choice_is_checked_by_the_route_grammar_never_by_a_catalog():
     assert normalize_model_choice("") == normalize_model_choice(None) == {"kind": "main"}
     # An unlisted model, a named connection and a bare OpenRouter id are routes like any other.
-    for model in ("claudexor::codex=gpt-7-unreleased", "openai-compatible@work::my/model", "vendor/model"):
+    # ``claudexor@x::`` names where a subscription model runs (a remote engine): a route like any other.
+    for model in ("claudexor::codex=gpt-7-unreleased", "claudexor@x::codex=m", "openai-compatible@work::my/model",
+                  "vendor/model"):
         assert normalize_model_choice({"kind": "model", "model": f" {model} "}) == {"kind": "model", "model": model, "use_local": False}
     assert normalize_model_choice({"kind": "model", "model": "qwen3 (local)"}) == {"kind": "model", "model": "qwen3", "use_local": True}
     for bad in ({"kind": "fallback"}, {"kind": "pin"}, {"kind": "model", "model": ""}, {"kind": "model", "model": "claudexor::codex"},
-                {"kind": "model", "model": "claudexor@x::codex=m"}, {"kind": "model", "model": "a\nb"},
+                {"kind": "model", "model": "claudexor@X Y::codex=m"}, {"kind": "model", "model": "a\nb"},
                 {"kind": "model", "model": ASTRA, "use_local": True}, {"kind": "model", "model": ASTRA, "use_local": "yes"},
                 "not json", [CHOSEN]):
         with pytest.raises(ValueError):
@@ -106,6 +108,8 @@ def test_main_and_each_project_keep_their_own_choice(room):
 @pytest.mark.parametrize("model,local,account,pin,reset", [
     (ASTRA, False, "kept", "acc-main", True),
     ("claudexor::claude=some-model", False, "auto", "", True),
+    # The same source on a remote engine: that engine's accounts are its own, so this computer's pin is not kept.
+    ("claudexor@vps::codex=gpt-6-astra", False, "auto", "", True),
     (OPUS, False, "none", "", True),
     ("local-model", True, "none", "", True),
     (SOL, False, "kept", "acc-main", False),
@@ -124,6 +128,21 @@ def test_main_write_keeps_only_same_subscription_source_pin_and_resets_only_chan
     assert windows["fallback"] == [654321]
     if not reset:
         assert windows["main"] == 123456
+
+
+@pytest.mark.parametrize("model,account,pin", [
+    ("claudexor@vps::codex=gpt-6-astra", "kept", "vps-acc"),  # the same engine and source: its own account stays
+    (ASTRA, "auto", ""),                                     # the owned engine never receives a remote engine's pin
+    ("claudexor@lab::codex=gpt-6-astra", "auto", ""),        # nor does another remote engine
+])
+def test_a_remote_mains_pin_stays_on_its_engine(room, model, account, pin):
+    _root, client = room
+    save_owner({**OWNER, "OUROBOROS_MODEL": "claudexor@vps::codex=gpt-6.1-sol",
+                "OUROBOROS_MODEL_ACCOUNTS": json.dumps({"main": "vps-acc"})})
+    response = client.post("/api/owner/chat-model", json={"kind": "model", "model": model, "use_local": False})
+    assert response.status_code == 200, response.text
+    assert response.json()["account"] == account
+    assert json.loads(_saved()["OUROBOROS_MODEL_ACCOUNTS"])["main"] == pin
 
 
 def test_main_locality_only_keeps_the_manual_window_and_records_the_writers_receipt(room, monkeypatch):

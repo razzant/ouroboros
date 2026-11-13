@@ -15,10 +15,11 @@ import { parseModelSource, composeModelSource, apiConnections, configuredApiProv
     profileOptionsFor, routeChoiceGroups, selectHtml, mintStableId, unavailableConnectionState, API_CHOICE_PREFIX,
     DEFAULT_API_PROVIDER, PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_CHOICES,
     processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, priceWords, tierPriced,
-    KEY_PROBLEM_WORDS, routeKeyProblem, keyProblemLine, apiProviderLabel } from './route_editor_primitives.js';
+    KEY_PROBLEM_WORDS, routeKeyProblem, keyProblemLine, apiProviderLabel, remoteCatalogItems, remoteProfileOptions } from './route_editor_primitives.js';
 import { revealNewRow } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { catalogPrograms } from './model_program.js';
+import { engineConnectionRows, readRemoteEngines } from './settings_engine_connections.js';
 import { modelChooserHtml, bindModelChoosers, updateModelChooser } from './model_chooser.js';
 
 export const MODEL_ACCOUNTS_KEY = 'OUROBOROS_MODEL_ACCOUNTS';
@@ -40,7 +41,7 @@ export function modelRoleMap(value) {
  */
 export function sourceChoice(source) {
     const raw = String(source || '');
-    if (!raw || raw === 'inherit' || raw.startsWith('subscription:')) return raw;
+    if (!raw || raw === 'inherit' || raw.startsWith('subscription:') || raw.startsWith('remote:')) return raw;
     return `${API_CHOICE_PREFIX}${raw}`;
 }
 
@@ -60,12 +61,13 @@ export function sourceFromChoice(choice) {
  *   `current` a stored row source.
  */
 export function modelSourceGroups({ sources = [], providers = [], connections = [], current = '', inheritLabel = 'Uses Main',
-    catalogKnown = false, accountsKnown = false, providerProfiles = {}, hasConfiguredAccounts = false, offerInherit = false } = {}) {
+    catalogKnown = false, accountsKnown = false, providerProfiles = {}, hasConfiguredAccounts = false, offerInherit = false,
+    remoteEngines = [] } = {}) {
     return [
         ...(current === 'inherit' || offerInherit ? [{ options: [{ value: 'inherit', label: inheritLabel }] }] : []),
         ...routeChoiceGroups({ modelSources: sources, providers, connections, providerProfiles,
             currentChoice: current === 'inherit' ? '' : sourceChoice(current),
-            catalogKnown, accountsKnown, hasConfiguredAccounts, includeSessions: false }),
+            catalogKnown, accountsKnown, hasConfiguredAccounts, includeSessions: false, remoteEngines }),
     ];
 }
 
@@ -116,6 +118,8 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     let connections = [];
     let mainChoice = [];  // `_meta.main_connection_choice`: an unauthored Main waits for the owner's key
     let catalog = { items: [], model_sources: [], read_state: 'not_read' };
+    let remoteEngines = [];  // saved remote engines and a connected one's catalog (settings_engine_connections.js)
+    let remoteEnginesKnown = false;  // until this page has read them, nothing is claimed about one
     let loaded = false;
     let destroyed = false;
     let disposeStatus = null;
@@ -152,7 +156,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const fallback = slot.slot === 'fallback';
             const values = matching.map((row) => composeModelSource(row.source, row.model));
             result[slot.settingKey] = fallback ? values.join(', ') : values[0] || '';
-            const pins = matching.map((row) => sourceId(row) ? row.account : '');
+            const pins = matching.map((row) => sourceId(row) || remoteOf(row) ? row.account : '');
             const contexts = matching.map((row) => Number(row.context || 0));
             const preferences = matching.map((row) => row.processing_preference);
             if (pins.some(Boolean) || slot.slot in accounts) accounts[slot.slot] = fallback ? pins : pins[0] || '';
@@ -206,16 +210,33 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         return selected ? composeModelSource(selected.source, selected.model) : '';
     }
     function sourceId(row) { const source = effectiveSource(row); return source.startsWith('subscription:') ? source.slice(13) : ''; }
+    // ``{engine, source}`` of a row on a named remote engine (its pins are that engine's accounts), else null.
+    function remoteOf(row) {
+        const [kind, engine, source] = String(row.source || '').split(':');
+        return kind === 'remote' ? { engine, source } : null;
+    }
     function catalogKey(row) { return JSON.stringify([sourceId(row), row.account]); }
+    // Where a remote row's requests go and what that means, said under the row itself (docs/DESIGN.md §3).
+    function remoteNote(row) {
+        const remote = remoteOf(row);
+        if (!remote) return '';
+        const entry = remoteEngines.find((item) => item?.name === remote.engine);
+        const where = entry?.label || remote.engine;
+        const state = !remoteEnginesKnown ? '' : !entry ? ' It is not among the saved remote engines, so nothing is sent.'
+            : entry.state === 'connected' ? '' : ' Check it in Accounts › Remote engines to list its models.';
+        return `Runs on ${where}: its requests go to that host under that engine's accounts while the tools it calls `
+            + 'run on this computer. It is never moved to another engine, this computer\'s included (Fallback models you '
+            + `set still apply as for any route); an Emergency Stop here may leave a request running there until it ends.${state}`;
+    }
     // A saved source whose key is gone stays selectable and labelled; discovery
     // only widens the list, it never rewrites the owner's assignment.
     function sourceGroupsFor(row, facts = {}) {
         return modelSourceGroups({ sources: catalog.model_sources, providers: apiProviders, connections, providerProfiles, current: row.source,
-            inheritLabel: `Uses ${inheritName(row)}`, offerInherit: Boolean(only) && !['main', 'fallback'].includes(row.slot.slot), ...facts });
+            inheritLabel: `Uses ${inheritName(row)}`, offerInherit: Boolean(only) && !['main', 'fallback'].includes(row.slot.slot), remoteEngines, ...facts });
     }
-    // A saved API source that cannot send says why under its row; the select keeps it chosen.
+    // A saved API source that cannot send says why under its row; the select keeps it chosen. A remote engine has no key.
     function keyNote(row) {
-        if (row.local || !row.model || row.source === 'inherit' || sourceId(row)
+        if (row.local || !row.model || row.source === 'inherit' || sourceId(row) || remoteOf(row)
             || apiProviders.some((provider) => provider.id === row.source)) return '';
         return choiceNote(row) || KEY_PROBLEM_WORDS[unavailableConnectionState(row.source, connections)];
     }
@@ -228,6 +249,9 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         for (const row of new Map(rows.map(row => [catalogKey(row), row])).values()) void refreshRow(row, {force: true});
     };
     function itemsFor(row) {
+        if (row.source.startsWith('remote:')) {  // that engine's own models (Accounts › Remote engines), never local ones
+            return remoteCatalogItems(remoteEngines).filter((item) => parseModelSource(item.value).source === row.source);
+        }
         return sourceId(row) ? (catalogs.get(catalogKey(row))?.items || [])
             : catalog.items.filter((item) => parseModelSource(item.value || item.id).source === row.source);
     }
@@ -282,11 +306,11 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         const field = (label, control) => (only ? `<div class="ui-field model-role-field"><span>${label}</span>${control}</div>` : control);
         const source = selectHtml(`data-model-role-source aria-label="${escapeHtml(row.slot.label)} source"`, sourceGroupsFor(row), sourceChoice(row.source));
         const model = modelChooserHtml(`id="${escapeHtml(inputId)}" data-model-role-model aria-label="${escapeHtml(row.slot.label)}${isFallback ? ` ${index + 1}` : ''}"${described}`, row.model, `${hostId}-${row.id}-models`, [], { placeholder: row.slot.slot === 'main' ? 'Choose a model' : emptyUsesText(row) });
-        const account = `<select class="ui-control" data-model-role-account aria-label="${escapeHtml(row.slot.label)} account" ${sourceId(row) ? '' : 'hidden'}></select>`;
+        const account = `<select class="ui-control" data-model-role-account aria-label="${escapeHtml(row.slot.label)} account" ${sourceId(row) || remoteOf(row) ? '' : 'hidden'}></select>`;
         const local = only && row.slot.settingsToggleId ? `<label class="local-toggle ui-field ui-field-inline"><input class="ui-checkbox" id="${escapeHtml(row.slot.settingsToggleId)}" type="checkbox" data-model-local ${row.local ? 'checked' : ''}> Use the local model for this role</label>` : '';
         return `<div class="model-role-row" data-model-role="${escapeHtml(row.id)}"${only ? ' data-solo' : ''}>
             <div class="model-role-controls">
-                ${field('Source', source)}${field('Model', model)}${only ? `<div class="ui-field model-role-field" data-model-role-account-field ${sourceId(row) ? '' : 'hidden'}><span>Account</span>${account}</div>` : account}
+                ${field('Source', source)}${field('Model', model)}${only ? `<div class="ui-field model-role-field" data-model-role-account-field ${sourceId(row) || remoteOf(row) ? '' : 'hidden'}><span>Account</span>${account}</div>` : account}
                 ${isFallback && !only ? `<span class="model-role-order"><button type="button" class="btn btn-default" data-model-up aria-label="Move fallback up" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" class="btn btn-default" data-model-down aria-label="Move fallback down" ${index === total - 1 ? 'disabled' : ''}>↓</button><button type="button" class="btn btn-default" data-model-remove aria-label="Remove fallback">Remove</button></span>` : ''}
             </div>${local}
             <div class="model-role-notes"><span id="${escapeHtml(hostId)}-${escapeHtml(row.id)}-status" class="model-role-meta ui-field-help" data-model-role-status></span>${only ? '' : detailsHtml(row)}</div>
@@ -361,11 +385,16 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const options = sourceHtml.slice(sourceHtml.indexOf('>') + 1, sourceHtml.lastIndexOf('</select>'));
             if (source.innerHTML !== options) source.innerHTML = options;
             const account = node.querySelector('[data-model-role-account]');
-            account.hidden = !sourceId(row);
+            const remote = remoteOf(row);
+            account.hidden = !sourceId(row) && !remote;
             const accountField = node.querySelector('[data-model-role-account-field]');
             if (accountField) accountField.hidden = account.hidden;
             const credentialHarness = catalog.model_sources.find((entry) => entry.id === sourceId(row))?.credentialHarness || '';
-            const accountHtml = selectHtml('', [{ options: profileOptionsFor(profiles[credentialHarness], row.account, { accountsKnown: store.accountsKnown && Boolean(credentialHarness), labelled: Boolean(only) }) }], row.account);
+            // A remote engine's row pins one of that engine's own accounts, never this computer's.
+            const remoteHarness = remote ? (remoteEngines.find((entry) => entry.name === remote.engine)?.sources || [])
+                .find((entry) => entry.id === remote.source)?.credentialHarness || '' : '';
+            const accountHtml = selectHtml('', [{ options: remote ? remoteProfileOptions(remoteEngines, remote.engine, remoteHarness, row.account, { labelled: Boolean(only) })
+                : profileOptionsFor(profiles[credentialHarness], row.account, { accountsKnown: store.accountsKnown && Boolean(credentialHarness), labelled: Boolean(only) }) }], row.account);
             const accountOptions = accountHtml.slice(accountHtml.indexOf('>') + 1, accountHtml.lastIndexOf('</select>'));
             if (account.innerHTML !== accountOptions) account.innerHTML = accountOptions;
             updateModelChooser(node.querySelector('[data-model-role-model]'), catalogModelOptions(itemsFor(row).map((item) => ({
@@ -387,10 +416,10 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const choosing = !local && Boolean(choiceNote(row)) && keyNote(row) === choiceNote(row);
             status.classList.toggle('ui-status', choosing);
             if (choosing) status.dataset.tone = 'warn'; else delete status.dataset.tone;
-            const price = local || keyNote(row) || note || !row.model || sourceId(row) || tieredProcessing(row) ? ''
+            const price = local || remoteNote(row) || keyNote(row) || note || !row.model || sourceId(row) || tieredProcessing(row) ? ''
                 : priceWords(currentItem(row)?.price, { unit: true });
             status.textContent = local ? 'Uses the local runtime.'
-                : keyNote(row) || note || (!row.model ? (row.slot.slot === 'main' ? 'Choose a model to continue.' : `Uses ${inheritName(row)}.`)
+                : remoteNote(row) || keyNote(row) || note || (!row.model ? (row.slot.slot === 'main' ? 'Choose a model to continue.' : `Uses ${inheritName(row)}.`)
                     : sourceId(row) ? (rowCatalog?.read_state === 'ok' && !rowCatalog.items.length
                         ? 'No models were listed for this source. Your selection is kept.'
                         : 'Uses your subscription. No API key required.') : price || 'Price unknown');
@@ -612,12 +641,15 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             }
             updateCatalogViews();
         },
+        /** What the saved remote engines serve (``settings_engine_connections.readRemoteEngines``): their models and
+         *  accounts join the choices; the rows and what is typed in them stay as they are. */
+        adoptRemoteEngines(list = []) { remoteEngines = Array.isArray(list) ? list : []; remoteEnginesKnown = true; updateCatalogViews(); },
         collect,
         validateAll,
         /** The one role of `only` as its Save writes it, its refusals (said under it), and the slot a deployment fixes. */
         entry() {
             const row = only && loaded ? soleRow() : null;
-            return row && { value: composeModelSource(row.source, row.model), account: sourceId(row) ? row.account : '',
+            return row && { value: composeModelSource(row.source, row.model), account: sourceId(row) || remoteOf(row) ? row.account : '',
                 context: Number(row.context || 0), processing: row.processing_preference, local: Boolean(row.local),
                 errors: rowErrors(row).map(({ message }) => message), slot: row.slot };
         },
@@ -731,11 +763,18 @@ const slotsOf = (settings) => (Array.isArray(settings?._meta?.setup_contract?.mo
 const wordsOf = (id) => HAND_WRITTEN.find((row) => row.id === id) || { id, keys: [], name: id, meta: '' };
 const shortModel = (model) => String(model || '').slice(String(model || '').lastIndexOf('/') + 1);
 
-/** A stored route in the owner's words: `{ name, source, mark }`; an empty one follows another role (`follows`). */
-export function routeWords(value, { local = false, account = '', follows = 'Main' } = {}) {
+/** A stored route in the owner's words: `{ name, source, mark }`; an empty one follows another role (`follows`). A route
+ *  on a remote engine names that engine by its saved label (`engines`: the OUROBOROS_ENGINE_CONNECTIONS rows). */
+export function routeWords(value, { local = false, account = '', follows = 'Main', engines = [] } = {}) {
     const { source, model } = parseModelSource(value);
     if (local) return { name: 'Local model', source: 'On this computer', mark: '' };
     if (!String(value || '').trim()) return { name: `${follows} model`, source: '', mark: '', follows: true };
+    if (source.startsWith('remote:')) {
+        const [, engine, harness] = source.split(':');
+        const where = (engines || []).find((row) => row?.name === engine)?.label || engine;
+        return { name: shortModel(model), mark: harness, source: `On ${where} · ${harnessPresentation(harness).label} subscription · `
+            + `${account ? `account ${account}` : 'its accounts in turn'}` };
+    }
     const harness = source.startsWith('subscription:') ? source.slice(13) : '';
     const kind = source.split('@')[0];
     return { name: shortModel(model), mark: harness, source: harness ? `${harnessPresentation(harness).label} subscription · ${account ? `account ${account}` : 'your accounts in turn'}`
@@ -808,7 +847,8 @@ function mountModels(container, { path, ctx }) {
         const slots = Object.fromEntries(slotsOf(settings).map((slot) => [slot.slot, slot]));
         const accounts = modelRoleMap(settings[MODEL_ACCOUNTS_KEY]);
         const local = (slot) => Boolean(slots[slot]?.settingsToggleId) && truthy(settings[`USE_LOCAL_${slot.toUpperCase()}`]);
-        const route = (slot, follows) => routeWords(settings[slots[slot]?.settingKey], { follows, account: accounts[slot], local: local(slot) });
+        const engines = engineConnectionRows(settings.OUROBOROS_ENGINE_CONNECTIONS);
+        const route = (slot, follows) => routeWords(settings[slots[slot]?.settingKey], { follows, account: accounts[slot], local: local(slot), engines });
         const profiles = settings._meta?.setup_contract?.providerProfiles || {};
         const keyWords = (value, onLocal) => {
             const problem = onLocal ? '' : routeKeyProblem(value, settings, profiles);
@@ -828,7 +868,7 @@ function mountModels(container, { path, ctx }) {
         shown = list.map((entry) => entry.value).join(',');
         const localFallback = truthy(settings.USE_LOCAL_FALLBACK);
         const fallbackHtml = list.map((entry, index) => {
-            const words = routeWords(entry.value, { account: entry.account, local: localFallback });
+            const words = routeWords(entry.value, { account: entry.account, local: localFallback, engines });
             const note = keyWords(entry.value, localFallback);
             return `<div class="ui-row settings-head" data-entry-id="fallback/${index + 1}" data-actions>
                 <span class="settings-head-glyph settings-head-order" aria-hidden="true">${index + 1}</span>
@@ -924,10 +964,16 @@ function mountRole(container, { path, ctx }, slot, index) {
     // the fallback list a Save checks stays the one the typing began from. Nothing is drawn while the owner is in it.
     const typing = () => dirty && container.contains(globalThis.document?.activeElement);
     let asRead = null;  // the role as read when the typing began: a Save writes only what the owner changed from it
+    let engineReads = 0;  // what the saved remote engines serve, read by this page itself; only the newest answer counts
+    const readEngines = (settings) => {
+        const mine = ++engineReads;
+        void readRemoteEngines({ settings }).then((list) => { if (mine === engineReads) editor.adoptRemoteEngines(list); });
+    };
     const read = async () => {
         if (typing()) return;
         let settings;
         try { settings = await ctx.readSettings(); } catch { return; }
+        readEngines(settings);
         if (typing()) return;
         if (!dirty) readFallbacks = fallbackEntries(settings).map((entry) => entry.value).join(',');
         editor.load(settings, { ...settings._meta?.setup_contract, modelSlots: slotsOf(settings).map((each) => ({ ...each, inputId: each.settingsInputId })) }, { keep: dirty });

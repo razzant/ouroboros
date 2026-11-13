@@ -1047,6 +1047,24 @@ def conversation_turn_live() -> bool:
         return live_turn_count() > 0
 
 
+def _remote_after_panic(root) -> None:
+    """After a Panic's receipt, off the boot path: stop a forward the Panic exit outran and send each open remote
+    model operation one best-effort cancel (``remote_stops``); owed runs and starts are the sweep's."""
+    import threading
+
+    def run() -> None:
+        try:
+            from ouroboros.remote_engines import panic_close
+            from ouroboros.remote_stops import cancel_open_model_operations
+
+            panic_close()
+            cancel_open_model_operations(root)
+        except Exception:
+            log.warning("Remote engine steps after Panic did not complete", exc_info=True)
+
+    threading.Thread(target=run, name="remote-after-panic", daemon=True).start()
+
+
 def auto_resume_after_restart() -> None:
     """Consume boot doors only after their work stops and controls are durable."""
     try:
@@ -1078,7 +1096,20 @@ def auto_resume_after_restart() -> None:
             from supervisor.state import update_state
 
             update_state(_panic_controls, confirm=PANIC_CONTROL_KEYS)
+            from ouroboros.delegate_recovery import remote_engines_named
+
+            remote = remote_engines_named(root)  # no connection and no recorded remote work: nothing remote waited on
+            if remote:
+                try:  # a launcher's Panic never ran the server's remote step: the owed stops are durable first
+                    from ouroboros.remote_stops import record_owed_stops
+
+                    record_owed_stops(root)
+                except Exception:
+                    log.error("Panic's owed remote stops are not durable; its input is kept.", exc_info=True)
+                    return
             update_state(lambda state: state.update({PANIC_RECEIPT: identity}))
+            if remote:
+                _remote_after_panic(root)
             remove_received_panic(root, identity)
             return
         if restart:

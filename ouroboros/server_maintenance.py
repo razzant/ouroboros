@@ -540,8 +540,9 @@ def _retry_latched_daemon_start() -> None:
         log.warning("Owned daemon retry after latch release failed unexpectedly", exc_info=True)
 
 
-def _reconcile_delegated_runs(running_task_ids: Any, *, stop_event: Any = None) -> None:
-    """Settle or cancel delegated runs whose owning task is gone (startup + tick)."""
+def _reconcile_delegated_runs(running_task_ids: Any, *, stop_event: Any = None, remote_engines: bool = True) -> None:
+    """Settle or cancel delegated runs whose owning task is gone (startup + tick). The boot pass reaches no remote
+    engine (``remote_engines=False``): the periodic sweep, off the loop, does after readiness."""
     try:
         from ouroboros.claudexor_daemon import ensure_owned_gateway, read_owned_gateway
         from ouroboros.delegate_custody import reconcile_orphaned_runs
@@ -565,7 +566,7 @@ def _reconcile_delegated_runs(running_task_ids: Any, *, stop_event: Any = None) 
             gateway_factory=lambda: (read_owned_gateway() if _stop_requested(stop_event)
                                      else ensure_owned_gateway(admission_wait_sec=0)),
             recoverable_handles=recoverable_handles(DATA_DIR) | continuation_handles(DATA_DIR, continued),
-            replay_pending=running, observe_pending=running,
+            replay_pending=running, observe_pending=running, remote_engines=remote_engines,
         )
         if outcomes:
             log.info("Delegated-run reconciliation handled %d orphan(s): %s", len(outcomes), outcomes)
@@ -1013,7 +1014,7 @@ def _startup_custody_sweep() -> None:
         settle_task_scopes(DATA_DIR, _live_task_ids)
     except Exception:
         log.debug("Task scope startup sweep failed", exc_info=True)
-    _reconcile_delegated_runs(_live_task_ids)
+    _reconcile_delegated_runs(_live_task_ids, remote_engines=False)  # a boot never waits on SSH
     try:
         # D1a boot backfill, ONCE per generation and AFTER the orphan reconcile
         # (so this generation's settlements are already visible to the audit):

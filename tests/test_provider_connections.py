@@ -89,7 +89,9 @@ def test_the_ambient_resolver_reads_the_runtime_view(monkeypatch):
 @pytest.mark.parametrize("route,rows,reason", [
     ("openrouter@gone::x/y", ROWS, "missing"),
     ("openrouter@byok::x/y", [{**ROWS[0], "enabled": False}], "disabled"),
-    ("claudexor@acct::codex=gpt", ROWS, "invalid"),
+    # ``claudexor@<name>`` names a remote engine connection (``remote_engines``); none is configured here.
+    ("claudexor@acct::codex=gpt", ROWS, "missing"),
+    ("claudexor@Acct!::codex=gpt", ROWS, "invalid"),
 ])
 def test_an_unavailable_connection_refuses_and_never_falls_through(route, rows, reason):
     with pytest.raises(ConnectionUnavailable) as caught:

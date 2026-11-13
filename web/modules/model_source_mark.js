@@ -17,12 +17,13 @@ const svg = (viewBox, body) => `<svg class="model-source-mark" viewBox="${viewBo
 const initial = (label) => `<span class="model-source-mark model-source-initial" aria-hidden="true">${esc((String(label || '').trim()[0] || '·').toUpperCase())}</span>`;
 
 /**
- * A source's mark as markup: its harness's (a subscription), its provider's (an API key), else its initial.
+ * A source's mark as markup: its harness's (a subscription, a remote engine's included), its provider's (an API key),
+ * else its initial.
  * @param {?{lane?: string, harness?: string, kind?: string, label?: string, sourceLabel?: string}} source
  */
 export function sourceMark(source) {
     const label = source?.label || source?.sourceLabel || '';
-    if (source?.lane === 'subscription') {
+    if (source?.lane === 'subscription' || source?.lane === 'remote') {
         const mark = harnessPresentation(source.harness);
         return mark.generic ? initial(label) : svg(mark.viewBox, `<path fill="currentColor" d="${mark.path}"/>`);
     }

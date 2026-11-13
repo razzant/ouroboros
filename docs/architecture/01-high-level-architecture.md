@@ -93,7 +93,8 @@ supervisor/ — background thread inside server.py (§5)
 ouroboros/ — agent core and shared runtime (§6)
   config.py, launch_roots.py — SSOT facade: paths, settings load/save, PID lock (§7)
   settings_defaults.py, settings_scales.py, model_slots.py, review_model_routes.py, runtime_limits.py — settings vocabularies `config.py` re-exports (§7; §10 invariant 3)
-  deployment_policy.py, deployment_extensions.py, execution_domain.py, work_domain.py, work_skill_payloads.py — deployment settings, Safety, body, extensions and work domains (§7, §6, §13)
+  deployment_policy.py, deployment_extensions.py, execution_domain.py, work_domain.py, work_skill_payloads.py — deployment settings, Safety, body, extensions and work domains (§7, §6, §13); execution_domain also compares, groups and reopens a run's bound engine (owned, work or named remote)
+  remote_engines.py, remote_workspace.py, remote_stops.py — named remote Claudexor engines over the owner's SSH (`OUROBOROS_ENGINE_CONNECTIONS`, §7): one attach-only installation tunnel per connection publishing a private loopback descriptor, the remote gateway, the bound `engine_ref`, Emergency Stop's owed remote stops and unknown starts (`remote_stops`, §9); and a remote run's staged copy, typed host sources, result and evidence mirror into the local private copy, declared remote workspaces and host copy retirement (§6)
   version.py — version string from VERSION, importlib.metadata fallback
   secret_masking.py, settings_integrity.py, route_choice.py — Settings/MCP wire placeholders and secret repair before env overlay/persistence; task-local/skill settings views, snapshot pin (`OUROBOROS_SETTINGS_SHA256`), projection echo/digests (`OUROBOROS_PROJECTED_*`); live route keys, a turn's route choice (§6, §7)
   credential_shapes.py — credential leaf names and physical locations (§6 Credential mutation and diagnostic redaction)
@@ -485,6 +486,7 @@ ouroboros/ — agent core and shared runtime (§6)
     claudexor_accounts.py — thin owned-daemon status/login/account proxies; no auth logic or browser token; only a successful read proves absence (§3 Agent accounts; §4)
     claudexor_passive.py, claudexor_contracts.py — passive quota read and envelope types (docs/PASSIVE_QUOTA_READ.md)
     claudexor_quota.py — Owned-daemon refresh/reset/receipt proxies; catalog negotiation, exact key/body and typed errors, no start/retry/browser token (§3 Agent accounts; §4)
+    engine_connections.py — Remote engines (`remote_engines`): saved rows with the last observation, no host contact; attach-only Check; Disconnect of this installation's forward only; a connected engine's catalog and own account roster through an already open tunnel; never a token (Accounts: §3; routes: §4)
     harness_maintenance.py — Owner maintenance HTTP over shared service (§6; routes: §4)
     host_service.py, host_notify.py — Loopback-only Host Service API, /notify `skill_notice` rows (§12)
     history.py, history_deliveries.py — Shared Chat room/quiz/media/review/terminal/receipt projection, cost-breakdown factories; delivery rows' `msg_type`
@@ -690,6 +692,7 @@ Default root (overrides: §7). This tree orients; `docs/PERSISTENCE.md` register
 │   │   ├── openrouter_models.json ← the OpenRouter catalogue every process adopts
 │   │   ├── extra-ca-bundle/<digest>.pem ← content-addressed CA bundle all first-party HTTP clients verify
 │   │   ├── process_ledger.jsonl   ← process-custody ledger (Runtime topology)
+│   │   ├── remote_engines/<name>/ ← a remote engine's tunnel: control-api.json (no token), 0600 token, ssh.log, attach.lock, runs/<engine>/<run>/{live,final}/<digest>/ (one complete read of a run's fact files each, keyed by the engine's address, home and store; final ones stay) (`remote_engines`)
 │   │   ├── installation_scope.json ← scope marker
 │   │   ├── task_scopes/ ← task scope records
 │   │   ├── panic_sweep_pending.json ← pending Panic sweep

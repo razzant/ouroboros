@@ -638,6 +638,14 @@ export const apiClient = {
      * @returns {Promise<import('./api_types.js').ProviderTestResponse>}
      */
     providerTest: (payload) => jsonPost('/api/providers/test', payload),
+    /** Saved remote engines with this installation's last observation of each; no host contact, no token. */
+    engineConnections: () => fetchJson('/api/engine-connections', { cache: 'no-store' }),
+    /** Attach-only Check of one saved remote engine; a refusal answers `ok: false` with its typed code. */
+    engineConnectionCheck: (name) => jsonPost(`/api/engine-connections/${encodeURIComponent(name)}/check`, {}),
+    /** Stop this installation's tunnel to one remote engine; the engine and its runs continue. */
+    engineConnectionDisconnect: (name) => jsonPost(`/api/engine-connections/${encodeURIComponent(name)}/disconnect`, {}),
+    /** A connected remote engine's sources, models and agent harnesses (`state: offline` while no tunnel is open). */
+    engineConnectionCatalog: (name) => fetchJson(`/api/engine-connections/${encodeURIComponent(name)}/catalog`, { cache: 'no-store' }),
     extensions: () => fetchJson('/api/extensions', { cache: 'no-store' }),
     /**
      * Widgets page cards: live extension UI tabs projected from the loader

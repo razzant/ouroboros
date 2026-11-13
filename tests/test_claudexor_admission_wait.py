@@ -487,8 +487,10 @@ def test_supervisor_sweep_wiring_passes_a_zero_wait_factory(monkeypatch):
 
     def fake_reconcile(
         drive_root, *, running_task_ids, gateway_factory, recoverable_handles, replay_pending, observe_pending,
+        remote_engines,
     ):
         captured["factory"] = gateway_factory
+        captured["remote_engines"] = remote_engines
         captured["recoverable_handles"] = set(recoverable_handles)
         captured["replay_pending"] = replay_pending
         captured["observe_pending"] = observe_pending
@@ -504,6 +506,7 @@ def test_supervisor_sweep_wiring_passes_a_zero_wait_factory(monkeypatch):
     monkeypatch.setattr(daemon_mod, "ensure_owned_gateway", fake_ensure)
     server_mod._reconcile_delegated_runs(set())
     assert "factory" in captured, "the sweep never reached the reconciler"
+    assert captured["remote_engines"] is True, "the periodic sweep, off the loop, is the one that reaches remote engines"
     assert captured["recoverable_handles"] == set()
     with pytest.raises(ClaudexorUnavailable):
         captured["factory"]()

@@ -25,6 +25,8 @@ from ouroboros.gateway.router import collect_routes
 from ouroboros.gateway.schema import CONTRACT_MODULES, contract_document, contract_typed_dict, validate_ingress
 from tests.test_gateway_parity import _js_typedef_fields
 
+pytest_plugins = ("tests._remote_engine_stand",)  # ``host``: a stand-in OpenSSH and engine, no real host
+
 REPO = pathlib.Path(__file__).resolve().parents[1]
 DOCUMENT = contract_document()
 BY_TOKEN = {f"{entry['method']} {entry['path']}": entry for entry in DOCUMENT["http"]}
@@ -305,6 +307,47 @@ def test_mcp_listing_evidence_matches_published_contracts(client, monkeypatch, t
         assert attempt["ok"] is (outcome != "failed")
         invalid = {**row, "latest_attempt": {**attempt, "partial": "not a boolean"}}
         assert validate_ingress(invalid, contract_typed_dict("McpServerStatus"))
+
+
+def test_the_remote_engine_routes_answer_their_published_shapes(client, host, monkeypatch):
+    """List, Check, catalog and Disconnect of a saved remote engine through the real router and attach path."""
+    host.state["profiles"] = {"profiles": [{"profile": {"harness_id": "codex", "profile_id": "remote-main"},
+                                            "status": {"verification": "passed"}}], "accountPools": []}
+    assert assert_bound("GET /api/engine-connections", client.get("/api/engine-connections")) == "EngineConnectionsResponse"
+    offline = client.get("/api/engine-connections/vps/catalog")
+    assert assert_bound("GET /api/engine-connections/{name}/catalog", offline) == "EngineConnectionCatalogResponse"
+    assert offline.json()["state"] == "offline"  # not connected is a state, never an empty catalog
+    checked = client.post("/api/engine-connections/vps/check", json={})
+    assert assert_bound("POST /api/engine-connections/{name}/check", checked) == "EngineConnectionCheckResponse"
+    assert checked.json()["ok"] is True
+    catalog = client.get("/api/engine-connections/vps/catalog")
+    assert assert_bound("GET /api/engine-connections/{name}/catalog", catalog) == "EngineConnectionCatalogResponse"
+    assert catalog.json()["state"] == "connected" and catalog.json()["accounts_state"] == "ok"
+    listed = client.get("/api/engine-connections").json()["connections"][0]
+    assert listed["observation"]["state"] == "connected" and listed["owed_stops"] == {"runs": 0, "starts": 0}
+    gone = client.post("/api/engine-connections/missing/check", json={})
+    assert assert_bound("POST /api/engine-connections/{name}/check", gone) == "ErrorResponse"
+    closed = client.post("/api/engine-connections/vps/disconnect", json={})
+    assert assert_bound("POST /api/engine-connections/{name}/disconnect", closed) == "EngineConnectionDisconnectResponse"
+    assert closed.json() == {"name": "vps", "closed": True}
+    # a removed row's name still closes its tunnel; a segment outside the name grammar never reaches the tunnel files
+    removed = client.post("/api/engine-connections/gone-row/disconnect", json={})
+    assert removed.status_code == 200 and removed.json() == {"name": "gone-row", "closed": False}
+    outside = client.post("/api/engine-connections/Not%20A%20Name/disconnect", json={})
+    assert assert_bound("POST /api/engine-connections/{name}/disconnect", outside) == "ErrorResponse"
+    assert outside.status_code == 404
+    import asyncio
+
+    from starlette.requests import Request
+
+    from ouroboros import remote_engines
+    from ouroboros.gateway.engine_connections import api_engine_connection_disconnect
+
+    asked = []
+    monkeypatch.setattr(remote_engines, "retire", lambda name, **_kwargs: asked.append(name))
+    dotted = asyncio.run(api_engine_connection_disconnect(Request(
+        {"type": "http", "method": "POST", "path": "/", "headers": [], "path_params": {"name": ".."}})))
+    assert dotted.status_code == 404 and asked == []
 
 
 def test_every_published_and_owned_shape_has_one_field_identical_browser_twin():

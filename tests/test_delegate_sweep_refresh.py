@@ -366,7 +366,8 @@ def test_same_boot_sweep_settlement_is_cleared_in_the_same_generation(tmp_path, 
     monkeypatch.setattr(server_mod, "DATA_DIR", tmp_path)
 
     def fake_reconcile(drive_root, *, running_task_ids, gateway_factory,
-                       recoverable_handles, replay_pending, observe_pending):
+                       recoverable_handles, replay_pending, observe_pending, remote_engines):
+        assert remote_engines is False  # the boot pass never waits on SSH; the periodic sweep reaches them
         _emit_settled(tmp_path, "run-5", "t-late")
         return []
 

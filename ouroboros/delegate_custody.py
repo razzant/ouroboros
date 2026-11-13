@@ -53,6 +53,11 @@ CLOSED_ABSENT = "delegate_run_closed_absent"
 STORE_BOUND = "delegate_run_store_bound"
 PROJECT_RETIRED = "delegate_run_project_retired"
 PROJECT_RETIRE_FAILED = "delegate_run_project_retire_failed"
+REMOTE_COPY_RETIRED = "delegate_run_remote_copy_retired"  # a staged host copy removed (``remote_workspace``)
+# A remote start's local phase (``remote_engines``), written durably in the invocation's own custody root: ``staging``
+# before anything is sent to the host, ``posting`` just before the POST leaves. ``staging`` without ``posting`` is a
+# definite local no-send; ``posting`` stays sent-unknown until its run is found; neither proves nothing.
+REMOTE_START_PHASE = "delegate_run_remote_start_phase"
 CANCEL_OUTCOME = "delegate_run_cancel_outcome"
 UNCONFINED = "delegate_run_unconfined"
 CONTAINMENT_FAULT = "delegate_run_containment_fault"
@@ -149,6 +154,7 @@ class RunCustody:
     daemon_store_id: str = ""  # the engine store that admitted the run; "" = unbound (older engine or receipt)
     # The work-engine locator is bound before POST; it is not admission-store proof.
     engine_ref: Dict[str, Any] = field(default_factory=dict)
+    remote_copy_retired: bool = False  # a remote run's staged host copy is removed; until then the row holds it
     # Configured-actor binding. Empty on historical/root-legacy delegate starts.
     selected_subagent_id: str = ""
     config_fingerprint: str = ""
@@ -642,7 +648,10 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
             run_id=run_id, task_id=str(row.get("task_id") or ""), route_id=str(row.get("route") or ""),
             root_task_id=str(row.get("root_task_id") or ""), parent_task_id=str(row.get("parent_task_id") or ""),
             invocation_id=str(row.get("invocation_id") or ""),
-            project_id=str(row.get("project_id") or ""), source=str(row.get("source") or ""))
+            project_id=str(row.get("project_id") or ""), source=str(row.get("source") or ""),
+            # An incident about a run found on a bound engine (``remote_stops``) names that engine: its later
+            # reads and stops go there, never to the owned engine whose absence would speak for nothing.
+            engine_ref=copy.deepcopy(row["engine_ref"]) if isinstance(row.get("engine_ref"), dict) else {})
     if custody is None:
         return
     if kind == STORE_BOUND and not custody.daemon_store_id:
@@ -762,8 +771,12 @@ def _apply(state: Dict[str, RunCustody], row: Dict[str, Any]) -> None:
         # the leak shape); no ledger row exists and none ever will.
         custody.settled = True
         custody.containment_fault = {}
+    elif kind == REMOTE_COPY_RETIRED:
+        custody.remote_copy_retired = True
     elif kind == CONTAINMENT_FAULT:
-        custody.containment_fault = dict(row)
+        from ouroboros.remote_stops import incident_after  # an owed remote stop outlasts other incidents
+
+        custody.containment_fault = incident_after(custody.containment_fault, row)
     elif kind == CONTAINMENT_RESOLVED:
         if not row.get("expected_reason") or row["expected_reason"] == custody.containment_fault.get("reason"):
             custody.containment_fault = {}

@@ -31,6 +31,7 @@ from ouroboros.provider_models import (
     resolve_zai_base_url,
     normalize_anthropic_model_id,
     normalize_model_identity,
+    claudexor_route,
     parse_claudexor_model,
     parse_model_route,
     resolve_minimax_base_url,
@@ -107,14 +108,23 @@ def resolve_target(model: str, settings: Optional[Dict[str, Any]] = None, *,
     route = _resolver_route(model)
     provider, resolved_model = route.kind, route.model.strip()
     if provider == "claudexor" and route.valid:
+        if route.connection:  # a remote engine is refused here as an unknown or disabled API connection is
+            from ouroboros.provider_connections import unavailable
+            from ouroboros.remote_engines import engine_connection_rows
+
+            row = next((item for item in engine_connection_rows(settings if explicit_settings else None)
+                        if item.get("name") == route.connection), None)
+            if row is None or row.get("enabled", True) is False:
+                raise unavailable(route, "missing" if row is None else "disabled")
         source, native_model = parse_claudexor_model(model)
         return {
             "provider": provider, "source": source, "resolved_model": native_model,
-            "usage_model": f"claudexor::{resolved_model}", "api_key": "", "default_headers": {},
+            "usage_model": claudexor_route(route.connection, source, native_model), "api_key": "", "default_headers": {},
             # The daemon's address as route identity only; discovery never uses it, and each
             # attempt states the model's real (remote) locality (llm_claudexor._accounted_request).
+            # ``connection`` names the remote engine (``remote_engines``), "" the owned one.
             "base_url": "http://127.0.0.1", "supports_openrouter_extensions": False,
-            "supports_generation_cost": False, "connection": "",
+            "supports_generation_cost": False, "connection": route.connection,
         }
     get = connection_values(route, configured, connection_rows(configured(CONNECTIONS_KEY, None)))
     if provider == "anthropic":
@@ -205,19 +215,20 @@ class _ProviderRoutingMixin:
     """Provider targets, client factories, affinity keys and the window probe."""
 
     @staticmethod
-    def claudexor_model_sources() -> dict:
+    def claudexor_model_sources(engine: str = "") -> dict:
         from ouroboros.llm_claudexor import model_sources
 
-        return model_sources()
+        return model_sources(**({"engine": engine} if engine else {}))  # a local read keeps its old call
 
     @staticmethod
     def claudexor_model_catalog(source: str, credential_profile_id: str | None = None, *,
-                               requested_model: str | None = None) -> dict:
-        """Read the owned model route's catalog; evidence interpretation stays with its caller."""
+                               requested_model: str | None = None, engine: str = "") -> dict:
+        """Read the model route's catalog on its engine (``engine``: a remote one, "" the owned one);
+        evidence interpretation stays with its caller."""
         from ouroboros.llm_claudexor import model_catalog
 
         hint = {"requested_model": requested_model} if requested_model is not None else {}
-        return model_catalog(source, credential_profile_id, **hint)
+        return model_catalog(source, credential_profile_id, **hint, **({"engine": engine} if engine else {}))
 
     @classmethod
     def supports_response_format(cls, model: str, *, use_local: bool = False) -> bool:
