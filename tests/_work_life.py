@@ -8,9 +8,11 @@ the real OpenAI lane to an in-memory SDK client. Behind both sits one stub provi
 per place (an engine account, or one API key of one model string) and reads the longest run of byte-equal elements (the
 tool array, each system block, each later row) of that place's previous request; it counts tokens at the place's own
 density and enforces the place's bound the way the place does (``input``: an input above it is refused with its number;
-``total``: input plus the reply allowance above it is refused, with its number, or, ``total_unnumbered``, without;
-``cut``: nothing is refused and the reply is cut to what is left); and it answers a scripted mind. It also notes how
-each part the mind read came back: whole, or as a partial view (``tool_result_delivery.RESULT_VIEW_MARKER``).
+``total``: input plus the reply allowance above it is refused, with its number, or, ``total_unnumbered``, without, or,
+``total_worded``, in the words of a server that names ``max_tokens`` beside the window and the input, or,
+``total_as_a_size``, as a size it will not take, with no number; ``cut``: nothing is refused and the reply is cut to
+what is left); and it answers a scripted mind. It also notes how each part the mind
+read came back: whole, or as a partial view (``tool_result_delivery.RESULT_VIEW_MARKER``).
 
 A life is read back from the product's own record of each request (``physical_context.prefix`` ->
 ``transcript_prefix.prefix_class``), joined with the place that answered it (the observer keys a route by its model
@@ -156,7 +158,14 @@ class Provider:
                 entry["message"] = {
                     "input": f"prompt is too long: {total} tokens > {limit} maximum",
                     "total": f"input length and `max_tokens` exceed context limit: {total} + {reply} > {limit}",
-                    "total_unnumbered": "The request exceeds the context length of this model."}[place.kind]
+                    "total_unnumbered": "The request exceeds the context length of this model.",
+                    "total_as_a_size": "Requested tokens exceed the model limit: lower max_tokens or shorten the prompt.",
+                    "total_worded": (f"This model's maximum context length is {limit} tokens. However, your request has "
+                                     f"{total} input tokens. Please reduce the length of the input messages."
+                                     if total > limit else
+                                     f"'max_tokens' or 'max_completion_tokens' is too large: {reply}. This model's maximum "
+                                     f"context length is {limit} tokens and your request has {total} input tokens "
+                                     f"({reply} > {limit} - {total}).")}[place.kind]
                 return entry
             entry["cut"] = place.kind == "cut" and over > limit
             hook = self.before.pop(answered + 1, None)
@@ -626,7 +635,7 @@ def breaches(record: Dict[str, Any], places: Dict[str, Place], *, sequence: str,
             found.append(f"mode: {row['token']} ran in {row['mode']!r}, not {mode!r}")
     total = any(row.get("kind") == "total" for row in record["windows"])  # what the product learned, not the place
     total_refused = [entry["round"] for entry in record["log"] if entry["kind"] == "refused"
-                     and places[entry["place"]].kind in ("total", "total_unnumbered")] if total else []
+                     and places[entry["place"]].kind.startswith("total")] if total else []
     for event in record["events"]:
         if event.get("checkpoint_kind") == "context_fit_refused" and event.get("cause") == "known_window_prediction":
             # The window the route states, never the capacity frame the event carries (the admitted line plus R).

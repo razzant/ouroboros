@@ -1360,7 +1360,10 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
         msg, retry_cost = retried
         cost = float(cost or 0.0) + float(retry_cost or 0.0)
     refused = ctx.accumulated_usage.pop(REFUSED_CANDIDATE_KEY, None)  # includes a pre-send-refused image retry
-    if msg is not None or str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") != "context_overflow":
+    kind = str(ctx.accumulated_usage.get("_last_llm_error_kind") or "")
+    if msg is None and kind == "request_too_large" and disposition is not None and disposition.measurement.probes_reply_reservation:
+        kind = ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"  # the stated total's own refusal
+    if msg is not None or kind != "context_overflow":
         return msg, cost, ctx.active_context_mode
     ctx.accumulated_usage[CONTEXT_REFUSAL_ROUND_KEY] = ctx.round_idx  # this round's size refusal, passes or not
 

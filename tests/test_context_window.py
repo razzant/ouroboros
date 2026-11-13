@@ -129,6 +129,35 @@ def test_a_numberless_refusal_inside_a_stated_totals_reservation_confirms_the_to
     assert window.admitted == admitted and window.usable == min(admitted, 234_464)
 
 
+@pytest.mark.parametrize("source,anchored,size,probes", [
+    ("metadata", True, 240_000, True),       # inside the reply reservation of a total nothing has proved
+    ("metadata", True, 291_808, True),       # up to the admitted line itself
+    ("metadata", True, 234_464, False),      # at the line a start is sized to: no reading is being tried
+    ("metadata", False, 240_000, False),     # a cold estimate measures nothing: its refusal is read by its words
+    ("local_health", True, 240_000, False),  # a total that holds the reply has no such band
+])
+def test_a_request_inside_the_reply_reservation_is_known_as_one(tmp_path, monkeypatch, source, anchored, size, probes):
+    """What the recovery gate asks of a refused round (``loop_model_call._call_round_model``): a provider's size
+    refusal of a request only the favourable reading admitted is that stated total's own answer, whatever its words
+    (owner, 30 Sep 2026: the host sends once and records the provider's answer). Any other request's size refusal
+    keeps the kind its words gave it."""
+    from ouroboros import context_fit as cf
+    from ouroboros.context_anchor import InputAnchor
+    from tests.test_memory_window_acceptance import _core
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    monkeypatch.setattr(ce, "resolve_main_token_density", lambda *_a, **_kw: (1.0, "cold_estimate"))
+    core, _snap = _core(True)
+    plan = cf.build_context_fit_plan(None, core, {"usage_category": "consciousness"}, preferred_mode="max",
+        route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "test"},
+            ce.CapabilityEvidence(300_000, "confirmed", source, "probe-route")))
+    monkeypatch.setattr(cf, "estimate_context_prompt_tokens", lambda *_a, **_kw: size)
+    anchor = InputAnchor(input_tokens=size, estimate_tokens=size, transcript_tokens=size, round=1) if anchored else None
+    fit = cf.measure_main_fit(plan, [], [], profile="owner_max", rendered_mode="max", round_id="r", anchor=anchor).measurement
+    assert fit.estimated_input_tokens == size and fit.probes_reply_reservation is probes
+
+
 @pytest.mark.parametrize("main", [True, False])
 def test_settlement_binds_main_density_and_acceptance_but_auxiliary_calls_do_not(tmp_path, main):
     from types import SimpleNamespace

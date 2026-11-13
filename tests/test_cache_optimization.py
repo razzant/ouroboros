@@ -607,6 +607,19 @@ WORK_LIVES = {
         Life(places=(Place("opus", OPUS, density=1.4, dense=4.2, marked=True),), primary="opus",
              reads=(200_000,) + (_P50,) * 4, dense=(0,)),
         r"first_request@opus( append@opus)*( (system_changed|history_rewritten)@opus( append@opus)*)+", {}, 1),
+    # A server that validates input plus max_tokens says so in its own sentence (vLLM's): it is that total's refusal,
+    # learned once, and no reason to leave the model although a fallback is configured.
+    "a_total_refused_in_a_servers_own_words": (
+        Life(places=(Place("opus", OPUS, density=1.4, marked=True, kind="total_worded"), _A), primary="opus",
+             fallbacks=("a",), reads=(_WIDE,) * 5),
+        r"first_request@opus( append@opus)*( (system_changed|history_rewritten)@opus( append@opus)*)+", {}, 1),
+    # A server words the same refusal as a size it will not take and names no number: the request went out inside the
+    # reply reservation of the total it states, so the refusal is that total's answer, learned in one round (the
+    # transport first repeats a 400 it cannot read without the reasoning replay: ``reasoning_strip_retry_allowed``).
+    "a_total_refused_as_a_size_with_no_number": (
+        Life(places=(Place("opus", OPUS, density=1.4, marked=True, kind="total_as_a_size"), _A), primary="opus",
+             fallbacks=("a",), reads=(_WIDE,) * 5),
+        r"first_request@opus( append@opus)*( (system_changed|history_rewritten)@opus( append@opus)*)+", {}, 2),
     "an_account_rotation_of_one_model": (Life(places=(_A, _B), reads=(8_000,) * 4, rotate=3, pinned=False),
                                          _ON_A + r"( append@b)+", {}, 0),
     # The work has grown past the stated window less the reply reserve; its requests still go out. The engine then

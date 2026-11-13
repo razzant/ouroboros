@@ -71,8 +71,8 @@ SOURCE_USER_SETTING = "user_setting"
 SOURCE_NONE = "none"
 
 #: The refused request's whole input where the provider states it beside the limit: OpenAI ("your messages
-#: resulted in N tokens"), Anthropic ("prompt is too long: N tokens", "context limit: N + R") and Gemini
-#: ("input token count (N)").
+#: resulted in N tokens"), Anthropic ("prompt is too long: N tokens", "context limit: N + R"), Gemini
+#: ("input token count (N)") and vLLM ("your request has N input tokens").
 _CTX_INPUT_PATTERNS: Tuple[re.Pattern[str], ...] = (
     re.compile(r"resulted in\s*([0-9][0-9,]*)\s*tokens", re.I),
     re.compile(r"prompt is too long:\s*([0-9][0-9,]*)\s*tokens", re.I),
@@ -80,15 +80,18 @@ _CTX_INPUT_PATTERNS: Tuple[re.Pattern[str], ...] = (
     re.compile(r"(?:input length|the input)\s*\(\s*([0-9][0-9,]*)\s*tokens?\b", re.I),
     re.compile(r"([0-9][0-9,]*)\s*tokens? from the input messages", re.I),
     re.compile(r"input token count\s*\(?\s*([0-9][0-9,]*)", re.I),
+    re.compile(r"request has\s*([0-9][0-9,]*)\s*input tokens", re.I),
 )
 #: Shares of the input where only the parts are stated: OpenAI's messages and functions (tool definitions),
 #: OpenRouter's "N of <kind> input".
 _CTX_INPUT_PART = re.compile(r"([0-9][0-9,]*)\s*(?:of [a-z]+ input|in the (?:messages|functions))", re.I)
-#: The reply the refused request reserved ("R in the completion" / "in the output", Anthropic's "+ R").
+#: The reply the refused request reserved ("R in the completion" / "in the output", Anthropic's "+ R", vLLM's
+#: "max_tokens … is too large: R").
 _CTX_REPLY_PATTERNS: Tuple[re.Pattern[str], ...] = (
     re.compile(r"([0-9][0-9,]*)\s*tokens? for the completion", re.I),
     re.compile(r"([0-9][0-9,]*)\s*in the (?:completion|output)", re.I),
     re.compile(r"context limit:\s*[0-9][0-9,]*\s*\+\s*([0-9][0-9,]*)", re.I),
+    re.compile(r"is too large:\s*([0-9][0-9,]*)", re.I),
 )
 #: OpenAI's and OpenRouter's "you requested (about) N tokens" is a total: the input plus that reserved reply.
 _CTX_TOTAL_PATTERN = re.compile(r"you requested (?:(?:about|a total of)\s*)?([0-9][0-9,]*)\s*tokens", re.I)

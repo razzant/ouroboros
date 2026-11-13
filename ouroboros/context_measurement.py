@@ -70,6 +70,16 @@ class MainFitMeasurement:
     mode_cause: str = ""  # why ``rendered_mode`` is lower than it (``mode_cause``); "" when it is not
 
     @property
+    def probes_reply_reservation(self) -> bool:
+        """This request goes out inside the reply reservation of a stated total nothing has proved, measured on a
+        request this route answered: only the favourable reading (``WindowRecord.admitted``) admits it, so the
+        provider's size refusal of it is that reading's answer, whatever its words (owner 30.09: the host sends once
+        and records the provider's answer). A proved total and an input limit have no such band."""
+        usable, admitted = self.window.get("usable"), self.window.get("admitted")
+        return bool(self.anchor_input_tokens is not None and usable is not None and admitted is not None
+                    and usable < self.estimated_input_tokens <= admitted)
+
+    @property
     def reprojection_input_tokens(self) -> Optional[int]:
         """Carry the anchored input into the floor's estimator units, rounding conservatively.
 
