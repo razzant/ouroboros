@@ -744,7 +744,11 @@ def test_account_polling_stops_when_hidden_unmounted_and_disposed(resources_ui):
     page.evaluate("Object.defineProperty(document, 'hidden', {configurable: true, get: () => false}); document.dispatchEvent(new Event('visibilitychange'))")
     page.wait_for_timeout(20)
     assert transport.calls.count("passive") > count
-    open_settings(page, "")
+    # A wide Settings home restores its last page; explicitly choose Ouroboros
+    # so Accounts really unmounts instead of remounting beside the home rail.
+    page.locator('[data-settings-overview-row]').click()
+    page.locator('[data-settings-page="accounts/claude"]').wait_for(state="detached")
+    assert store_call(page, "s.polling") is False
     count = transport.calls.count("passive")
     page.clock.fast_forward(15000)
     assert transport.calls.count("passive") == count
