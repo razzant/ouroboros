@@ -1433,7 +1433,7 @@ html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) {
 html[data-layout="stack"] .app-page-header[data-back]:has(> .app-page-title-block > .app-page-back:not(:empty)) {
     grid-template-areas: "back title toolbar";
 }
-html[data-layout="stack"] .app-page-header[data-back]:has(> .app-page-title-block > .app-page-back:not(:empty)) > .app-page-leading {
+html[data-layout="stack"] .app-page-header[data-back] > .app-page-leading:has(~ .app-page-title-block > .app-page-back:not(:empty)) {
     display: none;
 }
 html[data-layout="stack"] .app-page-header[data-back] > .app-page-title-block:has(> .app-page-back:not(:empty)) { display: contents; }
