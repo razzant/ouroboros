@@ -230,6 +230,11 @@ html[data-layout="stack"] .shell-icon-control {
     .nav-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .nav-tools > .nav-row:nth-child(n) { justify-self: start; }
 }
+/* A finger's target in the docked layout too (a tablet, a touch laptop): the row is the touch minimum tall; a mouse
+   keeps the quieter row. */
+@media (pointer: coarse) {
+    .nav-tools > .nav-row { min-height: var(--touch-target-min); }
+}
 html[data-layout="stack"] .nav-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); padding-top: var(--space-3); }
 html[data-layout="stack"] .nav-tools > .nav-row { min-height: 44px; }
 html[data-layout="stack"] .nav-tools > .nav-row:nth-child(n) { justify-self: start; }
@@ -6263,6 +6268,17 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     color: var(--text-meta);
     cursor: pointer;
     transition: var(--motion-tone);
+}
+/* Under a finger the action is the touch minimum on every side, its extra box drawn into the head's air by equal
+   negative margins, so nothing moves and a mouse keeps the small capsule (DESIGN "Touch and containment"). */
+@media (pointer: coarse) {
+    .costs-meter-action {
+        --costs-action-reach: calc((var(--control-h-sm) - var(--touch-target-min)) / 2);
+        width: var(--touch-target-min);
+        height: var(--touch-target-min);
+        margin-block: var(--costs-action-reach);
+        margin-inline: var(--costs-action-reach) calc(var(--costs-action-reach) - var(--space-1));
+    }
 }
 @media (hover: hover) { .costs-meter-action:hover { background: var(--tone-quiet-hover); color: var(--text-primary); } }
 .costs-meter-action:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
