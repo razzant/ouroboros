@@ -80,17 +80,13 @@ export function initSettings(ctx = {}) {
     const top = () => levels[levels.length - 1] || null;
     const beside = () => levels.length > 0 && visible(homeEl);
     const pageCtx = { openSettings: (path, options) => go(path, options), openDashboardTab, showPage, layers, ws, state, readSettings };
-    // A second press of the rail's chosen row closes its page: the home comes back (landing B) or the Ouroboros row is
-    // chosen again (landing A).
-    // Landing (PROTOTYPE, html[data-proto-landing]): unset = "page": two panes at once and never an empty one (owner
-    // 13.11, "1. C"); "panes" = two panes at once with Ouroboros's own page first; "home" = the home alone until a row
-    // is pressed.
-    const landing = () => document.documentElement?.dataset?.protoLanding || 'page';
+    // Landing (owner 13.11, "1. C"): from 40rem the list and an open page always stand together, never an empty pane;
+    // a second press of the chosen row keeps its page.
     let ownChosen = false;   // the owner pressed the list's Ouroboros row: his page stays until another row is pressed
     let lastFirst = '';      // the first-level page last opened in this load
     const pressed = (path, options = {}) => {
         ownChosen = !path;
-        if (path && !options.row && beside() && levels[0]?.path === path) return landing() === 'page' ? true : go('');
+        if (path && !options.row && beside() && levels[0]?.path === path) return true;
         return go(path, { ...options, fresh: true });
     };
     const home = mountSettingsHome(homeEl, { open: pressed,
@@ -98,13 +94,12 @@ export function initSettings(ctx = {}) {
     // The home's search field moves into the header's lead, over the list: the same element, with its listeners.
     const searchField = homeEl.querySelector('.settings-search');
     if (searchField) page.querySelector('[data-settings-search-slot]')?.append(searchField);
-    // Landing A (PROTOTYPE: html[data-proto-landing="panes"]): from a 40rem box Settings always shows two panes; until
-    // a row is pressed the list's Ouroboros row is chosen and its pane holds Ouroboros's card. Landing B (no
-    // attribute): the home alone until a row is pressed. Below 40rem both are one column.
+    // From a 40rem box Settings always shows two panes; when the list's Ouroboros row is chosen its pane holds
+    // Ouroboros's card. Below 40rem the list is one column.
     const card = homeEl.querySelector('[data-settings-card]');
     const cardHome = card?.parentElement || null;
     const overviewRow = homeEl.querySelector('[data-settings-overview]');
-    // The overview pane is drawn the first time landing A shows two panes.
+    // The overview pane is drawn the first time two panes show it.
     let overviewEl = null;
     let disposeOverviewFade = () => {};
     function overviewPane() {
@@ -121,10 +116,10 @@ export function initSettings(ctx = {}) {
         return overviewEl;
     }
     const rem = () => parseFloat(globalThis.getComputedStyle?.(document.documentElement)?.fontSize) || 16;
-    const panes = () => landing() !== 'home' && (page.getBoundingClientRect?.().width || 0) >= 40 * rem();
-    // "page" landing: with two panes and no page open, the page last seen comes back (Models on a first visit).
+    const panes = () => (page.getBoundingClientRect?.().width || 0) >= 40 * rem();
+    // With two panes and no page open, the page last seen comes back (Models on a first visit).
     const ensurePage = () => {
-        if (landing() !== 'page' || !panes() || levels.length || ownChosen || opening || !shown()) return;
+        if (!panes() || levels.length || ownChosen || opening || !shown()) return;
         go(lastFirst || 'models');
     };
     let panesBefore = null;
