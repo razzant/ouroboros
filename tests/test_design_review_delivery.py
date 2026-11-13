@@ -118,6 +118,9 @@ def test_a_change_under_web_carries_the_design_bible_when_the_whole_book_does_no
     context, rows = delivered(1_000_000)
     assert DESIGN_BIBLE.strip() in context.selected_inline and "principles 1–7" in context.selected_inline
     assert "Full design recipes." not in context.selected_inline
+    # A handbook chapter that names the touched file is chosen too; the principles come before it.
+    ordered, _ = delivered(1_000_000, touched="web/modules/chat.js")
+    assert 0 < ordered.selected_inline.index("Principle 1.") < ordered.selected_inline.index("Widget rules mention chat.js once.")
     assert "docs/DESIGN.md" not in context.inline_whole_documents and "Interaction meaning" in context.navigation
     assert rows["docs/DESIGN.md"]["disposition"] == "navigation" and "inline share exhausted" in rows["docs/DESIGN.md"]["reason"]
     assert rows["docs/DESIGN.md#Design bible"]["disposition"] == "inline"
@@ -126,6 +129,11 @@ def test_a_change_under_web_carries_the_design_bible_when_the_whole_book_does_no
     context, rows = delivered(0)
     assert DESIGN_BIBLE.strip() not in context.selected_inline
     assert {row["disposition"] for row in rows.values()} == {"navigation"} and len(rows) == 2
+    # A book with no design bible says so by name.
+    _design(governance_repo, DESIGN + "\nA recipe line.\n" * 200_000)
+    context, rows = delivered(1_000_000)
+    assert rows["docs/DESIGN.md#Design bible"]["disposition"] == "navigation"
+    assert "unavailable" in rows["docs/DESIGN.md#Design bible"]["reason"]
     # A book that fits is carried whole and its bible is not carried twice; a change elsewhere gets neither.
     _design(governance_repo, DESIGN_BIBLE + DESIGN)
     context, rows = delivered(1_000_000)

@@ -37,7 +37,8 @@ SELECTION_RULE = ("floor + changed tests + direct importers of changed code, tes
                   "+ the interface's static witnesses when web/ changes + authored widening")
 # The interface's static witnesses read web/ as data, which no import traces: a stylesheet edited alone ran none
 # of them and left the target red (#3308, #3311). By name, with no dependency analysis: web/tests/ counts too,
-# since a witness runs a fixture from there in Node.
+# since a witness runs a fixture from there in Node, and so does a numbered release, whose version carrier
+# web/modules/api_types.js is such a file (the eighteen take ten seconds).
 _INTERFACE_SOURCES = (".css", ".js", ".html")
 _STATIC_WITNESS = re.compile(r"tests/test_\w+_static\.py")
 # Bind the policy this process loaded, even if its source changes later on disk.

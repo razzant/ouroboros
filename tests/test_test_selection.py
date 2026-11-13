@@ -329,7 +329,7 @@ def test_a_change_to_the_interface_runs_its_static_witnesses_and_nothing_else_do
         result = selection.select_from_paths(repo, [change], base="base")
         assert result.tier == "selected" and set(result.files) == {"tests/test_floor.py"} | witnesses, change
         assert all("static witness of the interface" in dict(result.reasons)[path] for path in witnesses), change
-    for change in ("docs/DESIGN.md", "ouroboros/unused.py", "web/fonts/readme.txt"):
+    for change in ("docs/DESIGN.md", "ouroboros/unused.py", "web/fonts/readme.txt", "site/app.js"):
         result = selection.select_from_paths(repo, [change], base="base")
         assert set(result.files) == {"tests/test_floor.py"}, change
     everything = selection.select_from_paths(repo, ["web/ui.css", "server.py"], base="base")
