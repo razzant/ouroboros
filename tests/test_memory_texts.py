@@ -266,8 +266,14 @@ def test_a_workpad_reads_through_its_project_scope_and_its_versions_outlive_the_
     assert "workpad_write(project_id='atlas', mode='revert', version=<revision>" in listing
     child = types.SimpleNamespace(project_id="other", task_id="kid", drive_root=tmp_path,
                                   task_metadata={"delegation_role": "subagent"})
+    from ouroboros.tools.tool_result import _TOOL_RESULT_ATTR
+
+    setattr(child, _TOOL_RESULT_ATTR, None)
     withheld = _read(child, source="workpad:atlas")
     assert withheld.startswith("⚠️ TOOL_FORBIDDEN") and "only its current project" in withheld, withheld
+    assert getattr(child, _TOOL_RESULT_ATTR).code == "ACCESS_BLOCKED"  # the resolver's own code, not its text
+    malformed = _read(child, source="workpad:a/b")
+    assert malformed.startswith("⚠️ TOOL_ARG_ERROR") and getattr(child, _TOOL_RESULT_ATTR).code == "TOOL_ARG_ERROR"
     root = types.SimpleNamespace(project_id="", task_id="main", drive_root=tmp_path, task_metadata={"root_task_id": "main"})
     page.unlink()  # a historical version reads even when the live page is gone
     gone = _read(root, source="workpad:atlas", version=first)

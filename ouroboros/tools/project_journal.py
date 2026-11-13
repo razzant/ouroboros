@@ -112,35 +112,45 @@ def may_publish_focus(ctx: ToolContext) -> bool:
     return _scope_authority(ctx)[0] == "root" or _bound_continue_root(ctx)
 
 
-def _resolve_project_id(ctx: ToolContext, explicit: Any, *, write: bool = False) -> tuple[str, str]:
+def _project_scope(ctx: ToolContext, explicit: Any, *, write: bool = False) -> tuple[str, str, str]:
+    """``(project id, refusal, its code)``: the project this actor may read (``write``: write), or the refusal and
+    the code it is published with (``TOOL_ARG_ERROR`` for a malformed scope, ``ACCESS_BLOCKED`` for a project
+    this actor may not use), so a caller never re-reads the kind from the text."""
+    malformed = "TOOL_ARG_ERROR", "⚠️ TOOL_ARG_ERROR: "
     own_value = placed_project_id(ctx)
     if own_value not in (None, "") and not isinstance(own_value, str):
-        return "", "⚠️ TOOL_ARG_ERROR: current project scope is malformed"
+        return "", malformed[1] + "current project scope is malformed", malformed[0]
     if explicit not in (None, "") and not isinstance(explicit, str):
-        return "", "⚠️ TOOL_ARG_ERROR: project_id is malformed"
+        return "", malformed[1] + "project_id is malformed", malformed[0]
     own_raw = str(own_value or "").strip()
     requested_raw = str(explicit or "").strip()
     own = sanitize_project_id(own_raw) if own_raw else ""
     if requested_raw and not explicit_project_id_ok(requested_raw):
-        return "", "⚠️ TOOL_ARG_ERROR: project_id is malformed"
+        return "", malformed[1] + "project_id is malformed", malformed[0]
     requested = sanitize_project_id(requested_raw) if requested_raw else ""
     authority, _metadata = _scope_authority(ctx)
     if requested_raw and not requested:
-        return "", "⚠️ TOOL_ARG_ERROR: project_id is malformed"
+        return "", malformed[1] + "project_id is malformed", malformed[0]
     if own_raw and not own:
-        return "", "⚠️ TOOL_ARG_ERROR: current project scope is malformed"
+        return "", malformed[1] + "current project scope is malformed", malformed[0]
     # A root reads every project; so does a place turn (owner 06.11, 4=A: it may read project journals and tell
     # the task that leads its thread), read-only. A child reads only its own; writes stay with the current project.
     reads_any = authority == "root" or (authority == "presence" and not write)
     if own and requested and requested != own:
         if write:
-            return "", "⚠️ TOOL_FORBIDDEN: foreign project writes are refused; write only the current project"
+            return "", "⚠️ TOOL_FORBIDDEN: foreign project writes are refused; write only the current project", "ACCESS_BLOCKED"
         if not reads_any:
-            return "", "⚠️ TOOL_FORBIDDEN: this actor may read only its current project"
-        return requested, ""
+            return "", "⚠️ TOOL_FORBIDDEN: this actor may read only its current project", "ACCESS_BLOCKED"
+        return requested, "", ""
     if requested and not own and not reads_any:
-        return "", "⚠️ TOOL_FORBIDDEN: restricted actors may not access a foreign project"
-    return own or requested, ""
+        return "", "⚠️ TOOL_FORBIDDEN: restricted actors may not access a foreign project", "ACCESS_BLOCKED"
+    return own or requested, "", ""
+
+
+def _resolve_project_id(ctx: ToolContext, explicit: Any, *, write: bool = False) -> tuple[str, str]:
+    """``(project id, refusal text)``: ``_project_scope`` without the refusal's code."""
+    pid, refusal, _code = _project_scope(ctx, explicit, write=write)
+    return pid, refusal
 
 
 def _authorized_project_id(ctx: ToolContext, explicit: Any) -> str:
@@ -566,11 +576,10 @@ def _workpad_write(ctx: ToolContext, content: Optional[str] = None, project_id: 
     from ouroboros.memory_texts import workpad_source, write_text
     from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
 
-    pid, scope_error = _resolve_project_id(ctx, project_id, write=True)
+    pid, scope_error, code = _project_scope(ctx, project_id, write=True)
     if scope_error or not pid:
-        forbidden = scope_error.startswith("⚠️ TOOL_FORBIDDEN")
         return _publish_tool_result(ctx, ToolResult(
-            status="blocked" if forbidden else "error", code="ACCESS_BLOCKED" if forbidden else "TOOL_ARG_ERROR",
+            status="blocked" if code == "ACCESS_BLOCKED" else "error", code=code or "TOOL_ARG_ERROR",
             text=(scope_error or "⚠️ TOOL_ARG_ERROR (workpad_write): no project scope.") + (
                 " (workpad_write)" if scope_error else "")))
     metadata = getattr(ctx, "task_metadata", {}) or {}

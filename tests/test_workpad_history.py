@@ -267,3 +267,18 @@ def test_a_presence_workpad_read_is_a_pure_read_not_possible_speech():
     assert may_speak(ctx, {"function": {"name": "workpad_read", "arguments": "{}"}}) is False
     assert "workpad_read" in PURE_READ_TOOLS and "workpad_read" not in READ_ONLY_PARALLEL_TOOLS  # no new parallelism
     assert may_speak(ctx, {"function": {"name": "workpad_write", "arguments": "{}"}}) is False  # a receipt write, as before
+
+
+def test_scope_refusals_carry_the_resolvers_own_code(tmp_path, store):
+    """The project scope's refusal kind comes from its resolver (``_project_scope``), never from its text."""
+    from ouroboros.tools.project_journal import _project_scope, _resolve_project_id, _workpad_write
+
+    placed = _ctx(tmp_path, "root", project="mine")
+    foreign = _workpad_write(placed, "x", "racer")
+    assert foreign.startswith("⚠️ TOOL_FORBIDDEN") and _code(placed) == "ACCESS_BLOCKED", foreign
+    malformed = _workpad_write(placed, "x", "a/b")
+    assert malformed.startswith("⚠️ TOOL_ARG_ERROR") and _code(placed) == "TOOL_ARG_ERROR", malformed
+    unscoped = _ctx(tmp_path, project="")
+    assert "no project scope" in _workpad_write(unscoped, "x") and _code(unscoped) == "TOOL_ARG_ERROR"
+    assert _project_scope(placed, "racer", write=True)[2] == "ACCESS_BLOCKED"
+    assert _resolve_project_id(placed, "racer", write=True) == _project_scope(placed, "racer", write=True)[:2]

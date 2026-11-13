@@ -331,24 +331,28 @@ def write_text(ctx: Any, source: TextSource, *, content: Any = None, mode: Any =
 SOURCES = "identity, world, workpad (this task's project) or workpad:<project id>"
 
 
-class _Withheld(ValueError):
-    """The workpad's read scope refuses this project to this actor."""
+class _ScopeRefused(ValueError):
+    """The workpad's read scope refuses this address: ``code`` is the resolver's own (``project_journal._project_scope``)."""
+
+    def __init__(self, code: str, text: str) -> None:
+        super().__init__(text)
+        self.code = code
 
 
 def resolve_source(ctx: Any, address: Any) -> TextSource:
     """A source address as memory_read names it: identity and the map on the canonical root; a workpad through the
-    project read scope (``project_journal._resolve_project_id(write=False)``), on the page's own root."""
+    project read scope (``project_journal._project_scope(write=False)``), on the page's own root."""
     if address in ("identity", "world"):
         from ouroboros.tool_access import canonical_data_root
 
         root = canonical_data_root(ctx)
         return identity_source(root) if address == "identity" else world_source(root)
     if isinstance(address, str) and (address == "workpad" or address.startswith("workpad:")):
-        from ouroboros.tools.project_journal import _resolve_project_id
+        from ouroboros.tools.project_journal import _project_scope
 
-        pid, refusal = _resolve_project_id(ctx, address[len("workpad:"):], write=False)
+        pid, refusal, code = _project_scope(ctx, address[len("workpad:"):], write=False)
         if refusal:
-            raise (_Withheld if refusal.startswith("⚠️ TOOL_FORBIDDEN") else ValueError)(refusal.split(": ", 1)[-1])
+            raise _ScopeRefused(code, refusal)
         if not pid:
             raise ValueError("source='workpad' is this task's project, and this task has none: name one as "
                              "workpad:<project id>")
@@ -401,8 +405,8 @@ def read_versions(ctx: Any, address: Any, version: Any, start: Any, fingerprint:
                              if fingerprint else "version is a revision text (the sha256 of that version)")
         source = resolve_source(ctx, address)
         raw = source.path.read_bytes() if source.path.exists() else None
-    except _Withheld as exc:
-        return failed("ACCESS_BLOCKED", f"⚠️ TOOL_FORBIDDEN: {exc}", "blocked")
+    except _ScopeRefused as exc:
+        return failed(exc.code, str(exc), "blocked" if exc.code == "ACCESS_BLOCKED" else "error")
     except ValueError as exc:
         return failed("TOOL_ARG_ERROR", f"⚠️ TOOL_ARG_ERROR: {exc}")
     except OSError as exc:
