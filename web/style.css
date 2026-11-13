@@ -6228,7 +6228,7 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 /* Dashboard › Costs (costs.js) on the Dashboard tab body: the known spend of the limit leads with its share as a thin
    bar under it (amber only when the limit is reached, the owner's move); the limits card's rows save themselves; the
    four breakdowns are cards of their own, two side by side where they fit, each a short list with "Show all (N)". */
-/* PROTOTYPE (owner 13.11): Costs leads with two meters of one anatomy, side by side where they fit and one under the
+/* Costs leads with two meters of one anatomy, side by side where they fit and one under the
    other where they do not: the total budget and consciousness's 24 hours. Each says what the limit is, the spend of it
    (whole dollars) with what is left on the same line, the share as a bar in the product's crimson on its own tint
    (amber only when the limit is reached, the owner's move), and one quiet line of what the number leaves out. */
@@ -8993,7 +8993,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 
 .nav-projects-add { order: 2; flex-shrink: 0; }  /* the ⋯ column keeps its width in a narrow sidebar */
 
-/* PROTOTYPE (owner 13.11): the list starts with its search; no "Projects" word and no collapse. The row is the find
+/* The Projects list starts with its search; no "Projects" word and no collapse. The row is the find
    capsule and, at its end, New project: a round capsule of the same material and height, as a messenger's compose
    button stands beside its search field. */
 .nav-projects-header { gap: var(--space-2); margin: var(--space-1) 0 var(--space-2); }

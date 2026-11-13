@@ -336,6 +336,7 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     window.addEventListener('ouro:settings-page-shown', onShownTab);
     // The answers follow the state the app already reads (every 20 s, faster while a room shows): no read of their own.
     const answerTimer = setInterval(() => { if (state.activePage === 'dashboard' && !document.hidden) paintAnswers(); }, 5000);
+    answerTimer?.unref?.();  // a test runner's clock is never kept alive by it
     const resize = typeof ResizeObserver === 'function' ? new ResizeObserver(() => paint()) : null;
     resize?.observe(page);
 
