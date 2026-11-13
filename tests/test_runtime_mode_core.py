@@ -680,9 +680,8 @@ def test_pro_commit_uses_normal_review_for_protected_paths(tmp_path, monkeypatch
         skip_advisory_pre_review=True,
     )
 
-    from ouroboros.tools.review_helpers import review_enforcement_blocks
-    # The normal review ran; nonblocking enforcement returns its outcome before Git (#1741).
-    assert result["status"] == ("passed" if review_enforcement_blocks() else "reviewed")
+    # The normal review ran and its outcome returns before Git (#1741).
+    assert result["status"] == "reviewed"
     assert calls == {"review": 1}
 
 

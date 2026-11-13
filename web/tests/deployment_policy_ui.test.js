@@ -74,7 +74,7 @@ test('a built-in checker fixes only the flat fields it reads, and says so beside
         'a fixed row never points at a change its fields refuse');
 });
 
-const POLICY_ROWS = ['OUROBOROS_RUNTIME_MODE', 'OUROBOROS_SAFETY_MODE', 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE', 'OUROBOROS_REVIEW_ENFORCEMENT'];
+const POLICY_ROWS = ['OUROBOROS_RUNTIME_MODE', 'OUROBOROS_SAFETY_MODE', 'OUROBOROS_CONSCIOUSNESS_SAFETY_MODE'];
 const policyRows = (policy_state) => {
     const rows = applyPolicyToRows(POLICY_ROWS.map((id) => structuredClone(rowById(id))), policy_state ? { _meta: { policy_state } } : null, rowById);
     return Object.fromEntries(rows.map((row) => [row.id, row]));

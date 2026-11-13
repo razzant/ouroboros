@@ -66,11 +66,11 @@ from ouroboros.launcher_bootstrap import (
     BootstrapContext,
     bootstrap_repo as _bootstrap_repo,
     check_git as _check_git, launcher_sources_changed, remember_loaded_checkout,
-    install_deps as _install_deps_impl,
+    install_deps,
     embedded_python_env, update_external_host,
     exec_source_launcher, find_embedded_python, macos_source_entry, parse_launch_options, shell_runtime_facts,
     automatic_launch_allowed,
-    sync_existing_repo_from_bundle as _sync_existing_repo_from_bundle_impl,
+    sync_existing_repo_from_bundle,
 )
 from ouroboros.desktop_media import attach_media_permissions, display_ready as _display_ready, host_environment, route_gtk_browser
 from ouroboros.runtime_venv import PREPARATION_DEPS_TIMEOUT_SEC, RuntimeVenvRefused, mark_ready, prepare_runtime_venv
@@ -259,13 +259,6 @@ def check_git() -> bool:
 def bootstrap_repo() -> bool:
     return _bootstrap_repo(_bootstrap_context())
 
-
-def _sync_existing_repo_from_bundle() -> None:
-    _sync_existing_repo_from_bundle_impl(_bootstrap_context())
-
-
-def _install_deps() -> bool:
-    return _install_deps_impl(_bootstrap_context())
 
 _agent_proc: Optional[subprocess.Popen] = None
 _agent_job: Optional[object] = None
@@ -799,15 +792,15 @@ def agent_lifecycle_loop(port: int = AGENT_SERVER_PORT) -> None:
 
         if exit_code == RESTART_EXIT_CODE:
             log.info("Agent requested restart (exit code 42). Restarting...")
-            _sync_existing_repo_from_bundle()  # a deployment policy's packages are its administrator's: none synced
-            if not os.environ.get("OUROBOROS_DEPLOYMENT_POLICY", "").strip() and not _install_deps():
+            sync_existing_repo_from_bundle(_bootstrap_context())  # a deployment policy's packages are its administrator's: none synced
+            if not os.environ.get("OUROBOROS_DEPLOYMENT_POLICY", "").strip() and not install_deps(_bootstrap_context()):
                 # Retry dependency sync once before letting imports fail under the crash fuse.
                 log.error(
                     "Dependency install failed after the restart request; "
                     "retrying once in %ds.", _DEPS_RETRY_DELAY_SEC,
                 )
                 time.sleep(_DEPS_RETRY_DELAY_SEC)
-                if not _install_deps():
+                if not install_deps(_bootstrap_context()):
                     log.error(
                         "Dependency install failed twice; starting the agent anyway "
                         "under the crash fuse (%d crashes in %ds stops the launcher). "
@@ -1325,7 +1318,7 @@ def main(argv=()):
             "Continuing startup after a failed dependency install; the agent may "
             "be missing packages (see the pip output above)."
         )
-    elif _runtime_venv is not None and not _runtime_venv.ready and _install_deps():
+    elif _runtime_venv is not None and not _runtime_venv.ready and install_deps(_bootstrap_context()):
         try:
             _runtime_venv = mark_ready(_runtime_venv)  # a failed install stays preparing and retries next start
         except RuntimeVenvRefused as refusal:

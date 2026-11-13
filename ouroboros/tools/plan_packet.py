@@ -96,7 +96,6 @@ def build_stable_prompt(
     *,
     checklist_section: str,
     body: bool,
-    enforcement: str,
     bible_text: Optional[str] = None,
     architecture_text: Optional[str] = None,
     bible_locator: str = "BIBLE.md",
@@ -109,9 +108,6 @@ def build_stable_prompt(
     typed ``PlanPacketError``: the pack is never silently incomplete."""
     parts = [
         _ROLE + "\n\n"
-        f"Review enforcement for this task: {str(enforcement or 'unknown').strip()} (host information; under "
-        "Blocking an open objection of an owner-marked reviewer to a plan revision holds the author's final answer, "
-        "under Advisory and in Cyber Pro it is disclosed; it does not change what you should say).\n\n"
         f"## Reply contract\n\n{PLAN_REPLY_CONTRACT}\n---\n",
     ]
     if checklist_section:
@@ -342,7 +338,7 @@ def render_own_objections(objections: Sequence[Mapping[str, Any]], *, reading: b
               "One you do not mention stays open and is flagged as not adjudicated.\n")]
     for item in objections:
         flag = " (flagged: not adjudicated in your last reply)" if item.get("not_adjudicated") else ""
-        where = ("your blocking finding in this task's previous plan review, imported; it holds the task until you withdraw it"
+        where = ("your blocking finding in this task's previous plan review, imported"
                  if item.get("legacy") else f"raised in ask {item.get('raised_in')} about {ask_subject(item.get('revision'))}")
         lines.append(f"- {item.get('id')} ({where}){flag}: {item.get('text')}")
     return "\n".join(lines) + "\n"

@@ -172,6 +172,37 @@ def openrouter_catalog_price(model: Any) -> Optional[Dict[str, Any]]:
         {"min_prompt_tokens": minimum, "input": tier[0], "output": tier[3]} for minimum, tier in tiers]} if tiers else {})}
 
 
+def openrouter_pricing_rows(models: Any) -> Dict[str, Tuple[Optional[float], ...]]:
+    """OpenRouter ``/models`` records as model_id -> per-1M prices (``openrouter_price_row``), under the id and its
+    normalized form: one parser for a fetched answer and for the catalogue the install recorded
+    (``recorded_openrouter_pricing``)."""
+    pricing_dict = {}
+    for model in models:
+        row = openrouter_price_row(model)
+        if row is None:
+            continue
+        model_id = str(model.get("id") or "").strip()
+        pricing_dict[model_id] = row
+        normalized_model_id = normalize_model_identity(model_id)
+        if normalized_model_id != model_id:
+            pricing_dict[normalized_model_id] = row
+    return pricing_dict
+
+
+def recorded_openrouter_pricing() -> Tuple[Dict[str, Tuple[Optional[float], ...]], str]:
+    """Tariffs of the install's dated catalogue record (``llm_capability_policy.recorded_openrouter_catalog``) and
+    its date: no fetch and no freshness claim, for a price DISPLAY in a process that has priced no call itself."""
+    from ouroboros.llm_capability_policy import recorded_openrouter_catalog
+
+    models, observed = recorded_openrouter_catalog()
+    try:
+        rows = openrouter_pricing_rows([{"id": mid, "pricing": row["pricing"]} for mid, row in models.items()
+                                        if isinstance(row.get("pricing"), dict)])
+    except (TypeError, ValueError, KeyError):  # an unreadable record prices nothing
+        return {}, ""
+    return rows, (observed if rows else "")
+
+
 def fetch_openrouter_pricing(*, timeout_sec: float = 5.0) -> Dict[str, Tuple[Optional[float], ...]]:
     """Fetch OpenRouter pricing as model_id -> per-1M prices.
 
@@ -195,17 +226,7 @@ def fetch_openrouter_pricing(*, timeout_sec: float = 5.0) -> Dict[str, Tuple[Opt
         data = resp.json()
         models = data.get("data", [])
 
-        pricing_dict = {}
-        for model in models:
-            row = openrouter_price_row(model)
-            if row is None:
-                continue
-            model_id = str(model.get("id") or "").strip()
-            pricing_dict[model_id] = row
-            normalized_model_id = normalize_model_identity(model_id)
-            if normalized_model_id != model_id:
-                pricing_dict[normalized_model_id] = row
-
+        pricing_dict = openrouter_pricing_rows(models)
         log.info(f"Fetched pricing for {len(pricing_dict)} models from OpenRouter")
         return pricing_dict
 

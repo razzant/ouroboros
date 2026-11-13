@@ -442,7 +442,7 @@ def test_panic_while_a_window_leaves_full_screen_exits_at_once_and_tears_nothing
         kwargs.get("exit_fn", os._exit)(99)
         exited.set()
 
-    def windowed(final):  # still leaving full screen; the main thread's turn comes once the test lets it
+    def windowed(final, cancelled):  # still leaving full screen; the main thread's turn comes once the test lets it
         animating.set()
         assert finish.wait(5)
         final()

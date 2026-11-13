@@ -238,7 +238,7 @@ def authorize_row(data_dir: pathlib.Path, row: Dict[str, Any], commit: str, *, r
     if unreviewed and runtime_mode != "cyber_pro":
         raise AdoptionRefused(
             "ADOPTION_UNREVIEWED",
-            "these commits did not come through commit_reviewed under the configured enforcement: "
+            "these commits did not come through commit_reviewed: "
             + ", ".join(sha[:12] for sha in unreviewed))
     rows = _switch_rows(serving, old, cand)
     paths = [item["path"] for item in rows]

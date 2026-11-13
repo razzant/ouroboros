@@ -351,8 +351,11 @@ def test_tool_description_and_continue_work_order_name_the_narrow_capability():
     assert "the FINISHED native result of a direct child of its recorded predecessor" in schema["description"]
     assert "old helpers stay outside its control" in schema["description"]
     assert "a decision already recorded on that exact result stands" in schema["description"]
+    assert "A cancelled child stays cancelled, but its retained capture" in schema["description"]
+    assert "for applying a cancelled child's capture" in schema["parameters"]["properties"]["reason"]["description"]
     text = work_order_text("pred", "owner_restart", {})
     assert "its helpers are not yours to steer" in text
+    assert "a cancelled helper stays cancelled, but its ready retained capture is decided" in text
     assert "integrate_subagent_patch(task_id=...)" in text and "continue_from=<run_id>" in text
 
 
@@ -702,3 +705,321 @@ def test_a_decision_with_no_retained_record_does_not_claim_one(world, monkeypatc
         out = invoke(successor_ctx(world, task_id=first), task_id="shared", reason="stores down")
     assert "Verdict: (unwritten)" in out and "INTEGRATE_DISPOSITION_FAILED" in out, out
     assert "retained verdict artifact" not in out and "verdict artifact was not written either" in out, out
+
+
+# A cancelled child's retained capture (#3193): decided only explicitly, as it stands; the child stays cancelled.
+ROOT, HELPER = "work-root", "work-helper"
+
+
+def running_child(w, task_id="child", parent="pred", shared=None):
+    """An admitted native child of PARENT, still running, with its saved edit: a private copy of the project, or
+    the SHARED folder it writes directly."""
+    surface = {"surface": "external_workspace", "write_root": str(shared)} if shared else {"surface": "self_worktree"}
+    constraint, folder, mode, error = _resolve_subagent_constraint(
+        SimpleNamespace(REPO_DIR=w.system, DRIVE_ROOT=w.data), tid=task_id,
+        requested_constraint={"mode": "acting_subagent", **surface},
+        workspace_root=str(shared or w.project), workspace_mode="external", base_sha="", parent_task_id=parent)
+    assert not error, error
+    task = {"id": task_id, "parent_task_id": parent, "root_task_id": parent, "delegation_role": "subagent",
+            "workspace_root": folder, "workspace_mode": mode, "task_constraint": constraint}
+    if not shared:
+        binding = admitted_copy_metadata(folder)
+        task.update(workspace_copy=binding, metadata={"workspace_copy": binding})
+    write_task_result(w.data, task_id, "running", **{key: value for key, value in task.items() if key != "id"})
+    (Path(folder) / "a.txt").write_bytes(b"base\nshared\n" if shared else b"base\nchild\n")
+    return task
+
+
+def cancel_after_capture(w, task, *, capture=True, unreconciled=()):
+    """The running kill path's order without a process (``task_lifecycle._finish_captured_running``): the real
+    capture while the row still runs, then the cancelled write the production fields build."""
+    from ouroboros.headless import finalize_task_artifacts
+    from supervisor.cancel_publication import _cancel_result_fields, _intent_outcome_fields
+
+    if capture:
+        finalize_task_artifacts(w.data, task)
+    intent = {"source": "agent_tool", "requested_by": task["parent_task_id"], "scope": "single",
+              "reason": "an obsolete wait", "request_id": "req-1"}
+    stored = write_task_result(w.data, task["id"], "cancelled", **_cancel_result_fields(
+        task, existing=read_result(w.data, task["id"]), artifact_capture="attempted" if capture else "never_started",
+        result="Running task cancelled and worker terminated.", delegated_runs_unreconciled=list(unreconciled),
+        **_intent_outcome_fields(intent)))
+    assert stored["status"] == "cancelled", stored
+    return load_effective_task_result(w.data, task["id"])
+
+
+def capture_bytes(w, child):
+    """The retained capture's files, as the child's current row names them."""
+    return {item["kind"]: Path(item["path"]).read_bytes() for item in load_effective_task_result(w.data, child)["artifacts"]
+            if item.get("kind") in ("workspace_patch", "workspace_patch_manifest")}
+
+
+@pytest.fixture
+def closure_world(tmp_path_factory, monkeypatch):
+    """The real queue whose ended-work closure cancels a parked helper (its projects outside the data drive, as
+    admission requires) and the real queue-liveness predicate, which ``world`` substitutes."""
+    from tests._budget_pause_exact_helpers import _install_queue
+
+    data = tmp_path_factory.mktemp("closure-data")
+    _queue, _state, workers = _install_queue(data, monkeypatch)
+    monkeypatch.setattr(workers, "get_event_q", lambda *a, **k: SimpleNamespace(put=lambda _event: None))
+    base = tmp_path_factory.mktemp("closure-projects")
+    for name, value in (("OUROBOROS_DATA_DIR", str(data)), ("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(base / "copies")),
+                        ("OUROBOROS_RUNTIME_MODE", "advanced"), ("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "true"),
+                        ("OUROBOROS_SAFETY_MODE", "off"), ("OUROBOROS_CONSCIOUSNESS_SAFETY_MODE", "off")):
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("OUROBOROS_BOOT_RUNTIME_MODE", raising=False)
+    return SimpleNamespace(system=repo(base / "system", {"system.txt": b"own body\n"}),
+                           project=repo(base / "project", {"a.txt": b"base\n"}), data=data, monkeypatch=monkeypatch)
+
+
+@pytest.mark.parametrize("decider", ["successor", "parent"])
+def test_a_helper_closed_with_its_ended_work_is_applied_from_its_retained_capture(closure_world, decider):
+    """End to end: the production closure cancels a parked native helper of ended work, capturing its saved edit
+    first. Its recorded parent, or the admitted Continue successor of a technically stopped one, applies exactly
+    that retained capture through the real tool with a reason; the helper stays cancelled and nothing replays."""
+    import time
+
+    from ouroboros.owner_continue import mark_claim_admitted
+    from ouroboros.task_status import task_has_live_queue_ownership
+    from supervisor.ended_work_helpers import close_abandoned_helpers
+    from supervisor.task_lifecycle import sweep_cancel_intents
+    from tests._budget_pause_exact_helpers import _parked
+
+    w = closure_world
+    if decider == "successor":
+        interrupted_root(w.data, ROOT)
+        caller = continue_from(w.data, ROOT)
+        mark_claim_admitted(w.data, ROOT, NONCE)
+    else:  # the work ended in an ordinary way; its parent decides its own helper's product
+        write_task_result(w.data, ROOT, "running", root_task_id=ROOT, chat_id=7, delegation_role="root")
+        write_task_result(w.data, ROOT, "completed", result="the answer")
+        caller = ROOT
+    constraint, folder, mode, error = _resolve_subagent_constraint(
+        SimpleNamespace(REPO_DIR=w.system, DRIVE_ROOT=w.data), tid=HELPER,
+        requested_constraint={"mode": "acting_subagent", "surface": "self_worktree"},
+        workspace_root=str(w.project), workspace_mode="external", base_sha="", parent_task_id=ROOT)
+    assert not error, error
+    binding = admitted_copy_metadata(folder)
+    fields = {"parent_task_id": ROOT, "delegation_role": "subagent", "role": "researcher", "chat_id": 7,
+              "workspace_root": folder, "workspace_mode": mode, "task_constraint": constraint,
+              "workspace_copy": binding, "metadata": {"workspace_copy": binding}}
+    _parked(w.data, w.monkeypatch, task_id=HELPER, root_task_id=ROOT, extra={**fields, "admitted_dispatch": "possible"})
+    write_task_result(w.data, HELPER, "scheduled", root_task_id=ROOT, **fields)
+    (Path(folder) / "a.txt").write_bytes(b"base\nchild\n")  # saved by the helper, never handed in
+
+    assert close_abandoned_helpers() == [HELPER]
+    assert sweep_cancel_intents(now=time.time() + 3600) == {HELPER: "cancelled"}
+    closed = load_effective_task_result(w.data, HELPER)
+    assert (closed["status"], closed["cancel_origin"]["source"], closed["artifact_status"]) == (
+        "cancelled", "work_finished", "ready_with_changes"), closed
+    assert not closed.get("native_capture_pending") and not task_has_live_queue_ownership(w.data, HELPER)
+    ctx = ToolContext(repo_dir=w.system, drive_root=w.data, task_id=caller, workspace_root=w.project,
+                      workspace_mode="external")
+    product, signature = capture_bytes(w, HELPER), result_signature(w.data, HELPER)
+
+    out = invoke(ctx, task_id=HELPER)
+    assert "TOOL_ARG_ERROR" in out and f"{HELPER} was cancelled; deciding its retained result needs reason" in out, out
+    assert not (task_artifact_dir_path(w.data, caller) / f"subagent_patch_verdict_{HELPER}.json").exists()
+    out = invoke(ctx, task_id=HELPER, reason="its saved edit is the finished change")
+
+    assert f"✅ Integrated subagent patch from {HELPER}" in out, out
+    assert f"{HELPER} stays cancelled (work_finished: the work it helped has ended)" in out, out
+    assert (w.project / "a.txt").read_bytes() == b"base\nchild\n"
+    assert git(w.project, "diff", "--cached", "--name-only").splitlines() == [b"a.txt"]
+    receipt = verdict(w, caller, HELPER)
+    assert receipt["outcome"] == "applied" and receipt["child_result_sha256"] == _child_result_sha256(closed)
+    assert receipt.get("original_parent_task_id") == (ROOT if decider == "successor" else None)
+    assert receipt["child_cancelled"] == {
+        "status": "cancelled", "cancel_origin": closed["cancel_origin"],
+        "artifact_attribution": closed["artifact_attribution"],
+        "capture_created_at": json.loads(product["workspace_patch_manifest"])["created_at"],
+        "capture_manifest_sha256": next(item["sha256"] for item in closed["artifacts"]
+                                        if item["kind"] == "workspace_patch_manifest")}
+    # The stop, the row and the retained product stay exactly as the closure recorded them.
+    assert result_signature(w.data, HELPER) == signature and capture_bytes(w, HELPER) == product
+    current = load_effective_task_result(w.data, HELPER)
+    assert current["status"] == "cancelled"
+    assert current.get("child_result_disposition") == ("integrated" if decider == "parent" else None)
+    again = invoke(ctx, task_id=HELPER, reason="once more")
+    if decider == "successor":  # its decision on this exact result stands
+        assert "already recorded the decision 'applied'" in again, again
+    # Nothing lands twice: for the parent, Git's three-way apply of the same change to its clean source is a no-op.
+    assert (w.project / "a.txt").read_bytes() == b"base\nchild\n"
+    assert git(w.project, "diff", "--cached", "--name-only").splitlines() == [b"a.txt"]
+    assert result_signature(w.data, HELPER) == signature
+
+
+# The cancelled child's own direct writer of its shared folder, as current custody shows it, and what blocks.
+LEAF_STATES = {"live": "run leaf", "pending": "start leaf-start", "unknown": "custody is unreadable",
+               "terminal": "", "elsewhere": ""}
+
+
+DECIDERS = [("parent", "apply"), ("parent", "accept"), ("successor", "apply"), ("successor", "accept")]
+
+
+@pytest.mark.parametrize("leaf", sorted(LEAF_STATES))
+@pytest.mark.parametrize("decider, decision", DECIDERS)
+def test_a_cancelled_shared_result_waits_while_a_direct_writer_of_its_folder_may_be_live(world, monkeypatch,
+                                                                                          decider, decision, leaf):
+    """A shared capture can be ready with nothing owed while the cancelled child's own in-place writer still edits
+    that folder: capture debt follows private copies only. Current custody decides, for the parent and the Continue
+    successor alike, verifying or accepting; a run the kill left unreconciled is history once custody shows it
+    ended. The cancellation rides the verdict; the child's row and capture stay as they were."""
+    from ouroboros import delegate_custody as custody
+    from ouroboros import store
+
+    interrupted_root(world.data)
+    shared = repo(world.tmp / "shared", {"a.txt": b"base\n"})
+    where = repo(world.tmp / "elsewhere", {"a.txt": b"base\n"}) if leaf == "elsewhere" else shared
+    ref = {"workspace_kind": "git", "strategy": "in_place"}
+    task = running_child(world, task_id="shared", shared=shared)
+    if leaf == "pending":
+        assert custody.emit(world.data, custody.START_REQUESTED, {
+            "task_id": "shared", "invocation_id": "leaf-start", "request": {"prompt": "work"},
+            "execution_root": str(where), "target_root": str(where), "resource_ref": ref})
+    else:
+        assert custody.record_started(world.data, custody.RunCustody(
+            run_id="leaf", task_id="shared", route_id="fake", invocation_id="leaf-start", root_task_id="pred",
+            parent_task_id="pred", execution_root=str(where), target_root=str(where), resource_ref=ref))
+    cancelled = cancel_after_capture(world, task, unreconciled=["leaf"])
+    assert cancelled["artifact_status"] == "ready_with_changes" and not cancelled.get("native_capture_pending")
+    if leaf == "terminal":
+        assert custody.emit(world.data, custody.TERMINAL_OBSERVED, {
+            "run_id": "leaf", "task_id": "shared", "state": "cancelled", "observation_seq": 1,
+            "source_ref": {"sha256": "a" * 64}})
+    caller = continue_from(world.data) if decider == "successor" else "pred"
+    signature, product = result_signature(world.data, "shared"), capture_bytes(world, "shared")
+    if leaf == "unknown":
+        def unreadable(*_args, **_kwargs):
+            raise store.StoreError("fixture: custody cannot answer")
+        monkeypatch.setattr("ouroboros.delegate_custody_current.task_snapshot", unreadable)
+
+    out = invoke(successor_ctx(world, task_id=caller), task_id="shared", decision=decision,
+                 reason="its shared edit is the change")
+
+    if LEAF_STATES[leaf]:
+        assert "INTEGRATE_NATIVE_CANCELLED" in out and "may still be live" in out and LEAF_STATES[leaf] in out, out
+        assert not (task_artifact_dir_path(world.data, caller) / "subagent_patch_verdict_shared.json").exists()
+    else:
+        assert ("Verified external_workspace child shared" if decision == "apply" else
+                "OK: accepted external_workspace child shared") in out and "shared stays cancelled (agent_tool: " in out, out
+        receipt = verdict(world, caller, "shared")
+        assert receipt["outcome"] == ("verified_shared_workspace" if decision == "apply" else "accepted_shared_workspace")
+        assert receipt.get("observed_outcome") == (None if decision == "apply" else "verified_shared_workspace")
+        assert receipt["child_cancelled"]["cancel_origin"]["source"] == "agent_tool"
+    assert (shared / "a.txt").read_bytes() == b"base\nshared\n"
+    assert result_signature(world.data, "shared") == signature and capture_bytes(world, "shared") == product
+    assert read_result(world.data, "shared")["delegated_runs_unreconciled"] == ["leaf"]  # the kill's record stays
+
+
+@pytest.mark.parametrize("decider, decision", DECIDERS)
+def test_a_cancelled_direct_folder_result_waits_for_its_folder_writer_then_decides_its_outputs(world, decider,
+                                                                                               decision):
+    """The ordinary-folder shape: the cancelled child's registered outputs are its capture. Its own live ``direct``
+    folder run holds the decision; once custody records that run's end, the outputs verify, or are accepted as they
+    stand, with the cancellation beside them, and the row and capture stay as they were."""
+    from ouroboros import delegate_custody as custody
+    from ouroboros.artifacts import copy_file_to_task_artifacts
+
+    interrupted_root(world.data)
+    plain = world.tmp / "plain"
+    plain.mkdir()
+    task = running_child(world, task_id="direct", shared=plain)
+    copy_file_to_task_artifacts(ToolContext(repo_dir=world.system, drive_root=world.data, task_id="direct",
+                                            workspace_root=plain, workspace_mode="external"), plain / "a.txt")
+    assert custody.record_started(world.data, custody.RunCustody(
+        run_id="folder", task_id="direct", route_id="fake", invocation_id="folder-start", root_task_id="pred",
+        parent_task_id="pred", execution_root=str(plain), target_root=str(plain),
+        resource_ref={"workspace_kind": "directory", "strategy": "direct", "scopePaths": []}))
+    cancelled = cancel_after_capture(world, task)
+    manifest = json.loads(capture_bytes(world, "direct")["workspace_patch_manifest"])
+    assert (cancelled["artifact_status"], manifest["capture_kind"]) == ("ready", "directory_direct"), cancelled
+    caller = continue_from(world.data) if decider == "successor" else "pred"
+    ctx, reason = successor_ctx(world, task_id=caller), "its folder outputs are the change"
+    signature, product = result_signature(world.data, "direct"), capture_bytes(world, "direct")
+
+    out = invoke(ctx, task_id="direct", decision=decision, reason=reason)
+    assert "INTEGRATE_NATIVE_CANCELLED" in out and "run folder" in out, out
+    assert not (task_artifact_dir_path(world.data, caller) / "subagent_patch_verdict_direct.json").exists()
+    assert custody.emit(world.data, custody.TERMINAL_OBSERVED, {"run_id": "folder", "task_id": "direct",
+                                                               "state": "cancelled", "observation_seq": 1,
+                                                               "source_ref": {"sha256": "b" * 64}})
+    out = invoke(ctx, task_id="direct", decision=decision, reason=reason)
+
+    assert ("Verified 1 registered file postimage(s)" if decision == "apply" else
+            "OK: accepted external_workspace child direct") in out and "direct stays cancelled (agent_tool: " in out, out
+    receipt = verdict(world, caller, "direct")
+    assert receipt["outcome"] == ("verified_registered_outputs" if decision == "apply" else "accepted_shared_workspace")
+    assert receipt["child_cancelled"]["capture_created_at"] == manifest["created_at"]
+    assert receipt["path_findings"] == [{"path": "a.txt", "state": "unchanged", "basis": "exact"}]
+    assert result_signature(world.data, "direct") == signature and capture_bytes(world, "direct") == product
+    assert (plain / "a.txt").read_bytes() == b"base\nshared\n"
+
+
+@pytest.mark.parametrize("case", ["no_reason", "long_reason", "failed", "owed", "missing"])
+def test_a_cancelled_child_is_decided_only_from_a_ready_capture_and_with_a_reason(world, case):
+    """A cancelled owner's capture is never completed later: a failed, owed or absent one refuses for good, and a
+    ready one still needs the decider's reason. Nothing is applied, recorded or rewritten."""
+    interrupted_root(world.data)
+    cancel_after_capture(world, running_child(world), capture=case != "missing")
+    if case in ("failed", "owed"):
+        row = read_result(world.data, "child")
+        if case == "failed":
+            row["artifact_status"] = "failed"
+        else:
+            row["native_capture_pending"] = {
+                "leaf": {"run_id": "leaf", "invocation_id": "leaf-start", "target_root": "x", "effect": "unknown"}}
+        seed_result(world.data, "child", row)
+    successor = continue_from(world.data)
+    signature = result_signature(world.data, "child")
+    reason = {"no_reason": " ", "long_reason": "x" * 501}.get(case, "take the retained edit")
+
+    out = _integrate_subagent_patch(successor_ctx(world), task_id="child", reason=reason)
+
+    expected = {
+        "no_reason": "TOOL_ARG_ERROR (integrate_subagent_patch): child was cancelled; deciding its retained result",
+        "long_reason": "TOOL_ARG_ERROR (integrate_subagent_patch): child was cancelled; deciding its retained result",
+        "failed": "INTEGRATE_NATIVE_CANCELLED: child was cancelled and its retained capture is not ready "
+                  "(artifact status 'failed')",
+        "owed": "INTEGRATE_NATIVE_CANCELLED: child was cancelled and its retained capture is not ready "
+                "(artifact status 'ready_with_changes'; capture owed for ['leaf'])",
+        "missing": "INTEGRATE_PATCH_NOT_FOUND"}
+    assert expected[case] in out, out
+    if case == "missing":  # a cancelled child never finishes later, so the reply sends nobody to wait for it
+        assert "never finishes later" in out and "Ensure the child finished" not in out, out
+    assert (world.project / "a.txt").read_bytes() == b"base\n"
+    assert not (task_artifact_dir_path(world.data, successor) / "subagent_patch_verdict_child.json").exists()
+    assert result_signature(world.data, "child") == signature
+
+
+def test_a_cancelled_copy_meets_the_ordinary_integrity_and_target_checks_and_decides_once(world):
+    """Deciding a cancelled child's capture adds no right: a foreign target, a tampered capture and a moved source
+    refuse as for any child, the conflict keeps the cancellation beside it, and the corrected retry decides once."""
+    interrupted_root(world.data)
+    (world.project / "a.txt").write_bytes(b"parent uncommitted\n")
+    task = running_child(world)
+    (Path(task["workspace_root"]) / "a.txt").write_bytes(b"child\n")
+    cancel_after_capture(world, task)
+    successor = continue_from(world.data)
+    # Over 600 raw characters, under 500 once each whitespace run counts as one: accepted and kept as given.
+    ctx, reason = successor_ctx(world), "the retained edit," + " " * 600 + "judged as it stands"
+    assert "INTEGRATE_TARGET_FORBIDDEN" in _integrate_subagent_patch(
+        ctx, task_id="child", reason=reason, target_root=str(world.system))
+    patch = next(task_artifact_dir_path(world.data, "child").rglob("workspace.patch"))
+    kept = patch.read_bytes()
+    patch.write_bytes(b"tampered\n")
+    assert "INTEGRATE_PATCH_CORRUPT" in _integrate_subagent_patch(ctx, task_id="child", reason=reason)
+    patch.write_bytes(kept)
+    (world.project / "a.txt").write_bytes(b"concurrent parent\n")
+    out = _integrate_subagent_patch(ctx, task_id="child", reason=reason)
+    assert "INTEGRATE_CONFLICT" in out and "changed since copy" in out and "child stays cancelled" in out, out
+    assert verdict(world, successor, "child")["child_cancelled"]["status"] == "cancelled"
+    (world.project / "a.txt").write_bytes(b"parent uncommitted\n")  # the source is back at the copy's baseline
+    out = _integrate_subagent_patch(ctx, task_id="child", reason=reason)
+    assert "✅ Integrated" in out and (world.project / "a.txt").read_bytes() == b"child\n", out
+    assert [row["disposition"] for row in dispositions(world, successor)] == ["conflict", "applied"]
+    assert verdict(world, successor, "child")["reason"] == reason
+    assert dispositions(world, successor)[-1]["reason"] == reason[:600]
+    assert "already recorded the decision 'applied'" in _integrate_subagent_patch(ctx, task_id="child", reason=reason)
+    assert load_effective_task_result(world.data, "child")["status"] == "cancelled"

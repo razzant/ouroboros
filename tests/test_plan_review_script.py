@@ -46,7 +46,6 @@ def _fixture(tmp_path, monkeypatch):
     script = _load_script_module(repo)
     monkeypatch.setattr(plan_ask, "plan_review_slots", lambda default_effort="": _slots())
     monkeypatch.setattr("ouroboros.tools.plan_dialogue.session_input_limits", lambda _slots: {})
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     workspace = tmp_path / "ws"
     workspace.mkdir()
     plan_path = tmp_path / "plan.md"

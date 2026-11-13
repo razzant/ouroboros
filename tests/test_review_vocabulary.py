@@ -23,7 +23,7 @@ def test_the_gates_malformed_pool_refusals_name_the_review_pool():
     from pathlib import Path
 
     source = Path(REPO, "ouroboros/tools/review.py").read_text(encoding="utf-8")
-    assert source.count("invalid review pool configuration") == 2
+    assert source.lower().count("invalid review pool configuration") == 2
     assert "reviewer-slot configuration" not in source
     # The result review reads the same pool and refuses a malformed one in the same words.
     result = Path(REPO, "ouroboros/tools/review_result.py").read_text(encoding="utf-8")

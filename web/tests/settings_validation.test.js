@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { collectCustomSecretDraft, deepseekSearchKey, searchModelAfterSourceSwitch, searchModelForKey, settingsWriteFailure,
-    syncSearchKey, syncSearchModelWords, webSearchPreviewWords } from '../modules/settings_controls.js';
+    syncSearchKey, webSearchPreviewWords } from '../modules/settings_controls.js';
 
 const draft = (overrides = {}) => ({
     key: '', value: '', appliedValue: '', originalKey: '', clear: false, removed: false,
@@ -115,32 +115,17 @@ test('a DeepSeek preview names the key it uses; every other source keeps its own
         details: 'OpenAI · gpt-5.5. Not available now: Anthropic (no API key). Uses saved account credentials.' });
 });
 
-test('the search Model help and placeholder change with the Source only, so typing never rewrites a translation', () => {
-    const writes = [];
-    const help = { set innerHTML(value) { writes.push(value); } };
-    const field = { set placeholder(value) { writes.push(`placeholder: ${value}`); } };
-    const select = { dataset: { modelHelp: 'Page help', modelPlaceholder: 'Recommended for each source' },
-        selectedOptions: [{ dataset: {} }] };
-    syncSearchModelWords(select, field, help);  // the page rendered the select's own words: nothing to write
-    syncSearchModelWords(select, field, help);  // a keystroke
-    assert.deepEqual(writes, []);
-    select.selectedOptions = [{ dataset: { modelHelp: 'DeepSeek help', modelPlaceholder: 'Built-in DeepSeek key' } }];
-    syncSearchModelWords(select, field, help);
-    syncSearchModelWords(select, field, help);  // typing under DeepSeek writes nothing more
-    select.selectedOptions = [{ dataset: {} }];
-    syncSearchModelWords(select, field, help);  // back to a source with a model: the page's own English again
-    assert.deepEqual(writes, ['DeepSeek help', 'placeholder: Built-in DeepSeek key', 'Page help',
-        'placeholder: Recommended for each source']);
-    syncSearchModelWords(null, field, help);  // a page without the section changes nothing
-    assert.equal(writes.length, 4);
-});
-
 test('a DeepSeek key is chosen from the keys of Accounts and spelled only by the editor', () => {
     // The saved Model as the Key select reads it: a key, or null for a misspelt head the resolver refuses.
-    assert.deepEqual(['', 'deepseek::', 'deepseek@default::', 'deepseek@work::', 'gpt-5.5', 'openai@work::gpt-5.5']
-        .map(deepseekSearchKey), ['deepseek', 'deepseek', 'deepseek', 'deepseek@work', 'deepseek', 'deepseek']);
+    assert.deepEqual(['', 'deepseek::', 'deepseek@default::', 'deepseek@work::', 'gpt-5.5', 'openai@work::gpt-5.5',
+        ' deepseek@k-2_b:: ', `deepseek@${'w'.repeat(32)}::`]
+        .map(deepseekSearchKey), ['deepseek', 'deepseek', 'deepseek', 'deepseek@work', 'deepseek', 'deepseek',
+        'deepseek@k-2_b', `deepseek@${'w'.repeat(32)}`]);
     assert.deepEqual(['deepseek@work', 'deepseek@work:', 'DeepSeek@work::', 'deepseek@work:: (local)', 'deepseek::deepseek-chat']
         .map(deepseekSearchKey), [null, null, null, null, null]);
+    // A name outside the key grammar (provider_models._CONNECTION_NAME), which the resolver refuses as invalid.
+    assert.deepEqual(['deepseek@::', 'deepseek@Work::', 'deepseek@DEFAULT::', 'deepseek@-work::', 'deepseek@wo rk::',
+        'deepseek@work@x::', `deepseek@${'w'.repeat(33)}::`].map(deepseekSearchKey), [null, null, null, null, null, null, null]);
     assert.deepEqual([searchModelForKey('api:deepseek', 'gpt-5.5'), searchModelForKey('api:deepseek@work', ''),
         searchModelForKey('saved', 'deepseek@work')], ['', 'deepseek@work::', 'deepseek@work']);
     // Leaving DeepSeek drops only the spelling written for it; another source's model stays the owner's.
@@ -164,11 +149,14 @@ test('a DeepSeek key is chosen from the keys of Accounts and spelled only by the
         ['deepseek@old::', ['DeepSeek', 'DeepSeek · Work', 'DeepSeek · old (off) *', 'Add a key in Accounts for more -']],
         ['deepseek@gone::', ['DeepSeek', 'DeepSeek · Work', 'DeepSeek · gone (removed) *', 'Add a key in Accounts for more -']],
         ['deepseek@work', ['Saved choice (not readable) *', 'DeepSeek', 'DeepSeek · Work', 'Add a key in Accounts for more -']],
+        // A name outside the key grammar is not readable: no second "DeepSeek · Work", no nameless key said to be removed.
+        ['deepseek@Work::', ['Saved choice (not readable) *', 'DeepSeek', 'DeepSeek · Work', 'Add a key in Accounts for more -']],
+        ['deepseek@::', ['Saved choice (not readable) *', 'DeepSeek', 'DeepSeek · Work', 'Add a key in Accounts for more -']],
     ]) {
         const { source, field, select } = page(saved);
         syncSearchKey(source, field, select, keys);
         assert.deepEqual(shown(select), expected, saved);
-        assert.equal(select.value, saved === 'deepseek@work' ? 'saved' : `api:${deepseekSearchKey(saved)}`);
+        assert.equal(select.value, deepseekSearchKey(saved) === null ? 'saved' : `api:${deepseekSearchKey(saved)}`);
         assert.deepEqual([field.hidden, field.labels[0].hidden, select.hidden, select.labels[0].hidden], [true, true, false, false]);
         assert.equal(field.value, saved);  // showing a choice never rewrites the saved Model
     }

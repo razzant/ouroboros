@@ -686,6 +686,10 @@ def test_accounts_catalog_failure_is_visible_and_retry_keeps_the_draft(subscript
     page.goto(ui['url'] + '/onboarding')
     page.wait_for_function("() => document.querySelector('#onboarding-access-note').textContent.includes('Raw model service unavailable')")
     assert page.locator('#next-btn').is_disabled()
+    # The note offers only what the buttons allow: with Continue disabled, a Retry alone.
+    page.wait_for_function("() => document.querySelector('#onboarding-access-note').textContent.trim()"
+                           ".endsWith('Agent model discovery unavailable. Retry.')")
+    assert 'or Continue' not in page.locator('#onboarding-access-note').inner_text()
     page.locator('[data-collapse="api-access"] > summary').click()
     page.locator('#openai-key').fill('owner-draft-credential')
     ui['backend'].pop('catalog_status')

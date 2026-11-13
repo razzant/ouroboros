@@ -146,8 +146,9 @@ def test_generated_public_files_match_source():
         assert (SITE / "public" / name).read_bytes() == (DOCS / name).read_bytes()
 
 
-def test_readme_and_install_page_name_the_factory_spending_limits():
-    """What a newcomer reads before installing is the factory limits themselves, in one paragraph on every surface."""
+def test_readme_install_page_and_deployment_guide_name_the_factory_values():
+    """What a newcomer reads before installing is the factory limits themselves, in one paragraph on every surface;
+    an operator's deployment guide states the same factory values as rows of its first-run table."""
     from ouroboros.settings_defaults import SETTINGS_DEFAULTS as defaults
 
     total, task, daily = (int(defaults[key]) for key in (
@@ -157,6 +158,11 @@ def test_readme_and_install_page_name_the_factory_spending_limits():
                  f"until you start it, and then has ${daily} for each 24 hours. Settings changes all three.")
     for path in (REPO / "README.md", SITE / "install" / "index.html", DOCS / "install" / "index.html"):
         assert paragraph in path.read_text(encoding="utf-8"), path.relative_to(REPO)
+    table = (DOCS / "DEPLOYMENT.md").read_text(encoding="utf-8")
+    assert f"| Limits | ${total} in total, ${task} for one task and its helpers, of known spend |" in table
+    assert f"| Consciousness | off; ${daily} over 24 hours once started |" in table
+    for label, key in (("Safety coverage", "OUROBOROS_SAFETY_MODE"), ("Access level", "OUROBOROS_RUNTIME_MODE")):
+        assert f"| {label} | `{defaults[key]}`" in table, label
 
 
 def test_rating_publication_is_complete_and_source_bound():

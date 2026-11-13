@@ -74,7 +74,6 @@ class _Engine:
 
 @pytest.fixture
 def stopped_wave(author, fake_route, monkeypatch):
-    from ouroboros import config
     from ouroboros.review_execution import ReviewRouteKind
     from ouroboros.tools import review
     from ouroboros.triad_review import REVIEW_TWO_PART_OBJECT_CONTRACT
@@ -92,10 +91,8 @@ def stopped_wave(author, fake_route, monkeypatch):
             "brief_shas": ["brief-sha"] * 2}
 
     def prepared(ctx, commit_message, review_rebuttal="", repo_dir=None, goal="", scope="", subject=None):
-        from ouroboros.tools.review_helpers import review_enforcement_blocks
         root = subject.review_root if subject is not None else ctx.repo_dir
-        return ({"blocking_review": review_enforcement_blocks(config.get_review_enforcement()),
-                 "prompt": "Review this candidate.", "models": list(plan["models"]), "stable_prefix_len": 0,
+        return ({"prompt": "Review this candidate.", "models": list(plan["models"]), "stable_prefix_len": 0,
                  "routes": list(routes), "session_task": "", "target_repo": root,
                  "row_plan": json.loads(json.dumps(plan, default=str)) | {"routes": list(routes)},
                  "layer": "core", "brief_texts": {"brief-sha": "Review this candidate."}}, None, False)

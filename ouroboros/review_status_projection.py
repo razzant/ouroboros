@@ -219,7 +219,6 @@ def build_review_status_payload(projection: Dict[str, Any], *, next_step: str, i
     # repairs the row's own projection; this read-only diagnostic writes nothing.
     settled = bool(projection.get("selected_settled"))
     if selected_attempt is not None and (settled or selected_attempt.phase in {"review_only", "late_wait"}):
-        from ouroboros.config import get_review_enforcement
         from ouroboros.review_records import review_outcome_received
 
         received = settled or review_outcome_received(
@@ -227,7 +226,7 @@ def build_review_status_payload(projection: Dict[str, Any], *, next_step: str, i
             findings=[*selected_attempt.critical_findings, *selected_attempt.advisory_findings],
             terminal=selected_attempt.phase == "review_only" and selected_attempt.status == "reviewed",
         )
-        if get_review_enforcement() == "advisory" and received:
+        if received:
             payload["review_reference"] = {"surface": "commit", **{key: getattr(selected_attempt, key) for key in
                 ("repo_key", "task_id", "tool_name", "attempt", "pre_review_fingerprint", "review_record_id")}}
             payload["next_step"] = ("Read the returned findings. You may revise and request another permitted review, stop, or collect the whole outcome at $0 with "
@@ -381,7 +380,7 @@ def _review_status_message(projection: Dict[str, Any]) -> str:
             "overlap_guard": "Another reviewed attempt is still active. Wait or expire it before retrying.",
             "attempt_cap_reached": "The same staged diff was review-blocked repeatedly. Change the diff or rebut via review_rebuttal.",
             "identical_diff_refused": "This exact staged diff was already review-blocked. Change the diff or supply a NEW review_rebuttal (identical bytes are never re-reviewed for pay).",
-            "review_cycles_exhausted": "This task tree spent its paid review cycles (OUROBOROS_REVIEW_MAX_CYCLES). Under Advisory decide whether what was reviewed is enough; under Blocking only the owner may raise the cap.",
+            "review_cycles_exhausted": "This task tree spent its paid review cycles (OUROBOROS_REVIEW_MAX_CYCLES). Decide whether what was reviewed is enough; the owner can raise the cap (Settings, Max Review Cycles).",
             "review_subject_binding_mismatch": "The reviewed managed subject is not the tree this commit would write. Re-stage the intended candidate and retry so review and commit describe the same tree.",
         }
         label = "BLOCKED" if ca.status == "blocked" else "FAILED"

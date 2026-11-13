@@ -634,3 +634,72 @@ def test_a_model_listed_first_without_a_price_keeps_none_when_a_later_record_sta
     payload = json.loads(asyncio.run(model_catalog_api.api_model_catalog(None)).body.decode("utf-8"))
     [item] = [item for item in payload["items"] if item["value"] == "vendor/x"]
     assert "price" not in item
+
+
+def test_the_limits_name_what_they_cannot_count_and_nothing_where_every_route_has_a_price():
+    """Dashboard › Costs says it under the limits: a call on a route without a known price adds nothing to known
+    spend (`usage_accounting.paid_admission`), so the limits count without it."""
+    from ouroboros.pricing import known_spend_gaps, price_source
+
+    routed = {"OUROBOROS_MODEL": "anthropic/claude-opus-5.5", "OUROBOROS_MODEL_LIGHT": "openai::gpt-6-mini",
+              "OUROBOROS_MODEL_FALLBACKS": "openai::gpt-6", "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}
+    # An empty Safety runs on Light's slot; Vision and Consciousness follow Main, which has a catalog price.
+    assert known_spend_gaps(routed) == ["Light", "Safety Supervisor", "Fallback"]
+    assert known_spend_gaps({**routed, "OUROBOROS_MODEL_SAFETY": "anthropic/claude-opus-5.5",
+                             "OUROBOROS_MODEL_LIGHT": "", "OUROBOROS_MODEL_FALLBACKS": ""}) == []
+    assert known_spend_gaps({"OUROBOROS_MODEL": "openai::gpt-6", "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == ["all model roles"]
+    assert known_spend_gaps({"OUROBOROS_MODEL": "claudexor::codex=gpt-6"}) == [], "a subscription spends time, not money"
+    # A slot with its own model keeps its own local flag; only an empty one runs on Main's (route_choice).
+    assert known_spend_gaps({"OUROBOROS_MODEL": "qwen3.gguf", "USE_LOCAL_MAIN": "true", "OUROBOROS_MODEL_LIGHT": "openai::gpt-6-mini",
+                             "USE_LOCAL_LIGHT": False, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == ["Light", "Safety Supervisor"]
+    assert known_spend_gaps({"OUROBOROS_MODEL": "openai::gpt-6", "USE_LOCAL_MAIN": "true",
+                             "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == [], "a local model costs nothing"
+    # Built-in web search by its first leg: a direct key has no catalog, OpenRouter has one, ddgs is free.
+    base = {"OUROBOROS_MODEL": "anthropic/claude-opus-5.5", "OPENROUTER_API_KEY": "k"}
+    assert known_spend_gaps({**base, "OPENAI_API_KEY": "k", "OUROBOROS_WEBSEARCH_BACKEND": "openai"}) == ["Web search"]
+    assert known_spend_gaps({**base, "OUROBOROS_WEBSEARCH_BACKEND": "openrouter"}) == []
+    # Enabled API helpers on a route without a price; a switched-off one spends nothing.
+    helper = {"route": {"kind": "api_model", "target_id": "deepseek::deepseek-v4"}}
+    assert known_spend_gaps({**base, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}, {"items": [helper]}) == ["Agents"]
+    assert known_spend_gaps({**base, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}, {"items": [{**helper, "enabled": False}]}) == []
+    assert price_source("cloudru", {"OUROBOROS_RUB_USD_RATE": "0.012", "CLOUDRU_FOUNDATION_MODELS_API_KEY": "k"}) == "catalog"
+    assert price_source("cloudru", {"OUROBOROS_RUB_USD_RATE": "0.012"}) == "unknown", "the catalog is read with the built-in key"
+    assert price_source("cloudru", {"CLOUDRU_FOUNDATION_MODELS_API_KEY": "k"}) == "unknown", "roubles without a rate"
+
+
+def test_the_spend_gaps_follow_the_runtime_lane_of_each_role():
+    """Each role's route as the runtime resolves it (route_choice, safety_config, slot_lane_label): a remote role on a
+    direct key is named even beside a local Main, and a local one is not."""
+    from ouroboros.pricing import known_spend_gaps
+
+    local_main = {"OUROBOROS_MODEL": "qwen3-8b", "USE_LOCAL_MAIN": True, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}
+    assert known_spend_gaps({**local_main, "OUROBOROS_MODEL_VISION": "openai::gpt-6"}) == ["Vision"]
+    assert known_spend_gaps({**local_main, "OUROBOROS_MODEL_SAFETY": "anthropic::claude-haiku-5-5"}) == ["Safety Supervisor"]
+    assert known_spend_gaps({**local_main, "OUROBOROS_MODEL_VISION": "openai::gpt-oss-20b (local)"}) == [], (
+        "a model stored with its local label runs locally, whatever its prefix")
+    # A stored False is a set flag: an empty Consciousness then wakes on Main's model remotely.
+    assert known_spend_gaps({**local_main, "OUROBOROS_MODEL": "openai::gpt-6",
+                             "USE_LOCAL_CONSCIOUSNESS": False}) == ["Consciousness"]
+    # An empty Safety beside an empty Light runs Main's slot and flag, not Light's leftover one.
+    assert known_spend_gaps({"OUROBOROS_MODEL": "openai::gpt-6", "USE_LOCAL_LIGHT": True, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs",
+                             "OUROBOROS_MODEL_VISION": "anthropic/claude-opus-5.5"}) == [
+        "Main", "Light", "Safety Supervisor", "Consciousness"]
+    routed = {"OUROBOROS_MODEL": "anthropic/claude-opus-5.5", "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}
+    helper = {"route": {"kind": "api_model", "target_id": "deepseek::deepseek-v4"}}
+    assert known_spend_gaps(routed, {"enabled": False, "items": [helper]}) == ["Agents"], (
+        "a review names any enabled row with the catalog switched off")
+    assert known_spend_gaps(routed, {"enabled": False, "items": [{**helper, "enabled": False}]}) == []
+    # An empty Consciousness with its own flag set wakes on that flag alone; Light keeps Main's lane too.
+    priced = {"OUROBOROS_MODEL_LIGHT": "anthropic/claude-opus-5.5", "OUROBOROS_MODEL_VISION": "anthropic/claude-opus-5.5"}
+    assert known_spend_gaps({**priced, "OUROBOROS_MODEL": "openai::gpt-6", "USE_LOCAL_CONSCIOUSNESS": True,
+                             "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == ["Main"]
+    # An empty Vision runs Main's lane whatever its own flag says (slot_lane_label).
+    assert known_spend_gaps({**priced, "OUROBOROS_MODEL_VISION": "", "OUROBOROS_MODEL": "openai::gpt-6",
+                             "USE_LOCAL_CONSCIOUSNESS": True, "USE_LOCAL_VISION": True,
+                             "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}) == ["Main", "Vision"]
+    rouble = {"OUROBOROS_RUB_USD_RATE": "0.012", "CLOUDRU_FOUNDATION_MODELS_API_KEY": "k", "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}
+    assert known_spend_gaps({**rouble, "OUROBOROS_MODEL": "cloudru::GigaChat-2-Max"}) == []
+    assert known_spend_gaps({**rouble, "OUROBOROS_MODEL": "cloudru@work::GigaChat-2-Max"}) == [], "one catalog for every connection"
+    rouble.pop("CLOUDRU_FOUNDATION_MODELS_API_KEY")
+    assert known_spend_gaps({**rouble, "OUROBOROS_MODEL": "cloudru@work::GigaChat-2-Max"}) == ["all model roles"], (
+        "the catalog is read with the built-in key")

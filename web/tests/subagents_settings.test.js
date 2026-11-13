@@ -653,20 +653,17 @@ test('shared route primitive preserves each semantic owner account spelling', ()
 
 // IMPL_SPEC §5, verbatim: the Reviewer tick means whose agreement counts, said per saved strictness.
 const TICK = {
-    blocking: 'Counts toward review: every ticked reviewer checks each change Ouroboros makes to itself, each skill and each required result; a critical finding stops it.',
     advisory: 'Counts when chosen: for each check Ouroboros asks one, several or all reviewers and writes why; it never skips a check that is owed.',
     cyber_pro: 'Trusted to judge: Ouroboros decides whom to ask, if anyone; reviews inform and never block.',
 };
 
-test('the Reviewer tick caption is one line per strictness; Cyber Pro Access outranks the enforcement it keeps', () => {
+test('the Reviewer tick caption is one line per Access: Cyber Pro trusts the judgment, every other level counts when chosen', () => {
     assert.deepEqual({ ...REVIEWER_TICK_CAPTIONS }, TICK);
-    assert.equal(reviewerTickCaption('blocking', 'advanced'), TICK.blocking);
-    assert.equal(reviewerTickCaption('blocking', 'light'), TICK.blocking);
-    assert.equal(reviewerTickCaption('advisory', 'pro'), TICK.advisory);
-    assert.equal(reviewerTickCaption('blocking', 'cyber_pro'), TICK.cyber_pro);
-    assert.equal(reviewerTickCaption('advisory', 'cyber_pro'), TICK.cyber_pro);
-    // The shipped defaults (advisory, advanced) when the document names neither.
-    assert.equal(reviewerTickCaption(undefined, undefined), TICK.advisory);
+    for (const access of ['light', 'advanced', 'pro']) assert.equal(reviewerTickCaption(access), TICK.advisory, access);
+    assert.equal(reviewerTickCaption('cyber_pro'), TICK.cyber_pro);
+    assert.equal(reviewerTickCaption(' Cyber_Pro '), TICK.cyber_pro);
+    // The shipped default (advanced) when the document names no Access.
+    assert.equal(reviewerTickCaption(undefined), TICK.advisory);
     for (const caption of Object.values(TICK)) assert.doesNotMatch(caption, /\n/);
 });
 

@@ -270,8 +270,8 @@ def test_sidebar_activity_census_and_navigation(subscription_ui, width, theme, r
     assert page.locator(WORK).get_attribute('data-unread') == '', 'the unread fact stands under the amber'
     mixed = [owner_wait, activity('independent', 'p-work', 'finalizing')]
     refresh(active_chat_activities=mixed)
-    # Independent work goes on, but the owner's move stands alone in the mark; the row's name says both facts.
-    observe('p-work', 'dot', 'owner')
+    # Independent work goes on: its moving dots keep the owner's hue; the row's name says both facts.
+    observe('p-work', 'moving', 'owner')
     assert page.locator(WORK).get_attribute('aria-label').endswith(
         'Finalizing… · A question waits for your answer · new messages')
     assert page.evaluate("""() => sidebarKept.row === document.querySelector('[data-project-id="p-work"]')

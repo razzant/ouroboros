@@ -55,32 +55,36 @@ starts working at once and does not open it; the wizard stays reachable at
 `/onboarding`. The check is that access is configured, not that it works: a wrong
 key shows at the first request. That is the usual first run of a container or a
 service unit configured by variables alone, and of a Colab notebook, whose launch
-writes the budget and the Access level it was given and no wizard choice. No wizard
-choice is saved then, and what the wizard would have asked keeps its factory value:
+writes the whole factory settings document with the budget and the Access level it
+was given. No wizard choice is saved then, and what the wizard would have asked
+keeps its factory value:
 
 | | Factory value | After completing the wizard on fresh data |
 |---|---|---|
 | Safety coverage | `full`: commands are read first too | `light`: outgoing actions are read first (background consciousness keeps `full`) |
 | Access level | `advanced` | the level chosen |
-| Review | `advisory` | the mode chosen |
 | Limits | $200 in total, $50 for one task and its helpers, of known spend | the limits entered |
 | Consciousness | off; $20 over 24 hours once started | off unless ticked |
 
 Reviewers and helpers are proposed from the reachable Main at each read (none while
-the keys present do not settle which provider serves Main) until they are saved on
-the Models or Agents page or by the wizard; other saves leave them proposed.
-Subscription sessions join them through Settings or the wizard.
+the keys present do not settle which provider serves Main) until they are edited on
+the Agents page or saved by the wizard; other saves, the Models page's among them,
+leave them proposed. A Colab launch saves the ones it proposes from the key it was
+given. Subscription sessions join them through Settings or the wizard.
 
-A setting the file does not hold is read from the environment variable of its name,
-for example `TOTAL_BUDGET`, `OUROBOROS_PER_TASK_COST_USD`,
-`OUROBOROS_REVIEW_ENFORCEMENT`, `OUROBOROS_CONSCIOUSNESS_DAILY_USD` and
+A setting the file does not hold is read from the environment variable of its name
+(a Colab launch writes the ones named here into its file: `TOTAL_BUDGET` and
+`OUROBOROS_RUNTIME_MODE` from the notebook's variables at each launch that sets them,
+the rest as the file held them, or at factory values on a first launch), for example
+`TOTAL_BUDGET`, `OUROBOROS_PER_TASK_COST_USD`, `OUROBOROS_CONSCIOUSNESS_DAILY_USD` and
 `OUROBOROS_RUNTIME_MODE` (read at a start). The exceptions are the choices only the
 owner's controls author, Safety coverage and the Context mode among them: Settings
-shows their saved or factory value whatever the environment says. Safety coverage is
-not consistent there today: while none is saved, the Safety Supervisor still reads a
-forwarded `OUROBOROS_SAFETY_MODE` (#3202), so choose the coverage in Settings to have
-one answer. A deployment policy file (below) can cap the Access level and raise the
-minimum coverage.
+shows their saved or factory value whatever the environment says. Neither is
+consistent there today: while none is saved, the Safety Supervisor still reads a
+forwarded `OUROBOROS_SAFETY_MODE`, and a task still starts in a forwarded
+`OUROBOROS_CONTEXT_MODE` (#3202), so choose both in Settings to have one answer. A
+deployment policy file (below) can cap the Access level and raise the minimum
+coverage.
 
 ## Unknown model role at startup
 

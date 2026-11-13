@@ -277,7 +277,9 @@ E1v2 contract:
   `blocking` the steer-mandated absence of a VERSION bump becomes a
   conditionally-critical triad finding that blocks the commit — the evolution
   contract ("one reviewed commit, then restart") would be structurally
-  uncommittable (v6.55.0 scope-review finding).
+  uncommittable (v6.55.0 scope-review finding). **2026-11-12:** the key is retired
+  on every install and every template runs what Advisory was; rows after that
+  release are a new methodology for the benches that ran `blocking`.
 - The bench-local "Option A" heal for dangling evolution transactions is kept as
   a belt-and-braces in `entrypoint_pro.sh`: at task start it marks a committed
   transaction restart-verified at the container boundary (with a

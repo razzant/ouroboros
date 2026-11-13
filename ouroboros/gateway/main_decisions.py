@@ -75,13 +75,16 @@ def question_display_rooms(drive_root: Any, task_id: str, quizzes: Any, *, rooms
 
 
 def _native_question(task_id: str, quiz_id: str, block: dict, owner_wait: Any) -> dict:
-    """Main's own question is already its native card in Main: navigation needs its identity only."""
+    """Main's own question is already its native card in Main: its identity, lifecycle and the wait facts its rows
+    say (a room's question row words it as the card does), as a Project's pointer carries them."""
     from ouroboros.contracts.chat_id_policy import WEB_UI_CHAT_ID
+    from ouroboros.project_dialogue import owner_wait_projection
 
     row = {"task_id": task_id, "quiz_id": quiz_id, "chat_id": WEB_UI_CHAT_ID, "native": True,
-           "quiz_state": str(block.get("state") or "open"), "ts": str(block.get("asked_at") or "")}
-    if isinstance(owner_wait, dict) and owner_wait.get("quiz_id") == quiz_id:
-        row["owner_wait_state"] = str(owner_wait.get("state") or "")
+           "quiz_state": str(block.get("state") or "open"), "ts": str(block.get("asked_at") or ""),
+           **owner_wait_projection(quiz_id, owner_wait, block)}
+    if block.get("wait_for_answer") is True:
+        row["wait_for_answer"] = True
     return row
 
 
@@ -108,6 +111,19 @@ def owner_actions(activity: dict) -> tuple[dict, bool]:
     view = activity_stop_view(activity)
     return waits, (phase in {"budget_paused", "budget_pausing"} and not activity.get("live")
                    and view["resumable"] and activity.get("can_resume") is True)
+
+
+def question_waits(row: dict) -> bool:
+    """Whether a current question still waits on the owner: it is unanswered, whether its task waits, went on with
+    an assumption or has ended, or its Project answer was left undelivered by a restart, which only the owner can
+    remove. Main's pill counts by this rule and every room's turn follows it (``work_status.place_questions``), so a
+    room is the owner's turn exactly while the pill counts something of that room. Browser twin:
+    question_presentation.js ``questionWaits`` (web/tests/fixtures/question_presentation_parity.json pins both)."""
+    if row.get("quiz_state") in {"open", "expired_terminal"}:
+        return True
+    delivery = row.get("question_delivery") if isinstance(row.get("question_delivery"), dict) else {}
+    return bool(row.get("project_id") and row.get("quiz_state") == "answered" and delivery.get("state") == "owed"
+                and delivery.get("reason_code") == "late_answer_delivery_unknown" and delivery.get("dismissed") is not True)
 
 
 def _question_sources(drive_root: Any, candidates: dict) -> dict:

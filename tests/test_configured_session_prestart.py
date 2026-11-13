@@ -353,7 +353,6 @@ def test_unreadable_custody_projects_unknown_not_clean(tmp_path, monkeypatch, fa
     from ouroboros.subagent_bootstrap import (
         actor_first_terminal_projection,
         actor_first_unresolved_fact,
-        configured_actor_finalization_message,
     )
 
     if failure == "marker":
@@ -375,14 +374,6 @@ def test_unreadable_custody_projects_unknown_not_clean(tmp_path, monkeypatch, fa
     }
     # No invented counts: unknown means the log may hold a settled run.
     assert "delegated_runs_started" not in fact
-
-    message = configured_actor_finalization_message(
-        ctx, task_id="actor-started", fallback_root=tmp_path,
-    )
-    assert "CONFIGURED_ACTOR_UNKNOWN" in message
-    # Unknown-safe guidance: never a fresh-start recipe over unreadable custody.
-    assert "Start the exact assigned session now" not in message
-    assert "delegate_wait" in message
 
     projected, usage_out, _trace = actor_first_terminal_projection(
         ctx, {"id": "actor-started"}, {}, {}, tmp_path,

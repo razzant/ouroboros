@@ -14,7 +14,7 @@ import queue
 from typing import Any, Callable, Dict, List, Optional
 from ouroboros import task_pacing
 from ouroboros.nanny_pacing import nanny_burn_fact, nanny_metered_since_delegate_activity
-from ouroboros.outcomes import extract_final_answer, latest_agent_defined_verification, latest_unreconciled_failed_verification, latest_unreconciled_masked_verification, should_nudge_verification, turn_has_reviewable_effects
+from ouroboros.outcomes import _ROOT_WRITE_TOOLS, extract_final_answer, latest_unreconciled_failed_verification, result_unexamined, reviewable_effect_projection, turn_has_reviewable_effects
 # D18b: the trace-touched skill-name scan lives with the readiness predicate that
 # consumes it (upstream 0463c6bb); the historical private name stays bound here so
 # loop.py's re-export and every existing caller keep addressing one object.
@@ -84,10 +84,7 @@ def _plan_gate_decision(
     """Project plan finalization from existing review + policy SSOTs."""
     from ouroboros.owner_hurry import plan_gate_decision
 
-    return plan_gate_decision(
-        ctx, _llm_trace, hard_rail=hard_rail,
-        enforcement=_loop().get_review_enforcement(),
-    )
+    return plan_gate_decision(ctx, _llm_trace, hard_rail=hard_rail)
 
 
 def _plan_gate_reminder(decision: Dict[str, Any]) -> str:
@@ -294,94 +291,174 @@ def _forced_delegation_note(tools_ctx: Any, llm_trace: Dict[str, Any]) -> str:
     )
 
 
-def _nanny_finalization_message(
-    tools: ToolRegistry, drive_root: pathlib.Path, task_id: str,
-    trace_attempted: bool = False,
-) -> str:
-    """The honest nanny reminder for a harness-dispatched child at finalization —
-    or '' when no reminder is deserved.
+_EFFECT_WORDS = {"commit_reviewed": "commit_reviewed call", "vcs_commit_reviewed": "vcs_commit_reviewed call",
+                 "integrate_subagent_patch": "integrated patch", "integrate_delegated_patch": "integrated patch"}
 
-    A configured actor with no durable delegated start gets its charter fact
-    (``configured_actor_finalization_message``); an unsettled start gets
-    NANNY_DELEGATED_RUN_PENDING (the custody fact a duplicate start would
-    contradict); runs that all ended without success get NANNY_DELEGATED_RUN_FAILED.
-    Each is a one-shot fact with the available verbs, not a gate. A succeeded run gets
-    nothing here: the nanny's own burn rides the facts line every round.
 
-    F4 (2026-08-10 saga): the old reminder accused children whose delegated
-    runs CRASHED of "choosing" not to delegate, and fired even with the verbs
-    policy-hidden. Two structural facts fix both: the task's own visible
-    toolset and durable custody evidence (delegate_custody.
-    task_execution_evidence) spanning the WHOLE task — per-execution llm_trace
-    resets on continuation. `trace_attempted` is the third fact: a
-    delegate_start in THIS execution's trace; it must not suppress the failure
-    message (triad, e84475f2: delegate, run dies, finish by hand, finalize —
-    one execution), only the zero-start fact when custody has no rows yet (a
-    pending/uncustodied start is an attempt, not a choice)."""
+def _changed_fact(llm_trace: Dict[str, Any]) -> str:
+    """What the result changed, counted from the one effect projection review and the record read."""
+    counts: Dict[str, int] = {}
+    for effect in reviewable_effect_projection(llm_trace):
+        tool, args = str(effect.get("tool") or ""), effect.get("args") or {}
+        label = (_EFFECT_WORDS.get(tool)
+                 or (f"written to {args.get('root') or 'active_workspace'}" if tool in _ROOT_WRITE_TOOLS else "")
+                 or f"artifact registered by {tool} outputs")
+        counts[label] = counts.get(label, 0) + 1
+    return "; ".join(f"{label} x{n}" for label, n in counts.items())
+
+
+def _recorded_fact(drive_root: Any, task_id: str, receipt_rows: List[Dict[str, Any]]) -> str:
+    """What this task recorded about its result, by receipt status; a red check with its own words."""
+    if not receipt_rows:
+        return "no verification receipt"
+    status = [str(row.get("status") or "") for row in receipt_rows]
+    parts = []
+    if status.count("pass"):
+        parts.append(f"{status.count('pass')} check(s) passed before the last change")
+    if status.count("observed"):
+        parts.append(f"{status.count('observed')} path set(s) confirmed to exist")
+    kinds = {str(row.get("contract_kind") or "") for row in receipt_rows if row.get("status") == "declared"}
+    if "no_visible_machine_contract" in kinds:
+        parts.append('"no machine check exists" declared')
+    if kinds - {"no_visible_machine_contract"}:
+        parts.append("a zero-run decision recorded")
+    red = latest_unreconciled_failed_verification(drive_root, task_id, receipts=receipt_rows)
+    if red is not None:
+        check, code = str(red.get("check") or "").strip(), red.get("returncode")
+        matcher = "; exit 0 but the expected text was not found" if code == 0 and red.get("matched") is False else ""
+        check = check[:200] + ("…" if len(check) > 200 else "")
+        parts.append(f"latest check RED{f' on `{check}`' if check else ''}"
+                     f"{f' (exit {code}{matcher})' if code is not None else ''} with no later pass of the same check")
+    return "; ".join(parts) or "no verification receipt"
+
+
+def _reader_fact(ctx: Any) -> str:
+    from ouroboros.task_results import resolve_ctx_lineage
+
+    lineage = resolve_ctx_lineage(ctx)
+    parent = str(lineage.get("parent_task_id") or "")
+    return "your human" if lineage.get("is_root_task") or not parent else f"parent task {parent}"
+
+
+def _running_children(tools: ToolRegistry, drive_root: Any, task_id: str) -> List[str]:
+    """Direct children still running with no decision recorded: they outlive this task's end."""
+    from ouroboros.loop_forced_finalization import HANDLED_CHILD_DISPOSITIONS
+    from ouroboros.task_status import FINAL_STATUSES
+
+    metadata = getattr(tools._ctx, "task_metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    root = pathlib.Path(str(metadata.get("budget_drive_root") or getattr(tools._ctx, "budget_drive_root", "") or "")
+                        or drive_root)
+    children = _loop()._load_direct_child_results(root, task_id, str(metadata.get("root_task_id") or task_id))
+    return [str(c.get("task_id") or c.get("id") or "?") for c in children
+            if str(c.get("status") or "").strip().lower() not in FINAL_STATUSES
+            and _loop()._child_disposition_state(c) not in HANDLED_CHILD_DISPOSITIONS]
+
+
+def _open_delegated_runs(ctx: Any, task_id: str) -> int:
+    """This task's own delegated runs that started and have not settled (durable custody, the writers' root)."""
+    from ouroboros.delegate_custody import custody_root, task_execution_evidence
+
+    evidence = task_execution_evidence(custody_root(ctx), str(task_id or ""))
+    if evidence.get("evidence_read_failed"):
+        return 0
+    return max(0, int(evidence.get("delegated_runs_started") or 0) - int(evidence.get("delegated_runs_settled") or 0))
+
+
+def _zero_run_closed(ctx: Any, receipt_rows: List[Dict[str, Any]]) -> bool:
+    """A read-only actor that already made its terminal no-leaf decision no longer has the verification tool:
+    naming paths it cannot take would be false (the record still discloses the gap)."""
     try:
-        from ouroboros.tools import registry_guards
+        from ouroboros.outcomes import _terminal_zero_run_receipt_present
+        from ouroboros.tool_access import active_tool_profile
 
-        if "delegate_start" not in set(tools.available_tools()) or "delegate_start" in registry_guards._disabled_tools(
-                getattr(tools, "_ctx", None)):
-            return ""  # the verb is invisible or withheld here; "you chose not to" would be false
+        return active_tool_profile(ctx) == "local_readonly_subagent" and _terminal_zero_run_receipt_present(receipt_rows)
     except Exception:
-        log.debug("nanny nudge: toolset visibility check failed", exc_info=True)
-    evidence: Dict[str, Any] = {}
+        return False
+
+
+def _callable_tools(tools: Any) -> Optional[frozenset]:
+    """The tools this actor may call now; None when unreadable, and then the notice withholds no path."""
     try:
-        from ouroboros.delegate_custody import custody_root, task_execution_evidence
-
-        # Split-root fix (2026-08-10): custody WRITES land on the CANONICAL
-        # (budget) root, but this read used the loop's drive_root — a
-        # split-root child drive has no custody rows: nanny blind. Resolve
-        # the writers' SAME root; drive_root stays the unit-stub fallback.
-        try:
-            evidence_root = custody_root(tools._ctx)
-        except Exception:
-            evidence_root = drive_root
-        evidence = task_execution_evidence(evidence_root, str(task_id or ""))
+        return frozenset(tools.available_tools())
     except Exception:
-        log.debug("nanny nudge: custody evidence read failed", exc_info=True)
-    if evidence.get("delegated_runs_succeeded"):
-        # The poltergeist children ran one $0 run, then co-built for tens of opus
-        # rounds: that burn is now on the facts line of every round
-        # (``nanny_pacing.nanny_burn_fact``), stated, not judged.
-        return ""
-    started = int(evidence.get("delegated_runs_started") or 0)
-    readable = bool(evidence) and not evidence.get("evidence_read_failed")
-    if not started and readable and (trace_attempted or evidence.get("delegate_start_attempted")):
-        # Pending, refused or uncustodied starts are still real attempts.
-        return ""
-    if not started:
-        # The charter fact of a configured actor, also over unreadable custody
-        # (a5e59bdf, as unknown); any other nanny has nothing honest to add.
-        from ouroboros.subagent_bootstrap import configured_actor_finalization_message
+        return None
 
-        return configured_actor_finalization_message(
-            tools._ctx, task_id=str(task_id or ""), fallback_root=drive_root) or ""
-    settled = int(evidence.get("delegated_runs_settled") or 0)
-    failure_states = [str(s) for s in (evidence.get("delegated_run_failure_states") or [])]
-    pending = max(0, started - settled)
-    if pending:
-        # PENDING ≠ FAILED (b49f8192): a STARTED row without settlement may
-        # still be executing — "failed" invites a duplicate, finalizing orphans
-        # the result; outranks the failed message even if a sibling died.
-        failed_note = (
-            f" {len(failure_states)} earlier run(s) already ended: {', '.join(failure_states)}."
-            if failure_states else ""
-        )
-        return (
-            f"⚠️ NANNY_DELEGATED_RUN_PENDING: {pending} delegated run(s) of this task have "
-            "started but not settled — they may still be executing. A final answer now "
-            "leaves their results unread (orphaned), and a new start would duplicate "
-            "them. Available: delegate_wait to check or wait, delegate_cancel to stop one."
-            + failed_note
-        )
-    states = ", ".join(failure_states) or "settled without a recorded terminal state"
-    return (
-        f"⚠️ NANNY_DELEGATED_RUN_FAILED: this task started {started} delegated run(s) "
-        f"and none succeeded; they ended: {states}. Available: delegate_start for "
-        "another run."
-    )
+
+def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm_trace: Dict[str, Any],
+                         receipt_rows: List[Dict[str, Any]]) -> str:
+    """The one finish-door notice (audit 11.11, item 18; owner 12.11: keep the pushback at the exit and make
+    acceptance and quality more precise): the facts the host holds before the first ordinary
+    delivery, never a gate. It names what applies: a result nothing examined since it last changed
+    (``outcomes.result_unexamined``; not where Required's floor reviews it at delivery), direct children still
+    running, this task's own delegated runs still open. Typed facts only, never parsed prose (P5); a red check,
+    a masking pipe and an agent-defined criterion were said when the check ran and stay on the record."""
+    from ouroboros.config import get_task_review_mode
+    from ouroboros.tools.review_result import required_root_wave
+
+    lines: List[str] = []
+    # A declaration that nothing is machine-checkable does not skip it: an early formal record must not buy the
+    # door back (owner 12.11: such a record no longer counts as a check). The notice states the declaration.
+    if (result_unexamined(llm_trace) and not required_root_wave(tools._ctx)
+            and not _zero_run_closed(tools._ctx, receipt_rows)):
+        mode = get_task_review_mode()  # Off refuses a result review; Required reviews only a root at delivery
+        callable_tools = _callable_tools(tools)  # a path this actor cannot take is never offered
+        can_review = mode != "off" and (callable_tools is None or "review_change" in callable_tools)
+        paths = (["check the result against what was asked (verify_and_record runs the check and records what it "
+                  "showed)"] if callable_tools is None or "verify_and_record" in callable_tools else [])
+        paths += (["ask for a result review (review_change with subject=\"result\" and the seats you choose; its "
+                   "verdict comes back before delivery)"] if can_review else [])
+        deliver = "deliver it as it is and say in the answer what was not checked, which the record then shows"
+        lines += [
+            "Before delivery: no recorded check (verify_and_record) or result review has examined this result since it "
+            "last changed.",
+            f"Changed: {_changed_fact(llm_trace)}.",
+            f"Recorded about it: {_recorded_fact(drive_root, task_id, receipt_rows)}.",
+            f"This answer is read by: {_reader_fact(tools._ctx)}.",
+            "Result review: off on this install (task review mode Off)." if mode == "off" else
+            "Result review: none for this answer; this actor has no review_change." if not can_review else
+            f"Result review: none for this answer; under {mode.capitalize()} a result review "
+            f"{'of a child ' if mode == 'required' else ''}runs only when you ask for one.",
+            "Ways forward: " + "; ".join([*paths, f"or {deliver}" if paths else deliver]) + ".",
+        ]
+    try:
+        running = _running_children(tools, drive_root, task_id)
+    except Exception:
+        log.debug("pre-delivery notice: direct children unreadable", exc_info=True)
+        running = []
+    if running:
+        listed = ", ".join(running[:10]) + (f" (+{len(running) - 10} more)" if len(running) > 10 else "")
+        lines.append(f"Still running: direct children {listed}; after this task ends they keep running and spending, "
+                     "and it reads nothing more from them (wait for them, cancel them, or leave them).")
+    try:
+        open_runs = _open_delegated_runs(tools._ctx, task_id)
+    except Exception:
+        log.debug("pre-delivery notice: delegated custody unreadable", exc_info=True)
+        open_runs = 0
+    if open_runs:
+        lines.append(f"Open delegated runs: {open_runs} of this task's runs have not settled; ending this task now "
+                     "cancels them on the next custody pass (delegate_wait shows each run's state).")
+    if not lines:
+        return ""
+    if not lines[0].startswith("Before delivery"):
+        lines.insert(0, "Before delivery:")
+    return "\n".join([*lines, "Your next answer is delivered as you choose."])
+
+
+def _claim_pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm_trace: Dict[str, Any],
+                               receipt_rows: Optional[List[Dict[str, Any]]] = None) -> str:
+    """The notice once per execution: the first door that shows it (this chain, or the handoff riding the same
+    door) latches it, so one door is never two returns."""
+    if drive_root is None or getattr(tools._ctx, "_pre_delivery_noticed", False):
+        return ""
+    if receipt_rows is None:
+        from ouroboros.outcomes import read_context_verification_receipts
+
+        receipt_rows = read_context_verification_receipts(tools._ctx, task_id, fallback_root=drive_root)
+    notice = _pre_delivery_notice(tools, drive_root, task_id, llm_trace, receipt_rows)
+    if notice:
+        tools._ctx._pre_delivery_noticed = True
+    return notice
 
 
 def _maybe_inject_finalization_nudges(
@@ -389,8 +466,9 @@ def _maybe_inject_finalization_nudges(
     llm_trace: Dict[str, Any], content: Optional[str], messages: List[Dict[str, Any]],
     emit_progress: Callable[[str], None],
 ) -> bool:
-    """One-shot pre-finalization injections that each re-loop (return True): the skill
-    finalization reminder, then the FR3 verify-before-done nudge. Extracted from
+    """One-shot pre-finalization injections that each re-loop (return True): the authoring
+    handover fact, the skill finalization reminder, the one pre-delivery notice
+    (``_pre_delivery_notice``) and the adapter's answer-protocol marker. Extracted from
     run_llm_loop to keep it under the method size gate."""
     if drive_root is None:
         return False
@@ -408,7 +486,7 @@ def _maybe_inject_finalization_nudges(
 
         receipt_rows = read_verification_receipts(drive_root, task_id)
 
-    def _inject(reminder: str, note: str, cause: str) -> bool:
+    def _inject(reminder: str, note: str, cause: str, *, progress: bool = True) -> bool:
         # The one nudge protocol every advisory injection below follows: land
         # the model's pending text, append the reminder, record the note once
         # (live progress AND the durable trail), name the hold's typed cause
@@ -416,7 +494,8 @@ def _maybe_inject_finalization_nudges(
         if content and content.strip():
             messages.append({"role": "assistant", "content": content})
         _loop()._append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{reminder}")
-        emit_progress(note)
+        if progress:
+            emit_progress(note)
         llm_trace["reasoning_notes"].append(note)
         tools._ctx._completion_hold_cause = cause
         return True
@@ -468,138 +547,17 @@ def _maybe_inject_finalization_nudges(
             # can still continue the task. Later tool work heals only this
             # warning; the history row retains the handover and its recovery.
 
-    if (getattr(tools._ctx, "_nanny_route_dispatched", False)
-            and not getattr(tools._ctx, "_nanny_finalization_injected", False)):
-        # Nanny postcondition (owner 2026-08-07): a harness-dispatched child must
-        # not finalize as if that decision never existed — one structural fact,
-        # one re-loop, never a hard gate (P5); suppressions live in
-        # _nanny_finalization_message.
-        _trace_attempted = any(
-            str(c.get("tool") or "") == "delegate_start"
-            for c in (llm_trace.get("tool_calls") or [])
-            if isinstance(c, dict)
-        )
-        tools._ctx._nanny_finalization_injected = True
-        _nanny_msg = _nanny_finalization_message(
-            tools, drive_root, task_id, trace_attempted=_trace_attempted,
-        )
-        if _nanny_msg:
-            if content and content.strip():
-                messages.append({"role": "assistant", "content": content})
-            _loop()._append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{_nanny_msg}")
-            # Owner decision (2026-08-15): no owner-chat progress line — the
-            # trace + typed task_checkpoint carry observability.
-            _code = _nanny_msg.split(":", 1)[0].replace("⚠️", "").strip()
-            _loop()._emit_checkpoint_event(
-                getattr(tools._ctx, "event_queue", None), task_id,
-                getattr(tools._ctx, "drive_logs", None),
-                {"checkpoint_kind": "nanny_finalization_nudge",
-                 "nanny_code": _code},
-            )
-            # B3: durable worker stamp that the nudge was really INJECTED (the
-            # ctx flag is set even on suppression); read back at completion.
-            from ouroboros.delegate_evidence import record_nanny_nudge_stamp
-
-            record_nanny_nudge_stamp(tools._ctx, task_id, _code)
-            llm_trace["reasoning_notes"].append(_nanny_msg)
-            tools._ctx._completion_hold_cause = _code  # the producer's own typed code, as its rows carry it
-            return True
     from ouroboros.tool_access import canonical_data_root
 
     finalization_msg = _loop()._skill_finalization_message(canonical_data_root(tools._ctx), llm_trace)
     if finalization_msg and not getattr(tools._ctx, "_skill_finalization_injected", False):
         tools._ctx._skill_finalization_injected = True
         return _inject(finalization_msg, finalization_msg, "skill_not_finalized")
-    if not getattr(tools._ctx, "_verify_red_nudged", False):
-        # Red-verification one-shot nudge: the latest host-attested verify
-        # receipt is RED and unreconciled (distinct from receipt_absent below).
-        # Before FR3; binary latch; advisory; forced paths bypass; keyed on the
-        # typed receipt status, never content (P5).
-        _failed_receipt = latest_unreconciled_failed_verification(
-            drive_root, task_id, receipts=receipt_rows,
-        )
-        if _failed_receipt is not None:
-            tools._ctx._verify_red_nudged = True
-            _check = str(_failed_receipt.get("check") or "").strip()
-            _rc = _failed_receipt.get("returncode")
-            _on = f" on `{_check}`" if _check else ""
-            _exit = f" (exit {_rc})" if _rc is not None else ""
-            return _inject(
-                "Your latest host-attested verification is RED" + _on + _exit +
-                ", and no later receipt reconciles it. Available: re-check it, fix and re-run "
-                "verification, or state why this check is not the task's acceptance contract. "
-                "This notice is advisory, not a gate.",
-                "Red-verification nudge injected before final response.", "verification_red",
-            )
-    if not getattr(tools._ctx, "_verify_masked_nudged", False):
-        # Exit-masking one-shot ADVISORY nudge (v6.52.2): a passing verify can
-        # launder the exit code (`| tail`/`|| true`). After the red nudge; binary
-        # latch; forced paths bypass; typed receipt sensor, never content (P5).
-        _masked_receipt = latest_unreconciled_masked_verification(
-            drive_root, task_id, receipts=receipt_rows,
-        )
-        if _masked_receipt is not None:
-            tools._ctx._verify_masked_nudged = True
-            _mcheck = str(_masked_receipt.get("check") or "").strip()
-            _mreasons = ", ".join(str(x) for x in (_masked_receipt.get("check_exit_masking_reasons") or []))
-            _mon = f" on `{_mcheck}`" if _mcheck else ""
-            _mwhy = f" ({_mreasons})" if _mreasons else ""
-            return _inject(
-                "Your latest passing verification" + _mon + " uses a shell pipe" + _mwhy +
-                " that can hide the real command's exit code, so a failing run could read as exit 0. "
-                "Available: re-run it without the masking pipe or with the runner's own pass marker, "
-                "or state why the result is reliable. This notice is advisory, not a gate.",
-                "Masked-verification nudge injected before final response.", "verification_masked",
-            )
-    if not getattr(tools._ctx, "_criterion_source_nudged", False):
-        # Criterion-provenance one-shot ADVISORY nudge (v6.54.4): a green check on
-        # an agent-defined criterion with no basis gets one reminder; after the
-        # masked nudge, before FR3; typed receipt field, never content (P5).
-        _agent_defined = latest_agent_defined_verification(
-            drive_root, task_id, receipts=receipt_rows,
-        )
-        if _agent_defined is not None:
-            tools._ctx._criterion_source_nudged = True
-            _acheck = str(_agent_defined.get("check") or "").strip()
-            _aon = f" (`{_acheck}`)" if _acheck else ""
-            return _inject(
-                "Your latest passing verification" + _aon + " uses a success criterion you defined "
-                "(criterion_source agent_defined, no criterion_basis), not one the task states; the "
-                "receipt carries that provenance to acceptance. Available: verify_and_record with a "
-                "criterion_basis, or a check of the task's own stated criterion. This notice is advisory, not a gate.",
-                "Criterion-provenance nudge injected before final response.", "criterion_agent_defined",
-            )
-    suppress_unavailable_zero_run_verify = False
-    try:
-        from ouroboros.outcomes import _terminal_zero_run_receipt_present
-        from ouroboros.tool_access import active_tool_profile
-
-        suppress_unavailable_zero_run_verify = (
-            active_tool_profile(tools._ctx) == "local_readonly_subagent"
-            and _terminal_zero_run_receipt_present(receipt_rows)
-        )
-    except Exception:
-        pass
-    if (
-        not getattr(tools._ctx, "_verify_nudged", False)
-        and not suppress_unavailable_zero_run_verify
-        and should_nudge_verification(
-            llm_trace, drive_root, task_id, receipts=receipt_rows,
-        )
-    ):
-        # FR3 one-shot verify-before-done nudge: real effects, no
-        # host-attested grounding yet. Binary latch, BEFORE the
-        # acceptance-review gate so it reaches required and auto. Forced
-        # finalization paths return earlier and bypass it (land best_effort).
-        tools._ctx._verify_nudged = True
-        return _inject(
-            "This turn has reviewable effects and no host-attested verification receipt; a clean "
-            "finish records the receipt_absent warning (the result stays solved). Available "
-            "verify_and_record kinds: explicit_command / explicit_metric / visible_verifier (run a "
-            "check), artifact_observation (confirm an artifact exists), no_visible_machine_contract "
-            "(declare that none exists).",
-            "Verify-before-done nudge injected before final response.", "verification_absent",
-        )
+    notice = _claim_pre_delivery_notice(tools, drive_root, task_id, llm_trace, receipt_rows)
+    if notice:
+        # A nanny's notice stays out of the owner chat's progress (owner 2026-08-15: nanny chat spam removed).
+        return _inject(notice, "Pre-delivery facts shown before final response.", "pre_delivery_notice",
+                       progress=not getattr(tools._ctx, "_nanny_route_dispatched", False))
     # No "expected output but nothing attempted" re-loop (A3, removed for #1748): plain
     # prose can itself be the requested deliverable, and the transcript already shows
     # the model its own calls.

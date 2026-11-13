@@ -304,7 +304,7 @@ class MainThread:
     def __init__(self, calls, *, confirmed=True):
         self.calls, self.confirmed = calls, confirmed
 
-    def __call__(self, final):
+    def __call__(self, final, cancelled):
         self.calls.append("windows confirmed" if self.confirmed else "windows unconfirmed")
         if not self.confirmed:
             return False
@@ -368,12 +368,26 @@ def test_a_stop_while_the_windows_leave_full_screen_tears_nothing_down(hand_over
     """Panic or Quit during the animation: the main thread's turn finds the Stop before the icon or lock."""
     stopped = threading.Event()
 
-    def windowed(final):
+    def windowed(final, cancelled):
         stopped.set()  # the stop arrives while the window is still leaving full screen
-        return MainThread(hand_over.calls)(final)
+        return MainThread(hand_over.calls)(final, cancelled)
 
     hand_over([], windows=False, macos=True, windowed=windowed, cancelled=stopped.is_set)
     assert hand_over.calls == ["windows confirmed"], "no icon, unlock, exec or restore"
+
+
+def test_the_window_barrier_reads_the_callers_stop_before_asking_any_window_to_leave(hand_over):
+    """The barrier gets the caller's own ``cancelled``: a Stop it reads in a main-thread turn refuses before any window
+    is asked to leave full screen (``launcher_window_chrome._step``)."""
+    stopped, given = threading.Event(), []
+
+    def windowed(final, cancelled):
+        given.append(cancelled)
+        stopped.set()
+        return not cancelled() and MainThread(hand_over.calls)(final, cancelled)
+
+    hand_over([], windows=False, macos=True, windowed=windowed, cancelled=stopped.is_set)
+    assert given == [stopped.is_set] and hand_over.calls == [], "refused: no icon, unlock, exec or restore"
 
 
 @pytest.mark.parametrize("barrier", [False, True], ids=["inline", "main thread"])

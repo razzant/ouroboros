@@ -63,7 +63,7 @@ def _operator_fixture(tmp_path: Path, monkeypatch, order: list | None = None, *,
         {"subagent_id": "api-scout", "name": "API scout", "recommended_use": "An early look.",
          "route": {"kind": "api_model", "target_id": "openai/fake-reviewer"}, "effort": "high",
          "enabled": scout_enabled}))
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    monkeypatch.delenv("OUROBOROS_REVIEW_ENFORCEMENT", raising=False)  # retired: the lane needs no pin
     monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "1")
     briefs: list[dict] = []
     golden = shared.golden_substrate(briefs)
@@ -231,6 +231,35 @@ def test_operator_lane_retains_the_checkout_while_a_seat_is_open(tmp_path, monke
     assert {row["slot_id"] for _surface, row in reviewers if row.get("late_result_pending")} == {"t2"}
     assert outcome["outcome"]["retention_reason"]
     assert shared.git(repo, "worktree", "list", "--porcelain").count("worktree ") == 2
+
+
+def test_operator_lane_exits_on_the_verdict_of_a_failure_the_cycle_hands_back(tmp_path, monkeypatch):
+    """The review-only cycle hands a FAIL back as ``reviewed`` (it never refuses on a verdict); the lane reads the
+    record's verdict and exits 1 as critical findings, while a PASS exits 0
+    (``test_operator_lane_is_the_commit_gate_dry_run_in_an_isolated_checkout``). Nothing pins an enforcement."""
+    import ouroboros.review_substrate as substrate
+    import scripts.run_external_review as module
+
+    _operator_fixture(tmp_path, monkeypatch)
+    settled = substrate.run_review_request
+
+    def failing(request, *, slots, **kwargs):
+        result = settled(request, slots=slots, **kwargs)
+        for actor in result.actors:
+            value = json.loads(actor["raw_text"])
+            change = value if isinstance(value, list) else value["change"]
+            (change or value["coupling"])[0].update(verdict="FAIL", severity="critical",
+                                                   reason="README.md loses the staged edit")
+            actor["raw_text"] = json.dumps(value, ensure_ascii=False)
+        return result
+
+    monkeypatch.setattr(substrate, "run_review_request", failing)
+
+    exit_code, output = _run_operator_lane(module, monkeypatch, tmp_path)
+
+    outcome = json.loads((output / "outcome.json").read_text(encoding="utf-8"))
+    assert (exit_code, outcome["exit_code"]) == (1, 1), outcome
+    assert (outcome["outcome"]["aggregate"], outcome["outcome"]["block_reason"]) == ("FAIL", "critical_findings")
 
 
 def test_operator_lane_without_isolation_reviews_this_worktree(tmp_path, monkeypatch):

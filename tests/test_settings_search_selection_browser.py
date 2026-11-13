@@ -315,6 +315,19 @@ _DEEPSEEK_KEYS = {'DEEPSEEK_API_KEY': 'deepseek-fixture', 'OUROBOROS_CONNECTIONS
     {'kind': 'deepseek', 'name': 'work', 'label': 'Work', 'api_key': 'work-fixture'},
     {'kind': 'deepseek', 'name': 'old', 'api_key': 'old-fixture', 'enabled': False}]}
 _POINTER = 'Add a key in Accounts for more'
+_MODEL_HELP = 'Only the built-in web search uses it. Empty follows the model Ouroboros recommends for each source.'
+_KEY_HELP = 'DeepSeek search takes no model: choose the key it uses.'
+
+
+def _fields(page):
+    """The Model and Key fields of the web search page (each a label with its control and its own help)."""
+    return page.locator('label.ui-field:has(#s-websearch-model)'), page.locator('label.ui-field:has(#s-websearch-key)')
+
+
+def _help_under(field, control):
+    """A field's help sits in its own column right under its control (DESIGN.md: help belongs to that field)."""
+    box, help_box = control.bounding_box(), field.locator('.ui-field-help').bounding_box()
+    assert abs(help_box['x'] - box['x']) < 1 and help_box['y'] >= box['y'] + box['height'], (box, help_box)
 
 
 @pytest.mark.parametrize('theme', ['light', 'dark'])
@@ -331,16 +344,18 @@ def test_an_explicit_deepseek_source_from_the_real_page_to_its_named_connection(
     ui = saved_ui
     page, preview, field = _open_models(ui, {'OUROBOROS_WEBSEARCH_BACKEND': 'auto', 'OUROBOROS_WEBSEARCH_MODEL': 'gpt-5.5',
                                              **_DEEPSEEK_KEYS}, theme=theme)
-    source, key, words = page.locator('#s-websearch-source'), page.locator('#s-websearch-key'), page.locator('#s-websearch-model-help')
+    source, key = page.locator('#s-websearch-source'), page.locator('#s-websearch-key')
+    model_field, key_field = _fields(page)
     expect(preview).to_contain_text('Uses OpenAI, then OpenRouter, then Anthropic, then DuckDuckGo.')
     expect(preview).not_to_contain_text('DeepSeek')  # DeepSeek keys alone add nothing to Auto
-    expect(key).to_be_hidden()
-    own_words = words.inner_text()
+    expect(key_field).to_be_hidden()
+    expect(model_field.locator('.ui-field-help')).to_have_text(_MODEL_HELP)
+    _help_under(model_field, field)
     source.select_option('deepseek')
-    expect(field).to_be_hidden()
-    expect(page.locator('label[for="s-websearch-key"]')).to_have_text('Key')
-    expect(words).to_have_text('Built-in web_search only. Skills, MCP and browser tools remain independent choices. '
-                               'DeepSeek search takes no model: choose the key it uses.')
+    expect(model_field).to_be_hidden()
+    expect(key_field.locator('span').first).to_have_text('Key')
+    expect(key_field.locator('.ui-field-help')).to_have_text(_KEY_HELP)
+    _help_under(key_field, key)
     expect(key.locator('option')).to_have_text(['DeepSeek', 'DeepSeek · Work', _POINTER])  # the off key is not offered
     expect(key).to_have_value('api:deepseek')
     # The saved model of another source stays as saved and is said not to apply.
@@ -365,10 +380,10 @@ def test_an_explicit_deepseek_source_from_the_real_page_to_its_named_connection(
     expect(preview).to_contain_text('DeepSeek · connection work.')
     routes.roles.capture(page, f'search-deepseek-key-reloaded-{theme}')
     source.select_option('auto')  # the Model field and its own words come back; DeepSeek's key spelling does not
-    expect(field).to_be_visible()
+    expect(model_field).to_be_visible()
     expect(field).to_have_value('')
-    expect(words).to_have_text(own_words)
-    expect(key).to_be_hidden()
+    expect(model_field.locator('.ui-field-help')).to_have_text(_MODEL_HELP)
+    expect(key_field).to_be_hidden()
     source.select_option('deepseek')
 
     sent = []
@@ -385,14 +400,22 @@ def test_an_explicit_deepseek_source_from_the_real_page_to_its_named_connection(
     assert not ui['errors'].unexpected(), ui['errors'].report()
 
 
+_UNREADABLE = 'Saved choice (not readable)'
+_INVALID_NAME = 'has an invalid connection name; choose its key under Web search in Settings'
+
+
 @pytest.mark.parametrize('saved,shown,said', [
     ('deepseek@old::', 'DeepSeek · old (off)', 'Not available now: DeepSeek connection old (not configured).'),
     ('deepseek@gone::', 'DeepSeek · gone (removed)', 'Not available now: DeepSeek connection gone (not configured).'),
-    ('deepseek@work', 'Saved choice (not readable)', 'The saved DeepSeek choice (deepseek@work) names no key'),
-], ids=['off', 'removed', 'misspelt'])
-def test_a_saved_deepseek_key_that_cannot_send_stays_chosen_until_the_owner_chooses_another(saved_ui, saved, shown, said):
-    """A saved key that is off, removed or misspelt is never read as the built-in key: it stays chosen and says why,
-    the saved value stays as it was, and the owner's own choice of another key replaces it on Save."""
+    ('deepseek@work', _UNREADABLE, 'The saved DeepSeek choice (deepseek@work) names no key'),
+    ('deepseek@Work::', _UNREADABLE, f'The saved DeepSeek choice (deepseek@Work::) {_INVALID_NAME}'),
+    ('deepseek@::', _UNREADABLE, f'The saved DeepSeek choice (deepseek@::) {_INVALID_NAME}'),
+], ids=['off', 'removed', 'misspelt', 'name-case', 'name-empty'])
+def test_a_saved_deepseek_key_that_cannot_send_stays_chosen_until_the_owner_chooses_another(saved_ui, request, saved, shown,
+                                                                                            said):
+    """A saved key that is off, removed or misspelt, or whose name the key grammar refuses, is never read as the
+    built-in key: it stays chosen and says why, the keys of Accounts are listed once each beside it, a Save before any
+    choice leaves the saved value as it was, and the owner's own choice of another key replaces it on Save."""
     from playwright.sync_api import expect
 
     ui = saved_ui
@@ -400,10 +423,14 @@ def test_a_saved_deepseek_key_that_cannot_send_stays_chosen_until_the_owner_choo
                                              **_DEEPSEEK_KEYS})
     key = page.locator('#s-websearch-key')
     expect(key.locator('option:checked')).to_have_text(shown)
+    expect(key.locator('option')).to_have_text([shown, 'DeepSeek', 'DeepSeek · Work', _POINTER] if shown == _UNREADABLE
+                                                else ['DeepSeek', 'DeepSeek · Work', shown, _POINTER])
     expect(preview).to_contain_text(said)
     expect(field).to_have_value(saved)
     key.scroll_into_view_if_needed()
-    routes.roles.capture(page, f'search-deepseek-key-{saved.replace("@", "-").strip(":")}')
+    routes.roles.capture(page, f'search-deepseek-key-{request.node.callspec.id}')
+    assert press_editor_save(page) == 'Nothing to save.'
+    assert (_on_disk().get('OUROBOROS_WEBSEARCH_BACKEND'), _on_disk().get('OUROBOROS_WEBSEARCH_MODEL')) == ('deepseek', saved)
     key.select_option(label='DeepSeek')
     expect(preview).to_contain_text('DeepSeek · built-in key.')
     _save_and_reload(page)
@@ -413,59 +440,52 @@ def test_a_saved_deepseek_key_that_cannot_send_stays_chosen_until_the_owner_choo
     assert not ui['errors'].unexpected(), ui['errors'].report()
 
 
-# A translated install (the house idiom: the gateway's /api/ui/i18n answer, stubbed). The Model help is one composite
-# the overlay translates whole; DeepSeek's has its own entry, and its Key select's words translate like any option.
-_HELP_EN = ('Built-in <1>web_search</1> only. Skills, MCP and browser tools remain independent choices. '
-            'Empty follows the model Ouroboros recommends for each source.')
-_HELP_RU = ('Только встроенный <1>web_search</1>. Навыки, MCP и браузерные инструменты выбираются отдельно. '
-            'Пустое поле: модель, которую Ouroboros рекомендует для каждого источника.')
-_DEEPSEEK_HELP_EN = ('Built-in <1>web_search</1> only. Skills, MCP and browser tools remain independent choices. DeepSeek '
-                     'search takes no model: choose the key it uses.')
-_DEEPSEEK_HELP_RU = ('Только встроенный <1>web_search</1>. Навыки, MCP и браузерные инструменты выбираются отдельно. Поиску '
-                     'DeepSeek модель не нужна: выберите ключ, который он использует.')
+# A translated install (the house idiom: the gateway's /api/ui/i18n answer, stubbed). Each field's help is its own
+# sentence the overlay translates whole, and the Key select's words translate like any option.
+_HELP_RU = 'Используется только встроенным веб-поиском. Пустое поле: модель, которую Ouroboros рекомендует для каждого источника.'
+_KEY_HELP_RU = 'Поиску DeepSeek модель не нужна: выберите ключ, который он использует.'
 _TRANSLATED = {'language': 'ru', 'english': False, 'revision': 1, 'entries': {
     english: {'text': text, 'provenance': 'imported'} for english, text in (
-        (_HELP_EN, _HELP_RU), (_DEEPSEEK_HELP_EN, _DEEPSEEK_HELP_RU),
+        (_MODEL_HELP, _HELP_RU), (_KEY_HELP, _KEY_HELP_RU),
         ('Recommended for each source', 'Рекомендуемая для каждого источника'), ('Key', 'Ключ'),
         (_POINTER, 'Добавьте ключ в Accounts, чтобы их стало больше'))}}
 _COUNT_HELP_WRITES = """() => {
-    const help = document.querySelector('#s-websearch-model-help');
     window.__helpWrites = 0;
-    new MutationObserver((records) => { window.__helpWrites += records.length; })
-        .observe(help, { childList: true, subtree: true, characterData: true });
+    const observer = new MutationObserver((records) => { window.__helpWrites += records.length; });
+    document.querySelectorAll('.models-form .ui-field-help').forEach((help) => observer.observe(help,
+        { childList: true, subtree: true, characterData: true }));
 }"""
 
 
 def test_a_translated_search_model_help_changes_with_the_source_and_survives_typing(saved_ui):
-    """The Model field's help and placeholder are the page's own English sentence, so a translated install shows their
-    translation; typing or choosing a key never rewrites them, and switching to DeepSeek and back shows each Source's
-    translation, the Key select's words translated too."""
+    """Each field's help and the Model placeholder are the page's own English, so a translated install shows their
+    translation; typing or choosing a key never rewrites them, and switching to DeepSeek and back shows each field's
+    own translated help, the Key select's words translated too."""
     from playwright.sync_api import expect
 
     ui = saved_ui
     ui['page'].route('**/api/ui/i18n', lambda route: route.fulfill(json=_TRANSLATED))
     ui['page'].route('**/api/ui/i18n/missing', lambda route: route.fulfill(json={'ok': True}))
     page, preview, field = _open_models(ui, {'OUROBOROS_WEBSEARCH_BACKEND': 'auto', **_DEEPSEEK_KEYS})
-    source, key, help_ = page.locator('#s-websearch-source'), page.locator('#s-websearch-key'), page.locator('#s-websearch-model-help')
-    plain = lambda text: text.replace('<1>', '').replace('</1>', '')  # noqa: E731
-    expect(help_).to_have_text(plain(_HELP_RU))
-    expect(help_.locator('code')).to_have_text(['web_search'])
+    source, key = page.locator('#s-websearch-source'), page.locator('#s-websearch-key')
+    model_field, key_field = _fields(page)
+    expect(model_field.locator('.ui-field-help')).to_have_text(_HELP_RU)
     expect(field).to_have_attribute('placeholder', 'Рекомендуемая для каждого источника')
     page.evaluate(_COUNT_HELP_WRITES)
     field.press_sequentially('gpt-5.5')
     expect(preview).to_contain_text('OpenAI · gpt-5.5')  # every keystroke has refreshed the preview
     assert page.evaluate('window.__helpWrites') == 0
-    expect(help_).to_have_text(plain(_HELP_RU))
+    expect(model_field.locator('.ui-field-help')).to_have_text(_HELP_RU)
     field.fill('')
     source.select_option('deepseek')
-    expect(help_).to_have_text(plain(_DEEPSEEK_HELP_RU))
-    expect(help_.locator('code')).to_have_text(['web_search'])
-    expect(page.locator('label[for="s-websearch-key"]')).to_have_text('Ключ')
+    expect(key_field.locator('.ui-field-help')).to_have_text(_KEY_HELP_RU)
+    expect(key_field.locator('span').first).to_have_text('Ключ')
     expect(key.locator('option')).to_have_text(['DeepSeek', 'DeepSeek · Work', 'Добавьте ключ в Accounts, чтобы их стало больше'])
     page.evaluate(_COUNT_HELP_WRITES)
     key.select_option(label='DeepSeek · Work')
     expect(preview).to_contain_text('DeepSeek · connection work.')
     assert page.evaluate('window.__helpWrites') == 0
+    help_ = key_field.locator('.ui-field-help')
     help_.scroll_into_view_if_needed()
     routes.roles.capture(page, 'search-deepseek-translated-help')
     page.set_viewport_size({'width': 390, 'height': 844})
@@ -474,7 +494,7 @@ def test_a_translated_search_model_help_changes_with_the_source_and_survives_typ
     routes.roles.capture(page, 'search-deepseek-translated-help-narrow')
     page.set_viewport_size({'width': 1360, 'height': 900})
     source.select_option('auto')
-    expect(help_).to_have_text(plain(_HELP_RU))
+    expect(model_field.locator('.ui-field-help')).to_have_text(_HELP_RU)
     expect(field).to_have_attribute('placeholder', 'Рекомендуемая для каждого источника')
     assert not ui['errors'].unexpected(), ui['errors'].report()
 

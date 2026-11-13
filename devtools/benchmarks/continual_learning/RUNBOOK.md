@@ -9,8 +9,10 @@ Field-tested configuration and operational hazards from the 2026-07-20 full 1-se
 - Model `openrouter/anthropic/claude-sonnet-4.6`, **effort low pinned uniformly** across every
   engine task type (engine defaults drift between releases — v6.71 flipped review effort to
   high; pin them all).
-- Review gate `OUROBOROS_TASK_REVIEW_MODE=required` + `OUROBOROS_REVIEW_ENFORCEMENT=blocking`:
-  the host's result review runs at delivery and a FAIL holds the answer. The adapter still pins
+- Review gate `OUROBOROS_TASK_REVIEW_MODE=required`: the host's result review runs at delivery.
+  **2026-11-12:** the release that retires `OUROBOROS_REVIEW_ENFORCEMENT` ends "a FAIL holds the
+  answer": the FAIL is shown to the agent, which decides. Rows after it are a new methodology,
+  never compared with earlier rows. The adapter still pins
   **`max_improvement_passes` to 1**, which the result review ignores; the paid bound is
   `OUROBOROS_REVIEW_MAX_CYCLES` (see the review-mode ablation in METHODOLOGY — unbounded
   convergence is 2.6× the cost for no measured gain on the toolchain-oracle domain, and burns

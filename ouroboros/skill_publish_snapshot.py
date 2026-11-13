@@ -253,7 +253,7 @@ def capture_skill_publish_candidate(loaded: LoadedSkill) -> SkillPublishSnapshot
 
 
 def capture_skill_publish_snapshot(loaded: LoadedSkill) -> SkillPublishSnapshot:
-    """Capture exact bytes and bind their critic or Advisory author authority."""
+    """Capture exact bytes and bind their critic or author authority."""
 
     snapshot = capture_skill_publish_candidate(loaded)
     stored_review_hash = str(loaded.review.reviewed_content_hash or loaded.review.content_hash or "")

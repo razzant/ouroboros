@@ -225,6 +225,7 @@ def test_question_presentation_shared_fixture():
     """Both sides of the parity fixture: Python emits exactly the fixture row for each case, and the
     browser (web/tests/question_presentation.test.js) reads the fixture status out of that row."""
     from pathlib import Path
+    from ouroboros.gateway.main_decisions import question_waits
     from ouroboros.project_dialogue import project_question_pointer
 
     cases = json.loads((Path(__file__).resolve().parents[1] /
@@ -240,8 +241,13 @@ def test_question_presentation_shared_fixture():
         assert pointer["text"] == case["status"] + " in Project", case["case"]
         assert {key: pointer[key] for key in keys if key in pointer} == case["row"], case["case"]
         assert pointer["question"] == "Which?" and pointer["options"] == ["a", "b"]
+        # Whether it still waits on the owner: the one rule Main's pill counts by and every room's turn follows.
+        assert question_waits(pointer) is case["waits"], case["case"]
         # A legacy label-only ask retained no details; Main says so exactly as the Project card does.
         assert "option_details" not in pointer and "stake" not in pointer
+    # An undelivered answer is the owner's to remove in its Project only: Main's own question has no such row.
+    lost = {"quiz_state": "answered", "question_delivery": {"state": "owed", "reason_code": "late_answer_delivery_unknown"}}
+    assert question_waits({**lost, "project_id": "p"}) and not question_waits(lost)
     narrow = project_question_pointer({"task_id": "task", "quiz_id": "q", "wait_for_answer": True},
                                       {"quiz_id": "q", "state": "open"}, {"id": "p", "chat_id": 12, "name": "Project"}, None)
     assert not {"question", "options", "option_details", "stake"} & narrow.keys(), \

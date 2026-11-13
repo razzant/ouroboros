@@ -385,7 +385,8 @@ def test_a_late_pass_rewrites_only_the_review_derived_outcome_of_the_current_row
         "task_id": "task-1", "surface": "result", "record_id": "rl-late", "subject_sha": "subject-a", "aggregate": "PASS"}
     current = event["current_outcome"]
     row = load_task_result(tmp_path, "task-1")
-    assert current["outcome_phase"] == outcome_phase(row, {}) == "warn", "the warning the review never answered stays"
+    # The receipt_absent the review never answered stays in the record as a detail; the headline is Done (9 Nov 2026).
+    assert current["outcome_phase"] == outcome_phase(row, {}) == "done"
     assert current["outcome_axes"]["objective"]["warnings"] == [WARN_RECEIPT_ABSENT]
     assert current["outcome_axes"]["artifacts"] == {"status": "not_applicable"} and current["revision"] == row["updated_at"]
     assert outcome_phase(current, {}) == current["outcome_phase"], "its card reads the phase a reload computes"
@@ -526,7 +527,7 @@ def test_an_ordinary_ended_task_is_never_resolved_or_announced_by_a_late_pass(tm
 def test_the_announced_outcome_is_the_parity_row_the_card_and_the_host_both_read(tmp_path, monkeypatch, warning):
     """The compact current outcome the resolver announces is exactly a row of the browser/host parity fixture
     (``web/tests/fixtures/outcome_phase_parity.json``): the card's twin and a reload's host reader read it alike, Done,
-    or Done with warnings while an independent ``receipt_absent`` stays."""
+    with or without an independent ``receipt_absent`` (a detail)."""
     import pathlib
 
     from ouroboros import review_ledger

@@ -40,8 +40,30 @@ def staged_body(tmp_path, monkeypatch):
     fixture["staged_tree_sha"] = shared.git(repo, "write-tree")
     assert fixture["staged_tree_sha"] != fixture["head_tree_sha"]
     set_review_pool(monkeypatch, shared.golden_pool())
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setenv("OUROBOROS_PRE_PUSH_TESTS", "1")
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")  # the proposal touches a protected surface
     monkeypatch.setattr(git_mod, "_run_review_preflight_tests", shared.passing_test_runner)
     return fixture
+
+
+# What the landing continuation leaves out: a paid rebuttal and a new panel it cannot carry, and the
+# paths, so the reviewed composition (``review_collection.author_scope``) is what lands.
+CONTINUATION_DROPS = frozenset({"review_rebuttal", "preflight_reviewer", "reviewers", "reason", "paths"})
+LANDING_DECISION = {"disposition": "accepted", "rationale": "test"}
+
+
+def returned_reference(result) -> dict:
+    """The ``review_reference`` a commit call returned with its outcome before Git."""
+    text = str(result)
+    assert text.startswith("Review outcome returned before commit"), text
+    # The JSON follows the prose; a collected record may append its id line after it.
+    return json.JSONDecoder().raw_decode(text, text.index("\n{") + 1)[0]["review_reference"]
+
+
+def land_after_review(ctx, commit_message, *, commit=None, **commit_kwargs):
+    """Outside Cyber Pro every review outcome, a PASS included, returns before Git: the first call
+    must hand it back, and the author's explicit continuation on its ``review_reference`` lands it."""
+    commit = commit or git_mod._commit_reviewed
+    reference = returned_reference(commit(ctx, commit_message, **commit_kwargs))
+    carried = {key: value for key, value in commit_kwargs.items() if key not in CONTINUATION_DROPS}
+    return commit(ctx, commit_message, review_reference=reference, author_disposition=dict(LANDING_DECISION), **carried)

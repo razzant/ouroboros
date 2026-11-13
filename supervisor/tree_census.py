@@ -338,7 +338,7 @@ def model_handoffs(custody_root, predecessor, *, member_results=None, for_contin
     none reads no member; one with some reads them from the census's memo (``tree_census``)."""
     blockers = []
     try:
-        from ouroboros.local_custody_repair import ended_unbound_model_request, receiver_reason
+        from ouroboros.local_custody_repair import ended_unbound_model_request, receiver_reason, retired_unbound_send
         from ouroboros.owner_pause import tree_model_requests
         if attempts is None:  # the root's open attempts only (the store's open-set index)
             attempts = tree_model_requests(custody_root, predecessor)
@@ -350,13 +350,14 @@ def model_handoffs(custody_root, predecessor, *, member_results=None, for_contin
         for attempt in attempts:
             if attempt.get("state") in {"dispatched", "unresolved"}:
                 consumer = attempt.get("local_answer_consumer_id")
-                retired = (member_results.get(str(attempt.get("task_id") or ""), {})
-                           .get("retired_model_consumers") or {}).get(consumer) if consumer else None
+                retirements = (member_results.get(str(attempt.get("task_id") or ""), {})
+                               .get("retired_model_consumers") or {})
+                retired = retirements.get(consumer) if consumer else None
                 if (isinstance(retired, dict) and retired.get("retired_at")
                         and type(attempt.get("local_answer_task_attempt")) is int
                         and retired.get("task_attempt") == attempt["local_answer_task_attempt"]):
                     continue
-                if ended_unbound_model_request(attempt):
+                if ended_unbound_model_request(attempt) or retired_unbound_send(attempt, retirements):
                     continue
                 # A reviewer's own send (its slot/skill attribution) is review
                 # custody: the owner Pause's readers list it as still finishing.

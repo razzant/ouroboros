@@ -36,7 +36,7 @@ is marked `owner-attested` (distinct from an LLM-clean badge) and does not
 confer publication readiness. Choosing Publish may still start the ordinary
 managed publication task, but attestation alone authorizes no outbound GitHub
 effect. Publication needs fresh critic authority or a later actual independent-review
-outcome acknowledged through qualified Advisory author finish (see Publishing). The
+outcome acknowledged through qualified author finish (see Publishing). The
 agent cannot self-attest (the marker is owner-state).
 
 **Accepted without a review.** A skill installed unchanged from a source the owner
@@ -49,7 +49,7 @@ the current `expected_content_hash` and `owner_source` recording the owner's
 words; its deterministic preflight and exact-byte owner
 attestation keep that edited copy running. This is the owner's authority, not
 an agent's claim that its own edit passed review. Blocker findings in a skill from a source that reviews
-each skill keep it off even under Advisory until the owner skips the review.
+each skill keep it off until the owner skips the review.
 
 There are three skill types:
 
@@ -417,7 +417,7 @@ flowchart LR
     enable --> execute[skill_exec / dispatch]
     review -- feedback --> reaction[Author reaction]
     reaction -- next permitted panel --> review
-    reaction -- Advisory finish + current preflight --> deps
+    reaction -- author finish + current preflight --> deps
     review -- PREFLIGHT failure --> repair[Repair]
     repair --> review
 ```
@@ -431,7 +431,7 @@ flowchart LR
   Panel composition, verdicts and author acceptance follow the [Skill Review Checklist](CHECKLISTS.md#skill-review-checklist),
   not a separate skill policy. A `surface="skill"` ledger record projects into `review.json`, bound to all runtime-reachable
   payload bytes; edits stale it. Change-focused review sees the manifest, changed files and diff, with unchanged files
-  readable, and judges the whole skill. Advisory authors may finish through
+  readable, and judges the whole skill. Authors may finish through
   `skill_review(author_disposition="accepted", author_rationale=…)` with current preflight; see “Skill Review Checklist” below.
   An addressed owner message can return the tool pending while reviewers finish; the same call later collects at $0.
   `.self_authored.json` and installation history are provenance, never approval; self-authored skills use the same lifecycle.
@@ -921,7 +921,7 @@ follow the setting below; an explicitly authorized task toggle remains separate.
 
 `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` defaults on; the owner can disable it in Settings → Permissions and checks
 (native confirmation on desktop, owner endpoint on web). It grants only declared keys/permissions for the accepted
-release digest. Executability follows the selected enforcement and current author/reviewer authority, not the verdict
+release digest. Executability follows the skill gate and current author/reviewer authority, not the verdict
 label alone; see the Skill Review Checklist. Editing the payload invalidates grants; readiness, the execution and toggle refusals and the skill card then also say
 that the grant belongs to an earlier version of the files (`grant_status_for_skill` `earlier_grant`); the saved Settings
 values are untouched.
@@ -1429,7 +1429,7 @@ Never project a retained refusal as `completed/silent` or as a successful handof
 event identity). An author parked on a review it left for an addressed message (a commit, change or result
 review) yields the conversation and answers early: `status: "continuing"` with `continuation_ref` (equal to `turn_ref`) and an
 initial `outcome`/`text`/`output_ref`. `deferred` with empty text means a result may follow; an
-author-selected early output (Advisory `pending_review=finish`) is speech to send once under its
+author-selected early output (`pending_review=finish`) is speech to send once under its
 `output_ref`; `silent`/`tool_delivered` send nothing. A promoted child keeps its own `work_ref`; poll
 both independently. `status: "completed"` (with `continuation_ref: ""`) means the author ended
 within the request. A retry of the same event returns the identical stored envelope, never a rerun;
@@ -1762,8 +1762,8 @@ The recommended closed-loop workflow is:
    `data/skills/clawhub/<name>/`, or `data/skills/ouroboroshub/<name>/`.
 2. Run `skill_preflight(skill="<name>")` for cheap syntax/manifest checks.
 3. Run `skill_review(skill="<name>")` and address every critical finding.
-4. If `OUROBOROS_REVIEW_ENFORCEMENT=advisory`, inspect each advisory finding
-   and either fix it or record why it is accepted for now.
+4. Inspect each advisory finding and either fix it or record why it is
+   accepted for now.
 5. Enable the skill, grant required keys/permissions (or use the auto-grant
    setting for reviewed closed-loop development), then run `skill_exec`.
 6. Read stdout/stderr and `skill_exec_finished` / `skill_exec_failed` events,
@@ -2628,7 +2628,7 @@ else:
 ## Skill Review Checklist
 
 Read the authoritative [Skill Review Checklist](CHECKLISTS.md#skill-review-checklist) when authoring or repairing:
-its verdicts, enforcement and Advisory author-finish rules are not a separate policy here. `clean`, `warnings`,
+its verdicts, gate and author-finish rules are not a separate policy here. `clean`, `warnings`,
 `blockers` and `pending` remain independent from `review_gate.executable_review`. Calls: the lifecycle above; runtime gate: ARCHITECTURE §13. A running review is not unavailable.
 
 ## Reference skills
@@ -2678,8 +2678,8 @@ any git repository the owner adds. Until the owner chooses, a source acts on
 its suggested trust: Official installs without review; Community reviews each
 skill. `confirmed: false` does not suspend that choice. Built-ins default to
 trusted only while no list is saved; afterwards the Built in row decides.
-Each source has a trust: `trusted` installs without review; `review` reviews each skill, and blocker findings keep it off,
-even under Advisory, until the owner skips the review. The basis a skill was
+Each source has a trust: `trusted` installs without review; `review` reviews each skill, and blocker findings keep it off
+until the owner skips the review. The basis a skill was
 installed under is recorded in `data/state/skills/<name>/install.json` and does
 not change when the source's trust changes later.
 
@@ -2692,9 +2692,9 @@ record its own check (`check: "self"` after reading the exact release, with
 `basis: "self_check"`; an edit invalidates it, and outside Cyber Pro that basis
 admits nothing. A trusted source ignores this choice and says so in the result.
 Every acceptance path keeps preflight, the owner's auto-grant setting,
-dependencies and readiness. Who reviews follows the review pool: under Blocking
-every marked reviewer; under Advisory Ouroboros may name `reviewers` (one or more
-pool rows) and must state why when it narrows the panel; a review the owner starts
+dependencies and readiness. Who reviews follows the review pool: Ouroboros may name
+`reviewers` (one or more pool rows) and must state why when it narrows the panel;
+outside Cyber Pro at least one counted; a review the owner starts
 uses the whole pool. Unmarked rows it adds are advisers: heard, never counted.
 
 Add source takes any Git address (`https://`, `ssh://`, `git@host:path`,
@@ -2816,7 +2816,7 @@ The preflight returns one of five states:
 
 - `ready` — the current snapshot is locally publication-ready; the managed task
   repeats the authoritative checks before any public effect.
-- `warnings` — redacted scanner warnings or qualified Advisory author acceptance
+- `warnings` — redacted scanner warnings or qualified author acceptance
   remain disclosed; original critic findings retain their actual severity.
   Continuing requires explicit confirmation.
 - `needs_attention` — the content, version, or full review still needs work, but
@@ -2847,7 +2847,7 @@ Only literal Betterleaks `high` confidence blocks an outbound publication call.
 an intentional provider-shaped fixture, Ouroboros may add Betterleaks's
 exact-line `betterleaks:allow` annotation. That byte edit makes the hash-bound
 critic review stale, so the current bytes need fresh critic authority or qualified
-Advisory author finish before retrying; scanner approval alone supplies neither.
+author finish before retrying; scanner approval alone supplies neither.
 The audit pass records the suppressed exact line as an audited false positive.
 Remove or rotate a real credential instead of allowing it.
 

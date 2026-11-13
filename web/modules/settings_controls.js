@@ -228,7 +228,8 @@ function effectOf(row) {
 /** The server's answer to a write that landed, as an Outcome. `changes` is the receipt (old, new, token per key);
  *  without it (an older server, `receipt: 'unavailable'`) the outcome carries no old value and no token. */
 function savedOutcome(row, value, data = {}) {
-    const base = { effect: effectOf(row), withheld: '', message: (data?.warnings || []).join(' '), code: '' };
+    const base = { effect: effectOf(row), withheld: '', message: (data?.warnings || []).join(' '), code: '',
+        references: Array.isArray(data?.connection_references) ? data.connection_references : [] };
     const ignored = data?.ignored_keys;
     if (row.keys.some((key) => (Array.isArray(ignored) ? ignored.includes(key) : Boolean(ignored && Object.hasOwn(ignored, key))))) {
         return { ...base, state: 'refused', code: 'ignored_key', message: 'This setting is not changed from here.' };
@@ -515,8 +516,8 @@ function enqueue(row, job) {
  */
 export async function commitSetting(row, value, { confirmed = false, ifUnchanged = '', unset = [], only = null, ask = openConfirmDialog } = {}) {
     if (!lastSettings) await ensureRead();  // effects, tokens and a contract field's bounds
-    const confirm = CONFIRMS[row.confirm];
-    if (confirm && !confirmed && !(await confirm(row, value, currentValue(row), ask))) {
+    const question = CONFIRMS[row.confirm];
+    if (question && !confirmed && !(await question(row, value, currentValue(row), ask))) {
         repaintRow(row.id);
         return unchanged(row);
     }
@@ -902,28 +903,18 @@ export function bindSettingRows(container, ctx = {}) {
     };
 }
 
-const searchModelHelpShown = new WeakMap();  // help element -> the English it was last given here
-
-/** The web search Model field's help and placeholder: the chosen option's own (DeepSeek, which takes no model, carries
- *  `data-model-help`), else the Source select's, which the page renders first. Written from that static English only
- *  when it changes (a Source switch), never read back from a page the interface language may have translated, so
- *  typing never rewrites a standing translation; no route grammar is read here. */
-export function syncSearchModelWords(source, field, help) {
-    if (!source || !field || !help) return;
-    const own = { ...source.dataset, ...source.selectedOptions?.[0]?.dataset };
-    if (own.modelHelp === (searchModelHelpShown.get(help) ?? source.dataset.modelHelp)) return;
-    searchModelHelpShown.set(help, own.modelHelp);
-    help.innerHTML = own.modelHelp ?? '';
-    field.placeholder = own.modelPlaceholder ?? '';
-}
+// A named key's stored name, the twin of provider_models._CONNECTION_NAME: the resolver refuses any other.
+const CONNECTION_NAME = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
 /** The DeepSeek key a saved web search Model chooses: `deepseek` (the built-in key) for a blank value or another
- *  source's model (not applied), `deepseek@name` for `deepseek@name::`; null for a misspelt head, which the resolver
- *  refuses (search_routes._DEEPSEEK_HEAD_LIKE) instead of sending it on another key. */
+ *  source's model (not applied), `deepseek@name` for `deepseek@name::`; null for a misspelt head or a name outside
+ *  the key grammar (`deepseek@::`, `deepseek@Work::`), which the resolver refuses too (search_routes) instead of
+ *  sending it on another key: the Key select shows it as not readable, never as an off or removed key. */
 export function deepseekSearchKey(saved) {
     const text = String(saved || '').trim();
     const { source, model } = parseModelSource(text);
-    if (text && connectionParts(source).kind === 'deepseek' && !model) return source;
+    const { kind, name } = connectionParts(source);
+    if (text && kind === 'deepseek' && !model) return source === kind || CONNECTION_NAME.test(name) ? source : null;
     return /^deepseek\s*[@:]/i.test(text) ? null : 'deepseek';
 }
 

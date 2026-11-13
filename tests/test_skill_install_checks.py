@@ -42,7 +42,6 @@ def release(tmp_path, monkeypatch):
     monkeypatch.setattr(installer, "find_item", lambda *a, **kw: (row, item, {}))
     monkeypatch.setattr(installer, "entry_payload_dir", lambda *a, **kw: folder)
     monkeypatch.setattr("ouroboros.config.SETTINGS_PATH", drive / "settings.json")
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.delenv("OUROBOROS_SKILLS_REPO_PATH", raising=False)
     return drive, folder, row, item
 
@@ -249,7 +248,6 @@ def registry_release(tmp_path, monkeypatch):
     drive = tmp_path / "data"
     row = {"id": "clawhub", "name": "ClawHub", "kind": "registry", "trust": "review", "confirmed": True}
     monkeypatch.setenv("OUROBOROS_SKILL_SOURCES", json.dumps([row]))
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     monkeypatch.setattr("ouroboros.config.SETTINGS_PATH", drive / "settings.json")
     monkeypatch.delenv("OUROBOROS_SKILLS_REPO_PATH", raising=False)
     storage = _patch_clawhub_install_pipeline(monkeypatch, tmp_path, auto_specs=[])
@@ -344,18 +342,17 @@ def test_a_saved_self_check_keeps_review_each_strictness_outside_cyber_pro(relea
     set_mode("cyber_pro")
     installer.install_item(drive, item["id"], check="self", check_notes="Read every file.", actor="ouroboros")
     set_mode(access)
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     current = find_skill(drive, "demo").content_hash
     facts = load_acceptance_facts(drive, "demo")
     assert facts["strict_review"] is True
     author = build_author_disposition(disposition="accepted", rationale="checked", subject_hash=current,
                                       enforcement="advisory", action="finish")
-    for disposition in (None, author):  # blockers stay off, even after an Advisory author finish
-        gate = skill_review_gate("blockers", enforcement="advisory", current_hash=current, acceptance=facts,
+    for disposition in (None, author):  # blockers stay off, even after an author finish
+        gate = skill_review_gate("blockers", current_hash=current, acceptance=facts,
                                  author_disposition=disposition)
         assert (gate["executable_review"], gate["blocking_reason"]) == (False, "blocker_findings_need_owner")
-    assert skill_review_gate("clean", enforcement="advisory", current_hash=current, acceptance=facts)["executable_review"]
-    skipped = skill_review_gate("blockers", enforcement="advisory", current_hash=current,
+    assert skill_review_gate("clean", current_hash=current, acceptance=facts)["executable_review"]
+    skipped = skill_review_gate("blockers", current_hash=current,
                                 acceptance={**facts, "basis": "owner_skip"})
     assert (skipped["executable_review"], skipped["blocking_reason"]) == (True, "owner_skip")
 

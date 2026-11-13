@@ -203,6 +203,174 @@ test('View question reaches the asking task of a work, not its first root', asyn
     }
 });
 
+test('two questions of one work have two reachable rows: the work\'s row leads to one, a row of its own to the other', async () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let shade = null;
+    try {
+        const node = (tag, cls, parent) => {
+            const el = document.createElement(tag); el.className = cls; parent.appendChild(el); return el;
+        };
+        const page = node('div', 'page', mount);
+        const header = node('div', 'chat-page-header', page);
+        const titleRow = node('div', 'app-page-title-row', node('div', 'app-page-title-block', header));
+        const badge = node('span', 'status-badge online', node('div', 'app-page-actions ui-chrome-group', header));
+        const messages = node('div', 'chat-messages', page);
+        const first = { kind: 'question', task_id: 'w', quiz_id: 'q1' };
+        const second = { kind: 'open_question', task_id: 'w', quiz_id: 'q2' };
+        const reveals = [];
+        let turn = [first, second];
+        shade = createRoomWork({ page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true },
+            reading: { stick: true, cancel() {}, scroll() {} },
+            works: () => workState([{ ...asking('w', 'q1'), turn }],
+                room('waiting', { turn: turn.map((item) => ({ work_id: 'w', ...item })) })),
+            liveCardRecords: new Map(), pendingSubmissions: new Map(),
+            revealQuestion: async (...args) => { reveals.push(args.slice(0, 2)); return true; } });
+        const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
+        trigger.click();
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
+        assert.deepEqual(list.children.map((el) => el.dataset.id).sort(), ['question:w:q2', 'w']);
+        for (const id of ['w', 'question:w:q2']) {
+            list.children.find((el) => el.dataset.id === id).children
+                .find((child) => child.classList.contains('rw-verb')).children[0].click();
+            await Promise.resolve();
+        }
+        assert.deepEqual(reveals, [['w', 'q1'], ['w', 'q2']]);
+        // One question only: the work's row alone leads to it.
+        turn = [first];
+        trigger.click();
+        trigger.click();
+        assert.deepEqual(list.children.map((el) => el.dataset.id), ['w']);
+    } finally { shade?.destroy(); restoreDom(prior); }
+});
+
+test('a known question keeps a door while its work is unconfirmed; a confirmed work keeps one door, no duplicate', async () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let shade = null;
+    try {
+        const node = (tag, cls, parent) => {
+            const el = document.createElement(tag); el.className = cls; parent.appendChild(el); return el;
+        };
+        const page = node('div', 'page', mount);
+        const header = node('div', 'chat-page-header', page);
+        const titleRow = node('div', 'app-page-title-row', node('div', 'app-page-title-block', header));
+        const badge = node('span', 'status-badge online', node('div', 'app-page-actions ui-chrome-group', header));
+        const messages = node('div', 'chat-messages', page);
+        const item = { kind: 'open_question', task_id: 'w', quiz_id: 'q1' };
+        const reveals = [];
+        let confirmed = true;
+        shade = createRoomWork({ page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true },
+            reading: { stick: true, cancel() {}, scroll() {} },
+            works: () => workState([{ ...running('w'), turn: [item], confirmed }],
+                room('working', { turn: [{ work_id: 'w', ...item }] })),
+            liveCardRecords: new Map(), pendingSubmissions: new Map(),
+            revealQuestion: async (...args) => { reveals.push(args.slice(0, 2)); return true; } });
+        const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
+        const shut = () => { if (trigger.getAttribute('aria-expanded') === 'true') trigger.click(); };
+        const doors = async () => {
+            shut();
+            trigger.click();
+            const pills = list.children.map((row) => [row.dataset.id, row.children
+                .find((child) => child.classList.contains('rw-verb'))?.children
+                .find((child) => child.classList.contains('rw-pill-question'))]).filter(([, pill]) => pill);
+            for (const [, pill] of pills) { pill.click(); await Promise.resolve(); }
+            shut();
+            return pills.map(([id]) => id);
+        };
+        // Confirmed: the work's own row is the one door to its question.
+        assert.deepEqual(await doors(), ['w']);
+        // Unconfirmed: the work's row offers no way there, so the question's own row is its door.
+        confirmed = false;
+        assert.deepEqual(await doors(), ['question:w:q1']);
+        assert.deepEqual(reveals, [['w', 'q1'], ['w', 'q1']]);
+    } finally { shade?.destroy(); restoreDom(prior); }
+});
+
+test('a question row\'s name leads to its question, never to a history read; a work row\'s name still reads its task', async () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let shade = null;
+    try {
+        const node = (tag, cls, parent) => {
+            const el = document.createElement(tag); el.className = cls; parent.appendChild(el); return el;
+        };
+        const page = node('div', 'page', mount);
+        const header = node('div', 'chat-page-header', page);
+        const titleRow = node('div', 'app-page-title-row', node('div', 'app-page-title-block', header));
+        const badge = node('span', 'status-badge thinking', node('div', 'app-page-actions ui-chrome-group', header));
+        const messages = node('div', 'chat-messages', page);
+        const asked = [], reveals = [];
+        const historyPager = { pageOf: () => 'replay:recent', revisit: async () => ({ status: 'applied' }),
+            around: async (address) => { asked.push(address); return { status: 'anchor', anchor: { state: 'absent', task_id: address.slice(5) } }; } };
+        const item = { kind: 'open_question', task_id: 't-ended', quiz_id: 'format' };
+        shade = createRoomWork({ page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true },
+            reading: { stick: false, cancel() {}, scroll() {}, claim: () => () => true }, historyPager,
+            captureVisibleTimelineAnchor: () => null,
+            works: () => workState([running('t-run')], room('working', { turn: [item] })),
+            liveCardRecords: new Map(), pendingSubmissions: new Map(),
+            revealQuestion: async (...args) => { reveals.push(args); return true; } });
+        const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
+        const main = (id) => list.children.find((el) => el.dataset.id === id).querySelector('.rw-main');
+        const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+        trigger.click();
+        assert.equal(main('question:t-ended:format').dataset.target, 'question');
+        assert.match(main('question:t-ended:format').getAttribute('aria-label'), /^View question: /);
+        main('question:t-ended:format').click();
+        await settle();
+        assert.deepEqual([reveals, asked], [[['t-ended', 'format', { focus: 'question' }]], []]);
+        // A work row's name still reads the page around its task.
+        trigger.click();
+        main('t-run').click();
+        await settle();
+        assert.deepEqual(asked, ['task:t-run']);
+        assert.equal(reveals.length, 1);
+    } finally { shade?.destroy(); restoreDom(prior); }
+});
+
+test('a question row says its own words as long as its turn item makes the row, read or no read', () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let shade = null;
+    try {
+        const node = (tag, cls, parent) => {
+            const el = document.createElement(tag); el.className = cls; parent.appendChild(el); return el;
+        };
+        const page = node('div', 'page', mount);
+        const header = node('div', 'chat-page-header', page);
+        const titleRow = node('div', 'app-page-title-row', node('div', 'app-page-title-block', header));
+        const badge = node('span', 'status-badge', node('div', 'app-page-actions ui-chrome-group', header));
+        const messages = node('div', 'chat-messages', page);
+        const item = { kind: 'open_question', task_id: 't-ended', quiz_id: 'format' };
+        const asked = { task_id: 't-ended', quiz_id: 'format', quiz_state: 'open', question: 'Which output format?' };
+        const read = (turn, questions) => ({ supervisor_ready: true, works: [], works_complete: true,
+            rooms: { 1: room('idle', { turn }) }, current_questions: questions });
+        let state = reconcileWorkState(emptyWorkState(), read([item], [asked]), 1);
+        // The page's newest body is gone (a retire or a failed read): the row's words never came from it.
+        shade = createRoomWork({ page, statusBadge: badge, messagesDiv: messages, ws: { isConnected: () => true },
+            reading: { cancel() {}, scroll() {} }, works: () => state, stateSnapshots: { latest: () => null },
+            liveCardRecords: new Map(), pendingSubmissions: new Map() });
+        titleRow.children.find((el) => el.classList.contains('rw-trigger')).click();
+        const list = header.children.find((el) => el.classList.contains('rw-shade-anchor')).children[0].querySelector('.rw-list');
+        const names = () => list.children.filter((el) => el.dataset.id?.startsWith('question:'))
+            .map((el) => el.querySelector('.rw-name').textContent);
+        assert.deepEqual(names(), ['Which output format?']);
+        // A body that still lists the item but did not carry its row keeps the row the item came with.
+        state = reconcileWorkState(state, read([item], []), 1);
+        shade.update();
+        assert.deepEqual(names(), ['Which output format?']);
+        // The item gone, its words go with it: nothing holds a row for a question the turn no longer lists.
+        state = reconcileWorkState(state, read([], []), 1);
+        assert.equal(state.questions.size, 0);
+        // An item that never had its row says what the item itself says: an answer whose delivery is unknown is
+        // not an unanswered question (a carried item across a read with a gap).
+        state = reconcileWorkState(emptyWorkState(), read([{ ...item, quiz_id: 'sent', code: 'delivery_unknown' }, item], []), 1);
+        shade.update();
+        const words = Object.fromEntries(list.children.filter((el) => el.dataset.id?.startsWith('question:'))
+            .map((el) => [el.dataset.id, el.querySelector('.rw-word').textContent]));
+        assert.deepEqual(words, { 'question:t-ended:sent': 'Answer recorded · delivery unknown',
+            'question:t-ended:format': 'Unanswered' });
+    } finally { shade?.destroy(); restoreDom(prior); }
+});
+
 // A progress card can be painted before the slow projection lists the work that answers the same send.
 test('a pending send keeps its slot until its work is listed; the work takes the same node, never a ghost', () => {
     const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
@@ -319,7 +487,7 @@ test('a row names its card\'s coined name first, then its work\'s own name; a ho
     } finally { shade?.destroy(); restoreDom(prior); }
 });
 
-test('the one mark after the word is the room\'s shape, the owner\'s amber dot in its place, Online\'s own dot at rest', () => {
+test('the one mark after the word is the room\'s shape, in the owner\'s hue while the owner\'s move stands, Online\'s own dot at rest', () => {
     const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
     let work;
     try {
@@ -366,15 +534,20 @@ test('the one mark after the word is the room\'s shape, the owner\'s amber dot i
         assert.deepEqual(paint(roomStatusView(inRoom('waiting'))), ['held', 'still', 'ink', '']);
         assert.deepEqual(paint(roomStatusView(inRoom('paused'))), ['held', 'pause', 'ink', ''], 'a Pause is not the owner\'s move');
         assert.deepEqual(paint(roomStatusView(inRoom('unknown'))), ['unknown', 'ring', 'ink', '']);
-        // Something waits for the owner: the amber dot takes the mark's place beside any word, said in words too.
+        // Something waits for the owner: moving work keeps its shape in the owner's hue, anything else is the amber
+        // dot in the mark's place, beside any word, said in words too.
         assert.deepEqual(paint(roomStatusView(inRoom('working', question))),
-            ['live', 'dot', 'owner', 'A question waits for your answer'], 'Working keeps its word and ink');
+            ['live', 'moving', 'owner', 'A question waits for your answer'], 'Working keeps its word and ink');
         assert.deepEqual(paint(roomStatusView(inRoom('queued', question))), ['queued', 'dot', 'owner', 'A question waits for your answer']);
         assert.deepEqual(paint(roomStatusView(inRoom('paused', action))), ['held', 'dot', 'owner', 'Something here waits for you']);
         // The word already says it: the amber dot beside the amber word, and no note repeats it.
         assert.deepEqual(paint(roomStatusView(inRoom('waiting', question))), ['wait', 'dot', 'owner', '']);
         // At rest the room says Online beside its green dot; the client's own facts lay their marks over the room.
         assert.deepEqual(paint(roomStatusView(emptyWorkState())), ['online', 'dot', 'ok', '']);
+        // A question whose work ended keeps the room the owner's turn: Online stands beside the owner's dot, said in words.
+        const unanswered = { turn: [{ kind: 'open_question', task_id: 't-ask', quiz_id: 'q-1' }] };
+        assert.deepEqual(paint(roomStatusView(inRoom('idle', unanswered))),
+            ['online', 'dot', 'owner', 'An unanswered question is here']);
         assert.deepEqual(paint(roomStatusView(inRoom('working', question), { connected: false })), ['offline', 'ring', 'ink', '']);
         assert.deepEqual(paint(roomStatusView(emptyWorkState(), { ready: false })), ['starting', 'hidden', 'ink', '']);
         assert.deepEqual(paint(roomStatusView(emptyWorkState(), { sending: true })), ['live', 'moving', 'ink', '']);

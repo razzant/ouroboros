@@ -29,10 +29,10 @@ def _plan(*, model: str = "claudexor::codex/gpt-6-astra", provider: str = "claud
 
     projection = lambda mode: ContextFitProjection(mode=mode, system_content_json=json.dumps(mode),  # noqa: E731
                                                    estimated_tokens=10, calibrated_tokens=10, calibration_ratio=1.0)
-    return ContextFitPlan(
+    return ContextFitPlan(  # one pinned account: an answer naming no route is its own (``observed_plan``)
         core_sha256="a" * 64, preferred_mode="max", initial_mode="max", model=model, provider=provider,
         route_fp="route-account-1", status="confirmed", stale=False, window_tokens=window,
-        output_reserve_tokens=65_536, user_content_json=json.dumps("go"),
+        output_reserve_tokens=65_536, user_content_json=json.dumps("go"), account_pin="account-1",
         max_projection=projection("max"), low_projection=projection("low"))
 
 

@@ -101,13 +101,11 @@ def test_an_unreceived_pass_reaches_its_author_before_delivery(tmp_path, monkeyp
     assert run["aggregate_signal"] == "PASS" and not run.get("informed_finish")
 
 
-@pytest.mark.parametrize("seat, enforcement, runtime", [
-    ("[]", "advisory", "pro"), (ADVISORY, "advisory", "pro"), (CRITICAL, "blocking", "cyber_pro")])
-def test_an_outcome_the_review_tool_returned_whole_needs_no_second_turn(tmp_path, monkeypatch, seat, enforcement,
-                                                                          runtime):
+@pytest.mark.parametrize("seat, runtime", [("[]", "pro"), (ADVISORY, "pro"), (CRITICAL, "pro"), (CRITICAL, "cyber_pro")])
+def test_an_outcome_the_review_tool_returned_whole_needs_no_second_turn(tmp_path, monkeypatch, seat, runtime):
     """Main asked for the review itself and the tool returned it whole into the transcript: its finish delivers
-    at once (a FAIL under Advisory or Cyber Pro as Main's own informed decision), with no ritual turn."""
-    ctx = _floor_ctx(tmp_path, monkeypatch, enforcement=enforcement)
+    at once (a FAIL in every Access as Main's own informed decision), with no ritual turn."""
+    ctx = _floor_ctx(tmp_path, monkeypatch)
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", runtime)
     _produced_answer_protocol(monkeypatch)
     sends = []
@@ -126,24 +124,20 @@ def test_an_outcome_the_review_tool_returned_whole_needs_no_second_turn(tmp_path
 
 
 @pytest.mark.parametrize("mode, root", [("required", True), ("auto", True), ("auto", False)])
-def test_blocking_still_holds_a_failed_result_the_tool_returned(tmp_path, monkeypatch, mode, root):
-    """Receipt changes no enforcement: under Blocking the FAIL Main already read still holds its delivery until
-    a review passes the result or Main stops, in Auto too (owner, 8 Nov 2026: Auto selects the call, Blocking
-    sets its strength); the stop buys no review and records why none ran. A child is never forced a review (no
-    Required floor), but the one it chose itself has the same Blocking strength."""
-    ctx = _floor_ctx(tmp_path, monkeypatch, mode=mode, enforcement="blocking", root=root)
+def test_a_stop_over_a_failed_result_the_tool_returned_buys_no_review_and_says_why(tmp_path, monkeypatch, mode, root):
+    """The FAIL Main already read holds nothing, in Auto and for a child too: Main's explicit stop ends the task
+    at once, buys no review and records why none ran."""
+    ctx = _floor_ctx(tmp_path, monkeypatch, mode=mode, root=root)
     _produced_answer_protocol(monkeypatch)
     sends = []
     monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", _seam(sends, {"t1": CRITICAL}))
 
     text, trace, requests = _main(ctx, monkeypatch, [
-        _call("review_change", {"subject": "result", "answer": ANSWER}, "review"), _finish(),
+        _call("review_change", {"subject": "result", "answer": ANSWER}, "review"),
         _call("finish_task", {"action": "stop", "answer": ANSWER, "rationale": "the reviewers' finding stands"},
               "stop")])
 
-    assert len(requests) == 3 and len(sends) == 3
-    assert any("not delivered until a review passes it" in notice for notice in _host_notices(requests[2]))
-    assert [row[2:4] for row in _holds(ctx)] == [("result_review", "findings")]
+    assert len(requests) == 2 and len(sends) == 3 and _holds(ctx) == []
     assert text  # the explicit stop ends the task without buying another review
     assert trace["review_decision"]["trigger"] == "author_stop"
 

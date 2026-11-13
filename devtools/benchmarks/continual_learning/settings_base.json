@@ -7,7 +7,6 @@
   "OUROBOROS_MODEL_LIGHT": "anthropic/claude-sonnet-4.6",
   "OUROBOROS_MODEL_FALLBACKS": "anthropic/claude-sonnet-4.6",
   "OUROBOROS_TASK_REVIEW_MODE": "required",
-  "OUROBOROS_REVIEW_ENFORCEMENT": "blocking",
   "OUROBOROS_REVIEW_MAX_CYCLES": "unlimited",
   "OUROBOROS_RUNTIME_MODE": "advanced",
   "OUROBOROS_SAFETY_MODE": "light",

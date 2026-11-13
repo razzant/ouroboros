@@ -73,3 +73,14 @@ def test_start_receipt_names_the_serving_engine_without_claiming_review_success(
     assert "recovered historical run" in description
     assert "self_worktree capture separately requires an unchanged HEAD" in HOST_INSTRUCTIONS
     assert "preserve committed changes" in HOST_INSTRUCTIONS
+
+
+def test_an_open_run_says_what_ending_this_task_does_to_it():
+    """The nanny reads, where the run's state is read, that ending now cancels the open run on the next custody
+    pass and which endings spare it (audit 11.11, item 18: the fact at its birth, not a return at the finish door)."""
+    payload = present_payload(run_id="run-1", state="running", last_seq=3, moved=False, elapsed_seconds=60,
+                              max_seconds=None, waiting_on_user=False, detail={}, budget=15000)
+    fact = payload["owner_end"]
+    assert "cancels the run (owner_task_gone)" in fact and "spares it" in fact
+    assert "deadline, budget or round limit" in fact, "a forced wrap-up is a deliberate end too"
+

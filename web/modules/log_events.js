@@ -1,6 +1,6 @@
 import { accountedUpperBound, accountedUpperBoundWithChildren, formatUsd4, isoMicros, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
-import { TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
+import { DETAIL_ONLY_WARNINGS, TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
     failedStepHeadline, heldCallPhrase, heldCallsLine } from './task_reason_words.js';
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
 import { taskCheckpointLabel, taskCheckpointIdentity, checkpointHasProgressRow, waitEpisode } from './task_checkpoints.js';
@@ -464,14 +464,14 @@ function custodyDebtReason(record) {
 }
 
 // The headline's objective warning: a nonempty current debt list warns, and an older row's custody warning
-// stops counting once that list is known empty; other warnings, and one beside an absent list, keep the word.
-// Twin: outcomes.objective_warned.
+// stops counting once that list is known empty; other warnings, and one beside an absent list, keep the word;
+// a detail-only fact asks nothing of the owner (9 Nov 2026). Twin: outcomes.objective_warned.
 function objectiveWarned(record) {
     const objective = record?.outcome_axes?.objective || {};
     const debt = record?.delegated_runs_unreconciled;
     if (Array.isArray(debt) && debt.length) return true;
-    if (!Array.isArray(debt) || objective.warning !== CUSTODY_DEBT_REASON) return Boolean(objective.warning);
-    return (Array.isArray(objective.warnings) ? objective.warnings : []).some((code) => code && code !== CUSTODY_DEBT_REASON);
+    return [objective.warning, ...(Array.isArray(objective.warnings) ? objective.warnings : [])].some((code) => code
+        && !DETAIL_ONLY_WARNINGS.includes(code) && !(Array.isArray(debt) && code === CUSTODY_DEBT_REASON));
 }
 
 // outcome_axes.execution.plan_review picks its sentence by lookup, never by its spelling; absent classes keep fallback.
@@ -1388,11 +1388,11 @@ function summarizeChatLiveEventView(evt) {
     }
 
     if (t === 'task_started' || t === 'task_received') {
-        return chatView({ headline: tr('task.progress.working_on_it', 'Working on it'), promote: true, dedupeKey: key() });
+        return chatView({ headline: tr('task.progress.working_on_it', 'Working on it'), dedupeKey: key() });
     }
 
     if (t === 'context_building_started') {
-        return chatView({ headline: tr('task.progress.getting_ready', 'Getting ready'), promote: true, dedupeKey: key() });
+        return chatView({ headline: tr('task.progress.getting_ready', 'Getting ready'), dedupeKey: key() });
     }
 
     if (t === 'context_building_finished') {

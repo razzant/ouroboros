@@ -35,8 +35,8 @@ def test_an_ask_every_route_refuses_leaves_a_typed_attempt_instead_of_holding(ha
     (attempt,) = record["attempts"]
     assert attempt["kind"] == "no_route" and attempt["revision"] == 1 and attempt["ask"] == "council" and attempt["ts"]
     assert set(attempt["not_sendable"]) == {"s1", "s2", "s3"} and "credential_pool_exhausted" in attempt["not_sendable"]["s1"]
-    decision = oh.plan_gate_decision(ctx, {}, enforcement="blocking")
-    assert decision["status"] == "clear" and decision["allow"] is True and decision["holding"] == []
+    decision = oh.plan_gate_decision(ctx, {})
+    assert decision["status"] == "clear" and decision["allow"] is True and decision["open_objections"] == []
     assert decision["asks_unroutable"] == 1 and decision["asks_dispatched"] == 0
     assert oh.plan_review_disclosure(decision) == ""
     read, _ = _call(ctx)
@@ -46,41 +46,41 @@ def test_an_ask_every_route_refuses_leaves_a_typed_attempt_instead_of_holding(ha
     # that no route could take leaves the same typed attempt, with no revision, and holds nothing.
     unasked = harness.make_ctx(task_id="task-2", force_plan=True)
     _write(unasked)
-    assert oh.plan_gate_decision(unasked, {}, enforcement="blocking")["allow"] is True
+    assert oh.plan_gate_decision(unasked, {})["allow"] is True
     bare = harness.make_ctx(task_id="task-3", force_plan=True)
     text, result = _call(bare, ask="council")
     assert "PLAN_ASK_NOTHING_SENDABLE" in text and result.code == "CAPABILITY_UNAVAILABLE" and len(sub.calls) == 0
     bare_record = _record(harness, "task-3")
     assert bare_record["revisions"] == [] and bare_record["asks"] == [] and bare_record["attempts"][0]["revision"] is None
-    assert oh.plan_gate_decision(bare, {}, enforcement="blocking")["allow"] is True
+    assert oh.plan_gate_decision(bare, {})["allow"] is True
     read, _ = _call(bare)
     assert "attempt at" in read and "on the reading of the request: no route" in read and "Nothing holds" in read
 
 
 # ---------------------------------------------------------------- point 3: imported objections reach their raiser
 
-def test_an_imported_objection_is_listed_to_its_raiser_and_only_its_withdrawal_releases_the_hold(harness):
+def test_an_imported_objection_is_listed_to_its_raiser_and_only_its_withdrawal_closes_it(harness):
     seed_result(harness.drive, "task-1", {"task_id": "task-1", "status": "running",
                                            "plan_review_state": _v2(closed=False, blocking=("s1",))})
     sub = harness.install({"s1": CLEAN, "s2": _reply("Not mine to withdraw.", withdrawn=[("s1:f1", "looks fine to me")])})
     ctx = harness.make_ctx()
     text, result = _write(ctx)
-    assert result.meta["plan_holding"] == 1 and "HELD" in text and "imported from the previous plan review" in text
+    assert result.meta["plan_open_objections"] == 1 and "nothing holds it" in text and "imported from the previous plan review" in text
     _call(ctx, ask=["s2"], message="anything to add?")
     assert "You have no open objection on this plan." in _content(sub, 0, "s2")
     text, result = _call(ctx)
-    assert result.meta["plan_holding"] == 1 and "ignored withdrawals" in text and "s2/s1:f1" in text, "a foreign withdrawal changes nothing"
+    assert result.meta["plan_open_objections"] == 1 and "ignored withdrawals" in text and "s2/s1:f1" in text, "a foreign withdrawal changes nothing"
     _call(ctx, ask=["s1"], message="still valid?")
     own = _content(sub, 1, "s1").split("## YOUR OPEN OBJECTIONS")[1].split("## WHAT OUROBOROS ASKS YOU NOW")[0]
     assert "- s1:f1 (your blocking finding in this task's previous plan review, imported" in own and "wrong shape" in own
     assert "You have no open objection" not in own and "Adjudicate these FIRST" in own
     text, result = _call(ctx)
-    assert result.meta["plan_holding"] == 1 and "NOT ADJUDICATED" in text, "a reply that mentioned nothing keeps it open, flagged"
+    assert result.meta["plan_open_objections"] == 1 and "NOT ADJUDICATED" in text, "a reply that mentioned nothing keeps it open, flagged"
     harness.install({"s1": _reply("Fixed by revision 1.", withdrawn=[("s1:f1", "the shape is right now")])})
     _call(ctx, ask=["s1"], message="withdraw?")
     text, result = _call(ctx)
-    assert result.meta["plan_holding"] == 0 and "Nothing holds your final answer." in text and "withdrawn: s1/s1:f1" in text
-    assert oh.plan_gate_decision(ctx, {}, enforcement="blocking")["status"] == "clear"
+    assert result.meta["plan_open_objections"] == 0 and "Nothing holds your final answer." in text and "withdrawn: s1/s1:f1" in text
+    assert oh.plan_gate_decision(ctx, {})["status"] == "clear"
 
 
 # ---------------------------------------------------------------- point 4: moved-out prose reaches a late critic

@@ -42,7 +42,11 @@ def safe_read(path: pathlib.Path, fallback: str = "") -> str:
         return fallback
 
 
-def _iter_recent_jsonl(path: pathlib.Path, max_bytes: int = 256_000):
+# The tail of each log these checks read; a health line names it as its source.
+_RECENT_LOG_BYTES = 256_000
+
+
+def _iter_recent_jsonl(path: pathlib.Path, max_bytes: int = _RECENT_LOG_BYTES):
     """The log's bounded tail, read once per file identity and shared with the Runtime section's body fact."""
     yield from cached_tail_objects(path, max_bytes)
 
@@ -125,15 +129,16 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
         host_work = _host_work_line(view_receipts)
         if host_work:
             checks.append(host_work)
+        source = f"source: logs/events.jsonl, last {_RECENT_LOG_BYTES // 1000} KB"
         if llm_error_models:
             top = ", ".join(f"{model} x{count}" for model, count in llm_error_models.most_common(3))
-            checks.append(f"WARNING: PROVIDER/ROUTING ERRORS — {sum(llm_error_models.values())} recent failures ({top}). Reliability or failover may need attention.")
+            checks.append(f"WARNING: PROVIDER/ROUTING ERRORS — {sum(llm_error_models.values())} recent failures ({top}); {source}.")
         if local_overflow_models:
             top = ", ".join(f"{model} x{count}" for model, count in local_overflow_models.most_common(3))
-            checks.append(f"WARNING: LOCAL CONTEXT OVERFLOW — {sum(local_overflow_models.values())} recent overflow event(s) ({top}). Local context may need more compaction or a larger window.")
+            checks.append(f"WARNING: LOCAL CONTEXT OVERFLOW — {sum(local_overflow_models.values())} recent overflow event(s) ({top}); {source}.")
         if remote_overflow_models:
             top = ", ".join(f"{model} x{count}" for model, count in remote_overflow_models.most_common(3))
-            checks.append(f"WARNING: REMOTE CONTEXT OVERFLOW — {sum(remote_overflow_models.values())} recent provider context-window rejection(s) ({top}). Switch to low context mode or reduce the prompt footprint before retrying the same request.")
+            checks.append(f"WARNING: REMOTE CONTEXT OVERFLOW — {sum(remote_overflow_models.values())} recent provider context-window rejection(s) ({top}); {source}.")
     except Exception:
         pass
 
@@ -155,9 +160,9 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
             if recent:
                 checks.append(
                     f"WARNING: RESCUE SNAPSHOT AVAILABLE — {', '.join(recent)}. "
-                    "Uncommitted changes were saved before last restart. "
-                    "Use read_file(root='runtime_data', path='archive/rescue/<dirname>/rescue_meta.json') "
-                    "and changes.diff to decide if recovery is needed."
+                    "Uncommitted changes were saved before last restart in "
+                    "read_file(root='runtime_data', path='archive/rescue/<dirname>/rescue_meta.json') "
+                    "and changes.diff beside it."
                 )
     except Exception:
         pass
@@ -242,9 +247,10 @@ _SELF_LAST_LINES: Dict[str, tuple] = {}
 
 
 def _last_line_parses(journal: pathlib.Path, info: Any) -> bool:
-    """Whether the journal's last non-empty line is a JSON object. ``publish_memory_file`` appends with no
-    record-boundary repair, so an interrupted append leaves a torn last line, and the next append joins it
-    into one line that does not parse: either way the newest record is unknown, never the one before it.
+    """Whether the journal's last non-empty line is a JSON object. An interrupted append leaves a torn last
+    line: the newest record is unknown, never the one before it. ``publish_memory_file`` starts its next row
+    on a line of its own (``ensure_record_boundary``), so the torn line stays behind that row; a writer
+    without the repair (the profiler's first fencing of the map) joins it into one line that does not parse.
     Read back from the end within the journal's tail, once per file identity: a last line longer than the
     tail holds no record the tail could show either."""
     identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)

@@ -120,6 +120,7 @@ def test_the_loop_opens_one_receipt_window_per_round(tmp_path, monkeypatch):
     monkeypatch.setattr(loop, "call_llm_with_retry", fake_call)
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    monkeypatch.setattr("ouroboros.loop_nudges._claim_pre_delivery_notice", lambda *_a, **_k: "")  # the door's notice on the unexamined write: no round here
     loop.run_llm_loop(messages=[{"role": "user", "content": "write the effect"}], tools=registry,
                       llm=type("FakeLLM", (), {"default_model": lambda self: "test-model"})(), drive_logs=tmp_path,
                       emit_progress=lambda *_a, **_k: None, incoming_messages=queue.Queue(), task_id="window-task",
@@ -158,6 +159,7 @@ def test_a_round_s_recovery_calls_run_in_their_own_window(tmp_path, monkeypatch)
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "fb/one")
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    monkeypatch.setattr("ouroboros.loop_nudges._claim_pre_delivery_notice", lambda *_a, **_k: "")  # the door's notice on the unexamined write: no round here
     loop.run_llm_loop(messages=[{"role": "user", "content": "write the effect"}], tools=registry,
                       llm=type("FakeLLM", (), {"default_model": lambda self: "test-model"})(), drive_logs=tmp_path,
                       emit_progress=lambda *_a, **_k: None, incoming_messages=queue.Queue(), task_id="recovery-task",

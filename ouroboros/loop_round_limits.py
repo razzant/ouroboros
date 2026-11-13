@@ -213,13 +213,13 @@ def _drain_incoming_messages(
                 acknowledge_transcript_entry(drive_root, task_id, entry, wake_id="owner_pause_wake")
                 continue
             if kind == KIND_HURRY:
-                # HQ1 no-chat contract (§19.7.2 item 6): a typed hurry
-                # control routes structurally — never via
-                # _record_owner_directive, _owner_marked_content, messages, or
-                # owner_message_injected.
-                from ouroboros.owner_hurry import apply_latch
+                # HQ1 no-chat contract (§19.7.2 item 6): a typed hurry control routes structurally — never via
+                # _record_owner_directive, _owner_marked_content or owner_message_injected. Arming the latch gives
+                # the running work one typed row of the owner's act (``HURRY_WORDS``), never a directive.
+                from ouroboros.owner_hurry import HURRY_WORDS, apply_latch
 
-                apply_latch(owner_ctx, entry, event_queue=event_queue)
+                if apply_latch(owner_ctx, entry, event_queue=event_queue):
+                    _loop()._append_or_merge_user_message(messages, HURRY_WORDS, slot=owner_ctx, kind=OWNER_WORDS_KIND)
                 controls["hurry"] = str(entry.get("msg_id") or "hurry")
                 continue
             from ouroboros.owner_mailbox import KIND_OWNER_MODEL
@@ -723,7 +723,7 @@ class _RoundLimitContext:
 
 
 def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
-    finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({ctx.max_rounds}). Consider decomposing into subtasks via schedule_subagent."
+    finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({ctx.max_rounds})."
     prompt = (
         f"[ROUND_LIMIT] {finish_reason} Produce your best final answer now from the "
         "verified work so far; clearly mark anything unverified or incomplete. An honest "

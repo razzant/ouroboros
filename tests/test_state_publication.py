@@ -127,6 +127,34 @@ def test_state_keeps_the_sidebar_feed_capped_and_reports_the_full_listable_count
     assert payload["project_listable_count"] == 60
 
 
+def test_a_room_that_is_the_owners_turn_always_has_its_row_in_the_feed(serving, monkeypatch):
+    """The Projects header's amber stands for a row the owner can reach: a listable Project whose room is the owner's
+    turn joins the feed beyond its recent slice, in message order after the pins. Without such a room the feed is the
+    capped one, byte for byte, also when the amber room is already in it."""
+    from ouroboros import projects_registry as registry
+    from ouroboros.gateway import work_projection
+
+    for index in range(60):
+        registry.create_project(serving.root, f"project-{index:03d}", name=f"Project {index:03d}", origin="owner_ui")
+    capped = gateway_state._state_snapshot(_request(serving.app))["projects"]
+    everything = registry.projects_summary(serving.root, limit=None, by_message=True)
+    [beyond] = [row for row in everything if row["id"] not in {row["id"] for row in capped}][:1]
+    real = work_projection.works_snapshot
+    amber = []
+
+    def with_amber(*args, **kwargs):
+        works = real(*args, **kwargs)
+        return {**works, "rooms": {**works["rooms"], **{str(chat): {"amber": True, "turn": [{}]} for chat in amber}}}
+
+    monkeypatch.setattr(work_projection, "works_snapshot", with_amber)
+    amber[:] = [capped[0]["chat_id"]]
+    assert gateway_state._state_snapshot(_request(serving.app))["projects"] == capped
+    amber[:] = [beyond["chat_id"]]
+    fed = gateway_state._state_snapshot(_request(serving.app))["projects"]
+    assert len(fed) == len(capped) + 1 and beyond in fed
+    assert [row["id"] for row in fed] == [row["id"] for row in everything if row in capped or row == beyond]
+
+
 def test_concurrent_readers_share_one_production_even_when_nothing_could_be_reused(serving, monkeypatch):
     real_probe = publication.probe
     monkeypatch.setattr(publication, "probe", lambda *a, **k: (*real_probe(*a, **k), object()))  # never equal

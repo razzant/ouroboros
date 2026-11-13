@@ -106,12 +106,18 @@ def test_the_self_lines_state_each_file_s_last_update_record_and_never_its_mtime
     assert said()[0] == "identity.md: last update_identity less than an hour ago (main)"
     # An append the publisher did not finish: the newest record is unknown, never the readable one before it.
     world = memory / "world_journal.jsonl"
+    torn = b'{"ts": "2026-11-12T11:00:00+00:00", "focus": {"role": "ma'
     with world.open("ab") as handle:
-        handle.write(b'{"ts": "2026-11-12T11:00:00+00:00", "focus": {"role": "ma')
+        handle.write(torn)
     assert said()[1] == "WORLD.md: last update_world record unreadable", "a torn last line hides the newest record"
     publish("WORLD.md", "world_journal.jsonl", "consciousness", timedelta(hours=2))
+    assert said()[1] == "WORLD.md: last update_world 2 h ago (consciousness)", \
+        "the publisher starts its row on a new line: the torn line stays behind it and the newest record is the fact"
+    with world.open("ab") as handle:
+        handle.write(torn)
+    append_jsonl(world, host)
     assert said()[1] == "WORLD.md: last update_world record unreadable", \
-        "the next append joined to the torn line: one line that does not parse, never the older record"
+        "a writer without boundary repair (the profiler's fencing) joins the torn line: one line that does not parse"
     with world.open("ab") as handle:
         handle.write(b"\n")
     publish("WORLD.md", "world_journal.jsonl", "consciousness", timedelta(hours=1))
@@ -162,8 +168,11 @@ def test_counts_and_obligations_with_an_action_stay(tmp_path):
     ])
     (tmp_path / "repo" / "pyproject.toml").write_text('version = "9.9.9"', encoding="utf-8")
     text = context_health.build_health_invariants(env)
-    assert "WARNING: PROVIDER/ROUTING ERRORS — 1 recent failures (provider/model x1)" in text
-    assert "WARNING: LOCAL CONTEXT OVERFLOW — 1 recent overflow event(s)" in text
+    # A count names where it was read; the host adds no advice about what to do with it (audit 11.11, item 1).
+    source = f"source: logs/events.jsonl, last {context_health._RECENT_LOG_BYTES // 1000} KB."
+    assert f"WARNING: PROVIDER/ROUTING ERRORS — 1 recent failures (provider/model x1); {source}" in text
+    assert f"WARNING: LOCAL CONTEXT OVERFLOW — 1 recent overflow event(s) (provider/model x1); {source}" in text
+    assert "may need" not in text
     assert "CRITICAL: VERSION DESYNC" in text and "OK:" not in text
 
 

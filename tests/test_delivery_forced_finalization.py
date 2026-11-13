@@ -187,7 +187,6 @@ def test_post_round_finalize_control_binds_its_grace_deadline(tmp_path, monkeypa
     monkeypatch.setattr(loop, "_resolve_delivery_control", lambda content, *_args: ("fresh", content))
     monkeypatch.setattr(loop, "_enforce_plan_gate", lambda *_args: False)
     monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_args: None)
-    monkeypatch.setattr(loop, "_maybe_enforce_child_absorption_gate", lambda *_args: None)
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_args: False)
     monkeypatch.setattr(loop, "_finalize_task_services", lambda *_args: False)
     monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", lambda *_args: False)
@@ -263,7 +262,7 @@ def test_budget_exhaustion_projects_deferred_child_before_forced_return(
     )
 
 
-def test_blocking_open_plan_round_rail_preserves_useful_candidate(tmp_path, monkeypatch):
+def test_an_open_plan_round_rail_preserves_useful_candidate(tmp_path, monkeypatch):
     from tests.test_plan_gate import _plan, _participant, OBJECTION, SEAT
 
     loop, registry, limit_ctx, trace = _forced_test_context(tmp_path)
@@ -275,7 +274,6 @@ def test_blocking_open_plan_round_rail_preserves_useful_candidate(tmp_path, monk
         "Useful verified work completed before the rail.",
         control="candidate",
     )
-    monkeypatch.setattr(loop, "get_review_enforcement", lambda: "blocking")
     monkeypatch.setattr(
         loop,
         "call_llm_with_retry",
@@ -287,7 +285,7 @@ def test_blocking_open_plan_round_rail_preserves_useful_candidate(tmp_path, monk
     assert text.startswith("Useful verified work completed before the rail.")
     # A real counted objection stays open even when the task-wide rail forces
     # best-effort delivery. It is disclosed without erasing the useful candidate.
-    assert "Blocking plan review is open" in usage["terminal_host_notice"]
+    assert "Plan review is open" in usage["terminal_host_notice"] and "Blocking" not in usage["terminal_host_notice"]
     assert "`round_limit`" in usage["terminal_host_notice"]
     assert usage["reason_code"] == "round_limit"
 
@@ -1266,7 +1264,6 @@ def test_a_child_result_that_changes_after_the_review_step_requires_a_complete_r
 
     monkeypatch.setattr("ouroboros.tools.review_result.result_review_at_delivery", review_then_deliver)
     monkeypatch.setattr(loop, "_compute_subagent_handoff", lambda *_a, **_k: None)
-    monkeypatch.setattr(loop, "_maybe_enforce_child_absorption_gate", lambda *_a, **_k: None)
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_a, **_k: False)
     monkeypatch.setattr(loop, "_finalize_task_services", lambda *_a, **_k: False)
 
@@ -1711,22 +1708,11 @@ def test_nonforced_fenced_legacy_control_is_inert_until_tool_selection(tmp_path)
 def test_nonforced_midprose_quotation_is_held_as_selectable_complete_prose(tmp_path):
     loop, registry, ctx, trace = _forced_test_context(tmp_path)
     candidate = loop._replace_delivery_candidate(registry, ctx, trace, "Retained complete answer.", control="candidate")
-    candidate.finalization_control = "child_absorption_or_revision_required"
+    candidate.finalization_control = loop._SKILL_ACTION_HOLD_CONTROL
     prose = 'As noted, the old loop emitted {"delivery_control":"keep"} in control rounds; this is explanatory prose.'
     assert loop._resolve_delivery_control(prose, registry, ctx, trace) == ("retry", candidate.full_text)
     assert registry._ctx._completion_held_sha256 == hashlib.sha256(prose.encode()).hexdigest()
     assert ctx.messages[-2]["content"] == prose and ctx.messages[-1]["role"] == "user"
-
-
-def test_nonforced_legacy_control_cannot_close_a_child_absorption_hold(tmp_path):
-    loop, registry, ctx, trace = _forced_test_context(tmp_path)
-    candidate = loop._replace_delivery_candidate(registry, ctx, trace, "Retained complete answer.", control="candidate")
-    loop._hold_delivery_for_skill_action(registry, trace, control="child_absorption_or_revision_required")
-    status, text = loop._resolve_delivery_control('{"delivery_control":"keep"}', registry, ctx, trace)
-    assert status == "retry" and text == candidate.full_text
-    assert candidate.finalization_control == "child_absorption_or_revision_required"
-    assert registry._ctx._delivery_control_required is True
-    assert "finish_task" in ctx.messages[-1]["content"] and "DELIVERY_CONTROL_REPAIR" not in str(ctx.messages)
 
 
 def test_nonforced_resolver_passes_mixed_prose_json_when_latch_not_armed(tmp_path):
@@ -1794,98 +1780,14 @@ def test_salvage_predicate_keeps_mixed_answers_and_skips_pure_protocol():
     ) is False
 
 
-def test_repeated_child_holds_never_force_an_answer_or_erase_the_retained_candidate(tmp_path, monkeypatch):
-    _write_child(tmp_path, status="running")
-    loop, registry, ctx, trace = _forced_test_context(tmp_path)
-    candidate = _arm_latch_with_candidate(loop, registry, ctx, trace)
-    registry._ctx._child_absorption_reminded = True  # legacy saved state grants no termination authority
-    monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("hold bought a model call")))
-    for _ in range(5):
-        assert loop._maybe_enforce_child_absorption_gate(registry, ctx, candidate.full_text, ctx.messages, lambda _t: None, trace) == "continue"
-    assert registry._ctx._delivery_candidate is candidate
-    assert "forced_finalization" not in trace and "acceptance_decision" not in trace
-    assert "child1 [running]" in str(ctx.messages) and "No reminder count ends the task" in str(ctx.messages)
-
-
-# ---------------------------------------------------------------------------
-# Child results hold a requested finish without any reminder-count terminal rail.
-# Real round limits retain their own cause; an explicit unfinished stop is free
-# of new review calls and never cancels the child's independent work.
-
-
-
-
-
-
-
-
-def test_exact_child_disposition_closes_the_hold_without_counter_based_finalization(tmp_path, monkeypatch):
-    from ouroboros.task_status import load_effective_task_result
-    from ouroboros.tools.join_ledger import _child_result_sha256
-
-    _write_child(tmp_path)
-    loop, registry, ctx, trace = _forced_test_context(tmp_path)
-    monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("hold bought a model call")))
-    assert loop._maybe_enforce_child_absorption_gate(registry, ctx, "", ctx.messages, lambda _t: None, trace) == "continue"
-    child = load_effective_task_result(tmp_path, "child1")
-    assert _child_result_sha256(child) in str(ctx.messages) and "child1 [completed]" in str(ctx.messages)
-    _write_confirmed_disposition(tmp_path, disposition="integrated", rationale="Folded the exact child result into the answer")
-    assert loop._maybe_enforce_child_absorption_gate(registry, ctx, "", ctx.messages, lambda _t: None, trace) is None
-    assert "acceptance_decision" not in trace
-
-
-def test_child_hold_refreshes_current_state_without_a_forced_model_call(tmp_path, monkeypatch):
-    from ouroboros.task_status import load_effective_task_result
-    from ouroboros.tools.join_ledger import _child_result_sha256
-
-    _write_child(tmp_path, status="running")
-    loop, registry, ctx, trace = _forced_test_context(tmp_path)
-    monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("hold bought a model call")))
-    assert loop._maybe_enforce_child_absorption_gate(registry, ctx, "", ctx.messages, lambda _t: None, trace) == "continue"
-    first = str(ctx.messages)
-    _write_child(tmp_path, status="completed")
-    assert loop._maybe_enforce_child_absorption_gate(registry, ctx, "", ctx.messages, lambda _t: None, trace) == "continue"
-    assert "child1 [running]" in first and "child1 [completed]" in str(ctx.messages[-1])
-    assert _child_result_sha256(load_effective_task_result(tmp_path, "child1")) in str(ctx.messages[-1])
-    assert "forced_finalization" not in trace
-
-
-def test_post_tool_evidence_change_holds_while_absorption_gate_open(tmp_path):
-    """New evidence retains the child hold and an explicit finish/stop affordance."""
-    _write_child(tmp_path, status="running")
-    loop, registry, limit_ctx, trace = _forced_test_context(tmp_path)
-    candidate = loop._replace_delivery_candidate(
-        registry, limit_ctx, trace, "Retained complete answer.", control="candidate",
-    )
-    loop._hold_delivery_for_skill_action(
-        registry, trace, control="child_absorption_or_revision_required",
-    )
-    registry._ctx._owner_directives = ["fresh owner directive"]
-    before = len(limit_ctx.messages)
-
-    loop._prepare_post_tool_budget_context(
-        registry, limit_ctx, trace, "test-model", False, "medium",
-    )
-
-    assert registry._ctx._delivery_control_required is True
-    assert candidate.finalization_control == "child_absorption_or_revision_required"
-    assert all(
-        "[DELIVERY_FINALIZATION_CONTROL]" not in str(m.get("content") or "")
-        for m in limit_ctx.messages[before:]
-    )
-
-
 def test_post_tool_evidence_change_arms_after_children_dispositioned(tmp_path):
-    """Once every child is dispositioned the absorption gate is closed: the
-    same evidence-change seam escalates through the ordinary arm (the free
+    """A child decision recorded after the answer was retained changes the delivery
+    evidence: the evidence-change seam escalates through the ordinary arm (the free
     post-action escalation path)."""
     _write_child(tmp_path)
     loop, registry, limit_ctx, trace = _forced_test_context(tmp_path)
     candidate = loop._replace_delivery_candidate(
         registry, limit_ctx, trace, "Retained complete answer.", control="candidate",
-    )
-    loop._hold_delivery_for_skill_action(
-        registry, trace, control="child_absorption_or_revision_required",
     )
     _write_confirmed_disposition(
         tmp_path, disposition="integrated", rationale="absorbed the child result",
@@ -1903,18 +1805,9 @@ def test_post_tool_evidence_change_arms_after_children_dispositioned(tmp_path):
     )
 
 
-def test_real_round_limit_still_finishes_after_child_holds_with_its_own_cause(tmp_path, monkeypatch):
-    _write_child(tmp_path, status="running")
-    loop, registry, ctx, trace = _forced_test_context(tmp_path)
-    calls = []
-    monkeypatch.setattr(loop, "call_llm_with_retry", lambda *_a, **_k: (calls.append(1) or {"role": "assistant", "content": "Useful partial answer."}, 0.0))
-    for _ in range(3):
-        assert loop._maybe_enforce_child_absorption_gate(registry, ctx, "", ctx.messages, lambda _t: None, trace) == "continue"
-    assert calls == []
-    text, usage, returned_trace = loop._handle_round_limit(ctx)
-    assert text == "Useful partial answer." and calls == [1]
-    assert usage["reason_code"] == "round_limit"
-    assert "acceptance_decision" not in returned_trace  # the rail's own cause, no acceptance bypass record
+# ---------------------------------------------------------------------------
+# An explicit unfinished stop with a running child is free of new review calls
+# and never cancels the child's independent work.
 
 
 def test_explicit_stop_with_running_child_finishes_without_a_review_or_cancelling_it(tmp_path, monkeypatch):

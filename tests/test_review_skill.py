@@ -42,7 +42,6 @@ def _seam(sends, answers):
 def harness(tmp_path, monkeypatch):
     """A reviewable script skill in the drive's external bucket, the golden pool and an offline seam."""
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(tmp_path))
-    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", "")
     monkeypatch.delenv("OUROBOROS_REVIEW_MAX_CYCLES", raising=False)
     set_review_pool(monkeypatch, shared.golden_pool())
@@ -68,7 +67,7 @@ def _state(harness):
     return load_review_state(harness.drive, "weather", skill_type="script", skill_dir=harness.skill_dir)
 
 
-def test_advisory_one_reviewer_with_a_reason_reviews_the_skill_and_the_same_bytes_reuse_the_record(harness):
+def test_one_reviewer_with_a_reason_reviews_the_skill_and_the_same_bytes_reuse_the_record(harness):
     first = _review(harness, reviewers=["t1"], reason="small payload")
     assert (first.status, first.paid, first.reused, first.pending) == ("clean", True, False, False), first.error
     assert [send["slot_id"] for send in harness.sends] == ["t1"] and first.panel["assigned"] == ["t1"]
@@ -80,27 +79,30 @@ def test_advisory_one_reviewer_with_a_reason_reviews_the_skill_and_the_same_byte
     assert record["brief"]["skill"]["name"] == "weather" and record["verdict"]["per_question"] == {"skill": "PASS"}
     state = _state(harness)
     assert (state.status, state.record_id, state.content_hash) == ("clean", first.record_id, first.content_hash)
-    assert state.gate_for(first.content_hash, enforcement="advisory")["executable_review"] is True
+    assert state.gate_for(first.content_hash)["executable_review"] is True
     assert state.seats and state.seats[0]["seat_id"] == "t1" and state.governance["packet"]["owed_chars"] > 0
 
     again = _review(harness, reviewers=["t1"], reason="small payload")
     assert again.reused is True and again.record_id == first.record_id and len(harness.sends) == 1
 
 
-def test_blocking_widens_to_every_ticked_reviewer_and_the_checklist_rule_decides_what_blocks(harness):
-    """Blocking seats every ticked reviewer whatever the author named; a hard trust-boundary item blocks even
-    when the seat called it advisory (the severity policy is applied before the verdict is read)."""
-    harness.monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+def test_the_checklist_rule_decides_what_is_a_blocker_and_a_blocker_does_not_stop_the_skill(harness):
+    """A hard trust-boundary item is a blocker even when the seat called it advisory (the severity policy is
+    applied before the verdict is read); the named seat alone is asked, and outside Cyber Pro the blocker is
+    recorded and returned without vetoing the skill."""
+    harness.monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")  # retired: read by nothing
     harness.answers["t2"] = HARD
-    outcome = _review(harness, reviewers=["t1"], reason="small payload")
-    assert outcome.status == "blockers" and sorted(send["slot_id"] for send in harness.sends) == ["s1", "t1", "t2"]
-    assert outcome.panel["assigned"] == ["t1", "t2", "s1"] and outcome.panel.get("widened_from") == ["t1"]
+    outcome = _review(harness, reviewers=["t2"], reason="small payload")
+    assert outcome.status == "blockers" and [send["slot_id"] for send in harness.sends] == ["t2"]
+    assert outcome.panel["assigned"] == ["t2"] and "widened_from" not in outcome.panel
     [finding] = [f for f in outcome.findings if not f.get("additional")]
     assert (finding["item"], finding["severity"], finding["seat_id"], finding["part"]) == ("no_repo_mutation", "critical", "t2", "skill")
     record = review_ledger.load_record(harness.drive, outcome.record_id)
     assert record["verdict"]["aggregate"] == "FAIL" and record["verdict"]["per_row"]["t2"] == "FAIL"
     state = _state(harness)
-    assert state.status == "blockers" and state.gate_for(outcome.content_hash, enforcement="blocking")["executable_review"] is False
+    gate = state.gate_for(outcome.content_hash)
+    assert state.status == "blockers" and gate["executable_review"] is True
+    assert gate["blocking_reason"] == "blockers_allowed_by_advisory_enforcement"
 
 
 @pytest.mark.parametrize("answer, item", [(SOFT, "error_handling"), (UNKNOWN, "invented_item")])
@@ -114,7 +116,7 @@ def test_an_advisory_item_and_an_unknown_item_warn_and_never_block(harness, answ
     assert (finding["item"], finding["severity"]) == (item, "advisory")
     record = review_ledger.load_record(harness.drive, outcome.record_id)
     assert record["verdict"]["aggregate"] == "PASS" and record["verdict"]["advisory_findings"]
-    assert _state(harness).gate_for(outcome.content_hash, enforcement="advisory")["executable_review"] is True
+    assert _state(harness).gate_for(outcome.content_hash)["executable_review"] is True
 
 
 def test_an_unreadable_findings_array_is_no_answer_and_a_readable_entry_beside_junk_still_counts(harness):
@@ -128,7 +130,7 @@ def test_an_unreadable_findings_array_is_no_answer_and_a_readable_entry_beside_j
     record = review_ledger.load_record(harness.drive, outcome.record_id)
     assert record["verdict"]["aggregate"] == "QUORUM_FAILED" and record["rows"][0]["answers"]["skill"]["status"] == "unanswered"
     assert "none of the 1 entries has an item and a PASS/FAIL verdict" in record["rows"][0]["answers"]["skill"]["error"]
-    assert _state(harness).gate_for(outcome.content_hash, enforcement="advisory")["executable_review"] is False
+    assert _state(harness).gate_for(outcome.content_hash)["executable_review"] is False
 
     (harness.skill_dir / "SKILL.md").write_text("# weather\n\nRevised.\n", encoding="utf-8")
     harness.answers["t1"] = json.dumps([{"unexpected": "not a finding"},
@@ -169,7 +171,8 @@ def briefing(harness):
 
 def test_a_re_review_after_an_edit_is_change_focused_in_every_mode_and_judges_the_whole_skill(briefing):
     """3A: the brief says what changed since the last verdict — added, modified and removed files with a unified
-    diff from the retained earlier copy — in Advisory and in Blocking alike; the verdict is on the whole skill."""
+    diff from the retained earlier copy — to every seat asked, a seat that did not see the first wave too; the verdict
+    is on the whole skill."""
     h = briefing
     (h.skill_dir / "docs.txt").write_text("first notes\n", encoding="utf-8")
     first = _review(h, reviewers=["t1"], reason="small payload")
@@ -178,8 +181,7 @@ def test_a_re_review_after_an_edit_is_change_focused_in_every_mode_and_judges_th
     (h.skill_dir / "scripts" / "util.py").write_text("VALUE = 1\n", encoding="utf-8")
     (h.skill_dir / "docs.txt").unlink()
     h.briefs.clear()
-    h.monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
-    second = _review(h, reviewers=["t1"], reason="small payload")
+    second = _review(h)  # the whole pool
     assert second.status == "clean" and second.record_id != first.record_id and second.content_hash != first.content_hash
     for seat in ("t1", "t2", "s1"):
         brief = h.briefs[seat]
@@ -263,8 +265,7 @@ def test_a_deterministic_preflight_failure_stays_pending_and_dispatches_no_seat(
     assert outcome.status == "pending" and "skill_preflight failed" in outcome.error and harness.sends == []
     state = _state(harness)
     assert state.status == "pending" and state.findings[0]["item"] == "skill_preflight"
-    assert state.gate_for(outcome.content_hash, enforcement="advisory")["executable_review"] is False
-    assert state.gate_for(outcome.content_hash, enforcement="blocking")["executable_review"] is False
+    assert state.gate_for(outcome.content_hash)["executable_review"] is False
 
 
 # --- the paid ceiling: the manual lane per content version, the tool lane per root task (owner Q23) ---------
@@ -322,7 +323,7 @@ def test_a_narrowed_panel_without_a_reason_is_refused_outside_cyber_pro(harness,
         outcome = _review(harness, reviewers=["t1"])
         if mode == "cyber_pro":
             assert outcome.status == "clean" and outcome.panel["assigned"] == ["t1"] and len(harness.sends) == 1
-            assert _state(harness).gate_for(outcome.content_hash, enforcement="blocking")["executable_review"] is True
+            assert _state(harness).gate_for(outcome.content_hash)["executable_review"] is True
         else:
             assert outcome.dispatch_refusal_code == "TOOL_ARG_ERROR" and harness.sends == [] and outcome.status == "pending"
     finally:
@@ -429,16 +430,15 @@ def test_the_owner_skip_attests_the_bytes_without_a_wave_and_publication_still_w
     state = _state(harness)
     assert state.review_profile == "owner_attested" and state.record_id == ""
     assert (harness.drive / "state" / "skills" / "weather" / "owner_attestation.json").is_file()
-    assert state.gate_for(state.content_hash, enforcement="blocking")["executable_review"] is True
+    assert state.gate_for(state.content_hash)["executable_review"] is True
     eligibility = submit_hub_eligibility(source="external", review_status=state.status, review_profile=state.review_profile,
                                          github_token_configured=True)
     assert eligibility["reason"] == "Owner-attested skills need a full LLM review before publication"
 
 
-@pytest.mark.parametrize("enforcement", ["advisory", "blocking"])
-def test_an_author_finish_after_an_edit_binds_the_new_bytes_in_advisory_and_is_refused_in_blocking(harness, enforcement):
-    """The author answers the reviewer's warning by editing and finishing: Advisory records the acceptance for
-    the NEW bytes against the retained reviewer evidence (no second panel); Blocking refuses the finish."""
+def test_an_author_finish_after_an_edit_binds_the_new_bytes(harness):
+    """The author answers the reviewer's warning by editing and finishing: the acceptance is recorded for the NEW
+    bytes against the retained reviewer evidence (no second panel), whatever a retired setting still says."""
     from ouroboros.tool_access_types import ResolvedResourceBinding
     from ouroboros.tools import skill_exec
 
@@ -447,7 +447,7 @@ def test_an_author_finish_after_an_edit_binds_the_new_bytes_in_advisory_and_is_r
     first = _review(h, reviewers=["t1"], reason="small payload")
     assert first.status == "warnings"
     (h.skill_dir / "scripts" / "hello.py").write_text("print('handled')\n", encoding="utf-8")
-    h.monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", enforcement)
+    h.monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")  # retired: read by nothing
     binding = ResolvedResourceBinding(profile="self_modification", root="skill_payload", operation="review",
                                       base_path=h.skill_dir, target_path=h.skill_dir, source="test",
                                       skill_name="weather", state_drive_root=h.drive)
@@ -455,15 +455,11 @@ def test_an_author_finish_after_an_edit_binds_the_new_bytes_in_advisory_and_is_r
         h.ctx, binding, "weather", disposition="accepted", rationale="The exception is handled now; verified locally.")
     assert len(h.sends) == 1, "a finish never buys a panel"
     state = _state(h)
-    if enforcement == "blocking":
-        assert "explicit author finish requires advisory enforcement" in finished["error"]
-        assert not state.author_disposition and state.content_hash == first.content_hash
-        return
     assert "error" not in finished and finished["record_id"] == first.record_id
     assert finished["content_hash"] != first.content_hash and finished["reviewed_content_hash"] == first.content_hash
     assert state.author_disposition["disposition"] == "accepted" and state.author_disposition["subject_hash"] == finished["content_hash"]
     assert [f["item"] for f in state.findings] == ["error_handling"], "the reviewer's evidence stays"
-    gate = state.gate_for(finished["content_hash"], enforcement="advisory")
+    gate = state.gate_for(finished["content_hash"])
     assert gate["executable_review"] is True and gate["blocking_reason"] == "author_accepted_advisory"
 
 
@@ -481,7 +477,7 @@ def test_a_wave_without_a_verdict_keeps_the_owner_skip_and_a_substantive_wave_re
     assert f"record {silent.record_id} formed no verdict" in silent.error
     state = _state(h)
     assert (state.status, state.review_profile, state.record_id) == ("clean", "owner_attested", "")
-    assert state.gate_for(silent.content_hash, enforcement="blocking")["executable_review"] is True
+    assert state.gate_for(silent.content_hash)["executable_review"] is True
     h.answers["t1"] = HARD
     (h.skill_dir / "SKILL.md").write_text("# weather\n\nRevised.\n", encoding="utf-8")
     judged = _review(h, reviewers=["t1"], reason="small payload")
@@ -512,7 +508,7 @@ def test_a_wave_without_a_verdict_keeps_the_author_acceptance_and_a_substantive_
     assert silent.status == "pending" and "the author's acceptance for these bytes stands" in silent.error, silent.error
     state = _state(h)
     assert state.author_disposition["subject_hash"] == accepted_hash and state.content_hash == first.content_hash
-    assert state.gate_for(accepted_hash, enforcement="advisory")["blocking_reason"] == "author_accepted_advisory"
+    assert state.gate_for(accepted_hash)["blocking_reason"] == "author_accepted_advisory"
     # The author's rebuttal opens a new round over the same bytes (a plain repeat after a wave without a verdict
     # is a new attempt too: tests/test_review_no_verdict_retry.py).
     h.answers["t1"] = CLEAN
@@ -745,7 +741,7 @@ def test_a_left_wave_that_settles_without_a_verdict_admits_the_author_finish_onl
     assert "error" not in finished, finished
     state = _state(h)
     assert state.author_disposition["disposition"] == "accepted" and len(_physical_sends(h)) == 1
-    assert state.gate_for(reference["content_hash"], enforcement="advisory")["blocking_reason"] == "author_accepted_advisory"
+    assert state.gate_for(reference["content_hash"])["blocking_reason"] == "author_accepted_advisory"
 
 
 # --- the ledger readers: this skill's rows, the earlier verdict, what the brief cuts ---------------------------

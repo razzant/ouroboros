@@ -162,7 +162,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-rounds", type=float, default=DEFAULT_MAX_ROUNDS, help="per-task Ouroboros round ceiling (recorded in applied settings)")
     # The measured task's own result review (recorded in applied settings); the stock run keeps it Off.
     parser.add_argument("--task-review-mode", choices=("off", "auto", "required"), default="off")
-    parser.add_argument("--review-enforcement", choices=("advisory", "blocking"), default="advisory")
     parser.add_argument("--review-max-cycles", default="2", help="paid result-review waves per root task, or unlimited")
     parser.add_argument(
         "--per-task-cost-usd",
@@ -940,7 +939,6 @@ def _prepare_applied_settings(
         # The measured task's own result review, as selected (stock: Off, which refuses one at $0 whether the host
         # or the model asks): Required reviews its observed production before delivery.
         "OUROBOROS_TASK_REVIEW_MODE": str(getattr(args, "task_review_mode", "off") or "off"),
-        "OUROBOROS_REVIEW_ENFORCEMENT": str(getattr(args, "review_enforcement", "advisory") or "advisory"),
         "OUROBOROS_REVIEW_MAX_CYCLES": str(getattr(args, "review_max_cycles", "2") or "2").strip().lower(),
         "OUROBOROS_POST_TASK_EVOLUTION": "false",
         "OUROBOROS_POST_TASK_EVOLUTION_CADENCE": "off",
@@ -1041,7 +1039,7 @@ def _prepare_applied_settings(
         "model": applied_model,
         "runtime_mode": str(applied.get("OUROBOROS_RUNTIME_MODE") or ""),
         "result_review": {key: str(applied.get(name) or "") for key, name in (("mode", "OUROBOROS_TASK_REVIEW_MODE"), (
-            "enforcement", "OUROBOROS_REVIEW_ENFORCEMENT"), ("max_cycles", "OUROBOROS_REVIEW_MAX_CYCLES"))},
+            "max_cycles", "OUROBOROS_REVIEW_MAX_CYCLES"))},
         "max_rounds": max_rounds,
         "per_task_cost_usd": per_task_cost_usd,
         "workers": workers,

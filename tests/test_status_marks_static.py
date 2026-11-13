@@ -79,6 +79,7 @@ warning | web/style.css | .toast-warn | border-color, color
 warning | web/style.css | .widget-callout[data-tone="warn"] | border-left-color
 warning | web/style.css | .widget-metric[data-tone="warn"] | border-left-color
 warning | web/style.css | .widget-table-status[data-tone="warn"] | color
+warning | web/settings.css | #page-settings :is(.ui-row-meta, .models-main-meta, [data-setting-meta])[data-tone="warn"] | color
 warning | web/settings.css | .available-subagent-status-reason | color
 warning | web/settings.css | .available-subagents-review-copies | color
 warning | web/settings.css | .available-subagents-review-empty | color

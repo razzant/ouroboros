@@ -60,7 +60,7 @@ test('a reviewed subject opens to one compact line per reviewer in words, the to
     assert.match(facts(html), /<dt>Reviewer seat-two model<\/dt><dd>requested same\/model · observed not reported<\/dd>/);
     assert.match(facts(html), /<dt>Reviewer seat-two failure<\/dt><dd>failure_code=native_transcript_cap_exceeded/);
     assert.match(facts(html), /<dt>Reviewer seat-one saved answer<\/dt><dd>part=change,coupling · status=retained · sha256=a{64}<\/dd>/);
-    assert.match(html, /<span class="review-check-line">Advisory · chosen by Ouroboros · 2 of 2 ticked reviewers<\/span>/);
+    assert.match(html, /<span class="review-check-line">chosen by Ouroboros · 2 of 2 ticked reviewers<\/span>/);
 });
 
 test('no aggregate or seat token reaches a row: every reduction reads in the shared words', () => {

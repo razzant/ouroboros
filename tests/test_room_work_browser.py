@@ -185,6 +185,9 @@ class Transport:
         self.page = page
         self.activities = list(activities)
         self.complete = True
+        # The server always says whether it read every current question (gateway/state.py); a page carries an
+        # unanswered question across a read that says it could not (question_presentation.carryOpenQuestions).
+        self.questions_complete = True
         self.history = history or {1: []}
         self.details = dict(details or {})
         self.projects = list(projects)
@@ -235,6 +238,7 @@ class Transport:
                 "bg_consciousness_enabled": True, "bg_consciousness_state": describe_consciousness_state(
                     {"next_wake_at": next_wake.isoformat()}, True),
                 "active_chat_activities_complete": self.complete, "projects": self.projects,
+                "current_questions_complete": self.questions_complete,
                 "project_chat_ids": [p["chat_id"] for p in self.projects],
                 **work_fields(rows, raw, results=self.results, fences=fences, complete=self.complete)}
 
@@ -441,8 +445,8 @@ def test_main_rows_say_each_census_state_with_its_own_tone_and_controls(room_ui)
     transport.raw["rw-live"] = {"focus": {"text": focus_text, "at": "2026-10-19T09:00:00Z"}}
     page = open_app(room_ui, transport)
     closed = wait_facts(page, "main", lambda f: f["tone"] == "live" and not f["disabled"], "a live control")
-    # Moving work with something waiting keeps its live word; the owner's amber dot takes its mark's place, in words too.
-    assert closed["mark"] == "dot owner" and closed["waitNote"], closed
+    # Moving work with something waiting keeps its live word and its moving dots, in the owner's hue, in words too.
+    assert closed["mark"] == "moving owner" and closed["waitNote"], closed
     assert closed["markColor"] == closed["ownerColor"], closed  # the one mark is painted in the owner's token
     assert closed["surfaceHidden"] and closed["expanded"] == "false"
     trigger(page).click()

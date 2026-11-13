@@ -27,7 +27,7 @@ from tests.test_invocation_ownership import owner
 from tests.test_mcp_task_session import _private_mcp, body, call, fixture_server, rows, session_of, wire  # noqa: F401
 
 
-OWNER_BODY = '{"OUROBOROS_REVIEW_ENFORCEMENT":"advisory"}'
+OWNER_BODY = '{"OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS":"true"}'
 
 
 @pytest.fixture

@@ -24,7 +24,7 @@ export class Stub extends NodeStub {
 }
 
 export const ANSWERS = {
-    '/api/settings': { OUROBOROS_MODEL: 'openrouter::z-ai/glm-5.3', OUROBOROS_SAFETY_OWNER_RULES: '', _meta: {} },
+    '/api/settings': { OUROBOROS_MODEL: 'openrouter::z-ai/glm-5.3', OPENROUTER_API_KEY: 'sk-...', OUROBOROS_SAFETY_OWNER_RULES: '', _meta: {} },
     '/api/mcp/status': { enabled: true, servers: [] },
     '/api/extensions': { skills: [{ name: 'one' }], live: { settings_sections: [] } },
     '/api/places': { places: [], connectors: [] },

@@ -573,7 +573,7 @@ def test_pre_tag_publication_wrapper_preserves_containment_outcome(invoke, monke
 @pytest.mark.parametrize("lost", [False, True])
 def test_pending_review_observation_preserves_custody(invoke, monkeypatch, lost):
     from ouroboros.tools import git, git_review_cycle
-    monkeypatch.setattr(git_review_cycle, "review_enforcement_blocks", lambda *a: True)
+    monkeypatch.setattr(git_review_cycle, "cyber_review_authority", lambda: False)
     records = []
     monkeypatch.setattr(git, "_record_commit_attempt", lambda *a, **k: records.append((a, k)))
     custody = SimpleNamespace(review_retry_key="paid-wave")
@@ -608,7 +608,7 @@ def test_multi_review_validation_and_execution_fault_consumers(invoke, monkeypat
     assert set(json.loads(result.text)) == {"error"}
 
 
-@pytest.mark.parametrize("case", ["policy", "unavailable", "disposition"])
+@pytest.mark.parametrize("case", ["unavailable", "disposition"])
 def test_skill_author_finish_branch_outcomes_preserve_review_state(invoke, monkeypatch, case):
     from ouroboros.tools import skill_exec
     review_state = SimpleNamespace(status="pending" if case == "reference" else "failed", review_profile="",
@@ -616,8 +616,7 @@ def test_skill_author_finish_branch_outcomes_preserve_review_state(invoke, monke
                                   raw_result="", reviewed_content_hash="reviewed", content_hash="current")
     loaded = SimpleNamespace(skill_dir=invoke.ctx.repo_dir, manifest=SimpleNamespace(entry="", scripts=[], type="skill"))
     binding = SimpleNamespace(state_drive_root=invoke.ctx.drive_root)
-    monkeypatch.setattr("ouroboros.config.get_review_enforcement", lambda: "blocking" if case == "policy" else "advisory")
-    monkeypatch.setattr("ouroboros.tools.review_helpers.review_enforcement_blocks", lambda mode: mode == "blocking")
+    monkeypatch.setattr("ouroboros.tools.review_helpers.cyber_review_authority", lambda: False)
     monkeypatch.setattr(skill_exec, "load_bound_skill", lambda *a: None if case == "unavailable" else loaded)
     monkeypatch.setattr("ouroboros.skill_loader.compute_content_hash", lambda *a, **k: "current")
     monkeypatch.setattr("ouroboros.skill_loader.load_review_state", lambda *a, **k: review_state)
@@ -629,28 +628,24 @@ def test_skill_author_finish_branch_outcomes_preserve_review_state(invoke, monke
         return skill_exec._author_finish_existing_skill_review(ctx, binding, "fixture",
             disposition="invalid" if case == "disposition" else "accepted", rationale="considered feedback")["error"]
     result = invoke(handler)
-    _assert_consumers(result, {"policy": "LEGACY_BLOCKED", "unavailable": "LEGACY_UNAVAILABLE",
+    _assert_consumers(result, {"unavailable": "LEGACY_UNAVAILABLE",
                               "reference": "TOOL_ARG_ERROR", "disposition": "TOOL_ARG_ERROR", "preflight": "TOOL_ERROR"}[case])
     assert result.text.startswith("SKILL_REVIEW_ERROR:")
     assert review_state.reviewed_content_hash == "reviewed"
 
 
-@pytest.mark.parametrize("case", ["identical", "advisory", "stopped", "stopped_refused"])
+@pytest.mark.parametrize("case", ["advisory", "stopped", "stopped_refused"])
 def test_review_gate_return_boundaries_reach_consumers(invoke, monkeypatch, case):
     from ouroboros.tools import git, git_review_cycle
-    monkeypatch.setattr("ouroboros.config.get_review_enforcement", lambda: "advisory" if case == "advisory" else "blocking")
-    monkeypatch.setattr(git, "review_enforcement_blocks", lambda mode: mode == "blocking")
-    monkeypatch.setattr(git_review_cycle, "review_enforcement_blocks", lambda mode: mode == "blocking")
+    monkeypatch.setattr(git, "cyber_review_authority", lambda: False)
+    monkeypatch.setattr(git_review_cycle, "cyber_review_authority", lambda: False)
     monkeypatch.setattr(git, "commit_review_contract_fingerprint", lambda: "contract")
     monkeypatch.setattr(git, "resolve_root_task_id", lambda ctx: "root")
     monkeypatch.setattr(git, "_commit_review_retry_key", lambda *a, **k: "new-key")
-    monkeypatch.setattr(git, "check_identical_verdict_refusal", lambda *a, **k:
-                        "⚠️ IDENTICAL_DIFF_REFUSED: retained verdict" if case == "identical" else "")
     monkeypatch.setattr(git, "check_review_cycles_ceiling", lambda *a, **k:
                         {"message": "⚠️ REVIEW_CYCLES_EXHAUSTED: retained paid count", "cycles_paid": 3, "cap": 3}
                         if case in {"ceiling", "advisory"} else None)
     monkeypatch.setattr(git, "emit_review_cycles_exhausted", lambda *a, **k: None)
-    monkeypatch.setattr(git, "record_commit_gate_refusal", lambda *a, **k: "free-refusal")
     monkeypatch.setattr(git, "run_cmd", lambda *a, **k: "")
     monkeypatch.setattr(git, "_authorized_managed_update_resolver", lambda *a: False)
     monkeypatch.setattr(git, "_stage_candidate_for_review", lambda *a, **k: (["x.py"], ["x.py"], None))
