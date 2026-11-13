@@ -60,14 +60,10 @@ export function renderNavRows(zone) {
     return pagesInZone(zone).map(renderNavRow).join('\n');
 }
 
-/** The head of the Projects list. PROTOTYPE (owner 13.11: no "Projects" word, no collapse, the list starts with its
- * search): the row is Find a project (projects_nav.js puts the field first in it) and "+" (New project) at its end.
- * The header's toggle, its unread total and its one status mark are gone with the collapse they spoke for: every row
- * carries its own mark, and nothing is hidden for a total to stand for. The id is the hook app.js reads. */
+/** The head of the Projects list (owner 13.11: no "Projects" word, no collapse, the list starts with its search): the
+ * row is Find a project (projects_nav.js puts the field first in it) and "+" (New project) at its end. The header's
+ * toggle, its unread total and its one status mark are gone with the collapse they spoke for: every row carries its
+ * own mark, and nothing is hidden for a total to stand for. The id is the hook app.js reads. */
 export function renderProjectsHeader() {
-    // PROTOTYPE switch html[data-proto-side-count]: the unread total and the one status mark of the Projects (owner
-    // 19.10, B) stand at the end of the search row; without the switch they are not shown.
-    return `<span class="nav-projects-facts" aria-hidden="true"><span id="nav-projects-count" class="nav-row-meta"></span>`
-        + `<span class="nav-mark-slot">${statusMarkHtml('nav-mark')}</span></span>`
-        + `<button id="nav-projects-add" class="nav-projects-add" type="button" title="New project" aria-label="New project">${SHELL_ICONS.plus}</button>`;
+    return `<button id="nav-projects-add" class="nav-projects-add" type="button" title="New project" aria-label="New project">${SHELL_ICONS.plus}</button>`;
 }

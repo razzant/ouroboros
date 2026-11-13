@@ -9,8 +9,7 @@ function classAttr(parts) {
     return parts.filter(Boolean).join(' ');
 }
 
-// PROTOTYPE: the control is drawn one of three ways, chosen by html[data-proto-places]: Ouroboros's own picture (the
-// default: press him, and his places open, with his card on top), the three lines ("menu"), or a back arrow ("back").
+// The control is Ouroboros's own picture: press him, and his places open, with his card on top.
 // The shell's ☰: one of the shell's icon controls (style.css .shell-icon-control), shown in the stack layout. A
 // page's header carries it in its leading slot, where the drawer's × then sits; a room (Main, a Project) carries it
 // as the composer row's first control instead, under the thumb (owner 19.10, 1A), as tall as the capsules beside it
@@ -19,7 +18,7 @@ function classAttr(parts) {
 export function renderMobileNavToggle({ inComposer = false } = {}) {
     const classes = inComposer ? 'shell-icon-control mobile-nav-toggle composer-menu ui-hit-area' : 'shell-icon-control mobile-nav-toggle';
     return `
-        <button class="${classes}" type="button" data-mobile-nav-toggle aria-label="Open navigation" aria-controls="primary-sidebar" aria-expanded="false"><span class="places-face" aria-hidden="true"></span><span class="places-menu" aria-hidden="true">${SHELL_ICONS.menu}</span><span class="places-back" aria-hidden="true">${SHELL_ICONS.back}</span>${statusMarkHtml()}</button>
+        <button class="${classes}" type="button" data-mobile-nav-toggle aria-label="Open navigation" aria-controls="primary-sidebar" aria-expanded="false"><span class="places-face" aria-hidden="true"></span>${statusMarkHtml()}</button>
     `;
 }
 

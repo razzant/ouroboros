@@ -205,7 +205,7 @@ export function createProjectsNav({ section, header, list, toggle, feed, feedOrd
     status.setAttribute('aria-live', 'polite');
     status.dataset.i18nSkip = '';
     find.append(glyph, input, clear, status);
-    header.prepend(find);  // PROTOTYPE (owner 13.11): the list starts with its search; "+" ends the same row
+    header.prepend(find);  // owner 13.11: the list starts with its search; "+" ends the same row
 
     // ---- the list's own commands: Project-row geometry in the meta ink, so none reads as one more Project --------
     const command = (className) => {
