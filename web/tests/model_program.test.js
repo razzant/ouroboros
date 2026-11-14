@@ -235,3 +235,9 @@ test('an unanswered native catalog releases the shared read at its bound; reopen
     binding.update([{...group, programs: [current]}]); await flush(); await reopen();
     assert.equal(raw, 2, 'a recovered list needs no further catalog read');
 });
+
+ test('the catalog and available version are one sentence', () => {
+    const html = modelProgramMarkup({ harness: 'codex', label: 'Codex', programs: [{version: '0.162.1'}] },
+        { entry: { selection: { path: '/codex' }, updateAvailable: 'yes', newest: { status: 'available', version: '0.169.0' } } });
+    assert.match(html, /<span>List from Codex 0\.162\.1 · 0\.169\.0 available<\/span>/);
+ });
