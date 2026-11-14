@@ -261,7 +261,7 @@ test('the optional toolbar class cannot create an HTML attribute or node', () =>
     assert.match(html, /&lt;img/);
 });
 
-test('a page that leads back keeps Back in its header\'s slot in every layout: one leading control, its tabs as they were', () => {
+test('a destination return stays in its slot, hidden docked and the one leading control in stack', () => {
     const listeners = new Map();
     const before = { window: globalThis.window, document: globalThis.document };
     globalThis.window = { ouroLayout: { layout: 'stack' }, addEventListener: (type, fn) => listeners.set(type, fn),
@@ -280,6 +280,16 @@ test('a page that leads back keeps Back in its header\'s slot in every layout: o
             setAttribute: (name) => attrs.add(name), removeAttribute: (name) => attrs.delete(name) };
         const control = { name: 'Back to Settings' };
         const dispose = placePageBack(header, control);
+        const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+        const display = selector => [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+            .filter(([, selectors]) => selectors.trim().split(/,\s*/).includes(selector))
+            .flatMap(([, , body]) => [...body.matchAll(/\bdisplay:\s*([^;]+);/g)].map(([, value]) => value)).at(-1);
+        for (const layout of ['stack', 'docked', 'stack']) {
+            document.documentElement.dataset.layout = layout;
+            assert.equal(display(`html[data-layout="${layout}"] .app-page-back`) ?? display('.app-page-back'),
+                layout === 'docked' ? 'none' : 'flex', `${layout}: the sheet owns visibility without moving the control`);
+            assert.deepEqual(slot.children, [control]);
+        }
         // The sheet puts a header's Back where ☰ stood and hides ☰ (style.css `.app-page-header[data-back]`): Back stays.
         assert.deepEqual([slot.children, attrs.has('data-back'), tabs.prepended, [...tabs.marks]], [[control], true, [], []],
             'the stack layout: Back in the header\'s slot, never a second leading control in the tabs row');

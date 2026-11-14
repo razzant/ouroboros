@@ -1413,25 +1413,14 @@ html[data-layout="docked"] .app-page-header[data-empty] {
 .app-page-lead > * { min-width: 0; }
 .app-page-lead:empty,
 .app-page-tabs:not(:has(> *)) { display: none; }
-/* The Back slot (page_header.js placePageBack): one control, never part of a lead that scrolls. On a desk it stands
-   before the lead in the bar's start; in the stack layout it starts the row under ☰: the page's tab strip when it
-   has one, else a row of the header's own. */
+/* A door between destinations uses Back only in the stack layout; beside the page the sidebar is the way back.
+   These are settingsReturn's three placements. A level inside a page keeps its own Back in either layout. */
+html[data-layout="docked"] .app-page-back,
+html[data-layout="docked"] .dashboard-lead-back,
+html[data-layout="docked"] .dashboard-back { display: none; }
+/* The stack layout's Back stays in the header's leading slot, never inside a lead that scrolls. */
 .app-page-back { display: flex; flex: none; align-items: center; }
 .app-page-back:empty { display: none; }
-html[data-layout="docked"] .app-page-title-block:has(> .app-page-back:not(:empty)) {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-}
-html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) ~ .app-page-lead { flex: 1 1 auto; }
-/* Back takes the header's start inset (a step from the column's edge) and the hidden title takes no place in the row,
-   so the tabs or the location after it keep the room they have without Back. */
-html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title-block > .app-page-title-row:has(~ .app-page-back:not(:empty)) {
-    position: absolute;
-}
-html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) {
-    margin-inline-start: calc(var(--space-2) - var(--page-header-padding-x));
-}
 /* A phone page that leads back (Circles or Skills opened from Settings): Back stands where the places control stood,
    in the header's one row, as on a Settings page (DESIGN "Page header": one leading control, no second header row). */
 html[data-layout="stack"] .app-page-header[data-back]:has(> .app-page-title-block > .app-page-back:not(:empty)) {

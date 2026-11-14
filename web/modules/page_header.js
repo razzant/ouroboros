@@ -96,8 +96,8 @@ export function renderBackControl({ to = '', attrs = '' } = {}) {
 
 /**
  * The header's Back slot (renderPageHeader writes it before the lead): `control` stands there, so it never scrolls
- * away with a lead that is a scroller (Dashboard's tabs, Files' location). On a desk the slot stands before the lead;
- * in the stack layout it is the header's one leading control where ☰ stood (style.css, `.app-page-header[data-back]`),
+ * away with a lead that is a scroller (Dashboard's tabs, Files' location). On a desk the sheet hides this destination
+ * return; in the stack layout it is the header's one leading control where ☰ stood (`.app-page-header[data-back]`),
  * so a page that leads back (Skills opened from Settings) has one leading control in one row, its tabs under it as
  * they were. Returns the disposer, which takes the control away.
  */
