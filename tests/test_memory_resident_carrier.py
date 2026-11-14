@@ -13,7 +13,7 @@ from ouroboros import context
 from ouroboros.knowledge import resolve_knowledge_address, write_knowledge_note
 from ouroboros.memory import Memory
 
-GAP_CALL = "knowledge_write(topic='overview', scope='global', content=...)"
+GAP_CALL = "knowledge_write(topic='overview', scope='global', mode='overwrite', content=...)"
 
 
 def _env(tmp_path):

@@ -36,7 +36,7 @@ def test_knowledge_history_rows_land_via_locked_seam(tmp_path, monkeypatch):
 
     monkeypatch.setattr(knowledge_store, "append_jsonl", spy)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="t1")
-    assert knowledge._knowledge_write(ctx, "improvement-backlog", "- row").startswith("✅")
+    assert knowledge._knowledge_write(ctx, "improvement-backlog", "- row", mode="overwrite").startswith("✅")
 
     assert calls == ["knowledge_history.jsonl"]
     line = (tmp_path / "memory" / "knowledge_history.jsonl").read_text(encoding="utf-8")

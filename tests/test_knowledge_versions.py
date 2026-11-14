@@ -229,14 +229,14 @@ def test_an_emptied_plain_note_keeps_its_revision_and_its_calls_work(tmp_path):
     assert emptied.ok and target.path.read_bytes() == b"" and emptied.current.revision == empty
     journal = target.shelf.parent / "knowledge_history.jsonl"
     assert json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])["new_sha256"] == empty
-    receipt = registry.execute("knowledge_write", {"topic": "plain", "scope": "global", "content": "# Again\n",
-                                                   "expected_revision": empty})
+    receipt = registry.execute("knowledge_write", {"topic": "plain", "scope": "global", "mode": "overwrite",
+                                                   "content": "# Again\n", "expected_revision": empty})
     assert receipt.startswith("✅"), receipt
     meta = json.loads(receipt.split("\n", 1)[1])
     assert meta["knowledge_previous"]["revision"] == empty
     assert json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])["old_sha256"] == empty
-    stale = registry.execute("knowledge_write", {"topic": "plain", "scope": "global", "content": "Mine.\n",
-                                                 "expected_revision": empty})  # the empty version, held
+    stale = registry.execute("knowledge_write", {"topic": "plain", "scope": "global", "mode": "overwrite",
+                                                 "content": "Mine.\n", "expected_revision": empty})  # the empty version, held
     assert "revision_conflict" in stale and "1 block(s)" in stale and "\n+ # Again\n" in stale, stale
     read = registry.execute(meta["knowledge_read_previous"]["tool"], meta["knowledge_read_previous"]["arguments"])
     assert "Earlier version, not the current note" in read and '"complete_chars": 0' in read, read
@@ -339,7 +339,7 @@ def test_a_heading_whose_title_spans_lines_is_named_by_its_first_line_in_block_h
     held = store.write_knowledge_note(target, f"# Notes{eol}{eol}Intro.{eol}{eol}{setext}{eol}Timeout: 3.{eol}").current
     current = store.write_knowledge_note(target, held.text.replace("Timeout: 3.", "Timeout: 5."),
                                          expected_revision=held.revision).current
-    stale = tools._knowledge_write(context(tmp_path), "notes/weekly", "Mine.", scope="global",
+    stale = tools._knowledge_write(context(tmp_path), "notes/weekly", "Mine.", mode="overwrite", scope="global",
                                    expected_revision=held.revision)
     assert "revision_conflict" in stale and "1 block(s)" in stale, stale
     line = held.text[:held.text.index("Timeout: 3.")].count("\n") + 1  # after the frontmatter the writer adds

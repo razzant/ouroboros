@@ -31,10 +31,10 @@ def test_knowledge_topic_and_index_update_share_one_stable_file_lock(tmp_path, m
     monkeypatch.setattr(store, "rebuild_knowledge_index", paused_update)
     results: list[str] = []
     first = threading.Thread(
-        target=lambda: results.append(knowledge._knowledge_write(ctx, "alpha", "one")),
+        target=lambda: results.append(knowledge._knowledge_write(ctx, "alpha", "one", mode="overwrite")),
     )
     second = threading.Thread(
-        target=lambda: results.append(knowledge._knowledge_write(ctx, "beta", "two")),
+        target=lambda: results.append(knowledge._knowledge_write(ctx, "beta", "two", mode="overwrite")),
     )
 
     first.start()

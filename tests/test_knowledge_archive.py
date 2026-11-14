@@ -167,7 +167,7 @@ def test_archive_edit_restore_preserves_current_bytes_and_previous_sources(tmp_p
         assert archived.state == "archived"
         assert "REVISED ARCHIVED SUMMARY" not in registry.execute("knowledge_list", {"scope": scope})
     # Full-content overwrite carrying the unchanged lifecycle is legitimate.
-    receipt(registry.execute("knowledge_write", {"topic": TOPIC, "scope": scope,
+    receipt(registry.execute("knowledge_write", {"topic": TOPIC, "scope": scope, "mode": "overwrite",
         "content": archived.text.replace("Added later.", "Changed later."), "expected_revision": archived.revision}))
     edited = store.read_knowledge_note(address)
     restored_receipt = receipt(transition(registry, edited, "restore"))
@@ -297,17 +297,18 @@ def test_malformed_whole_yaml_remains_readable_visible_and_not_mutated_by_lifecy
 def test_ordinary_overwrites_and_edits_cannot_author_or_remove_lifecycle(tmp_path):
     _, registry, address, original = setup(tmp_path)
     for field in ("archive: null", "archive: {at: now, reason: old}"):
-        reply = registry.execute("knowledge_write", {"topic": TOPIC,
+        reply = registry.execute("knowledge_write", {"topic": TOPIC, "mode": "overwrite",
             "content": f"---\n{field}\n---\nOops", "expected_revision": original.revision})
         assert "archive is owned" in reply
-        reply = registry.execute("knowledge_write", {"topic": "new", "content": f"---\n{field}\n---\nOops"})
+        reply = registry.execute("knowledge_write", {"topic": "new", "mode": "overwrite",
+                                                      "content": f"---\n{field}\n---\nOops"})
         assert "archive is owned" in reply
     receipt(transition(registry, original))
     archived = store.read_knowledge_note(address)
-    assert "archive is owned" in registry.execute("knowledge_write", {"topic": TOPIC,
+    assert "archive is owned" in registry.execute("knowledge_write", {"topic": TOPIC, "mode": "overwrite",
         "content": "---\narchive: null\n---\nOops", "expected_revision": archived.revision})
     # Omission merges retained metadata; it does not reactivate the source.
-    receipt(registry.execute("knowledge_write", {"topic": TOPIC, "content": "New body.",
+    receipt(registry.execute("knowledge_write", {"topic": TOPIC, "mode": "overwrite", "content": "New body.",
                                                    "expected_revision": archived.revision}))
     archived = store.read_knowledge_note(address)
     # An anchored edit with a revised summary keeps the lifecycle field too.
@@ -388,7 +389,8 @@ def test_legacy_index_prose_is_disclosed_until_authored_overview_and_presence_st
     assert legacy in text and "may still mention archived notes" in text
     assert f"**{TOPIC}**" not in text
     assert any(row.get("old_content") == legacy for row in history(address))
-    receipt(registry.execute("knowledge_write", {"topic": "overview", "content": "Authored orientation."}))
+    receipt(registry.execute("knowledge_write", {"topic": "overview", "mode": "overwrite",
+                                                   "content": "Authored orientation."}))
     assert SUMMARY not in registry.execute("knowledge_list", {})
     # Explicit profile topics are independent reads; archival changes no profile authority.
     presence = build_presence_context_section(tmp_path, {"instructions": "Stay aware.", "event": {"type": "message"},
