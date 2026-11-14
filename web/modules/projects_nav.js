@@ -226,8 +226,12 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
         button.replaceChildren();
         const words = document.createElement('span');
         fmtInto(words, key, params);
-        if (button === more) {
-            button.insertAdjacentHTML('afterbegin', controlIcon('chevron', 18));
+        // Each command shows what it does in the icon column: Show more and Show all projects open the list further
+        // (the chevron), Clear search empties the field and returns to the resting list (the field's own ×).
+        const glyph = button === clearCommand ? SHELL_ICONS.close
+            : button === more || button === showAll ? controlIcon('chevron', 18) : '';
+        if (glyph) {
+            button.insertAdjacentHTML('afterbegin', glyph);
             button.firstElementChild.setAttribute('aria-hidden', 'true');
         }
         button.append(words);
