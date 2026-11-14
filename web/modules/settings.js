@@ -404,11 +404,20 @@ export function initSettings(ctx = {}) {
         });
     }
 
-    // The home reads its answers again whenever it is on screen; a page reads on the signal for its own path.
-    function announce() {
+    // The home reads its answers when it comes on screen (Settings shown, the window seen again, a reconnect, one column
+    // back on the list, a width that brings it beside the page), not at a press beside it; off screen its reads are
+    // dropped. A page reads on the signal for its own path.
+    let listOn = false;
+    function look(again = false) {
+        const on = shown() && !document.hidden && visible(homeEl);
+        if (on && (again || !listOn)) void home.refresh();
+        else if (!on && listOn) home.hide();
+        listOn = on;
+    }
+    function announce(again = false) {
         if (!shown()) return;
-        if (visible(homeEl)) void home.refresh();
         window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: state.settingsPath } }));
+        look(again);
     }
 
     // From outside Settings (app.js `openSettings`): Settings is shown first, and refused when the page left vetoes.
@@ -443,20 +452,25 @@ export function initSettings(ctx = {}) {
     const onPageShown = (event) => {
         doorBack.clear();  // a door's page was left (its own showing came before its row was drawn)
         syncLayers();
-        if (event.detail?.page === 'settings' && !opening) { announce(); ensurePage(); }
+        if (event.detail?.page !== 'settings') look();
+        else if (!opening) { announce(); ensurePage(); }
     };
-    const onVisible = () => { if (!document.hidden) announce(); };
-    const offReconnect = ws?.on?.('open', () => announce());
-    // A width that puts the home beside the page, or takes it away: the layers follow, and the home comes back
-    // where it was left.
+    const onVisible = () => (document.hidden ? look() : announce());
+    const offReconnect = ws?.on?.('open', (event) => announce(Boolean(event?.previouslyConnected)));  // a reconnect, not the first open
+    // A width that puts the home beside the page, or takes it away: the layers follow, the home comes back where it
+    // was left, and reads when it comes on screen.
     const resized = () => {
-        if (panes() !== panesBefore) { paint({ quiet: true }); return; }
-        placeSearch();
-        if (beside() === besideBefore) return;
-        besideBefore = beside();
-        if (besideBefore) homeEl.scrollTop = places.get(homeEl) || 0;
-        paintLead();
-        syncLayers();
+        if (panes() !== panesBefore) paint({ quiet: true });
+        else {
+            placeSearch();
+            if (beside() !== besideBefore) {
+                besideBefore = beside();
+                if (besideBefore) homeEl.scrollTop = places.get(homeEl) || 0;
+                paintLead();
+                syncLayers();
+            }
+        }
+        look();
     };
     // A new shell width or root font can move the two panes' 40rem. Repaint at the next frame: moving Search
     // between the header and list changes these observed boxes again, which a resize callback must not do.

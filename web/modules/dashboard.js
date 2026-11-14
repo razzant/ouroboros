@@ -2,7 +2,7 @@ import { bindTabStrip, placePageBack, renderBackControl, renderPageHeader } from
 import { currentLayout, onLayoutChange, sectionHoldsTwoPanes } from './layout.js';
 import { fluentIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
-import { bindSettingRows, readSettings, settingsRow } from './settings_controls.js';
+import { bindSettingRows, readSettings, settingsRow, settingsSnapshot } from './settings_controls.js';
 import { homeAnswers, homeFactsSeen } from './settings_home.js';
 import { rowsOf } from './settings_rows.js';
 import { paintStatusMark, statusMarkHtml } from './status_mark.js';
@@ -62,7 +62,7 @@ function rowHtml({ value, label }, active) {
  */
 export function mountTabSettings(host, tab, { state, cards = null, custom = null, openDoor = null, words = null, onPaint = null, onSaved = null } = {}) {
     const page = `dashboard:${tab}`;
-    const ctx = { custom, openDoor };
+    const ctx = { custom, openDoor, onPaint };
     const named = new Set((cards || []).flatMap((card) => card.rows || []));
     const draw = (card, inFold) => rowsOf(page, { fold: inFold }).filter((row) => (card.rows ? card.rows.includes(row.id) : !named.has(row.id)))
         .map((row) => settingsRow(row, ctx)).join('');
@@ -77,7 +77,6 @@ export function mountTabSettings(host, tab, { state, cards = null, custom = null
     const rows = bindSettingRows(host, ctx);
     const nodes = Array.from(host.querySelectorAll('[data-setting-row]'));
     const shown = () => !document.hidden && state?.activePage === 'dashboard' && state?.dashboardActiveSubtab === tab;
-    let settings = null;
     let reads = 0;
     // A row's own words from the last read: made once, then only their text changes.
     const say = (node, kind, text) => {
@@ -93,6 +92,7 @@ export function mountTabSettings(host, tab, { state, cards = null, custom = null
     };
     const paint = () => {
         rows.paint();
+        const settings = settingsSnapshot();  // the last read, whoever made it: the rows above paint from the same
         const said = (settings && words?.(settings)) || {};
         nodes.forEach((node) => {
             say(node, 'caption', said[node.dataset.settingRow]?.caption);
@@ -102,11 +102,10 @@ export function mountTabSettings(host, tab, { state, cards = null, custom = null
         (cards ? Array.from(host.children) : [host]).forEach((card) => {
             card.hidden = !Array.from(card.querySelectorAll('[data-setting-row]')).some((node) => !node.hidden);
         });
-        onPaint?.(settings);
     };
     const read = async () => {
         const mine = ++reads;
-        try { settings = await readSettings(); } catch { /* each row keeps what it showed */ }
+        try { await readSettings(); } catch { /* each row keeps what it showed */ }
         if (mine === reads) paint();
     };
     const onShown = () => (shown() ? void read() : rows.leave());

@@ -7,7 +7,7 @@
 import { apiClient } from './api_client.js';
 import { recheckFromSettings } from './consciousness_api.js';
 import { parseModelSource } from './route_editor_primitives.js';
-import { commitSetting, outcomeLine } from './settings_controls.js';
+import { commitSetting, outcomeLine, paintWithRow, settingsReadMessage, settingsSnapshot } from './settings_controls.js';
 import { deploymentOf, safetyExitsNote } from './settings_policy.js';
 import { rowById } from './settings_rows.js';
 import { setResult } from './ui_primitives.js';
@@ -152,18 +152,36 @@ export function mountRulesPage(container, { ctx, save = commitSetting } = {}) {
     const result = container.querySelector('[data-editor-result]');
     let stored = null;  // the saved text as last read; null until a read answers
     let gone = false;
+    let locked = false;
     const say = (words) => setResult(result, words || {});
-    if (unsavedRules !== null) {
-        field.value = unsavedRules;
-        say({ text: 'Not saved yet', tone: 'warn' });
-    }
-    async function read() {
-        let settings;
-        try { settings = await ctx.readSettings(); } catch { return; }  // the field keeps what it shows
-        if (gone) return;
+    const unsaved = () => (unsavedRules === null ? null : { text: 'Not saved yet', tone: 'warn' });
+    // Until a read answers the text is no value: not operable, and it says it is being read or could not be.
+    const lock = () => {
+        const words = stored === null ? settingsReadMessage() : '';
+        if (!words && !locked) return;
+        locked = Boolean(words);
+        field.disabled = button.disabled = locked;
+        say(locked ? { text: words } : unsaved());
+    };
+    const adopt = (settings) => {
         stored = String(settings?.[SAFETY_RULES_KEY] ?? '');
         container.querySelector('[data-rules-organization]').hidden = !deploymentOf(settings?._meta)?.organization_rules;
         if (unsavedRules === null && field.value !== stored) field.value = stored;
+    };
+    // Until a read answers, the text follows every read: one that lands is adopted, the others say what they found.
+    const follow = () => { if (stored === null && settingsSnapshot()) adopt(settingsSnapshot()); lock(); };
+    if (unsavedRules !== null) {
+        field.value = unsavedRules;
+        say(unsaved());
+    }
+    follow();  // the last read at once, else it says it is reading; this page's own read follows
+    const offRead = paintWithRow(SAFETY_RULES_KEY, follow);
+    async function read() {
+        let settings;
+        try { settings = await ctx.readSettings(); } catch { settings = settingsSnapshot(); }  // failed: the last read, if any
+        if (gone) return;
+        if (settings) adopt(settings);
+        lock();
     }
     const onInput = () => {
         unsavedRules = stored !== null && field.value === stored ? null : field.value;
@@ -193,6 +211,7 @@ export function mountRulesPage(container, { ctx, save = commitSetting } = {}) {
     void read();
     return { unmount() {
         gone = true;
+        offRead();
         field.removeEventListener('input', onInput);
         button.removeEventListener('click', onSave);
         globalThis.window?.removeEventListener?.('ouro:settings-page-shown', onShown);

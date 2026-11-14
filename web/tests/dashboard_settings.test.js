@@ -21,6 +21,7 @@ import { renderPageHeader } from '../modules/page_header.js';
 
 const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => structuredClone(data) });
 const settle = async (rounds = 8) => { for (let i = 0; i < rounds; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 const source = (name) => readFileSync(new URL(`../modules/${name}`, import.meta.url), 'utf8');
 const FIXTURE = JSON.parse(readFileSync(new URL('./fixtures/consciousness_contract.json', import.meta.url), 'utf8'));
 const shown = (window, tab) => window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab } }));
@@ -380,14 +381,42 @@ test('Evolution: the cycles card presses one choice; "Every N tasks" shows its c
     assert.equal(caption(), 'After every 3 tasks, chats included, it decides whether one improvement is worth a cycle.');
     assert.equal(result(card, 'OUROBOROS_POST_TASK_EVOLUTION'), 'Saved · applies to new tasks · was Off · Undo');
     count.value = '7';
-    await leave(count);
+    // The value typed into the custom control must stay in the field while its row is saving. The answer below is held
+    // so an ordinary row repaint cannot hide the edit by calling Evolution's painter.
+    const originalSettings = server.routes.get('/api/settings');
+    const held = deferred();
+    let writeMode = 'hold';
+    server.routes.set('/api/settings', async (url, init = {}) => {
+        if (init.method === 'POST' && writeMode === 'hold') return held.promise;
+        if (init.method === 'POST' && writeMode === 'refuse') return response({ saved: false, error: 'the document refused this value' }, 500);
+        return originalSettings(url, init);
+    });
+    const saving = leave(count);
+    await settle();
+    assert.equal(count.value, '7', 'a typed count survives the repaint while its write is in flight');
+    const saved = await originalSettings('/api/settings', { method: 'POST', body: JSON.stringify({
+        OUROBOROS_POST_TASK_EVOLUTION: true, OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'every_n:7' }) });
+    held.resolve(saved);
+    await saving;
     await settle();
     assert.deepEqual(server.posts.at(-1), { OUROBOROS_POST_TASK_EVOLUTION: true, OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'every_n:7' });
+    assert.equal(count.value, '7', 'the read that lands keeps the field at its stored count');
+    assert.equal(caption(), 'After every 7 tasks, chats included, it decides whether one improvement is worth a cycle.',
+        'the count and its caption land together through one painter');
+    writeMode = 'refuse';
+    count.value = '11';
+    await leave(count);
+    await settle();
+    assert.equal(count.value, '11', 'an HTTP refusal keeps the typed count');
+    assert.equal(caption(), 'After every 7 tasks, chats included, it decides whether one improvement is worth a cycle.',
+        'a refusal leaves the last read caption beside the typed value');
+    assert.match(result(card, 'OUROBOROS_POST_TASK_EVOLUTION'), /Not saved\. The document refused this value/);
     count.value = '0';
     await leave(count);
     await settle();
     assert.equal(result(card, 'OUROBOROS_POST_TASK_EVOLUTION'), 'Not saved. Enter a whole number of tasks, 1 or more.');
     assert.equal(server.posts.length, 2, 'a count of 0 is never sent');
+    writeMode = 'normal';
     await click(choices[2]);
     assert.equal(server.posts.length, 2, 'pressing the pressed choice sends nothing');
     await click(choices[1]);
@@ -972,4 +1001,28 @@ test('a Dashboard deep link keeps one Back entry when it replaces the phone draw
             }
         } finally { layers.destroy(); }
     }
+});
+
+test('a tab drawn before any read is no value; a read made elsewhere paints its rows and its own choice by its painter, before it is shown', async (t) => {
+    const server = settingsServer(t, { OUROBOROS_UPDATE_CHANNEL: 'qa' });
+    const host = new NodeStub();
+    server.mount.appendChild(host);
+    // Drawn at the app's start, as every tab is; Settings is shown, so the tab reads nothing itself.
+    const state = { activePage: 'settings', dashboardActiveSubtab: 'logs' };
+    const row = rowById('OUROBOROS_UPDATE_CHANNEL');
+    const mounted = mountTabSettings(host, 'updates', { state, cards: [{ label: 'Which updates', solo: true }],
+        onPaint: (settings) => host.querySelectorAll('[data-setting-value]').forEach((choice) =>
+            choice.setAttribute('aria-pressed', String(choice.dataset.settingValue === String(settings?.OUROBOROS_UPDATE_CHANNEL ?? '')))),
+        custom: () => row.control.options.map((option) => `<button data-setting-value="${option.value}" aria-pressed="false">${option.label}</button>`).join('') });
+    const choices = host.querySelectorAll('[data-setting-value]');
+    const facts = () => [choices.filter((choice) => choice.getAttribute('aria-pressed') === 'true').map((choice) => choice.dataset.settingValue),
+        choices.map((choice) => choice.disabled), rowNode(host, 'OUROBOROS_UPDATE_CHANNEL').querySelector('[data-setting-meta]').textContent];
+    assert.deepEqual(facts(), [[], [true, true, true], 'Reading…']);
+    assert.deepEqual(server.calls, [], 'a tab not shown reads nothing');
+    await readSettings();  // Settings read it for one of its pages
+    assert.deepEqual(facts(), [['qa'], [false, false, false], '']);
+    // A row of another page saved: the tab repaints from the last read, which it never made itself.
+    server.window.dispatchEvent(new CustomEvent('ouro:settings-updated', { detail: { source: 'settings-row', page: 'models', row: 'OUROBOROS_MODEL' } }));
+    assert.deepEqual(facts(), [['qa'], [false, false, false], '']);
+    mounted.dispose();
 });
