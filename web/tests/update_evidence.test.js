@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { afterUpdateRows, bindPreflightDescription, preflightDescription, preflightEvidenceRows } from '../modules/update_status.js';
-import { updateLetterView } from '../modules/updates.js';
+import { factValueHtml, updateLetterView } from '../modules/updates.js';
 
 const plan = { base_sha: 'aaaa', target_sha: 'bbbb' };
 const letter = { key: plan, text: '## Exact range\n\n- one change', description_current: true, state: 'ready', relation: 'pending' };
@@ -141,4 +141,19 @@ test('a zero is a measurement and a missing one stays unobserved; a current RSS 
     // One measured half of the share still says which half is missing.
     const half = sides(afterUpdateRows({ before: { ...missing, cpu_percent: 5 }, after: null }))[0];
     assert.equal(values(half)['CPU share, sample interval'], '5.0 % over unobserved');
+});
+
+test('a long code in a fact offers one break at its middle; words and short codes read as they are', () => {
+    // A full SHA in a narrow column broke before its last character ("…d7e65a" over a lone "c"): its one break is at
+    // its middle, so it reads as two even halves, and copying it still copies it whole.
+    const sha = 'c846227a389ed7ec0dc395d6cf02e1a55d7e65ac';
+    assert.equal(factValueHtml(sha), 'c846227a389ed7ec0dc3<wbr>95d6cf02e1a55d7e65ac');
+    assert.equal(factValueHtml(`source ${sha}`), 'source c846227a389ed7ec0dc3<wbr>95d6cf02e1a55d7e65ac');
+    // Words break between themselves (the sheet balances their lines); a short code never needs a break.
+    const duties = 'custody maintenance ×13, reconcile maintenance ×1';
+    assert.equal(factValueHtml(duties), duties);
+    assert.equal(factValueHtml('c846227a389e'), 'c846227a389e');
+    // Each half is escaped as the whole value was.
+    assert.equal(factValueHtml('<b>&'), '&lt;b&gt;&amp;');
+    assert.equal(factValueHtml('&'.repeat(30)), `${'&amp;'.repeat(15)}<wbr>${'&amp;'.repeat(15)}`);
 });

@@ -6912,6 +6912,8 @@ html[data-layout="stack"] #page-dashboard[data-section-view="home"] > .app-page-
 .dashboard-hero > :not(.dashboard-hero-actions) { grid-column: 1; min-width: 0; margin: 0; }
 .dashboard-hero-kicker,
 .dashboard-hero-meta { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* A headline longer than its line breaks into even lines ("Update available:" over "163 new changes"), never leaving
+   its last word alone under a full line. */
 .dashboard-hero-figure {
     color: var(--text-primary);
     font-size: var(--type-page);
@@ -6919,6 +6921,7 @@ html[data-layout="stack"] #page-dashboard[data-section-view="home"] > .app-page-
     font-weight: 650;
     font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;
+    text-wrap: balance;
 }
 .dashboard-hero-actions {
     grid-column: 2;
@@ -6928,8 +6931,18 @@ html[data-layout="stack"] #page-dashboard[data-section-view="home"] > .app-page-
     flex-wrap: wrap;
     gap: var(--space-2);
 }
+/* Under the words the actions leave the second column empty, and the hero drops it with its gap, so the words keep the
+   card's whole width. */
 @container dashboard (max-width: 480px) {
+    .dashboard-hero { grid-template-columns: minmax(0, 1fr); }
     .dashboard-hero-actions { grid-column: 1; grid-row: auto; align-self: start; }
+}
+/* Updates' headline is long and its action wide ("Update to 7.10.2-alpha.0"): side by side they need about 42rem, so a
+   narrower tab body (the pane beside the section's list, a narrow window) puts the action under the words, and the
+   headline keeps its one line wherever the card holds it. */
+@container dashboard (max-width: 42rem) {
+    .updates-card > .dashboard-hero { grid-template-columns: minmax(0, 1fr); }
+    .updates-card .dashboard-hero-actions { grid-column: 1; grid-row: auto; align-self: start; }
 }
 /* A Dashboard card's title (16/600) and its list of facts (label, value): the tabs' cards share these two parts of the
    tab body (Costs, Consciousness, Updates, Activity, Evolution). */
@@ -6966,7 +6979,9 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     font-size: var(--type-meta);
     line-height: var(--line-meta);
 }
-.dashboard-facts dd { margin: 0; color: var(--text-primary); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+/* A value longer than its column breaks into even lines: a list of duties breaks between them, not before its last
+   count ("×1" alone), and a long code breaks at its middle (updates.js factValueHtml), not before its last character. */
+.dashboard-facts dd { margin: 0; color: var(--text-primary); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; text-wrap: balance; }
 /* A narrow tab body reads each fact as its label over its value. */
 @container dashboard (max-width: 480px) {
     .dashboard-facts { grid-template-columns: minmax(0, 1fr); row-gap: 0; }
