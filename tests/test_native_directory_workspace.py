@@ -1,4 +1,5 @@
 """Ordinary native folders: direct results retain outputs without a Git baseline."""
+import hashlib
 import json
 import subprocess
 from types import SimpleNamespace
@@ -94,7 +95,8 @@ def test_store_conversion_is_not_a_false_workspace_postimage(tmp_path, monkeypat
     manifest = json.loads((task_artifacts_dir(drive, "child") / "workspace_patch.json").read_text())
     message = _integrate_subagent_patch(parent, task_id="child")
     assert "INTEGRATE_DIRECTORY_OUTPUT_MISMATCH" not in message, message
-    assert all(item["path"] != record["path"] for item in manifest["registered_outputs"])
+    converted = hashlib.sha256(Path(record["path"]).read_bytes()).hexdigest()  # held copies keep identities
+    assert all(item["sha256"] != converted for item in manifest["registered_outputs"])
     assert Path(record["path"]).read_bytes().endswith(b"converted")
     assert (source / "page.txt" if directory else source).read_text() == "original"
 
@@ -115,18 +117,66 @@ def test_native_directory_preserves_nonfile_result_extent(tmp_path, monkeypatch)
     assert verdict["outcome"] == "direct_result_observed"
 
 
-@pytest.mark.parametrize("changed", ["source", "artifact"])
+@pytest.mark.parametrize("changed", ["source", "artifact", "store_copy"])
 def test_native_directory_refuses_changed_postimage(tmp_path, monkeypatch, changed):
+    """The capture holds its own copy of each registered output (#3248): that copy changed, or the folder's file, is
+    refused; a later write of the store's mutable copy changes nothing the capture published."""
     workspace, drive, task, parent, output_ctx = _setup(tmp_path, monkeypatch)
     source = workspace / "out.bin"
     source.write_bytes(b"captured\x00")
     record = copy_file_to_task_artifacts(output_ctx, source)
     finalize_task_artifacts(drive, task)
     from pathlib import Path
-    (source if changed == "source" else Path(record["path"])).write_bytes(b"changed")
+    [held] = json.loads((task_artifacts_dir(drive, "child") / "workspace_patch.json").read_text())["registered_outputs"]
+    assert held["path"] != record["path"] and held["sha256"] == record["sha256"]
+    {"source": source, "artifact": Path(held["path"]), "store_copy": Path(record["path"])}[changed].write_bytes(b"changed")
     message = _integrate_subagent_patch(parent, task_id="child")
+    if changed == "store_copy":
+        assert "Verified 1 registered file postimage(s)" in message, message
+        return
     assert "INTEGRATE_DIRECTORY_OUTPUT_MISMATCH" in message
     assert not load_task_result(drive, "child").get("child_result_disposition")
+
+
+@pytest.mark.parametrize("no_space", [False, True])
+def test_native_directory_capture_fails_when_it_cannot_hold_an_output(tmp_path, monkeypatch, no_space):
+    """A registered output the capture cannot hold (ENOSPC copying it into ``registered_outputs/``) has its bytes only
+    in the mutable store (#3248): manifest, row and bundle say failed and name it, so neither apply nor an explicit
+    acceptance takes the result. The healthy control is held, ready and verified."""
+    import errno
+    from pathlib import Path
+
+    from ouroboros import artifacts
+
+    workspace, drive, task, parent, output_ctx = _setup(tmp_path, monkeypatch)
+    source = workspace / "out.bin"
+    source.write_bytes(b"captured\x00")
+    record = copy_file_to_task_artifacts(output_ctx, source)
+    copy = artifacts.copy_artifact_file
+
+    def copy_or_fail(src, destination, **kwargs):
+        if no_space and Path(destination).parent.name == "registered_outputs":
+            raise OSError(errno.ENOSPC, "No space left on device", str(destination))
+        return copy(src, destination, **kwargs)
+
+    monkeypatch.setattr(artifacts, "copy_artifact_file", copy_or_fail)
+    finalize_task_artifacts(drive, task)
+    manifest = json.loads((task_artifacts_dir(drive, "child") / "workspace_patch.json").read_text())
+    row = load_task_result(drive, "child")
+    [named] = manifest["registered_outputs"]
+    statuses = (manifest["status"], row["artifact_status"], row["artifact_bundle"]["status"])
+    if not no_space:
+        assert statuses == ("ready",) * 3 and named["path"] != record["path"] and not row.get("artifact_error")
+        assert "Verified 1 registered file postimage(s)" in _integrate_subagent_patch(parent, task_id="child")
+        return
+    assert statuses == ("failed",) * 3
+    assert named["status"] == "missing" and named["sha256"] == record["sha256"]  # named with its identity, unheld
+    assert f"registered output {named['name']}" in row["artifact_error"] and "No space left" in row["artifact_error"]
+    assert row["artifact_bundle"]["errors"] == [row["artifact_error"]]
+    for decision in ("apply", "accept"):
+        message = _integrate_subagent_patch(parent, task_id="child", decision=decision, reason="Read the findings")
+        assert "direct folder capture is not ready" in message, message
+    assert not load_effective_task_result(drive, "child").get("child_result_disposition")
 
 
 def test_native_directory_bundle_verifies_members(tmp_path, monkeypatch):
