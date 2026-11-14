@@ -516,10 +516,18 @@ def _latest_project_task_result(ctx: Any, project_id: str) -> Optional[Dict[str,
 
 
 def _main_routing_manifest(ctx: Any, roots: Optional[RootSnapshot] = None) -> Dict[str, Any]:
-    """Routing identities and exact readers; the memory view owns spoken rows."""
+    """Routing identities and exact readers; the memory view owns spoken rows.
+
+    A row's reader names a room that shows it by the rule memory_read reads by (``chat_chain.room_keys``): a work
+    moved from Main keeps its ``row:1@…`` address while its Project shows it. ``chat_id`` stays the chat it was
+    written in; a row no room shows (A2A) is read there, and that reading says it did not return the row. While a
+    segment imports or failed, the rule cannot read a Reply's saved target there (``room_membership.reply_target``):
+    that row keeps its written chat, the reader before the rule and no proven projection, and the gap says why; the
+    rest of the manifest stands."""
     from ouroboros import dialogue_store as ds
-    from ouroboros.chat_chain import row_address, format_address
-    from ouroboros.projects_registry import list_projects
+    from ouroboros.chat_chain import _row_chat_id, row_address, format_address
+    from ouroboros.projects_registry import RoomResolver, list_projects, list_reserved_projects
+    from ouroboros.room_membership import row_rooms
 
     projects = [{
         "project_id": str(row.get("id") or ""),
@@ -551,16 +559,30 @@ def _main_routing_manifest(ctx: Any, roots: Optional[RootSnapshot] = None) -> Di
     if coverage["gaps"]:
         gaps.add("recorded invalid intervals")
     rows = [entry.row for entry in reversed(rows[:20])]
+    reserved, rule = {int(project["chat_id"]) for project in list_reserved_projects(root)}, RoomResolver(root)
+    # The rows' task lineages in one read a generation (``RoomResolver.warm``), not one read per task.
+    rule.warm({str(row.get(key) or "") for row in rows for key in ("task_id", "parent_task_id", "root_task_id")} - {""})
     for row in rows:
         text = str(row.get("text") or "").strip()
         if text:
+            written, address = _row_chat_id(row), format_address(row_address(row))
+            try:
+                shown = row_rooms(written, row, reserved, rule)
+            except ds.StoreError as exc:  # importing or failed (``require_imported``) in a stream the rule reads
+                held = [c for c in (ds.range_coverage(root, stream) for stream in ds.STREAMS) if not c["imported"]]
+                if not held or type(exc) not in (ds.StoreError, ds.StoreMigrating):
+                    raise
+                gaps.update("a segment could not be imported" if c["mismatch"] else "history is still importing"
+                            for c in held)
+                shown = frozenset()
+            room = written if written in shown or not shown else min(shown)
             dialogue_rows.append({
                 "ts": str(row.get("ts") or ""),
                 "direction": str(row.get("direction") or ""),
                 "chat_id": row.get("chat_id", 1),
                 "chars": len(text),
-                "reader": {"tool": "memory_read", "arguments": {"room_id": str(row.get("chat_id", 1)),
-                    "rows": True, "from": format_address(row_address(row)), "to": format_address(row_address(row))}},
+                "reader": {"tool": "memory_read", "arguments": {"room_id": str(room), "rows": True,
+                                                                "from": address, "to": address}},
                 "task_id": str(row.get("task_id") or ""),
                 "client_message_id": str(row.get("client_message_id") or ""),
             })

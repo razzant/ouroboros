@@ -19,7 +19,7 @@ def test_a_wake_holds_the_block_a_main_turn_holds_and_running_work_names_its_own
     wake, text = _view(tmp_path, {"id": "wake001", "usage_category": "consciousness"})
     # A wake is one turn beside its whole memory, as a Main turn is: one eighth of work room each (owner, 29.10).
     assert wake.spec.other_conversations and wake.spec.work_room_levels == 1 and main.spec.work_room_levels == 1
-    assert _section(text, "## This room (Main)") == _section(main_text, "## This room (Main)")
+    assert _section(text, "## This room (Main [chat_id=1])") == _section(main_text, "## This room (Main [chat_id=1])")
     block = _section(text, "## Other conversations")
     assert block == _section(main_text, "## Other conversations")
     alpha = _section(block, f"### Project Alpha [chat_id={rooms['alpha']}]")
