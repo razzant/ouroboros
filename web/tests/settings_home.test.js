@@ -337,3 +337,39 @@ test('Ask Ouroboros puts the words into Main as an unsent draft and replaces no 
     assert.deepEqual([input.value, events], ['half a thought', ['input']], 'a draft already there stays, and nothing is written');
     assert.equal(await askOuroboros('x', { showPage: async () => false, doc }), false, 'a vetoed leave shows nothing');
 });
+
+test('a choice of this device made beside the list is its row\'s answer at once, read after its own module stored it', async (t) => {
+    const { env, content } = world(t);
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    const kept = new Map();
+    const before = globalThis.localStorage;
+    globalThis.localStorage = { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => { kept.set(key, String(value)); } };
+    t.after(() => { globalThis.localStorage = before; });
+    env.window.ouroTheme = { choice: 'dark' };
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws: { isConnected: () => true }, stateSnapshots: { latest: () => ({}) } } });
+    t.after(() => home.dispose());
+    await home.refresh();
+    await settle();
+    const answer = (to) => content.querySelector(`[data-settings-open="${to}"]`).querySelector('[data-settings-answer]').textContent;
+    assert.deepEqual([answer('appearance'), answer('notifications')], ['Dark', 'Off on this device']);
+    const inside = (attr, value = '') => { const control = new Stub('div'); control.setAttribute(attr, value); const hit = new Stub('button'); control.appendChild(hit); return hit; };
+    // The theme's strip: theme.js stored the choice from the document's handler, and the window hears the press after it.
+    env.window.ouroTheme.choice = 'light';
+    env.window.dispatchEvent({ type: 'click', target: inside('data-theme-control') });
+    assert.equal(answer('appearance'), 'Light');
+    env.window.ouroTheme.choice = 'system';
+    env.window.dispatchEvent({ type: 'keydown', target: inside('data-theme-control') });
+    assert.equal(answer('appearance'), 'System', 'an arrow in the strip chooses too');
+    // A notification switch: the notifier stored its prefs on the change.
+    kept.set('ouroboros.notifications', JSON.stringify({ enabled: true, sound: false }));
+    env.window.dispatchEvent({ type: 'change', target: inside('data-notify-pref', 'enabled') });
+    assert.equal(answer('notifications'), 'On, silent');
+    // A press anywhere else reads nothing again.
+    env.window.ouroTheme.choice = 'dark';
+    env.window.dispatchEvent({ type: 'click', target: inside('data-other') });
+    assert.equal(answer('appearance'), 'System');
+    home.dispose();
+    env.window.dispatchEvent({ type: 'click', target: inside('data-theme-control') });
+    assert.equal(answer('appearance'), 'System', 'a disposed home hears nothing');
+});

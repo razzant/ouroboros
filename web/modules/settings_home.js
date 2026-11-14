@@ -476,10 +476,12 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         facts.state = snapshots?.latest?.() ?? null;
         if (run === serial) paint();
     }
+    const readDevice = () => {
+        facts.device = { theme: globalThis.window?.ouroTheme?.choice, notify: readNotifyPrefs(globalThis.localStorage), dictation: dictationWord() };
+    };
     function refresh() {
         const run = ++serial;
-        const storage = globalThis.localStorage;
-        facts.device = { theme: globalThis.window?.ouroTheme?.choice, notify: readNotifyPrefs(storage), dictation: dictationWord() };
+        readDevice();
         facts.state = ctx.stateSnapshots?.latest?.() || facts.state;
         readAccounts();
         paint();
@@ -535,11 +537,22 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     const onType = () => { handed = ''; paintList(); };
     // A setting saved while the home is on screen may start or end a wait for a restart: the document is read again.
     const onSaved = () => { if (root.getClientRects?.().length) void read('settings', serial); };
+    // A choice of this device made on a page beside the list (the theme's strip, a notification switch) is the list's
+    // answer at once. Their own modules store it from the document's handlers (theme.js, notifications.js); the window
+    // hears the same press after the document, so the choice is stored by then.
+    const DEVICE_CONTROLS = '[data-theme-control], [data-notify-pref]';
+    const onDevice = (event) => {
+        if (!event.target?.closest?.(DEVICE_CONTROLS)) return;
+        readDevice();
+        paintRows();
+    };
     const offStore = store.subscribe((view) => { readAccounts(view); paintCard(); paintRows(); }, { visible: () => false });
     root.addEventListener('click', onClick);
     cardEl?.addEventListener('click', onClick);
     searchEl.addEventListener('input', onType);
     globalThis.window?.addEventListener?.('ouro:settings-updated', onSaved);
+    const DEVICE_EVENTS = ['click', 'keydown', 'change'];
+    DEVICE_EVENTS.forEach((type) => globalThis.window?.addEventListener?.(type, onDevice));
     paint();
     return {
         mark(path) {
@@ -559,6 +572,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
             cardEl?.removeEventListener('click', onClick);
             searchEl.removeEventListener('input', onType);
             globalThis.window?.removeEventListener?.('ouro:settings-updated', onSaved);
+            DEVICE_EVENTS.forEach((type) => globalThis.window?.removeEventListener?.(type, onDevice));
         },
     };
 }
