@@ -111,7 +111,10 @@ def check_arguments(mode: Any, content: Any, old_str: Any, new_str: Any, edits: 
     if mode == "revert" and (version is None or blank_version):
         raise ValueError("mode=revert requires version, the revision to put back")
     if mode != "revert" and version is not None:
-        raise ValueError("version is used only with mode=revert" + (f"; {version_reader} reads one" if version_reader else ""))
+        raise ValueError(f"version={version!r} is not an argument of mode={mode}; omit it. "
+                         "version names an earlier version to put back with mode=revert"
+                         + (f" ({version_reader} reads one)" if version_reader else "")
+                         + "; expected_revision is the current revision a replacing write checks")
     if mode == "revert" and content:
         raise ValueError("mode=revert takes version, expected_revision and an optional reason; no content")
     if mode not in ("edit", *no_content) and content is None:

@@ -26,7 +26,13 @@ from ouroboros.request_wire_custom_validation import (
 )
 from ouroboros.request_wire_receipts import WireCandidateManifest
 
+# OpenAI's bound on a Chat custom tool's description, in Unicode code points (what len() counts): a direct
+# api.openai.com send on 2026-11-15 accepted 4,096 and refused 4,097 as `string_above_max_length` on
+# `tools[0].custom.description`, the same for non-ASCII and non-BMP text. Set too low, field prose that fits is
+# dropped; set too high, that refusal fails the call, as the dialect ladder does not read it as a dialect refusal.
+# Re-probe before changing it (the OpenAI provider canary sends the registry through this projection).
 MAX_CUSTOM_DESCRIPTION_CHARS = 4096
+_SCHEMA_CLAUSE = "Input must be one JSON object matching this schema: "
 
 JSON_OBJECT_LARK_GRAMMAR = r"""start: object
 ?value: object
@@ -202,19 +208,27 @@ def _build_projected_catalog(
     )
 
 
-def _description_with_schema(description: Any, schema: Mapping[str, Any]) -> str:
-    compact_schema = canonical_json(_compact_schema(schema))
-    schema_clause = "Input must be one JSON object matching this schema: " + compact_schema
-    if len(schema_clause) > MAX_CUSTOM_DESCRIPTION_CHARS:
-        raise CustomToolProjectionError(
-            "tool schema structure exceeds OpenAI custom.description limit"
-        )
+def _description_with_schema(description: Any, schema: Mapping[str, Any], schema_json: str) -> str:
+    """The lead and the schema the model reads, within OpenAI's ``custom.description`` bound.
+
+    A tool whose whole lead and whole schema fit sends the schema as the function dialect does, field
+    descriptions and defaults included. A larger one sends the structure alone, its lead whole or
+    clipped beside it; a structure over the bound by itself cannot be represented.
+    """
     if isinstance(description, str):
         prose = " ".join(description.split())
     elif description is None:
         prose = ""
     else:
         prose = canonical_json(description)
+    whole = (prose + "\n" if prose else "") + _SCHEMA_CLAUSE + schema_json
+    if len(whole) <= MAX_CUSTOM_DESCRIPTION_CHARS:
+        return whole
+    schema_clause = _SCHEMA_CLAUSE + canonical_json(_compact_schema(schema))
+    if len(schema_clause) > MAX_CUSTOM_DESCRIPTION_CHARS:
+        raise CustomToolProjectionError(
+            "tool schema structure exceeds OpenAI custom.description limit"
+        )
     if not prose:
         return schema_clause
     available = MAX_CUSTOM_DESCRIPTION_CHARS - len(schema_clause) - 1
@@ -255,7 +269,7 @@ def project_function_tools_to_openai_custom(
             "type": "custom",
             "custom": {
                 "name": name,
-                "description": _description_with_schema(function.get("description"), schema_dict),
+                "description": _description_with_schema(function.get("description"), schema_dict, schema_json),
                 "format": _CUSTOM_FORMAT,
             },
         })

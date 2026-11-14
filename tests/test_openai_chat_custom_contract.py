@@ -100,9 +100,15 @@ def _projected_schema(catalog, name):
     return value
 
 
+def _lead_one_over_the_whole_schema(schema):
+    """A lead one character too long to stand beside the whole schema: the structure alone is sent."""
+    return "l" * max(1, MAX_CUSTOM_DESCRIPTION_CHARS - len(_SCHEMA_CLAUSE + canonical_json(schema)))
+
+
 def _assert_validator_parity(schema, cases, validator_class):
     tool = copy.deepcopy(_tools()[0])
     tool["function"]["parameters"] = schema
+    tool["function"]["description"] = _lead_one_over_the_whole_schema(schema)
     compact = _projected_schema(project_function_tools_to_openai_custom([tool]), "probe")
     validator_class.check_schema(schema)
     validator_class.check_schema(compact)
@@ -127,8 +133,37 @@ def test_projection_is_deterministic_structural_and_schema_bound():
     )
     probe_description = first.wire_tools()[0]["custom"]["description"]
     assert '"enum":["ok"]' in probe_description
-    assert "Nested prose" not in probe_description
     assert first.schema_binding("probe").schema()["properties"]["marker"]["description"]
+
+
+def test_a_tool_that_fits_whole_keeps_its_field_prose_and_a_larger_one_sends_structure_alone():
+    """OpenAI bounds custom.description, and the schema inside it is all the model reads of a tool's fields.
+    Up to the bound a tool's lead and whole schema go as the function dialect sends them, every annotation
+    included; one character over, the same tool sends its structure alone with its lead still whole.
+    The schema bound for argument validation is the original either way."""
+    tool = copy.deepcopy(_tools()[0])
+    function = tool["function"]
+    lead = function["description"]
+    field = function["parameters"]["properties"]["marker"]
+    field.update({"default": "ok", "x-note": "kept", "description": ""})
+    structure = copy.deepcopy(function["parameters"])
+    for annotation in ("default", "x-note", "description"):
+        del structure["properties"]["marker"][annotation]
+    room = MAX_CUSTOM_DESCRIPTION_CHARS - len(lead + "\n" + _SCHEMA_CLAUSE + canonical_json(function["parameters"]))
+
+    def projected(prose, description=lead):
+        field["description"], function["description"] = prose, description
+        catalog = project_function_tools_to_openai_custom([tool])
+        assert catalog.schema_binding("probe").schema() == function["parameters"]
+        return catalog.wire_tools()[0]["custom"]["description"]
+
+    at_the_bound = projected("p" * room)
+    assert len(at_the_bound) == MAX_CUSTOM_DESCRIPTION_CHARS
+    assert at_the_bound == lead + "\n" + _SCHEMA_CLAUSE + canonical_json(function["parameters"])
+    assert _projected_schema(project_function_tools_to_openai_custom([tool]), "probe") == function["parameters"]
+    assert projected("p" * (room + 1)) == lead + "\n" + _SCHEMA_CLAUSE + canonical_json(structure)
+    # A tool without a lead is its schema alone, under the same bound.
+    assert projected("p", description=None) == _SCHEMA_CLAUSE + canonical_json(function["parameters"])
 
 
 def test_compaction_preserves_literal_enum_and_const_objects_exactly():
@@ -784,9 +819,9 @@ _ACTUAL_PROFILES = {
 
 @pytest.mark.parametrize("profile", sorted(_ACTUAL_PROFILES))
 def test_actual_profile_catalogs_carry_every_tool_lead_whole(tmp_path, profile):
-    """Custom tools drop parameter prose, so a first-party lead clipped to fit beside its compact
-    schema loses pre-call conditions nothing else on that wire carries (schedule_subagent's tail
-    did, #502). Extension and MCP descriptions are external text, not covered here."""
+    """A tool too large for the description bound goes without parameter prose, so a first-party lead
+    clipped to fit beside its bare structure loses pre-call conditions nothing else on that wire carries
+    (schedule_subagent's tail did, #502). Extension and MCP descriptions are external text, not covered here."""
     from ouroboros.tools.registry import ToolRegistry
 
     registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=tmp_path)
@@ -810,8 +845,8 @@ def test_actual_profile_catalogs_carry_every_tool_lead_whole(tmp_path, profile):
 
 @pytest.mark.parametrize("name", ["knowledge_read", "knowledge_write"])
 def test_knowledge_tools_project_whole_where_parameter_prose_does_not_arrive(name):
-    """The custom route drops parameter descriptions and clips description plus schema to 4,096
-    characters, so every knowledge mode must be explained in the tool's own lead, unclipped."""
+    """A tool that does not fit the custom description bound whole goes without parameter descriptions,
+    so every knowledge mode must be explained in the tool's own lead, unclipped."""
     from ouroboros.tools.knowledge import get_tools
 
     entry = next(entry for entry in get_tools() if entry.name == name)
@@ -848,8 +883,8 @@ _MEMORY_TEXT_WORDS = {
 @pytest.mark.parametrize("name", sorted(_MEMORY_TEXT_WORDS))
 def test_memory_text_tools_project_whole_where_parameter_prose_does_not_arrive(name):
     """The writers of identity, the map and a workpad, and the version door, lead with their modes (edit first),
-    their revision rule and the map's block rule: on the custom route nothing else of theirs arrives, and the lead
-    must project unclipped beside the compact schema."""
+    their revision rule and the map's block rule: where parameter prose does not arrive the lead stands alone,
+    and it must project unclipped beside the schema."""
     from ouroboros.tools.chronicle import chronicle_tools
     from ouroboros.tools.control import get_tools as control_tools
     from ouroboros.tools.project_journal import get_tools as journal_tools

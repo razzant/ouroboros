@@ -806,7 +806,7 @@ def test_empty_optional_write_values_take_the_omitted_path_and_say_so(tmp_path):
     assert "ignored_arguments" not in _meta(write(mode="append", content="Four.\n"))
     current, before = store.read_knowledge_note(note.address), _files(tmp_path)
     for arguments, refusal in (
-            ({"mode": "overwrite", "content": "x", "version": "abc"}, "version is used only with mode=revert"),
+            ({"mode": "overwrite", "content": "x", "version": "abc"}, "version names an earlier version"),
             ({"mode": "append", "content": "x", "edits": [_item("Four.", "4.")]}, "edits is used only with mode=edit"),
             ({"mode": "append", "content": "x", "old_str": "Four."}, "old_str is used only with mode=edit"),
             ({"mode": "revert", "version": "", "expected_revision": current.revision}, "mode=revert requires version"),
@@ -961,7 +961,7 @@ def test_a_blank_version_outside_revert_takes_the_omitted_path_and_a_revert_stil
             ({"mode": "revert", "version": " ", "expected_revision": current.revision}, "mode=revert requires version"),
             ({"mode": "revert", "version": "\n", "expected_revision": current.revision}, "mode=revert requires version"),
             ({"mode": "edit", "old_str": "Four.", "content": "4.", "version": " abc ",
-              "expected_revision": current.revision}, "version is used only with mode=revert")):
+              "expected_revision": current.revision}, "version names an earlier version")):
         reply = write(**arguments)
         assert reply.startswith("⚠️ TOOL_ARG_ERROR") and refusal in reply, (arguments, reply)
     assert _files(tmp_path) == before
@@ -995,7 +995,11 @@ def test_a_version_equal_to_the_calls_expected_revision_asks_for_nothing_outside
                        "version": first.revision},  # an earlier revision: a revert, not this edit
                       {"mode": "append", "content": "Four.\n", "version": third.revision}):  # no expected_revision
         reply = write(**arguments)
-        assert reply.startswith("⚠️ TOOL_ARG_ERROR") and "version is used only with mode=revert" in reply, reply
+        # The one reply names the field with the value received and each repair: omit it for this mode, put an
+        # earlier version back with mode=revert, check the current revision through expected_revision (the host
+        # never moves the value between the fields).
+        assert reply.startswith("⚠️ TOOL_ARG_ERROR") and f"version={arguments['version']!r}" in reply, reply
+        assert f"mode={arguments['mode']}; omit it" in reply and "mode=revert" in reply and "expected_revision" in reply, reply
     assert _files(tmp_path) == before
     same = write(mode="revert", version=third.revision, expected_revision=third.revision)
     assert same.startswith("✅ Knowledge 'same' unchanged (revert)") and "ignored_arguments" not in same, same
