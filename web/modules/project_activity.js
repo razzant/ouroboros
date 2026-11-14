@@ -81,10 +81,10 @@ export function reconcileProjectRooms(previous = new Map(), data = {}) {
 }
 
 /**
- * Index the Project rooms by chat id (`chatIds`, every reserved room, and the rows'). The Projects header's
- * one mark stands for all of them: the strongest shape, and whether any waits for the owner; its label joins their
- * distinct words and what waits for the owner. What waits counts only the rooms the feed's `rows` can show, so an
- * amber header always has an amber row to reach; without rows, every room.
+ * Index the Project rooms by chat id (`chatIds`, every reserved room, and the rows'). The aggregate stands for all of
+ * them: the strongest shape, and whether any waits for the owner; its label joins their distinct words and what waits
+ * for the owner. The ☰ reads its `owner` (app.js paintNavToggles). What waits counts only the rooms the feed's `rows`
+ * can show, so an amber ☰ always has an amber row to reach; without rows, every room.
  */
 export function buildProjectActivityIndex(rooms = new Map(), chatIds = null, rows = null) {
     const byChat = new Map();

@@ -563,6 +563,17 @@ export function bindAppVersionRender({ getStatus, render }) {
     return watchAppVersion(() => { if (getStatus()) render(); });
 }
 
+// A fact's value as HTML. A code with no break of its own (a full commit SHA) offers one at its middle, so a column
+// narrower than the code reads it as two even halves instead of leaving its last character on a line of its own
+// (style.css .dashboard-facts dd); copying it still copies it whole.
+export function factValueHtml(value) {
+    return String(value ?? '').split(/(\s+)/).map((part) => {
+        if (part.length < 24 || /\s/.test(part)) return escapeHtml(part);
+        const middle = Math.ceil(part.length / 2);
+        return `${escapeHtml(part.slice(0, middle))}<wbr>${escapeHtml(part.slice(middle))}`;
+    }).join('');
+}
+
 export function initUpdates({ mount, state, ws }) {
     // The tab's one root and scroller (style.css "The Dashboard tab body"): the state of the channel leads as the
     // tab's headline with its facts and one next action; the last attempt, the record's facts, the description and
@@ -700,7 +711,7 @@ export function initUpdates({ mount, state, ws }) {
     // the card's Details. A group heading spans both columns of a facts list.
     const factLine = (chip) => escapeHtml(chip.label === 'App' ? `App ${chip.value}` : chip.label === 'Channel' ? `${chip.value} channel` : chip.value);
     const factRowHtml = (row) => (row.head ? `<dt class="updates-facts-head">${escapeHtml(row.head)}</dt>`
-        : `<dt>${escapeHtml(row.label)}</dt><dd>${escapeHtml(row.value)}</dd>`);
+        : `<dt>${escapeHtml(row.label)}</dt><dd>${factValueHtml(row.value)}</dd>`);
 
     // The letter body hosts rendered markdown, so its enhancement owns real
     // resources (Chart instances, mermaid timers, a click handler). Release

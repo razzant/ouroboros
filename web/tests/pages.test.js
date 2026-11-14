@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { PAGES, ZONES, pageById, pageLabel, pagesInZone, renderNavRow, renderNavRows, renderProjectsHeader } from '../modules/pages.js';
 import { PAGE_ICONS, SHELL_ICONS } from '../modules/page_icons.js';
 import { statusMarkHtml } from '../modules/status_mark.js';
@@ -48,6 +49,15 @@ test('rows render from the registry, in order, with the label verbatim and the i
     const files = renderNavRow(pageById('files'));
     assert.doesNotMatch(files, /nav-row-main|status-mark|nav-row-words/, 'a tool has no status of its own');
     assert.match(files, /<span class="nav-row-label">Files<\/span><\/button>$/);
+    // Each tool's row carries its registry glyph once, and no other page's.
+    const glyphs = new Set(pagesInZone('foot').map((page) => PAGE_ICONS[page.icon]));
+    assert.equal(glyphs.size, pagesInZone('foot').length, 'every tool has a glyph of its own');
+    for (const page of pagesInZone('foot')) {
+        const row = renderNavRow(page);
+        assert.equal((row.match(/<svg/g) || []).length, 1, `${page.id}: one glyph`);
+        assert.ok(row.includes(PAGE_ICONS[page.icon]), `${page.id}: the registry's glyph for it`);
+        assert.equal(rows.split(PAGE_ICONS[page.icon]).length - 1, 1, `${page.id}: its glyph once among the rows`);
+    }
     assert.match(renderNavRow({ id: 'x', label: '<b>', icon: 'none', zone: 'foot' }), /title="&lt;b&gt;".*>&lt;b&gt;</);
 });
 
@@ -58,4 +68,8 @@ test('the Projects header is the New project button alone, with the shell\'s plu
     assert.equal(html, `<button id="nav-projects-add" class="nav-projects-add" type="button" title="New project" aria-label="New project">${SHELL_ICONS.plus}</button>`);
     assert.doesNotMatch(html, /nav-projects-toggle|nav-projects-count|nav-projects-facts|nav-chevron|status-mark|aria-expanded/);
     assert.doesNotMatch(html, /nav-activity-marker|chat-live-typing|nav-projects-activity/);
+    // With its heading gone the list's region keeps a name of its own: "Projects" (index.html).
+    const shell = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+    const section = shell.match(/<section id="nav-projects"[^>]*>/)?.[0] || '';
+    assert.match(section, / aria-label="Projects"/);
 });
