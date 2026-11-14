@@ -10,12 +10,14 @@ Isolated roots only; the supervisor's probe is a stub that proves one task absen
 """
 from __future__ import annotations
 
+import json
 import pathlib
 from typing import Callable, Dict
 
 from ouroboros import maintenance_jobs, server_maintenance, store_import
 from ouroboros import subagent_worktrees as trees
 from ouroboros.maintenance_jobs import record_pass
+from ouroboros.utils import utc_now_iso
 from tests._store_shared import seed_result
 from tests.test_claudexor_runtime_retention import cx  # noqa: F401 -- the engine runtime fixture
 from tests.test_session_service_directories import _synthetic_temp_parent  # noqa: F401 -- isolate session scratch parent
@@ -45,17 +47,24 @@ def test_drive_settlement_releases_a_settled_drive_and_holds_a_live_one(tmp_path
     monkeypatch.setattr(server_maintenance, "DATA_DIR", data)
     monkeypatch.setenv("OUROBOROS_GC_RETENTION_DAYS", "1")
     monkeypatch.setattr("supervisor.queue.task_settlement_liveness", _probe("live"))
-    for task in ("done", "live"):
+    for task in ("done", "live", "young"):
         drive = data / "task_drives" / task
         drive.mkdir(parents=True)
         (drive / "scratch.bin").write_bytes(b"s" * 64)
-        seed_result(data, task, {"status": "completed", "ts": OLD, "child_drive_root": str(drive)})
+        seed_result(data, task, {"status": "completed", "ts": utc_now_iso() if task == "young" else OLD,
+                                 "child_drive_root": str(drive)})
 
     server_maintenance._run_drive_custody_pass()
     row = maintenance_jobs.job(data, "drive_settlement")
     assert row["released"] == 1 and not (data / "task_drives" / "done").exists() and (data / "task_drives" / "live").is_dir()
     assert [(hold["class"], hold["count"], hold["example"]) for hold in row["holds"]] == [("task_live", 1, "live")]
     assert row["holds"][0]["since"] == row["pass_at"]
+    # The pass's event lists what it holds and counts the drives still inside their term (no hold, the same every pass).
+    event = [json.loads(line) for line in (data / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()][-1]
+    layouts = [event["report"][key] for key in ("headless", "direct")]
+    assert event["type"] == "headless_task_drive_prune" and (data / "task_drives" / "young").is_dir()
+    assert {skip["task_id"]: skip["reason"] for layout in layouts for skip in layout["skipped"]} == {"live": "task_live"}
+    assert sum(layout["younger_than_retention"] for layout in layouts) == 1
 
     server_maintenance._run_drive_custody_pass()
     again = maintenance_jobs.job(data, "drive_settlement")
