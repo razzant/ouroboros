@@ -417,8 +417,9 @@ def _declarations(source: str, selector: str) -> dict[str, str]:
 def test_the_cards_quiet_label_keeps_its_words_in_a_narrow_sidebar() -> None:
     """Main Chat moves below the name in a narrow card; a wide card keeps the existing single row."""
     source = _decommented(_read("web/style.css"))
-    narrow = re.search(r"@container \(max-width: 327px\)\s*\{(.*?)\n\}", source, re.S)
+    narrow = re.search(r"@container ourocard \(max-width: 200px\)\s*\{(.*?)\n\}", source, re.S)
     assert narrow, "the card needs its own container rule at the narrow sidebar widths"
+    assert _declarations(source, ".nav-ouro-text").get("container") == "ourocard / inline-size"
     wide = source[:narrow.start()] + source[narrow.end():]
     label = _declarations(wide, ".nav-ouro-line1 > .nav-row-label")
     assert label.get("white-space") == "normal" and label.get("overflow") == "visible", label

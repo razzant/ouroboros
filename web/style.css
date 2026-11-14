@@ -482,6 +482,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .nav-ouro-text {
     flex: 1 1 auto;
     min-width: 0;
+    container: ourocard / inline-size;
     display: flex;
     flex-direction: column;
     gap: 1px;
@@ -509,7 +510,9 @@ html[data-layout="stack"] .resize-handle { display: none; }
     font-size: var(--type-meta);
     line-height: var(--line-meta);
 }
-@container (max-width: 327px) {
+/* The name, Main Chat, count and mark need 200px of text room, after the avatar and menu inset.
+   The phone's 293px drawer has that room; 282px and 270px columns need the second line. */
+@container ourocard (max-width: 200px) {
     .nav-ouro-line1 { flex-wrap: wrap; row-gap: 0; }
     .nav-ouro-name { flex: 1 1 auto; }
     .nav-ouro-line1 > .nav-row-label { order: 4; flex-basis: 100%; }
