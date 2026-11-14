@@ -39,7 +39,7 @@ def test_identity_rejects_missing_and_stale_revision_preserves_committed_bytes(t
     rows = [json.loads(line) for line in mem.identity_journal_path().read_text().splitlines()]
     assert len(rows) == 1 and rows[0]["new_sha256"] == current
     assert rows[0]["focus"]["room_id"] == "444" and rows[0]["focus"]["place_id"] == "garden"
-    assert Memory(tmp_path).load_identity() == content.replace("\r\n", "\n")
+    assert Memory(tmp_path).load_identity() == content  # byte-exact: the context's revision is of these bytes
 
 
 def test_identity_read_returns_the_revision_of_the_same_bytes(tmp_path):

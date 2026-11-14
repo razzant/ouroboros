@@ -14,6 +14,7 @@ from ouroboros.tool_capabilities import tool_result_limit
 from ouroboros.tool_access_paths import canonical_data_root
 from ouroboros.knowledge import INDEX_FILE as INDEX_FILE, OVERVIEW_TOPIC as OVERVIEW_TOPIC
 from ouroboros.knowledge import sanitize_topic as _sanitize_topic
+from ouroboros.knowledge_edits import check_arguments, mode_received, normalize_arguments
 from ouroboros.tools.arg_feedback import ignored_argument_note
 from ouroboros.tools.registry import ToolEntry, ToolContext
 from ouroboros.tools.tool_result import ToolResult, _MAX_META_BYTES, _publish_tool_result, completed_local_read
@@ -88,10 +89,7 @@ def _source_view(note: knowledge_store.KnowledgeNote, start_char: int | None = N
     header = "[Knowledge source] " + json.dumps(ref, ensure_ascii=False, sort_keys=True) + "\n"
     header += "".join(f"[Range note] {item}\n" for item in range_notes) + _argument_notes(notes)
     if earlier is not None:
-        written = ("no history row wrote it (an outside edit, or a write before history)"
-                   if earlier["ts"] == knowledge_versions.UNKNOWN else
-                   f"written {earlier['ts']} by focus {knowledge_versions.focus_text(earlier['focus'])} "
-                   f"({earlier['mode']}; reason: {knowledge_versions.reason_text(earlier['reason'])})")
+        written = knowledge_versions.written_text(earlier)
         header += f"[Earlier version, not the current note: {written}. The current revision is {earlier['current_revision']}.]\n"
     if note.parse_error:
         header += "[Metadata unavailable; the complete original Markdown follows.]\n"
@@ -115,10 +113,16 @@ def _rendered_view(view: str, text: str, facts: dict, start_char: int | None, en
                                       "knowledge_body_chars": end - start}
 
 
+class ListChanged(Exception):
+    """A history page's continuation named another list than the one rendered now (a write landed since)."""
+
+
 def _note_view(note: knowledge_store.KnowledgeNote, view: str, version: str | None,
-               start_char: int | None, end_char: int | None, notes=()) -> tuple[str, dict]:
+               start_char: int | None, end_char: int | None, notes=(), fingerprint: str = "") -> tuple[str, dict]:
     if view not in ("note", "outline", "history"):
         raise ValueError(f"view={view!r}: use note (default), outline or history")
+    if fingerprint and view != "history":
+        raise ValueError("fingerprint continues a list of versions (view='history'), as its first page names it")
     if version is not None and view == "history":
         raise ValueError("version selects one version for view=note or view=outline; view=history lists them all")
     shown, earlier = note, None
@@ -130,15 +134,25 @@ def _note_view(note: knowledge_store.KnowledgeNote, view: str, version: str | No
         return _source_view(shown, start_char, end_char, earlier, notes)
     facts = {"topic": note.address.topic, "scope": note.address.scope, "revision": shown.revision,
              **({"current_revision": note.revision, "earlier_version": earlier} if earlier else {})}
-    if view == "history":
-        return _rendered_view(view, knowledge_versions.render_history(note), facts, start_char, end_char, notes)
+    if view == "history":  # newest first: a later page continues the list its first page read, by its fingerprint
+        for name, bound in (("start_char", start_char), ("end_char", end_char)):  # an argument error, not a list's
+            if bound is not None and (type(bound) is not int or bound < 0):
+                raise ValueError(f"{name}={bound!r} is not a position in the list: a non-negative integer")
+        listing = knowledge_versions.render_history(note)
+        digest = hashlib.sha256(listing.encode("utf-8")).hexdigest()[:16]
+        if (start_char or fingerprint) and fingerprint != digest:
+            raise ListChanged("that page belongs to another list of versions (a write landed since, or no fingerprint "
+                              "named the list it continues): read it again from start_char=0" if start_char else
+                              "the fingerprint names another list of versions (a write landed since): a first page "
+                              "takes none, so read it without the fingerprint")
+        return _rendered_view(view, listing, {**facts, "fingerprint": digest}, start_char, end_char, notes)
     label = f" — an earlier version, not the current note (current revision {note.revision})" if earlier else ""
     return _rendered_view(view, knowledge_versions.render_outline(shown, label), facts, start_char, end_char, notes)
 
 
 def _knowledge_read(ctx: ToolContext, topic: str, scope: str = "",
                     start_char: int | None = None, end_char: int | None = None,
-                    view: str = "note", version: str | None = None) -> str:
+                    view: str = "note", version: str | None = None, fingerprint: str = "") -> str:
     notes = []  # a value that names the default takes it, said in the header (tools/arg_feedback)
     if view in (None, ""):
         notes.append(ignored_argument_note("view", view, "the default view, the note itself"))
@@ -150,8 +164,15 @@ def _knowledge_read(ctx: ToolContext, topic: str, scope: str = "",
         sanitized = _sanitize_topic(topic)
         address = _address(ctx, sanitized, scope)
         note = knowledge_store.read_knowledge_note(address)
-        text, meta = (_source_view(note, start_char, end_char, notes=notes) if view == "note" and version is None
-                      else _note_view(note, view, version, start_char, end_char, notes))
+        if fingerprint is not None and not isinstance(fingerprint, str):
+            raise ValueError("fingerprint is the text a history page's header names")
+        text, meta = (_source_view(note, start_char, end_char, notes=notes)
+                      if view == "note" and version is None and not fingerprint
+                      else _note_view(note, view, version, start_char, end_char, notes, fingerprint or ""))
+    except ListChanged as exc:
+        return _publish_tool_result(ctx, ToolResult(
+            status="error", code="TOOL_REPORTED_FAILURE", text=f"⚠️ TOOL_ERROR: position_mismatch: {exc}",
+            meta={"operation_outcome": "completed_no_effect"}))
     except knowledge_versions.VersionUnavailable as exc:
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_REPORTED_FAILURE", text=f"⚠️ TOOL_ERROR: version_unavailable: {exc}",
@@ -283,19 +304,9 @@ def _mode_refusal(ctx: ToolContext, mode: object) -> str:
     Null and blank text say what omission says (``tools/arg_feedback``), now refused like it; any other
     value is refused as received, never trimmed, case-folded or matched to the nearest operation.
     """
-    if mode is None:
-        received = "mode is missing or null"
-    elif not isinstance(mode, str):
-        received = f"mode={mode!r} is not text"
-    elif not mode.strip():
-        # Reuse the canonical blank-value representation; keep the established
-        # refusal wording for non-blank invalid values.
-        received = ignored_argument_note("mode", mode, "is not an operation").replace(
-            " ignored: is not an operation", " is not an operation")
-    else:
-        received = f"mode={mode!r} is not an operation"
     return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
-        f"⚠️ TOOL_ARG_ERROR: {received}. knowledge_write has no default operation: pass mode as exactly one of "
+        f"⚠️ TOOL_ARG_ERROR: {mode_received(mode)}. knowledge_write has no default operation: pass mode as exactly "
+        "one of "
         "overwrite (content replaces the whole body), append (content goes at the end), edit (old_str with "
         "content, or edits, replaces exact text; summary may go alone), revert (puts back the earlier version "
         "named by version), archive or restore (the archive state only; archive requires reason). version names "
@@ -312,81 +323,24 @@ def _knowledge_write(
     if not isinstance(mode, str) or mode not in _MODES:  # no default operation: the call must choose one
         return _mode_refusal(ctx, mode)
     notes = []  # a value that means what omission means takes the omitted path, said in the result (tools/arg_feedback)
-    blank_version = isinstance(version, str) and not version.strip()  # empty or whitespace: it names no revision
-    # Outside revert, a blank version or the revision this call already names as expected_revision asks for nothing.
-    if mode != "revert" and (blank_version or isinstance(version, str) and version == expected_revision):
-        notes.append(ignored_argument_note("version", version, ("" if blank_version else "the same as expected_revision; ")
-                                           + "only mode=revert takes a version"))
-        version = None
-    if isinstance(edits, list) and not edits:
-        notes.append(ignored_argument_note("edits", edits, "an empty list asks for no replacement"))
-        edits = None
-    if old_str == "" and mode != "edit":
-        notes.append(ignored_argument_note("old_str", old_str, "only mode=edit replaces text"))
-        old_str = None
-    if reason is None and mode != "archive":  # optional text: null is an omitted reason; archive still requires one
-        notes.append(ignored_argument_note("reason", reason, "no reason is recorded"))
-        reason = ""
+    # The argument rules every exact editor shares (knowledge_edits); archive still requires its reason.
+    version, edits, old_str, reason = normalize_arguments(mode, version, expected_revision, edits, old_str, reason,
+                                                          notes, reason_required=("archive",))
     try:
         sanitized = _sanitize_topic(topic)
         lifecycle = mode in ("archive", "restore")
-        if not isinstance(content, (str, type(None))):
-            raise ValueError("content must be Markdown")
-        if new_str is not None:  # the one-pair edit's replacement as other editors spell it: content
-            if not isinstance(new_str, str):
-                raise ValueError("new_str must be text, the replacement of old_str (empty text deletes it)")
-            if mode == "edit" and edits is not None and new_str:
-                raise ValueError("each edits item carries its own new_str; a top-level new_str belongs to the "
-                                 "one-pair spelling with old_str")
-            if mode == "edit" and isinstance(old_str, str) and old_str:
-                if content and new_str and content != new_str:
-                    raise ValueError("new_str and content both give old_str's replacement and differ; pass one")
-                if content is not None and bool(content) != bool(new_str):  # an empty one beside the other is filler
-                    empty, given = ("content", "new_str") if new_str else ("new_str", "content")
-                    notes.append(ignored_argument_note(empty, "", f"{given} gives the replacement"))
-                content = content or new_str  # both empty: the replacement is empty text, which deletes
-            elif new_str:
-                raise ValueError("new_str is the replacement of old_str in mode=edit, the same as content; "
-                                 + ("pass old_str with it" if mode == "edit" else f"mode={mode} takes its text as content"))
-            else:
-                notes.append(ignored_argument_note("new_str", new_str, "only an edit with old_str takes a replacement"))
         if mode == "archive" and sanitized in knowledge_store.ALWAYS_ACTIVE_TOPICS:
             raise ValueError("the overview must stay active")
-        if not isinstance(reason, str) or (mode == "archive" and not reason.strip()):
-            raise ValueError("reason is required for archive and optional text on every other mode")
         summary = None if summary == "" else summary  # an empty summary asks for nothing
         if summary is not None and (not isinstance(summary, str) or not summary.strip()):
             raise ValueError(f"summary={summary!r} is not summary text; pass the revised summary, "
                              "or omit summary to keep the current one")
-        if mode != "edit" and (old_str is not None or edits is not None):
-            raise ValueError("old_str is used only with mode=edit" if old_str is not None
-                             else "edits is used only with mode=edit")
-        if mode not in ("overwrite", "append", "edit") and summary is not None:
+        if mode not in ("overwrite", "append", "edit") and summary is not None and mode in _MODES:
             raise ValueError(f"summary is used only with mode=overwrite, append or edit, not mode={mode}")
-        if mode == "revert" and (version is None or blank_version):
-            raise ValueError("mode=revert requires version, the revision to put back")
-        if mode != "revert" and version is not None:
-            raise ValueError("version is used only with mode=revert; knowledge_read(version=...) reads one")
-        if mode == "revert" and content:
-            raise ValueError("mode=revert takes version, expected_revision and an optional reason; no content")
-        if mode not in ("edit", "revert") and not lifecycle and content is None:
-            raise ValueError(f"mode={mode} requires content")
-        if (lifecycle or mode == "revert") and content is None:
-            content = ""
-        if mode == "edit" and edits is not None:
-            if old_str not in (None, "") or content:
-                raise ValueError("edits carries its own replacements: pass edits without old_str and content")
-            content, old_str = "", None
-        elif mode == "edit" and summary is not None and old_str in (None, ""):  # "" asks for nothing
-            if content:
-                raise ValueError(f"content ({len(content)} chars) has no old_str to replace; pass old_str "
-                                 "for a body edit, or omit content to revise only the summary")
-            content, old_str = "", None
-        elif mode == "edit" and (not isinstance(old_str, str) or not old_str):
-            raise ValueError("mode=edit requires edits, or a non-empty old_str, or a summary")
-        elif mode == "edit" and content is None:
-            raise ValueError("mode=edit with old_str requires content, its replacement "
-                             "(empty text deletes the old_str span)")
+        content, old_str, edits = check_arguments(
+            mode, content, old_str, new_str, edits, version, reason, notes, modes=_MODES,
+            no_content=("revert", "archive", "restore"), reason_required=("archive",), alone="summary",
+            alone_given=summary is not None, version_reader="knowledge_read(version=...)")
         address = _address(ctx, sanitized, scope)
         # The turn is the writer; the route stamp is the route that ANSWERED the
         # loop's last round (provider + resolved model, account when Claudexor
@@ -493,14 +447,16 @@ def get_tools() -> List[ToolEntry]:
                             "and exact source revision. Paths and relative Markdown links survive archival. Read current "
                             "understanding before revising it. view='outline' shows its summary, revision, state, size and "
                             "every heading with its line and the start_char..end_char range of its section; view='history' "
-                            "lists its versions newest first: who wrote each, when, in which mode, why, and what left. "
+                            "lists its versions newest first: who wrote each, when, in which mode, why, and what left; a "
+                            "later page passes the fingerprint its first page names. "
                             "version=<revision> reads that earlier version exactly (verified by its sha256), as the note or "
                             "with view='outline' as its outline."),
             "parameters": {"type": "object", "properties": {"topic": topic, "scope": scope,
                 "start_char": {"type": "integer", "description": "Optional half-open character range start in the exact complete note (omitted = 0). Use ranges to read a large source in parts."},
                 "end_char": {"type": "integer", "description": "Exclusive range end (omitted = the end; a value past the end is lowered to it); complete_chars and revision are returned with every view. Omit both bounds, or pass 0 and 0, for the full note."},
                 "view": {"type": "string", "enum": ["note", "outline", "history"], "description": "note (default): the note itself; outline: its headings with section ranges, to read one section with start_char/end_char; history: its versions, newest first. start_char/end_char page the outline and history text like a note's."},
-                "version": {"type": "string", "description": "The revision of an earlier version of this note (view='history' or a write receipt names it): read that version instead of the current note."}},
+                "version": {"type": "string", "description": "The revision of an earlier version of this note (view='history' or a write receipt names it): read that version instead of the current note."},
+                "fingerprint": {"type": "string", "description": "view='history', a later page: the fingerprint its first page's header names; a changed list is refused."}},
                 "required": ["topic"]},
         }, _knowledge_read),
         ToolEntry("knowledge_write", {

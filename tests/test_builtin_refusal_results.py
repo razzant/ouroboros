@@ -66,7 +66,7 @@ def test_forwarding_refuses_unaddressable_tasks_before_mailbox_write(tmp_path, m
 
 @pytest.mark.parametrize("function,arguments", [
     ("_update_scratchpad", {"content": ""}),
-    ("_update_identity", {"content": "short"}),
+    ("_update_identity", {"content": "  \n"}),  # parsed before any root: an argument error needs none
     ("_send_user_message", {"text": ""}),
 ])
 def test_invalid_cognitive_or_message_arguments_are_not_success(function, arguments):
@@ -74,6 +74,20 @@ def test_invalid_cognitive_or_message_arguments_are_not_success(function, argume
 
     result = _call(SimpleNamespace(current_chat_id=1), getattr(control_runtime, function), **arguments)
     assert (result.status, result.code) == ("error", "TOOL_ARG_ERROR")
+
+
+def test_an_empty_identity_is_refused_and_a_short_one_is_written(tmp_path):
+    """The 50-character floor left (owner 12.11, 2A): only an empty or whitespace-only identity is an argument error."""
+    from ouroboros.tools import control_runtime
+
+    ctx = SimpleNamespace(current_chat_id=1, drive_root=tmp_path, task_id="t")
+    for content in ("", " \n\t"):
+        refused = _call(ctx, control_runtime._update_identity, content=content)
+        assert (refused.status, refused.code) == ("error", "TOOL_ARG_ERROR"), refused.text
+    assert not (tmp_path / "memory" / "identity.md").exists()
+    written = _call(ctx, control_runtime._update_identity, content="I am.")
+    assert (written.status, written.code) == ("ok", "OK"), written.text
+    assert (tmp_path / "memory" / "identity.md").read_bytes() == b"I am."
 
 
 @pytest.mark.parametrize("arguments,code", [
