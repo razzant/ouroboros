@@ -526,6 +526,7 @@ test('one writer: these tabs post nothing to /api/settings themselves and read n
 
 test('Back to Settings: a first row and one page layer; the press, Escape or Back blur the field first and open Settings', async (t) => {
     const { mount } = setup(t);
+    window.ouroLayout = { layout: 'stack' };
     const layers = [];
     const fakeLayers = { push: (layer) => layers.push(layer), remove: (id) => { layers.splice(0, layers.length, ...layers.filter((layer) => layer.id !== id)); } };
     const order = [];
@@ -559,39 +560,70 @@ test('Back to Settings: a first row and one page layer; the press, Escape or Bac
     assert.deepEqual([panel.querySelector('.dashboard-back'), layers.length, order.length], [null, 0, 3], 'clearing opens nothing');
 });
 
-test('Settings doors use destination slots hidden docked and shown in stack, leaving an internal Back alone', (t) => {
-    const { mount } = setup(t);
-    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
-    const display = selector => [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
-        .filter(([, selectors]) => selectors.trim().split(/,\s*/).includes(selector))
-        .flatMap(([, , body]) => [...body.matchAll(/\bdisplay:\s*([^;]+);/g)].map(([, value]) => value)).at(-1);
+test('Settings returns follow both layout crossings, yielding to the section Back in docked', (t) => {
+    const { mount, window } = setup(t);
+    window.ouroLayout = { layout: 'docked' };
+    const observers = [];
+    const previous = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+        constructor(fn) { this.fn = fn; observers.push(this); }
+        observe() {}
+        disconnect() {}
+    };
+    t.after(() => { globalThis.ResizeObserver = previous; });
     const content = new NodeStub(); content.id = 'content'; mount.append(content);
-    const dashboard = initDashboard({ state: { activePage: 'dashboard' } });
+    const layers = new Map();
+    const dashboard = initDashboard({ state: { activePage: 'dashboard' }, layers: {
+        push: layer => layers.set(layer.id, layer), remove: id => layers.delete(id),
+    } });
+    let width = 735;
+    dashboard.page.getBoundingClientRect = () => ({ width });
     dashboard.activateTab('costs', { back: 'models' });
-    const slots = [dashboard.page.querySelector('[data-dashboard-back-slot]')];
-    const returns = [];
-    for (const pageName of ['skills', 'circles', 'without-header']) {
+    const slot = dashboard.page.querySelector('[data-dashboard-back-slot]');
+    const listBack = dashboard.page.querySelector('[data-dashboard-list-back]');
+    const pages = [];
+    for (const pageName of ['circles', 'without-header']) {
         const page = new NodeStub(); page.className = 'page';
-        page.innerHTML = pageName === 'without-header' ? '' : renderPageHeader({ page: pageName });
+        page.innerHTML = pageName === 'without-header' ? '<p>Page body</p>' : renderPageHeader({ page: pageName });
         const query = page.querySelector.bind(page);
         page.querySelector = selector => query(selector.replace(':scope > ', ''));
         content.append(page);
-        const back = settingsReturn(); back.show(page, 'models'); returns.push(back);
-        slots.push(page.querySelector('[data-page-back]') || page.querySelector('.dashboard-back'));
+        const back = settingsReturn(); back.show(page, 'models');
+        t.after(() => back.clear());
+        pages.push(page);
     }
-    for (const layout of ['stack', 'docked', 'stack']) {
-        for (const slot of slots) {
-            assert.ok(slot.querySelector('[data-dashboard-back]'), 'the actual caller populated its return slot');
-            assert.equal(display(`html[data-layout="${layout}"] .${slot.className}`) ?? display(`.${slot.className}`),
-                layout === 'docked' ? 'none' : 'flex', `${slot.className} in ${layout}`);
+    for (const [layout, pixels, supports] of [
+        ['docked', 735, true], ['docked', 550, true], ['stack', 700, true],
+        ['docked', 735, true], ['stack', 390, true], ['docked', 1000, false],
+    ]) {
+        width = pixels;
+        window.CSS = { supports: () => supports };
+        window.ouroLayout.layout = layout;
+        window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout } }));
+        observers.forEach(observer => observer.fn([{ target: dashboard.page }]));
+        const stack = layout === 'stack';
+        const ownBack = !stack && (width < 640 || !supports);
+        assert.equal(slot.children.length, stack ? 1 : 0, `${layout}/${width}: door return is placed only in stack`);
+        assert.equal(listBack.hidden, !ownBack, `${layout}/${width}: the section's own Back stays available`);
+        assert.equal(dashboard.page.dataset.sectionView, 'page', 'the open Costs page survives resizing');
+        assert.deepEqual([...layers.keys()], stack ? ['dashboard-back'] : ownBack ? ['dashboard-level'] : []);
+        for (const page of pages) {
+            assert.equal(page.querySelectorAll('[data-dashboard-back]').length, stack ? 1 : 0);
+            assert.equal(Boolean(page.querySelector('.dashboard-back')), stack && !page.querySelector('.app-page-header'),
+                'the headerless fallback follows the same decision');
         }
-        assert.equal(display(`html[data-layout="${layout}"] .shell-back`), undefined, 'the rule never hides a level\'s own Back');
     }
-    returns.forEach(back => back.clear()); dashboard.destroy();
+    listBack.dispatchEvent({ type: 'click' });
+    assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['home', 0], 'the section Back returns to its list');
+    window.ouroLayout.layout = 'stack';
+    window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout: 'stack' } }));
+    assert.equal(slot.children.length, 0, 'leaving the page forgets its Settings return');
+    dashboard.destroy();
 });
 
 test('openDashboardTab: back gives the tab its Back, a row is brought into view and focused; another tab or page drops Back', async (t) => {
     const { mount, window } = setup(t);
+    window.ouroLayout = { layout: 'stack' };
     const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
     const opened = [];
     const layers = [];
@@ -652,6 +684,7 @@ test('openDashboardTab: back gives the tab its Back, a row is brought into view 
 // show in one task (layers.js: one snapshot per batch).
 test('openDashboardTab with back changes the layer stack once in one column', (t) => {
     const { mount } = setup(t);
+    window.ouroLayout = { layout: 'stack' };
     const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
     const stack = [];
     const seen = [''];

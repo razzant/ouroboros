@@ -1,5 +1,5 @@
 import { bindTabStrip, placePageBack, renderBackControl, renderPageHeader } from './page_header.js';
-import { sectionHoldsTwoPanes } from './layout.js';
+import { currentLayout, onLayoutChange, sectionHoldsTwoPanes } from './layout.js';
 import { fluentIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { bindSettingRows, readSettings, settingsRow } from './settings_controls.js';
@@ -146,23 +146,29 @@ export function focusSettingRow(panel, id) {
 /**
  * The way back to Settings from a place a door of Settings opened (PINS §2): a Dashboard tab, or a page of its own
  * (Circles, Skills: settings.js `leave`). The app's one Back (page_header.js renderBackControl), "Back to Settings",
- * icon only, in the place's header Back slot (page_header.js placePageBack): before its tabs or its location on a desk,
- * at the start of the row under ☰ on a phone, never inside a lead that scrolls. A page with no header keeps it as a
- * first row of `host`. One `page: true` layer (`id`), so Escape and the system's Back return there too. Every way of
- * returning leaves a focused field first, so a typed value is saved as it would be on leaving it; leaving the tab or
+ * icon only, in the place's header Back slot (page_header.js placePageBack) in the stack layout, never inside a lead
+ * that scrolls. A page with no header keeps it as a first row of `host`. Docked, the sidebar is the way back: no
+ * return control or layer is placed. In stack, one `page: true` layer (`id`) lets Escape and the system's Back return
+ * too. Returning leaves a focused field first, so a typed value is saved as it would be on leaving it; leaving the tab or
  * the page any other way drops it (its owner calls `clear`). Answers `{ show(host, path, before), clear() }`.
  */
 export function settingsReturn({ layers = null, openSettings = null, id = BACK_LAYER, place = null } = {}) {
     let control = null;
     let scope = null;
     let unplace = null;
-    const clear = () => {
+    let offLayout = null;
+    const remove = () => {
         unplace?.();
         unplace = null;
         control?.remove();
         control = null;
-        scope = null;
         layers?.remove(id);
+    };
+    const clear = () => {
+        offLayout?.();
+        offLayout = null;
+        remove();
+        scope = null;
     };
     const go = (path) => {
         const field = document.activeElement;
@@ -178,22 +184,31 @@ export function settingsReturn({ layers = null, openSettings = null, id = BACK_L
         button.addEventListener('click', () => go(path));
         const page = host.closest?.('.page') || host;
         const header = page.querySelector(':scope > .app-page-header');
-        // A place that keeps its own Back slot (the Dashboard's, before the open page's name) places it there.
-        const own = place?.(button);
-        if (own) {
-            unplace = own;
-            control = button;
-        } else if (header?.querySelector('[data-page-back]')) {
-            unplace = placePageBack(header, button);
-            control = button;
-        } else {
-            control = document.createElement('div');
-            control.className = 'dashboard-back';
-            control.append(button);
-            host.insertBefore(control, before);
-        }
         scope = host;
-        layers?.push({ id, el: host, page: true, modal: false, focus: false, opener: null, onClose: () => go(path) });
+        const sync = (layout = currentLayout()) => {
+            const steps = () => {
+                remove();
+                if (layout !== 'stack') return;
+                // The Dashboard keeps its own slot before the open page's name.
+                const own = place?.(button);
+                if (own) {
+                    unplace = own;
+                    control = button;
+                } else if (header?.querySelector('[data-page-back]')) {
+                    unplace = placePageBack(header, button);
+                    control = button;
+                } else {
+                    control = document.createElement('div');
+                    control.className = 'dashboard-back';
+                    control.append(button);
+                    host.insertBefore(control, before);
+                }
+                layers?.push({ id, el: host, page: true, modal: false, focus: false, opener: null, onClose: () => go(path) });
+            };
+            if (layers?.batch) layers.batch(steps); else steps();
+        };
+        sync();
+        offLayout = onLayoutChange(sync);
     };
     return { show, clear };
 }
@@ -365,7 +380,7 @@ export function initDashboard({ state, layers = null, openSettings = null, state
                 each.hidden = !on;
             });
             state.dashboardActiveSubtab = name;
-            if (asLevel && !panes()) level = true;
+            if (asLevel) level = true;  // an outside door keeps its page open when two panes narrow to one
             paint();
             window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: name } }));
             if (typeof path === 'string') back.show(panel, path);
