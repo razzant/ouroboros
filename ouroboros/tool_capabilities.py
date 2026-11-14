@@ -402,21 +402,34 @@ def requested_result_view(tool_args: Any) -> Optional[tuple[Optional[int], Optio
     return None
 
 
+def mcp_gateway_arguments(value: Any) -> Optional[dict]:
+    """The one reading of the ``arguments`` a ``call_mcp_tool`` envelope passes its MCP tool: an object, or ``None``.
+
+    Omitted, ``null``, ``{}``, empty or blank text and the JSON text ``null`` are a call without arguments (``{}``);
+    an object, or JSON text of one, passes as given. Anything else passes no object and is never read as a call
+    without arguments, nor corrected: text that is not JSON, an array, a number, a boolean, or JSON text of one of
+    those or of a further string."""
+    if isinstance(value, str):
+        if not value.strip():
+            return {}
+        import json
+
+        try:
+            value = json.loads(value)
+        except (ValueError, RecursionError):  # nesting past the decoder's depth is no JSON this call can pass
+            return None
+    if value is None:
+        return {}
+    return value if isinstance(value, dict) else None
+
+
 def requested_call_view(name: str, tool_args: Any) -> Optional[tuple[Optional[int], Optional[int]]]:
     """``requested_result_view`` of a whole call: the catalog view ``enable_tools`` returns is a form the mind
     asked for, and a call through the MCP gateway asks for the view its inner arguments name."""
     if name == "enable_tools":
         return (None, None)
     if name == MCP_GATEWAY_TOOL_NAME and isinstance(tool_args, dict):
-        inner = tool_args.get("arguments")
-        if isinstance(inner, str):
-            import json
-
-            try:
-                inner = json.loads(inner or "{}")
-            except ValueError:
-                inner = {}
-        tool_args = inner if isinstance(inner, dict) else {}
+        tool_args = mcp_gateway_arguments(tool_args.get("arguments"))
     return requested_result_view(tool_args)
 
 

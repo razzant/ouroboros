@@ -26,7 +26,7 @@ _LARGE_CONTEXT_SECTION_CHARS = LARGE_CONTEXT_SECTION_CHARS
 # section is cached with the semi-stable block, so it carries no timestamp.
 _SHARED_UNDERSTANDING_GAP = (
     "## Shared understanding\n\nNot authored yet. "
-    "knowledge_write(topic='overview', scope='global', content=...) creates it; "
+    "knowledge_write(topic='overview', scope='global', mode='overwrite', content=...) creates it; "
     "it is then loaded here in every context."
 )
 

@@ -241,7 +241,7 @@ def test_large_removed_heading_delta_keeps_tool_receipt_and_full_history(tmp_pat
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="editor")
     target = address(tmp_path, "large-headings")
     body = "".join(f"# Раздел {i:03d}\n" for i in range(240))
-    created = json.loads(tools._knowledge_write(ctx, "large-headings", body, scope="global").split("\n", 1)[1])
+    created = json.loads(tools._knowledge_write(ctx, "large-headings", body, mode="overwrite", scope="global").split("\n", 1)[1])
     assert created["knowledge_delta"]["added_headings_count"] == 240 and created["knowledge_delta"]["added_headings_omitted"]
     assert "removed_headings_omitted" not in created["knowledge_delta"]  # an empty list has nothing to give way
     assert len(history(target)[-1]["delta"]["added_headings"]) == 240
@@ -301,8 +301,8 @@ def test_an_omitted_delta_list_names_the_history_read_that_shows_it(tmp_path):
         return registry.execute_result("knowledge_write", {"topic": topic, "scope": "global", **arguments})
 
     target = address(tmp_path, "folds/река")
-    _landed(write("folds/река", content="# Река\n\n" + sections), target)
-    receipt, reduced = _landed(write("folds/река", content="# Река\n\nСвёрнуто: сорок разделов в одном.\n",
+    _landed(write("folds/река", mode="overwrite", content="# Река\n\n" + sections), target)
+    receipt, reduced = _landed(write("folds/река", mode="overwrite", content="# Река\n\nСвёрнуто: сорок разделов в одном.\n",
                                      expected_revision=store.read_knowledge_note(target).revision), target)
     delta = receipt["knowledge_delta"]
     assert not reduced and delta["removed_sections"] == [] and delta["removed_sections_count"] == 40, delta
@@ -315,8 +315,10 @@ def test_an_omitted_delta_list_names_the_history_read_that_shows_it(tmp_path):
     for length, reason in ((130, {"reason": "причина " * 2000}), (205, {})):
         topic = _long_topic(length)
         target = address(tmp_path, topic)
-        _landed(write(topic, content="".join(f"## Старый {index:03d}\n" for index in range(300)), **reason), target)
-        receipt, _reduced = _landed(write(topic, content="".join(f"## Новый {index:03d}\n" for index in range(300)),
+        _landed(write(topic, mode="overwrite", content="".join(f"## Старый {index:03d}\n" for index in range(300)), **reason),
+                target)
+        receipt, _reduced = _landed(write(topic, mode="overwrite",
+                                          content="".join(f"## Новый {index:03d}\n" for index in range(300)),
                                           expected_revision=store.read_knowledge_note(target).revision), target)
         delta = receipt["knowledge_delta"]
         assert all(delta[f"{field}_count"] == 300 and delta[f"{field}_omitted"]
@@ -340,8 +342,8 @@ def test_a_fold_and_a_bare_append_under_a_long_cyrillic_topic_answer_with_their_
         return registry.execute_result("knowledge_write", {"topic": topic, "scope": "global", **arguments})
 
     sections = "".join(f"## Раздел {index:02d}\n\n{'Первая строка раздела про реку. ' * 3}\n\n" for index in range(60))
-    _landed(write(content="# Река\n\n" + sections), target)
-    folded, fold_reduced = _landed(write(content="# Река\n\nСвёрнуто.\n",
+    _landed(write(mode="overwrite", content="# Река\n\n" + sections), target)
+    folded, fold_reduced = _landed(write(mode="overwrite", content="# Река\n\nСвёрнуто.\n",
                                          expected_revision=store.read_knowledge_note(target).revision), target)
     delta = folded["knowledge_delta"]
     assert delta["removed_sections_count"] == 60 and delta["removed_sections_omitted"], delta
@@ -403,7 +405,7 @@ def test_edit_is_an_opt_in_tool_mode_the_backlog_shares(tmp_path):
         ctx, "improvement-backlog", "new", mode="edit", old_str="old")
     assert not backlog.path.exists()
     # Once written, the backlog takes the same revision-checked anchored edit as any note.
-    assert tools._knowledge_write(ctx, "improvement-backlog", "- old item\n").startswith("✅")
+    assert tools._knowledge_write(ctx, "improvement-backlog", "- old item\n", mode="overwrite").startswith("✅")
     assert tools._knowledge_write(ctx, "improvement-backlog", "- new item", mode="edit", old_str="- old item",
                                   expected_revision=store.read_knowledge_note(backlog).revision).startswith("✅")
     assert store.read_knowledge_note(backlog).text.endswith("- new item\n")
@@ -434,8 +436,8 @@ def test_project_and_global_scope_refs_resolve_from_forked_context(tmp_path, mon
     monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path / "child", project_id="p")
     ctx.budget_drive_root = str(tmp_path)
-    tools._knowledge_write(ctx, "same", "Project fact.")
-    tools._knowledge_write(ctx, "same", "Global understanding.", scope="global")
+    tools._knowledge_write(ctx, "same", "Project fact.", mode="overwrite")
+    tools._knowledge_write(ctx, "same", "Global understanding.", mode="overwrite", scope="global")
     local = store.read_knowledge_note(address(tmp_path, "same", "project:p"))
     shared = store.read_knowledge_note(address(tmp_path, "same", "global"))
     assert local.raw != shared.raw
@@ -717,7 +719,7 @@ def test_an_item_whose_text_is_only_in_the_frontmatter_says_where_it_is(tmp_path
     def write(**arguments):
         return registry.execute("knowledge_write", {"topic": "people/nina", "scope": "global", **arguments})
 
-    _meta(write(content="# Нина\n\nРаботает над ранжированием.\n", summary=summary))
+    _meta(write(mode="overwrite", content="# Нина\n\nРаботает над ранжированием.\n", summary=summary))
     note = store.read_knowledge_note(address(tmp_path, "people/nina"))
     assert note.summary == summary and summary not in note.text  # the writer's YAML wraps a long summary
     in_front = "not found in the body; it occurs in the frontmatter (a summary is revised with summary=...)"
@@ -813,6 +815,94 @@ def test_empty_optional_write_values_take_the_omitted_path_and_say_so(tmp_path):
         reply = write(**arguments)
         assert reply.startswith("⚠️ TOOL_ARG_ERROR") and refusal in reply, (arguments, reply)
     assert _files(tmp_path) == before
+
+
+def _model_call(registry, arguments: str):
+    """One tool call as a model sends it: JSON arguments through the loop's own dispatch."""
+    from ouroboros.loop_tool_execution import _execute_single_tool
+
+    call = {"id": "mode-call", "function": {"name": "knowledge_write", "arguments": arguments}}
+    return _execute_single_tool(registry, call, registry._ctx.drive_root.parent / "logs", registry._ctx.task_id)
+
+
+def test_a_write_without_an_exact_mode_writes_nothing(tmp_path):
+    """There is no default operation. An omitted mode once meant overwrite, so a call meant to add a section replaced
+    the whole note (the 13 Nov Kimi turn: content, expected_revision and topic, then version alone, five times).
+    Omission, null, blank text and any value that is not exactly an operation are refused typed before anything is
+    read or written: note, history and index keep every byte; the operation, once named, does what it says."""
+    drive = tmp_path / "drive"
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=drive)
+    registry.set_context(ToolContext(repo_dir=tmp_path, drive_root=drive, task_id="modeless"))
+    target = address(drive, "people/polina")
+    first = store.write_knowledge_note(target, "# Полина\n\n## Работа\n\nВыгрузки и датасеты.\n").current
+    held = store.write_knowledge_note(target, first.text + "\n## Встречи\n\nДейли по средам.\n",
+                                      expected_revision=first.revision).current
+    news = "\n## Новость\n\nНовый запрос к выгрузкам.\n"
+    shapes = {"omitted": {}, "null": {"mode": None}, "empty": {"mode": ""}, "space": {"mode": " "},
+              "long blank": {"mode": " " * 9000}, "capitalized": {"mode": "Append"}, "padded": {"mode": " append"},
+              "trailing": {"mode": "append "}, "unknown": {"mode": "replace"}, "number": {"mode": 1},
+              "list": {"mode": ["append"]}, "object": {"mode": {"op": "append"}}, "boolean": {"mode": True}}
+    received = {"omitted": "mode is missing or null", "null": "mode is missing or null",
+                "empty": "mode='' is not an operation", "space": "mode=' ' is not an operation",
+                "long blank": "mode=<9000 whitespace characters> is not an operation",
+                "capitalized": "mode='Append' is not an operation", "padded": "mode=' append' is not an operation",
+                "trailing": "mode='append ' is not an operation", "unknown": "mode='replace' is not an operation",
+                "number": "mode=1 is not text", "list": "mode=['append'] is not text",
+                "object": "mode={'op': 'append'} is not text", "boolean": "mode=True is not text"}
+    before = _files(drive / "memory")
+    for name, mode in shapes.items():
+        for call in ({"topic": "people/polina", "scope": "global", "content": news, "expected_revision": held.revision},
+                     {"topic": "people/polina", "scope": "global", "version": first.revision}):
+            executed = _model_call(registry, json.dumps({**call, **mode}))
+            result, reply = executed["tool_result"], executed["result"]
+            assert executed["is_error"] and (result.status, result.code) == ("error", "TOOL_ARG_ERROR"), (name, reply)
+            assert result.meta.get("operation_outcome") == "completed_no_effect", (name, result.meta)
+            assert reply.startswith(f"⚠️ TOOL_ARG_ERROR: {received[name]}. knowledge_write has no default operation: "
+                                    "pass mode as exactly one of overwrite"), (name, reply)
+            assert reply.endswith(" Nothing was written."), (name, reply)
+    assert ("revert (puts back the earlier version named by version)" in reply
+            and "expected_revision is the current revision a replacing write checks" in reply), reply
+    assert _files(drive / "memory") == before  # the note, its history journal and the index, byte for byte
+    # Named, the operation is the one asked for: the same call appends the section and loses nothing.
+    appended = _model_call(registry, json.dumps({"topic": "people/polina", "scope": "global", "mode": "append",
+                                                 "content": news, "expected_revision": held.revision}))
+    assert not appended["is_error"], appended["result"]
+    assert target.path.read_bytes() == held.raw + news.encode("utf-8")
+    assert [row["mode"] for row in history(target)] == ["overwrite", "overwrite", "append"]
+
+
+def test_every_named_mode_keeps_its_operation_and_history_through_the_model_call_path(tmp_path):
+    """Each documented operation, named explicitly, still does what it did: create and replace with overwrite, append,
+    edit, revert to an exact earlier version, archive and restore, each with its own history row."""
+    drive = tmp_path / "drive"
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=drive)
+    registry.set_context(ToolContext(repo_dir=tmp_path, drive_root=drive, task_id="named"))
+    target = address(drive, "work/modes")
+
+    def write(**arguments):
+        executed = _model_call(registry, json.dumps({"topic": "work/modes", "scope": "global", **arguments}))
+        assert not executed["is_error"], (arguments, executed["result"])
+        return store.read_knowledge_note(target)
+
+    created = write(mode="overwrite", content="# Modes\n\nOne.\n")
+    appended = write(mode="append", content="Two.\n")
+    assert appended.raw == created.raw + b"Two.\n"
+    edited = write(mode="edit", old_str="One.", content="First.", expected_revision=appended.revision)
+    assert edited.text.endswith("# Modes\n\nFirst.\nTwo.\n")
+    replaced = write(mode="overwrite", content="# Modes\n\nReplaced on purpose.\n", expected_revision=edited.revision)
+    assert replaced.text.endswith("# Modes\n\nReplaced on purpose.\n") and "Two." not in replaced.text
+    reverted = write(mode="revert", version=edited.revision, expected_revision=replaced.revision)
+    assert reverted.raw == edited.raw and reverted.revision == edited.revision
+    archived = write(mode="archive", reason="kept in the overview", expected_revision=reverted.revision)
+    assert archived.state == "archived" and archived.text.endswith("# Modes\n\nFirst.\nTwo.\n")
+    restored = write(mode="restore", expected_revision=archived.revision)
+    assert restored.state == "active" and restored.text.endswith("# Modes\n\nFirst.\nTwo.\n")
+    assert [row["mode"] for row in history(target)] == [
+        "overwrite", "append", "edit", "overwrite", "revert", "archive", "restore"]
+    fresh = address(drive, "work/appended")  # append creates a missing note, as overwrite does
+    assert not _model_call(registry, json.dumps({"topic": "work/appended", "scope": "global", "mode": "append",
+                                                 "content": "Started by an append.\n"}))["is_error"]
+    assert store.read_knowledge_note(fresh).text.endswith("Started by an append.\n")
 
 
 def test_a_null_reason_takes_the_omitted_path_and_archive_still_requires_one(tmp_path):
@@ -948,7 +1038,7 @@ def test_the_one_pair_edit_takes_its_replacement_as_content_or_new_str(tmp_path)
             ({"edits": [_item("Newest three.", new_str="A")], "old_str": "Newest three.", "new_str": "B"}, items),
             ({"mode": "append", "content": "x", "new_str": "y"}, "mode=append takes its text as content"),
             ({"mode": "overwrite", "new_str": "# Pair\n"}, "mode=overwrite takes its text as content"),
-            ({"mode": "rewrite", "new_str": "B"}, "mode must be overwrite, append, edit, revert, archive, restore")):
+            ({"mode": "rewrite", "new_str": "B"}, "mode='rewrite' is not an operation")):  # read before new_str
         reply = write(**arguments)
         assert reply.startswith("⚠️ TOOL_ARG_ERROR") and message in reply, (arguments, reply)
     assert _files(tmp_path) == before
@@ -1057,16 +1147,17 @@ def test_a_stale_revision_its_history_holds_gets_the_changes_instead_of_the_whol
     held = store.write_knowledge_note(target, "# Plan\n\nStep one.\n\n## Later\n\nDetail.\n", writer="turn").current
     current = store.write_knowledge_note(target, "Step one, revised.", "edit", held.revision, old_str="Step one.",
                                          reason="another focus learned more", focus={"role": "presence", "task_id": "other"}).current
-    stale = tools._knowledge_write(ctx, "plan", "# Plan\n\nMine.\n", scope="global", expected_revision=held.revision)
+    stale = tools._knowledge_write(ctx, "plan", "# Plan\n\nMine.\n", mode="overwrite", scope="global",
+                                   expected_revision=held.revision)
     assert "revision_conflict" in stale and f"expected_revision={current.revision!r}" in stale
     assert "presence task_id=other · edit · reason: another focus learned more" in stale
     assert "- Step one.\n+ Step one, revised.\n" in stale and "under # Plan" in stale and "Outline of 'plan'" in stale
     assert applied_blocks(held.text, stale) == current.text  # your version plus the blocks is the current note
     assert "The complete current text is knowledge_read(topic='plan', scope='global')." in stale
     assert current.text not in stale and store.read_knowledge_note(target).raw == current.raw
-    unknown = tools._knowledge_write(ctx, "plan", "Mine.", scope="global", expected_revision="0" * 64)
+    unknown = tools._knowledge_write(ctx, "plan", "Mine.", mode="overwrite", scope="global", expected_revision="0" * 64)
     assert "revision_conflict" in unknown and unknown.endswith(current.text)  # a revision the tail lacks: as before
-    required = tools._knowledge_write(ctx, "plan", "Mine.", scope="global")
+    required = tools._knowledge_write(ctx, "plan", "Mine.", mode="overwrite", scope="global")
     assert "revision_required" in required and required.endswith(current.text)
 
 
@@ -1080,7 +1171,8 @@ def test_a_stale_reply_places_every_change_in_whole_lines(tmp_path):
                                       "Alice met Bob, and Alice called Carol.\n\nKept.\n").current
     current = store.write_knowledge_note(target, held.text.replace("timeout: 3", "timeout: 5").replace(
         "and Alice called", "and Alice never called"), expected_revision=held.revision).current
-    stale = tools._knowledge_write(ctx, "limits", "# Limits\n\nMine.\n", scope="global", expected_revision=held.revision)
+    stale = tools._knowledge_write(ctx, "limits", "# Limits\n\nMine.\n", mode="overwrite", scope="global",
+                                   expected_revision=held.revision)
     assert "revision_conflict" in stale and "2 block(s)" in stale and current.text not in stale
     assert ("@ yours: 1 line(s) from line 7 → current: 1 line(s) from line 7, under # Limits: 1 chars removed, 1 added\n"
             "- Retries: 3; timeout: 3; workers: 3.\n+ Retries: 3; timeout: 5; workers: 3.\n") in stale
@@ -1099,9 +1191,11 @@ def test_a_stale_revision_gets_every_change_since_or_the_whole_note_never_a_clip
                                          expected_revision=held.revision).current
 
     def stale():
-        return tools._knowledge_write(ctx, "plan", "# Plan\n\nMine.\n", scope="global", expected_revision=held.revision)
+        return tools._knowledge_write(ctx, "plan", "# Plan\n\nMine.\n", mode="overwrite", scope="global",
+                                      expected_revision=held.revision)
 
-    whole = tools._knowledge_write(ctx, "plan", "Mine.", scope="global", expected_revision="0" * 64)  # today's reply
+    whole = tools._knowledge_write(ctx, "plan", "Mine.", mode="overwrite", scope="global",
+                                   expected_revision="0" * 64)  # today's reply
     complete = stale()
     assert "6 block(s)" in complete and complete.count("\n- old words ") == 6 and complete.count("\n+ new words ") == 6
     assert applied_blocks(held.text, complete) == current.text
@@ -1121,7 +1215,7 @@ def test_a_stale_revision_beyond_the_tail_gets_the_whole_note_as_before(tmp_path
     for index in range(4):
         store.write_knowledge_note(address(tmp_path, f"filler/{index}"), "z" * 3000)
     monkeypatch.setattr(store, "_JOURNAL_TAIL_BYTES", 4096)
-    stale = tools._knowledge_write(ctx, "far", "Mine.", scope="global", expected_revision=held.revision)
+    stale = tools._knowledge_write(ctx, "far", "Mine.", mode="overwrite", scope="global", expected_revision=held.revision)
     assert "revision_conflict" in stale and stale.endswith(current.text) and "What changed" not in stale
     lead = next(entry for entry in tools.get_tools() if entry.name == "knowledge_write").schema["description"]
     assert "in whole lines when the note's recent history holds it" in lead  # the writer's tail, not all history

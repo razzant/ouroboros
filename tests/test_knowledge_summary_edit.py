@@ -177,6 +177,7 @@ REFUSALS = [
     ({"mode": "edit", "content": "Replacement."}, "non-empty old_str, or a summary"),
     ({"mode": "overwrite"}, "mode=overwrite requires content"),
     ({"mode": "append"}, "mode=append requires content"),
+    ({"summary": NEW}, "mode is missing or null"),  # a summary revision still names its edit
 ]
 
 
@@ -309,7 +310,7 @@ def test_the_backlog_summary_is_an_ordinary_revision_checked_edit(tmp_path):
     assert tools._knowledge_write(ctx, tools.BACKLOG_TOPIC, mode="restore", summary=NEW).startswith(
         "⚠️ TOOL_ARG_ERROR")
     assert not (tmp_path / "memory").exists()
-    _receipt(tools._knowledge_write(ctx, tools.BACKLOG_TOPIC, item))
+    _receipt(tools._knowledge_write(ctx, tools.BACKLOG_TOPIC, item, mode="overwrite"))
     address = store.resolve_knowledge_address(tmp_path, tools.BACKLOG_TOPIC, "global")
     created = store.read_knowledge_note(address)
     stale = tools._knowledge_write(ctx, tools.BACKLOG_TOPIC, mode="edit", summary=NEW)
@@ -325,7 +326,7 @@ def test_the_backlog_summary_is_an_ordinary_revision_checked_edit(tmp_path):
 def test_schema_adds_summary_without_breaking_older_calls(tmp_path):
     schema = next(entry.schema for entry in tools.get_tools() if entry.name == "knowledge_write")
     props = schema["parameters"]["properties"]
-    assert schema["parameters"]["required"] == ["topic"]
+    assert schema["parameters"]["required"] == ["topic", "mode"]
     assert props["summary"]["type"] == "string" and "when to open this note" in props["summary"]["description"]
     assert "overwrite, append or edit" in props["summary"]["description"]
     assert {"topic", "scope", "content", "mode", "old_str", "expected_revision"} < set(props)
@@ -333,20 +334,27 @@ def test_schema_adds_summary_without_breaking_older_calls(tmp_path):
     assert set(props) == set(inspect.signature(tools._knowledge_write).parameters) - {"ctx"}
     assert "body text never replaces it" in schema["description"]
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
-    assert tools._knowledge_write(ctx, "positional", "Body.").startswith("✅")  # the oldest call shape
+    # The oldest call shape keeps its positions (topic, content, mode); since mode became required, it names one.
+    assert tools._knowledge_write(ctx, "positional", "Body.", "overwrite").startswith("✅")
+    assert tools._knowledge_write(ctx, "unnamed", "Body.").startswith("⚠️ TOOL_ARG_ERROR: mode is missing or null.")
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry.set_context(ctx)
-    # Omitted content is the handler's typed refusal, not a signature-binding failure.
-    assert "mode=overwrite requires content" in registry.execute("knowledge_write", {"topic": "no-content"})
-    assert not store.resolve_knowledge_address(tmp_path, "no-content", "global").path.exists()
+    # An omitted mode or content is the handler's typed refusal, not a signature-binding failure.
+    for arguments, refusal in (({}, "⚠️ TOOL_ARG_ERROR: mode is missing or null."),
+                               ({"mode": "overwrite"}, "mode=overwrite requires content")):
+        reply = registry.execute("knowledge_write", {"topic": "no-content", **arguments})
+        assert refusal in reply and "invalid arguments for knowledge_write" not in reply, reply
+    for topic in ("unnamed", "no-content"):
+        assert not store.resolve_knowledge_address(tmp_path, topic, "global").path.exists()
 
 
 def test_an_overwrite_takes_its_summary_after_its_own_merge(tmp_path):
     ctx, address, original = _setup(tmp_path)
     content = "---\nsummary: From the content.\n---\n# Ada\n\nRewritten.\n"
-    assert "revision_required" in tools._knowledge_write(ctx, "people/ada", content, scope="global", summary=NEW)
+    assert "revision_required" in tools._knowledge_write(ctx, "people/ada", content, mode="overwrite", scope="global",
+                                                         summary=NEW)
     assert store.read_knowledge_note(address).raw == original.raw
-    receipt = _receipt(tools._knowledge_write(ctx, "people/ada", content, scope="global", summary=NEW,
+    receipt = _receipt(tools._knowledge_write(ctx, "people/ada", content, mode="overwrite", scope="global", summary=NEW,
                                               expected_revision=original.revision))
     current = store.read_knowledge_note(address)
     assert current.summary == NEW  # the parameter wins over the content's own frontmatter
@@ -354,7 +362,7 @@ def test_an_overwrite_takes_its_summary_after_its_own_merge(tmp_path):
         key: original.metadata[key] for key in ("type", "title", "custom")}
     assert _body(current) == b"# Ada\n\nRewritten.\n" and receipt["knowledge_delta"]["summary_changed"] is True
     assert (_history(address)[-1]["mode"], _history(address)[-1]["summary"]) == ("overwrite", NEW)
-    plain = _receipt(tools._knowledge_write(ctx, "people/ada", content, scope="global",
+    plain = _receipt(tools._knowledge_write(ctx, "people/ada", content, mode="overwrite", scope="global",
                                             expected_revision=current.revision))
     assert store.read_knowledge_note(address).summary == "From the content." and plain["knowledge_delta"]["summary_changed"]
 
