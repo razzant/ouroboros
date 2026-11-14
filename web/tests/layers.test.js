@@ -49,6 +49,7 @@ function makeWin() {
             constructor(type, init) { Object.assign(this, { type, defaultPrevented: false }, init); }
             preventDefault() { this.defaultPrevented = true; }
         },
+        Event: class { constructor(type, init) { Object.assign(this, { type }, init); } },
     };
     return win;
 }
@@ -88,6 +89,40 @@ test('push, top, size, pop through the owner, remove is idempotent', () => {
     w.layers.push({ id: 'b', el: w.panel, onClose() {} });
     w.layers.push({ id: 'a', el: w.sidebar, modal: false, onClose() {} });
     assert.deepEqual(w.layers.ids(), ['a', 'b']);
+    w.layers.destroy();
+});
+
+test('Escape clears search first; shortcut, mouse and host Back dismiss the popup before the page layer, and root is quiet', () => {
+    for (const input of ['shortcut', 'mouse', 'host']) {
+        const w = world(), closed = [];
+        const field = w.node('input', w.content);
+        field.matches = selector => selector.includes('search');
+        field.value = 'words'; field.focus();
+        w.layers.push({ id: 'return', page: true, modal: false, focus: false, onClose: () => closed.push('page') });
+        w.win.fire('keydown', { key: 'Escape', preventDefault() {} });
+        assert.equal(field.value, ''); assert.equal(w.layers.size(), 1);
+        const popup = w.node('div', w.doc.body);
+        popup.onkey = event => { if (event.key === 'Escape') { event.preventDefault(); closed.push('popup'); w.doc.dialogs = []; } };
+        w.doc.dialogs = [popup];
+        const press = () => input === 'host' ? w.layers.back('host-back')
+            : input === 'mouse' ? w.win.fire('auxclick', { button: 3, preventDefault() {} })
+                : w.win.fire('keydown', { key: '[', metaKey: true, preventDefault() {} });
+        press(); assert.deepEqual(closed, ['popup']); assert.equal(w.layers.size(), 1);
+        press(); assert.deepEqual(closed, ['popup', 'page']);
+        press(); assert.deepEqual(closed, ['popup', 'page'], 'at root nothing is dismissed');
+        w.layers.destroy(); assert.equal(w.win.listeners.size, 0);
+    }
+});
+
+test('a new layer waits for consumption of the old sentinel before arming its own', async () => {
+    const w = world();
+    w.layers.push({ id: 'old', focus: false }); await tick();
+    w.layers.remove('old'); await tick();
+    w.layers.push({ id: 'new', focus: false }); await tick();
+    assert.deepEqual(w.win.history.calls.map(call => call[0]), ['push', 'back']);
+    w.win.fire('popstate'); await tick();
+    assert.deepEqual(w.layers.ids(), ['new']);
+    assert.deepEqual(w.win.history.calls.map(call => call[0]), ['push', 'back', 'push']);
     w.layers.destroy();
 });
 

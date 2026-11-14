@@ -3395,8 +3395,8 @@ A jump leaves a named return in the one stack (`web/modules/layers.js`), under o
 or drawer choice, a section's own list row or a tab is a jump; another stacks. Sidebar and drawer choices clear the
 returns; section rows and tabs keep them. Returning restores the page, its levels, reading place and pressed row.
 The drawer, Project panel, section levels and a file shown alone in Files use that same stack. Dialogs, menus and the work list keep their own
-Escape and outside-press dismissal. Escape, ×, a press on the scrim close the
-topmost layer and only it; a Project that covers Main (the phone's card, a finger's
+Escape and outside-press dismissal. Escape, browser and system Back, mouse Back and ⌘[ (Ctrl+[ elsewhere) use the same Back: a popup first, then the
+top layer. Escape clears a filled search first. × and the scrim close their layer; a Project that covers Main (the phone's card, a finger's
 docked column) is modal with the docked sidebar live, its covered room inert once it
 has arrived; the system or browser Back and Telegram's Back close
 what is on top: a dialog over a layer first, then the layer. While a layer is

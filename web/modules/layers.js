@@ -46,6 +46,7 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
     let epoch = 0;        // the latest commit; an older pending inert difference applies nothing
     let pendingInert = null;  // that commit's inert difference while it waits for the motion
     let owed = null;          // the focus that waits for it
+    let dismissing = null;    // Escape dispatched to the popup above the stack, never another Back
 
     const top = () => stack[stack.length - 1] || null;
     const has = (id) => stack.some((layer) => layer.id === id);
@@ -98,6 +99,7 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
         Promise.resolve().then(() => {
             hist.queued = false;
             if (disposed) return;
+            if (hist.skip) return; // finish consuming the old sentinel before arming a newly opened layer
             try {
                 if (stack.length && !hist.armed) {
                     history.pushState(LAYER_STATE, '');
@@ -113,18 +115,21 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
         });
     }
     const onPopState = () => {
-        if (hist.skip > 0) { hist.skip -= 1; return; }
+        if (hist.skip > 0) { hist.skip -= 1; reconcileHistory(); return; }
         hist.armed = false;
         if (stack.length) back('history');
+        reconcileHistory();
     };
 
     // ---- Escape closes the top layer unless something inside already took the key (a menu, the work list, a dialog)
     const onKeydown = (event) => {
-        if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || !stack.length) return;
-        if (doc?.querySelector?.('dialog[open]')) return;  // a native modal dialog owns Escape until it adapts
-        event.preventDefault();
-        pop('escape');
+        if (event === dismissing || event.defaultPrevented || event.isComposing) return;
+        const bracket = event.key === '[' && (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey;
+        if (event.key !== 'Escape' && !bracket) return;
+        if (event.key === 'Escape' && doc?.querySelector?.('dialog[open]')) return; // the native dialog takes its own Escape
+        if (back(bracket ? 'shortcut' : 'escape')) event.preventDefault();
     };
+    const onMouseBack = (event) => { if (event.button === 3 && back('mouse')) event.preventDefault(); };
 
     function focusInto(layer) {
         if (layer.focus === false) return;
@@ -270,13 +275,23 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
      * as its Escape (the dialogs close on Escape through ui_interactions.bindDialogFocus; a bare native dialog that
      * nothing answered closes as its own Escape would close it) and the layer stays; otherwise the top layer closes. */
     function back(reason = 'history') {
-        const dialogs = [...(doc?.querySelectorAll?.('dialog[open], [aria-modal="true"]') || [])]
-            .filter((el) => el.getClientRects?.().length && !stack.some((layer) => layer.el === el));
+        const dialogs = [...(doc?.querySelectorAll?.('dialog[open], [aria-modal="true"], [role="dialog"], [role="menu"], .ui-popup') || [])]
+            .filter((el) => el.getClientRects?.().length && !el.closest?.('[inert], [hidden], [aria-hidden="true"]')
+                && !stack.some((layer) => layer.el === el));
         const dialog = dialogs[dialogs.length - 1];
-        if (!dialog || !win?.KeyboardEvent) return pop(reason);
+        if (!dialog || !win?.KeyboardEvent) {
+            const field = doc?.activeElement;
+            if (reason === 'escape' && field?.matches?.('input[type="search"], [role="searchbox"]') && field.value) {
+                field.value = '';
+                field.dispatchEvent(new win.Event('input', { bubbles: true }));
+                return true;
+            }
+            return pop(reason);
+        }
         const target = dialog.contains(doc.activeElement) ? doc.activeElement : dialog;
         const escape = new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });
-        target.dispatchEvent(escape);
+        dismissing = escape;
+        try { target.dispatchEvent(escape); } finally { dismissing = null; }
         if (!escape.defaultPrevented && dialog.tagName === 'DIALOG') dialog.close?.();
         reconcileHistory();
         return true;
@@ -290,6 +305,7 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
     win?.addEventListener?.('popstate', onPopState);
     win?.addEventListener?.('keydown', onKeydown);
     win?.addEventListener?.('keydown', onTab, true);
+    win?.addEventListener?.('auxclick', onMouseBack);
 
     function destroy() {
         disposed = true;
@@ -297,6 +313,7 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
         win?.removeEventListener?.('popstate', onPopState);
         win?.removeEventListener?.('keydown', onKeydown);
         win?.removeEventListener?.('keydown', onTab, true);
+        win?.removeEventListener?.('auxclick', onMouseBack);
         pendingInert = null;
         owed = null;
         for (const el of inerted) el.inert = false;
