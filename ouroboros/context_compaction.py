@@ -426,6 +426,10 @@ def owner_protected_unit_ids(messages: Sequence[Mapping[str, Any]], units: Seque
     return frozenset(unit.unit_id for unit in units if messages[unit.start].get(HOST_CONTEXT_KIND_KEY) in OWNER_ROW_KINDS)
 
 
+# Counted by ``_source_atoms`` for a part it cannot encode; never a sha256 digest and never evidence.
+UNENCODABLE_SOURCE_ATOM = "unencodable-source-atom"
+
+
 def _source_atoms(messages: Sequence[Mapping[str, Any]]) -> Counter:
     """Content identities across function/custom and native tool-result syntax.
 
@@ -439,13 +443,16 @@ def _source_atoms(messages: Sequence[Mapping[str, Any]]) -> Counter:
     last_call: tuple = ("", None)
 
     def add(kind: str, *values: Any) -> None:
-        atoms[_sha256(_canonical_bytes((kind, *values)))] += 1
+        try:
+            atoms[_sha256(_canonical_bytes((kind, *values)))] += 1
+        except RecursionError:  # nesting this reader decodes but cannot encode here
+            atoms[UNENCODABLE_SOURCE_ATOM] += 1
 
     def arguments(value: Any) -> Any:
         if isinstance(value, str):
             try:
                 return json.loads(value)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, RecursionError):
                 pass
         return value
 
@@ -459,7 +466,7 @@ def _source_atoms(messages: Sequence[Mapping[str, Any]]) -> Counter:
         if isinstance(value, str):
             try:
                 return json.loads(value)
-            except ValueError:
+            except (ValueError, RecursionError):
                 return {"result": value}  # native function-result JSON envelope
         return value
 
@@ -515,6 +522,11 @@ def exposed_context_units_from_atoms(
     exposed = []
     for unit in context_units(messages, scope="dialogue"):
         unit_atoms = _source_atoms(messages[unit.start:unit.end + 1])
+        # A part without a content identity leaves its whole unit unproven: matching the
+        # unit's other atoms shows only that those parts reached the wire, and a marker on
+        # the sent side names no content, so it can never stand in for the missing part.
+        if UNENCODABLE_SOURCE_ATOM in unit_atoms:
+            continue
         if unit_atoms and all(remaining[key] >= count for key, count in unit_atoms.items()):
             remaining.subtract(unit_atoms)
             exposed.append({"unit_id": unit.unit_id, "raw_sha256": unit.raw_sha256})

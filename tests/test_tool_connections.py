@@ -234,7 +234,7 @@ _GATEWAY_ARGUMENTS = {
     "number": (5, None), "zero": (0, None), "number text": ("5", None), "boolean": (True, None),
     "false": (False, None), "boolean text": ("true", None),
     "doubly encoded object": (json.dumps(json.dumps(_TITLE)), None), "doubly encoded null": (json.dumps("null"), None),
-    "nested past the decoder": ("[" * 100_000 + "]" * 100_000, None),
+    "nested past the decoder": ("[" * 1_000_000 + "]" * 1_000_000, None),  # past 3.14's C-stack bound, too
 }
 
 
@@ -277,6 +277,9 @@ def test_the_gateway_handler_sends_one_arguments_object_or_nothing(registry, mon
     """Called directly, call_mcp_tool sends the no-argument forms as {} and an object exactly as given (Unicode kept);
     any other arguments are a typed no-effect refusal carrying the tool's schema: the Safety check sees only the
     gateway's own declared skip, and nothing is sent."""
+    if form == "nested past the decoder":
+        with pytest.raises(RecursionError):  # the witness: the decoder refuses the depth, balanced or not
+            json.loads(_GATEWAY_ARGUMENTS[form][0])
     sent, checked = _gateway_sends(registry, monkeypatch)
     result = registry.execute_result("call_mcp_tool", _gateway_envelope(form))
     passes = _GATEWAY_ARGUMENTS[form][1]
@@ -316,6 +319,29 @@ def test_a_gateway_call_in_a_batch_runs_as_its_mcp_call_or_is_refused_beside_a_r
         assert (rows["form"]["fn_name"], rows["form"]["is_error"]) == ("mcp_gitlab__create_issue", False)
         assert sorted(sent, key=lambda row: row[0]) == [("create_issue", passes), ("history", {})]
         assert sorted(checked) == [("mcp_gitlab__create_issue", False), ("mcp_slack__history", False)]
+
+
+def test_a_call_whose_own_arguments_nest_past_the_decoder_is_refused_beside_a_running_neighbour(
+        registry, monkeypatch, tmp_path):
+    """The rows above nest inside a parsed envelope; here the call's own arguments (a repetition loop cut at the
+    output limit) reach every executor parse: a typed argument error, nothing dispatched, and the batch goes on."""
+    from ouroboros.loop_tool_execution import execute_tool_batch
+
+    deep = '{"name": ' + "[" * 1_000_000  # past Python 3.14's C-stack bound (about 115k), not only 1000 frames
+    with pytest.raises(RecursionError):  # the witness: the decoder refuses the depth, not merely the truncation
+        json.loads(deep)
+    sent, checked = _gateway_sends(registry, monkeypatch)
+    calls = [{"id": "deep", "type": "function", "function": {
+                 "name": "call_mcp_tool", "arguments": deep}},
+             {"id": "neighbour", "type": "function", "function": {
+                 "name": "call_mcp_tool", "arguments": json.dumps({"name": "mcp_slack__history"})}}]
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    results, control = execute_tool_batch(calls, registry, tmp_path / "logs", "deep-batch", None, {})
+    assert control is None and sent == [("history", {})] and checked == [("mcp_slack__history", False)]
+    rows = {row["tool_call_id"]: row for row in results}
+    assert (rows["neighbour"]["fn_name"], rows["neighbour"]["is_error"]) == ("mcp_slack__history", False)
+    assert (rows["deep"]["fn_name"], rows["deep"]["is_error"]) == ("call_mcp_tool", True)
+    assert rows["deep"]["tool_result"].code == "TOOL_ARG_ERROR"
 
 
 def test_enable_tools_loads_a_whole_server_and_says_what_the_next_request_carries(registry):

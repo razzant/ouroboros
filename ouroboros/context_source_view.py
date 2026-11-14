@@ -253,7 +253,7 @@ def chosen_read_units(messages, units, *, usable_input=None, density=1.0):
         for call in rows[0].get("tool_calls") or ():
             try:
                 arguments = json.loads(call.get("function", {}).get("arguments") or "{}")
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, RecursionError):  # nesting past the decoder's depth chose no read
                 continue
             row = results.get(str(call.get("id") or ""))
             if row is None or requested_call_view(str(call.get("function", {}).get("name") or ""), arguments) is None:

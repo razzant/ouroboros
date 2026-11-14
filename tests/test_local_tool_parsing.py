@@ -521,6 +521,20 @@ class TestReplayedCallsAndReasoningShapes(unittest.TestCase):
         self.assertEqual(history[1]["tool_calls"][0]["function"]["arguments"], '{"path": "README.md", "limit": 3}')
         odd = [history[0], {"role": "assistant", "tool_calls": [{"function": {"name": "x", "arguments": "not json"}}]}]
         self.assertEqual(object_tool_arguments(odd), odd)
+        deep = '{"path": ' + "[" * 1_000_000  # past Python 3.14's C-stack bound (about 115k), not only 1000 frames
+        with self.assertRaises(RecursionError):  # the witness: the decoder refuses the depth
+            json.loads(deep)
+        too_deep = [history[0], {"role": "assistant", "tool_calls": [{"function": {"name": "x", "arguments": deep}},
+                                                                     history[1]["tool_calls"][0]]}]
+        replayed = object_tool_arguments(too_deep)  # nothing raises: the raw text stays, its neighbour converts
+        self.assertIs(replayed[1]["tool_calls"][0]["function"]["arguments"], deep)
+        self.assertEqual(replayed[1]["tool_calls"][1]["function"]["arguments"], {"path": "README.md", "limit": 3})
+        with self.assertRaises(TypeError):  # converted still fails on the raw text: the template's own error
+            render_tool_arguments_on_retry(iterating)(None, messages=too_deep)
+        alone = [history[0], {"role": "assistant", "tool_calls": [{"function": {"name": "x", "arguments": deep}}]}]
+        self.assertEqual(object_tool_arguments(alone), alone)
+        with self.assertRaises(TypeError):  # nothing changed: the first formatter error stands, unmasked
+            render_tool_arguments_on_retry(iterating)(None, messages=alone)
         with self.assertRaises(TypeError):  # a template error the conversion cannot change stays the error
             render_tool_arguments_on_retry(iterating)(None, messages=odd)
 
