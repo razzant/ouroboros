@@ -80,6 +80,8 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "ZAI_PLAN": "",
     "OUROBOROS_CONNECTIONS": [],  # extra keys/endpoints per kind, one row each (provider_connections)
     "OUROBOROS_ENGINE_CONNECTIONS": [],  # named remote Claudexor engines over SSH, one row each (remote_engines)
+    # The Remote switch, {"on", "engine"} as canonical JSON text; "" is Off (remote_placement).
+    "OUROBOROS_REMOTE_EXECUTION": "",
     "OUROBOROS_NETWORK_PASSWORD": "",
     "OUROBOROS_SERVER_HOST": "127.0.0.1",
     "OUROBOROS_HOST_SERVICE_PORT": 8767,

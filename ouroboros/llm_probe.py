@@ -345,7 +345,7 @@ def upstream_transport_reachable(llm: Any, model: str, *, timeout: float,
             from ouroboros.llm_claudexor import catalog_admits_model, model_catalog
             from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
             source, native_model = parse_claudexor_model(model)
-            account = (model_role_option(MODEL_ACCOUNTS_KEY, model_role)
+            account = (model_role_option(MODEL_ACCOUNTS_KEY, model_role, model=model)
                        if account_override is None else account_override)
             effective = expected_route or {}
             effective_profile = effective.get("credentialProfileId")

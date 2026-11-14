@@ -130,6 +130,7 @@ def send_account(target: dict, messages: list, parameters: dict, *, plan: Any = 
     preferred by nothing (read here; ``consume`` spends it, which only a dispatch does), nor after a redo or re-ask
     (``_no_account_preference``); a correlated retry is built without this function and names no account.
     A preferred profile without a fingerprint stays advice; only a complete route is an identity.
+    A role's pin is read for the route sent (``model_role_option`` with ``model``): a pin is its engine's own.
     """
     from ouroboros.model_slots import MODEL_ACCOUNTS_KEY, model_role_option
 
@@ -137,7 +138,8 @@ def send_account(target: dict, messages: list, parameters: dict, *, plan: Any = 
     if override is not None and not isinstance(override, str):
         raise ValueError("model_account_override must be a profile name, empty Auto, or None")
     role = parameters.get("model_role", "")
-    pin = override.strip() if override is not None else model_role_option(MODEL_ACCOUNTS_KEY, role)
+    pin = override.strip() if override is not None else model_role_option(MODEL_ACCOUNTS_KEY, role,
+                                                                           model=target.get("usage_model"))
     failed = (take_failed_account_preference if consume else failed_account_preference)(target, parameters)
     answered = next((route for route in (((message.get("nativeContinuation") or {}).get("route") or {})
                                          for message in reversed(messages) if isinstance(message, dict))

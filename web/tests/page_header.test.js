@@ -117,10 +117,13 @@ test('a room\'s bar ends in one group of capsules, the consciousness chip first,
             group.append(panic);
             bar.append(title, group);
             const header = createRoomHeader({ bar, ws: { isConnected: () => true, send: () => ({ status: 'sent' }) } });
-            const chip = group.children[0];
+            const [chip, remote] = group.children;
             assert.ok(chip.classList.contains('cx-chip'), `${slot}: the chip leads the end group`);
-            assert.equal(group.children[1], panic);
-            assert.equal(bar.children.includes(chip), false, 'never a capsule of its own between the title and the group');
+            assert.ok(remote.classList.contains('rx-capsule'), `${slot}: Remote follows the chip (owner 14.11)`);
+            assert.equal(group.children[2], panic);
+            for (const capsule of [chip, remote]) {
+                assert.equal(bar.children.includes(capsule), false, 'never a capsule of its own between the title and the group');
+            }
             header.destroy();
         }
     } finally { restoreDom(env); }

@@ -126,7 +126,8 @@ def subagent_last_delegation(drive_root=None) -> dict[str, Any]:
 
 
 def execution_identity(snapshot: Mapping[str, Any]) -> dict[str, str]:
-    """Only execution-affecting choices, not prose, order or list fingerprints."""
+    """Only execution-affecting choices, not prose, order or list fingerprints; where a session runs is one of them
+    (``configured_subagents.engine_identity``), named only when it is a remote engine."""
     route = snapshot.get("route") or {}
     return {"kind": str(route.get("kind") or ""),
             "target_id": str(route.get("target_id") or ""),
@@ -134,7 +135,8 @@ def execution_identity(snapshot: Mapping[str, Any]) -> dict[str, str]:
             "effort": str(snapshot.get("effort") or ""),
             "processing_preference": str(snapshot.get("processing_preference") or ""),
             **({"access": str(snapshot.get("access", "workspace_write"))}
-               if route.get("kind") == "agent_session" else {})}
+               if route.get("kind") == "agent_session" else {}),
+            **{key: str(route[key]) for key in ("engine", "workspace") if route.get(key)}}
 
 
 def snapshot_handle(snapshot: Mapping[str, Any]) -> str:

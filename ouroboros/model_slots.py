@@ -95,12 +95,49 @@ def normalize_model_role_options(key: str, raw: object) -> tuple[dict, str]:
     return parsed, json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
-def model_role_option(key: str, role: str, *, settings: dict | None = None) -> str | int:
+def model_role_option(key: str, role: str, *, settings: dict | None = None, model: str | None = None) -> str | int:
     """Read one explicit role (``fallback:<index>`` for a chain entry).
 
     Unlabelled calls use Auto, not Main inferred by string equality. Reviewers
     and configured agents carry their own existing route credential field.
+    ``model`` is the route a send of the role uses: an account pin and an
+    acknowledged window are the own facts of the engine the role's configured
+    route names (``_configured_engine``), so on another engine (the Remote
+    switch's, ``remote_placement``) they read Auto; processing is no engine fact.
     """
+    value = _authored_role_option(key, role, settings=settings)
+    if model is None or key == MODEL_PROCESSING_PREFERENCES_KEY or not value:
+        return value
+    from ouroboros.provider_models import claudexor_engine
+
+    if claudexor_engine(str(model)) == _configured_engine(role, settings):
+        return value
+    return 0 if key == MODEL_CONTEXT_WINDOWS_KEY else ""
+
+
+def _configured_engine(role: str, settings: dict | None) -> str:
+    """The remote engine the route ``role`` is configured with names ("" for this computer's engine or another kind):
+    the role's own slot, an empty one Main's (the Supervisor's through Light), a chain entry its own."""
+    from ouroboros.provider_models import claudexor_engine
+
+    def read(key: str) -> str:
+        default = SETTINGS_DEFAULTS.get(key, "")
+        return str((settings.get(key, default) if settings is not None else runtime_setting(key, default)) or "").strip()
+
+    family, separator, position = role.partition(":")
+    if family == "fallback" and separator:
+        chain = _parse_model_list(read("OUROBOROS_MODEL_FALLBACKS")) if settings is not None else parse_fallback_chain()
+        index = int(position) if position.isdigit() else -1
+        return claudexor_engine(chain[index]) if 0 <= index < len(chain) else ""
+    for candidate in (("safety", "light", "main") if family == "safety" else (family, "main")):
+        model = read(MODEL_ROLE_SETTINGS[candidate]) if candidate in MODEL_ROLE_SETTINGS else ""
+        if model:
+            return claudexor_engine(model)
+    return ""
+
+
+def _authored_role_option(key: str, role: str, *, settings: dict | None = None) -> str | int:
+    """The role's authored option as saved (``model_role_option`` without a route)."""
     default = 0 if key == MODEL_CONTEXT_WINDOWS_KEY else ""
     raw = (settings or {}).get(key, "") if settings is not None else runtime_setting(key, "")
     options, _canonical = normalize_model_role_options(key, raw)
@@ -171,8 +208,12 @@ def task_model_binding(task: dict, *, context_fit_plan: object = None,
         pin = ""
     elif pin is None and role == actor_role and actor_role != "main":
         followed = str((cognitive or {}).get("follows_role") or "")  # a nanny following its parent's role: that role's current pin
-        pin = (str(model_role_option(MODEL_ACCOUNTS_KEY, followed) or "") if followed
-               else str((cognitive or route).get("credential_profile_id") or ""))
+        if followed:  # on the engine that role runs on now (a pin is its engine's own)
+            from ouroboros.route_choice import following_route
+
+            pin = str(model_role_option(MODEL_ACCOUNTS_KEY, followed, model=following_route(followed)[0]) or "")
+        else:
+            pin = str((cognitive or route).get("credential_profile_id") or "")
     pin = (overrides or {}).get(role, {}).get("model_account_override", pin)
     return role, pin
 
@@ -184,7 +225,8 @@ def route_binding(model: str, use_local: bool, role: str, *,
     A live owner choice for the role (a wait-card switch) replaces the configured
     route exactly as the send applies it; the account is the configured pin or
     empty Auto, never an observed Auto account, and routes without accounts have
-    none. Equal model strings with different accounts are different routes.
+    none; a pin binds only on its own engine (``model_role_option``). Equal model
+    strings with different accounts are different routes.
     """
     from ouroboros.provider_models import provider_for_model
 
@@ -192,7 +234,7 @@ def route_binding(model: str, use_local: bool, role: str, *,
     model, use_local = str(chosen.get("model", model) or ""), bool(chosen.get("use_local", use_local))
     account = chosen.get("model_account_override")
     if account is None:
-        account = model_role_option(MODEL_ACCOUNTS_KEY, role) if role else ""
+        account = model_role_option(MODEL_ACCOUNTS_KEY, role, model=model) if role else ""
     if use_local or provider_for_model(model) != "claudexor":
         account = ""
     return model, use_local, str(account or "").strip()

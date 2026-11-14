@@ -3477,8 +3477,8 @@ export function createChatInstance({
         cancelRunFromCard, refreshHeaderControlState, captureVisibleTimelineAnchor, restoreVisibleTimelineAnchor,
         historyPager, showLatest, hostReady: hostStart.ready });
     // Main's bar: Restart, Panic, the budget and the consciousness chip; a Project's bar is app.js's.
-    header = asPanel ? null : createRoomHeader({ bar: pageHeader, ws, shade: roomWork, openDashboardTab,
-        refreshState: refreshHeaderControlState });
+    header = asPanel ? null : createRoomHeader({ bar: pageHeader, ws, shade: roomWork, openDashboardTab, openSettings,
+        refreshState: refreshHeaderControlState, retireState: () => stateSnapshots.retire() });
 
     return self = {
         page,

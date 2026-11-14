@@ -209,7 +209,9 @@ def read_current(ctx: Any) -> dict:
 
 
 def waiting_wake(waiter: Any) -> str | None:
-    """A refused call's resource wait can yield to the loop; a sent call never polls this."""
+    """A refused call's resource wait can yield to the loop; a sent call never polls this. It yields to a durable owner
+    act on this work's model, and to a move of the role the turn follows (a Settings save of Main, the Remote switch:
+    ``route_choice.following_moved``), which the next round's handover applies."""
     from pathlib import Path
     from ouroboros.owner_mailbox import KIND_OWNER_MODEL, OwnerMailboxPeek, drain_owner_entries
     from ouroboros.store import StoreBusy, acquisition_budget
@@ -217,6 +219,8 @@ def waiting_wake(waiter: Any) -> str | None:
     ctx = waiter.tool_context
     if ctx is None:
         return None
+    if route_choice.following_moved(ctx):
+        return route_choice.ROUTE_MOVED_WAKE
     seen = set(getattr(ctx, "_loop_mailbox_seen_ids", ()) or ())
     root = Path(waiter.drive_root)
     applied = getattr(ctx, "_owner_model_applied_id", None)

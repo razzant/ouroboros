@@ -24,6 +24,7 @@ STATE_FIELDS = {
     "evolution_cycle", "evolution_state", "bg_consciousness_state", "spent_calls", "supervisor_ready",
     "supervisor_error", "boot", "runtime_mode", "context_mode", "subagents_mode", "subagents_availability",
     "context_mode_auto_low", "effort_range", "safety_mode", "skills_repo_configured", "github_token_configured",
+    "remote_execution",
     "accounting", "projects", "project_messages_revision", "project_listable_count", "project_chat_ids",
     "main_visible_revision", "task_bindings", "task_bindings_revision", "task_bindings_unchanged", "active_direct_turns", "active_chat_activities",
     "active_chat_activities_complete", "current_questions", "current_questions_complete", "current_questions_gaps",
@@ -203,6 +204,66 @@ def test_a_cancelled_reader_starts_nothing_and_its_refresh_serves_the_next(servi
 
     asyncio.run(abandoned())
     assert len(calls) == 1, "an unchanged revision needs no production, even for a reader that left"
+
+
+@pytest.mark.parametrize("initial_on,reverse", [(False, False), (True, False), (False, True)])
+def test_a_settings_save_cannot_be_confirmed_by_an_older_shared_production(serving, monkeypatch, initial_on, reverse):
+    """Real POST and GET handlers: a post-save reader may join the old flight but must not receive its old value.
+    Concurrent readers share the one replacement; a later deliberate reversal wins, not the first save's value."""
+    from ouroboros import config
+    from ouroboros.gateway import settings
+
+    path = serving.root / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    path.write_text(json.dumps({"OUROBOROS_MODEL": "claudexor::codex=gpt-6",
+        "OUROBOROS_ENGINE_CONNECTIONS": [{"name": "vps", "ssh_host": "example.invalid"}],
+        "OUROBOROS_REMOTE_EXECUTION": json.dumps({"on": initial_on, "engine": "vps"})}), encoding="utf-8")
+    for name in ("_start_supervisor_if_needed_for_request", "_apply_settings_to_env", "_apply_settings_save_side_effects"):
+        monkeypatch.setattr(settings, name, lambda *_a, **_k: None)
+    monkeypatch.setattr(settings, "apply_runtime_provider_defaults", lambda document: (document, False, []))
+    captured, release = threading.Event(), threading.Event()
+    real, calls = gateway_state._state_snapshot, []
+
+    def gated(request, direct=None):
+        snapshot = real(request, direct=direct)
+        calls.append(snapshot["remote_execution"]["on"])
+        if len(calls) == 1:
+            captured.set()
+            assert release.wait(20), "test did not release the older production"
+        return snapshot
+
+    monkeypatch.setattr(gateway_state, "_state_snapshot", gated)
+
+    async def save(on):
+        body = json.dumps({"OUROBOROS_REMOTE_EXECUTION": {"engine": "vps", "on": on}}).encode()
+        async def receive():
+            return {"type": "http.request", "body": body, "more_body": False}
+        request = Request({"type": "http", "method": "POST", "path": "/api/settings",
+                           "headers": [], "query_string": b"", "scheme": "http", "app": serving.app}, receive)
+        result = await settings.api_settings_post(request)
+        assert result.status_code == 200, result.body
+        assert json.loads(result.body)["status"] == "saved"
+
+    async def scenario():
+        first = asyncio.create_task(gateway_state.api_state(_request(serving.app)))
+        try:
+            assert await asyncio.to_thread(captured.wait, 20)
+            await save(not initial_on)
+            if reverse:
+                await save(initial_on)
+            readers = [asyncio.create_task(gateway_state.api_state(_request(serving.app))) for _ in range(5)]
+            await asyncio.sleep(0)  # all five have joined the blocked producer
+        finally:
+            release.set()
+        return await first, await asyncio.gather(*readers)
+
+    before, after = asyncio.run(scenario())
+    expected = initial_on if reverse else not initial_on
+    assert _payload(before)["remote_execution"]["on"] == initial_on
+    assert [_payload(response)["remote_execution"]["on"] for response in after] == [expected] * 5
+    assert calls == [initial_on, expected], "the intervening saves need one shared new production, not one per reader"
+    assert {response.headers[publication.GENERATION_HEADER] for response in after} == {"2"}
+    assert _get(serving.app).headers[publication.GENERATION_HEADER] == "2", "unchanged reads reuse that publication"
 
 
 def test_an_unchanged_revision_serves_the_held_publication_without_reading_a_task_body(serving, monkeypatch):

@@ -337,6 +337,7 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         "subagents_mode": main_cognition(settings)["subagents_mode"],
         "subagents_availability": subagents_availability(settings),
         "main_route": configured_references()["main"],
+        "remote_execution": _remote_execution(),
         "projects": projects,
         "project_messages_revision": messages_revision,
         "project_listable_count": project_listable_count,
@@ -354,6 +355,17 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         **decisions,
         **works,
     }
+
+
+def _remote_execution() -> Optional[Dict[str, Any]]:
+    """The Remote switch's projection (``remote_placement.state_view``); None when it could not be read, never Off."""
+    from ouroboros.remote_placement import state_view
+
+    try:
+        return state_view()
+    except Exception:
+        log.warning("Remote switch projection unavailable", exc_info=True)
+        return None
 
 
 def _direct_turns_snapshot_safe(*, availability=None) -> list:

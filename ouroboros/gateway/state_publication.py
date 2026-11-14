@@ -9,7 +9,11 @@ that probes the revision (``probe``: cheap reads) and, only when it differs from
 publication's, produces the body (``gateway/state.py:_state_snapshot`` plus ``produced_fields``) and
 encodes it once. Requests that arrive meanwhile await that same job; a cancelled waiter leaves without
 starting anything, and the shared job finishes for the others (a thread is never abandoned midway;
-its publication serves the next reader).
+its publication serves the next reader). A committed settings receipt invalidates this app's publisher before
+the save answers. A reader arriving after that receipt waits for a publication begun after it: an older flight
+finishes once, then those readers share one replacement. This in-memory revision adds no reads or durable state;
+ordinary file probes still discover writes made outside this app. It prevents post-save confirmation from reading
+pre-save values even when the browser correctly retired its own older requests.
 
 The revision is read BEFORE the production, so a body is never older than its key (a change landing
 mid-production makes the next probe differ: one more production, never a stale body kept):
@@ -74,6 +78,7 @@ class Publication:
     bindings_revision: str
     roots: frozenset = frozenset()  # other data roots this production read: the next probe stamps them too
     jobs: Dict[str, Any] = field(default_factory=dict)  # the store's named-job rows this production read
+    settings_revision: int = 0  # acknowledged app writes preceding this production
 
 
 def encode(value: Any) -> bytes:
@@ -274,15 +279,22 @@ class Publisher:
         self.held: Optional[Publication] = None
         self._lock = threading.Lock()  # held/generation, between the executor job and the loop
         self._generation = 0
+        self._settings_revision = 0
         self._flight: Optional[Tuple[asyncio.AbstractEventLoop, asyncio.Future]] = None
         self.productions = 0  # bodies produced in this process (the reuse is observable)
 
+    def invalidate_settings(self) -> None:
+        """A committed settings receipt: subsequent requests must not join an older production as confirmation."""
+        with self._lock:
+            self._settings_revision += 1
+
     def refresh(self, produce: Callable[..., Dict[str, Any]]) -> Publication:
         """Probe, then reuse the held publication or produce a new one (the executor job)."""
-        held = self.held
+        with self._lock:
+            held, settings_revision = self.held, self._settings_revision
         direct = _direct_turns_source()
         key = probe(self.drive_root, held.roots if held else frozenset(), direct=direct)
-        if held is not None and held.key == key:
+        if held is not None and held.key == key and held.settings_revision == settings_revision:
             return held
         produced = produce(direct)
         bindings = produced.pop("task_bindings") or {}
@@ -293,21 +305,34 @@ class Publisher:
                 key=key, generation=self._generation, published_at=time.time(), body=encode(produced["fields"]),
                 bindings=encode(bindings), bindings_revision=str(produced.get("task_bindings_revision") or ""),
                 roots=frozenset(map(str, produced.get("roots") or ())) - {self.drive_root},
-                jobs=dict(produced.get("jobs") or {}))
+                jobs=dict(produced.get("jobs") or {}), settings_revision=settings_revision)
             self.held = publication
         return publication
 
     async def current(self, produce: Callable[..., Dict[str, Any]]) -> Publication:
-        """The publication valid for the revision observed now: await the refresh in flight, else start one."""
+        """Share a flight at least as new as this request's acknowledged settings; cancellation leaves it alive."""
         loop = asyncio.get_running_loop()
-        flight = self._flight
-        if flight is None or flight[0] is not loop or flight[1].done():
-            future = asyncio.ensure_future(asyncio.to_thread(self.refresh, produce))
-            self._flight = (loop, future)
-            future.add_done_callback(_retrieve)
-        else:
-            future = flight[1]
-        return await asyncio.shield(future)  # a cancelled waiter leaves; the shared refresh goes on
+        with self._lock:
+            minimum = self._settings_revision
+        while True:
+            flight = self._flight
+            if flight is None or flight[0] is not loop or flight[1].done():
+                future = asyncio.ensure_future(asyncio.to_thread(self.refresh, produce))
+                self._flight = (loop, future)
+                future.add_done_callback(_retrieve)
+            else:
+                future = flight[1]
+            value = await asyncio.shield(future)
+            if value.settings_revision >= minimum:
+                return value
+
+
+def settings_written(request: Any) -> None:
+    """Retire only the request app's existing display publication, without creating one or reading anything."""
+    state = getattr(getattr(request, "app", None), "state", None)
+    held = getattr(state, "state_publication", None)
+    if isinstance(held, Publisher):
+        held.invalidate_settings()
 
 
 def _retrieve(future: asyncio.Future) -> None:
@@ -443,6 +468,7 @@ def produced_fields(snap: Dict[str, Any]) -> Dict[str, Any]:
         "subagents_mode": snap["subagents_mode"],
         "subagents_availability": snap["subagents_availability"],
         "main_route": snap["main_route"],
+        "remote_execution": snap.get("remote_execution"),  # None: unread, never Off (remote_placement.state_view)
         "github_token_configured": snap["github_token_configured"],
         "accounting": _accounting_block(snap["accounting"], available, limit),
         "projects": snap["projects"],

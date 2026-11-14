@@ -166,7 +166,7 @@ def _inherited_cognition(ctx: Any, settings: dict) -> dict:
         model = str(live.get("model", getattr(ctx, "active_model", "") or metadata.get("model") or ""))
         local = bool(live.get("use_local", getattr(ctx, "active_use_local", metadata.get("use_local_model", False))))
     if pin is None:
-        pin = model_role_option(MODEL_ACCOUNTS_KEY, role, settings=settings)
+        pin = model_role_option(MODEL_ACCOUNTS_KEY, role, settings=settings, model=model)
     if local or provider_for_model(model) != "claudexor":
         pin = ""
     chosen_by = "parent_switch" if isinstance(choice, dict) and not followed else "inherited"

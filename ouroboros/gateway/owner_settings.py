@@ -374,9 +374,12 @@ def record_settings_change(request: Request | None, changes: Optional[Dict[str, 
     ``{"withheld": "secret"|"structure"}``, plus the declared origin. A write the app did not declare also
     puts one quiet System row (``settings_changed``) in Main; the app's own Save already says what it
     saved. Neither step can undo or fail the save."""
-    if not changes:
-        return
     try:
+        from ouroboros.gateway.state_publication import settings_written
+
+        settings_written(request)  # the post-save GET may otherwise join a pre-save production
+        if not changes:
+            return
         origin = origin or declared_settings_origin(request)
         projected = project_settings_changes(changes)
         owner_audit(request, "settings_changed", {**origin, "changes": projected})

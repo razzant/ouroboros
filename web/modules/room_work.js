@@ -780,7 +780,10 @@ export function createRoomWork({
         delete trigger.dataset.step;
         const chip = name && bar.querySelector('.cx-chip');
         if (chip) delete chip.dataset.fit;
+        const remote = bar?.querySelector('.rx-capsule');  // Remote's word yields first, its glyph and mark stay
+        if (remote) delete remote.dataset.fit;
         const cut = () => statusBadge.scrollWidth > statusBadge.clientWidth + 1;
+        if (remote && cut()) remote.dataset.fit = 'mark';
         if (statusBadge.dataset.step && cut()) trigger.dataset.step = 'off';
         if (cut()) trigger.dataset.word = 'off';
         if (chip && roomCoversMain({ root: doc.documentElement }) && name.scrollWidth > name.clientWidth + 1) {

@@ -920,8 +920,8 @@ status sentence's or a composer chip's dot is its tone, §4).
   question still unanswered (the ones Main's pill counts, whether its task stands on it, goes on under its
   assumption or has ended, and a Project's answer whose delivery a restart left unknown), or what only the owner can do: sign in, a spending limit, Resume after a
   restart, crash or Panic, grant access, a skill review that must run first, local
-  changes before an update, an Evolution chip, the consciousness chip or a Consciousness sentence that needs the owner
-  or was stopped by the spending limit (new starts refused, or its wake proven held at the allowance it started
+  changes before an update, an Evolution chip, Remote On for a target that takes no new work, the consciousness chip
+  or a Consciousness sentence that needs the owner or was stopped by the spending limit (new starts refused, or its wake proven held at the allowance it started
   with); (2) a warning worth reading — warn toasts and sentences,
   Settings and onboarding notes, warnings inside task timelines, reviews and Logs
   events, account quota, and a work that went to a fallback route by itself, until that is resolved
@@ -3310,7 +3310,7 @@ no bar, and its page starts at the window's top edge: the band under the macOS t
 window's (owner 22.10), the page's first row starts below it, and the Widgets board's cards pass under it with
 crisp edges (owner 20.10), as a room's feed does (owner 21.10), while a plain press in the empty band still moves the window. A Project shows its name. In the stack
 layout the row is at most 56 px: ☰, the place's name, its status, then a room's
-consciousness chip and Panic, with the page's tabs, or Files' location and its actions, under it
+consciousness chip, Remote's computer and mark, and Panic, with the page's tabs, or Files' location and its actions, under it
 (`bindPageHeader` moves those nodes); the name wins over the status word, which a short row
 drops whole after its start step, keeping its mark, and Main's title ellipsizes before its chip or Panic yields.
 A Project's name keeps one line inside its capsule, at the controls' size and weight (`--type-body`, 600), and ends
@@ -3332,9 +3332,9 @@ it; another page keeps it too (a return says whether the file changed meanwhile)
 
 **A room's bar is the law of places** (owner 24.10): it holds what has a state and the emergency exit, and a
 command lives under the capsule of the state it changes; there is no ⋯ and no More. Main's bar holds its status,
-the consciousness chip, Restart, Panic and the budget; whenever the bar itself is narrow, on a phone or in a
+the consciousness chip, Remote, Restart, Panic and the budget; whenever the bar itself is narrow, on a phone or in a
 narrow window, Restart and the budget are the work list's last rows `Restart` and `Budget` — the same controls,
-placed by the bar's width. A Project's bar holds its name and status, the same chip and Panic
+placed by the bar's width. A Project's bar holds its name and status, the same chip, Remote and Panic
 (`web/modules/chat_header.js`); the chip leads the end group, so a status word never moves it. The chip is
 the brain and a future next attempt's time (the allowance reset when exhausted, or the sooner retry a changed limit brings),
 or `since HH:MM` only for `due` (appointment, `due` if unknown), with the `still` mark.
@@ -3352,7 +3352,17 @@ door to that place's sheet (Active · Silent · Paused there), read from the pla
 failed read says so on that line, a place gone since disables its row), `Dashboard ›`, `Costs ›` while the allowance is the next step
 and, during a campaign, `Evolution ›`
 (`web/modules/consciousness_status.js`). Evolve and Review live in Dashboard › Evolution (`Run review…` opens
-`/review`'s picker). In Main and Project, the bar has no continuous backing strip:
+`/review`'s picker). Remote (owner 14.11) follows the chip: the computer and its word, the saved preference of where
+Main and new agents run — Off, or the target engine's name in the switched-on soft crimson, `agents` beside it while
+On leaves Main where it is (an API key, the local model, a Main naming an engine), the owner's dot while its target
+takes no new work. A press acts at once: no engine saved opens Accounts and keys › Remote engines; On turns Off; Off
+turns On for the remembered or only engine, and asks where no choice is made (never the first). Its chevron, inside
+the same capsule, is the chooser: where Main and new agents run now (the server's projection, the resolver dispatch
+uses), what a press moves (Main at its next call, the agents started after it; running ones keep their engine), that
+Emergency Stop may not reach work already there, and what an engine refuses. The
+capsule says what the server confirms; its target name yields first where the bar is short, never the agents-only
+scope (`web/modules/remote_switch.js`).
+In Main and Project, the bar has no continuous backing strip:
 the title and status share one floating capsule (`--chip-float`, non-shrinking
 mark and caret with inline inset), and each command is its own floating capsule
 (owner 21.10). No band, mask or clip is drawn under or between them, so the capsules float over the transcript

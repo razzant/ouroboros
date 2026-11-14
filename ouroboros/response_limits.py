@@ -290,7 +290,8 @@ def response_limit_preview(drive_root, route: dict, *, account="", settings=None
     if observed is not None and evidence.response_limit.get("source") != "owner_ack":
         evidence.response_limit = observed  # This read's catalog fact, shown without being stored.
     response = evidence.response_limit
-    window = int(model_role_option(MODEL_CONTEXT_WINDOWS_KEY, role, settings=settings)) if window is None else int(window)
+    window = (int(model_role_option(MODEL_CONTEXT_WINDOWS_KEY, role, settings=settings, model=model)) if window is None
+              else int(window))
     evidence = ce.with_role_window(evidence, window)
     reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local")), evidence=evidence)
     if role in {"light", "deep_review"}:

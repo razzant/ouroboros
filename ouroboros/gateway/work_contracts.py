@@ -20,6 +20,31 @@ class ChatModelRoute(TypedDict):
     use_local: bool
 
 
+class RemoteExecutionEngine(TypedDict):
+    """One saved remote engine as the Remote switch offers it (no host contacted)."""
+
+    name: str
+    label: str
+    enabled: bool  # false: switched off in Settings, it takes no new work
+
+
+class RemoteExecutionMain(ChatModelRoute):
+    """Main as configured, where work that follows it runs now (``effective``, the state's ``main_route``) and why
+    the switch does or does not move it (``remote_placement.main_scope``)."""
+
+    scope: Literal["follows", "local", "api", "engine", "unreadable"]
+    effective: ChatModelRoute
+
+
+class RemoteExecutionState(TypedDict):
+    """``/api/state``'s ``remote_execution``: the saved Remote preference beside what it does now."""
+
+    on: bool
+    engine: str  # the remembered target, "" for none; On names it even if since removed or switched off
+    engines: List[RemoteExecutionEngine]
+    main: RemoteExecutionMain
+
+
 class CitedModelWords(TypedDict):
     """Up to 1024 Unicode characters of the verified span; clipped says whether more was retained."""
 

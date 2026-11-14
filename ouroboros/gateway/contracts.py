@@ -28,7 +28,7 @@ from ouroboros.gateway.claudexor_contracts import (  # noqa: F401 -- public re-e
     ClaudexorReadState, ClaudexorStatusReads, ClaudexorPassiveReadError, ClaudexorQuotaResponse,
     ClaudexorStatusResponse,
 )
-from ouroboros.gateway.work_contracts import WorkLeadFields, WorkStateFields
+from ouroboros.gateway.work_contracts import RemoteExecutionState, WorkLeadFields, WorkStateFields
 from ouroboros.gateway.history_contracts import ChatHistoryResponse, PresenceContact  # noqa: F401 -- public re-exports
 from ouroboros.gateway.health_contracts import BootDocument, BootJob, BootStep, HealthResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.attachment_contracts import (  # noqa: F401 -- public re-exports
@@ -808,7 +808,8 @@ class StateResponse(WorkStateFields):
     subagents_availability: Literal["available", "disabled", "unsaved"]
     context_mode_auto_low: bool  # frozen compatibility field, always False (persistent auto-Low is retired)
     effort_range: EffortRange  # the owner's effort range (POST /api/owner/effort-range), the tolerant read
-    main_route: ChatModelRoute  # Main itself, written by POST /api/owner/chat-model without project_id
+    main_route: ChatModelRoute  # Main where following work runs it now (the Remote switch's engine), its saved route else
+    remote_execution: Optional[RemoteExecutionState]  # the Remote switch beside what it moves; null: unread, never Off
     safety_mode: str
     skills_repo_configured: bool
     github_token_configured: bool

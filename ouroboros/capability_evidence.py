@@ -251,7 +251,7 @@ def model_account_options(model: str, *, role: str = "", settings: Any = None,
 
     source, native_model = parse_claudexor_model(model)
     pin = (credential_profile_id if credential_profile_id is not None else
-           model_role_option(MODEL_ACCOUNTS_KEY, role, settings=settings))
+           model_role_option(MODEL_ACCOUNTS_KEY, role, settings=settings, model=model))
     options = {"source_id": source, "credential_profile_id": str(pin or "")}
     observed = model_route if isinstance(model_route, dict) else {}
     if (observed.get("source") == source and observed.get("model") == native_model

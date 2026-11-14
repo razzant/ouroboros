@@ -943,7 +943,7 @@ def supports_vision(model_id: str, *, model_role: str = "",
         if model_account_override is None and wait is not None:
             model_account_override = wait.overrides.get(model_role, {}).get("model_account_override")
         account = (model_account_override if model_account_override is not None
-                   else model_role_option(MODEL_ACCOUNTS_KEY, model_role))
+                   else model_role_option(MODEL_ACCOUNTS_KEY, model_role, model=model_id))
         try:
             catalog = LLMClient.claudexor_model_catalog(
                 source, account or None, requested_model=native_model, **claudexor_engine_kwargs(model_id))

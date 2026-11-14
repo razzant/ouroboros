@@ -190,6 +190,7 @@ def _write_main_route(request: Request | None, choice: dict, *, origin: dict | N
         model_role_option, normalize_model_role_options,
     )
     from ouroboros.provider_models import claudexor_engine, parse_claudexor_model, provider_for_model
+    from ouroboros.remote_placement import effective_main
 
     result = {"ok": True, "project_id": ""}
 
@@ -209,8 +210,10 @@ def _write_main_route(request: Request | None, choice: dict, *, origin: dict | N
             if "main" in windows:
                 reset = bool(windows.pop("main"))
                 updated[MODEL_CONTEXT_WINDOWS_KEY] = normalize_model_role_options(MODEL_CONTEXT_WINDOWS_KEY, windows)[1]
-        result.update(main_route={"model": model, "use_local": local},
-                      previous_main_route={key: old[key] for key in ("model", "use_local")},
+        # Where Main runs: the saved route as the Remote switch of this document places it (``state_view``'s resolver).
+        placed = (effective_main(model, local, settings=current), effective_main(old["model"], old["use_local"], settings=current))
+        result.update(main_route={"model": placed[0][0], "use_local": placed[0][1]},
+                      previous_main_route={"model": placed[1][0], "use_local": placed[1][1]},
                       account="kept" if pin and keep else "auto" if subscription else "none", window_reset=reset)
         return updated
 

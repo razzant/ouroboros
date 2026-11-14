@@ -624,7 +624,7 @@ def resolve_context_fit_route(
             "source_id", "credential_profile_id", "account_fingerprint")}}
         route["window_observation_fp"] = route_observation_scope(route, settings)
     window = int(model_role_option(MODEL_CONTEXT_WINDOWS_KEY, route["model_role"],
-                                   settings=settings))
+                                   settings=settings, model=route["model"]))
     return route, with_role_window(evidence, window)
 
 

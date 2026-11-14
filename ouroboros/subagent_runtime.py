@@ -135,8 +135,11 @@ def model_visible_subagent_catalog(settings: Mapping[str, Any]) -> dict[str, Any
     ):
         return {}
 
+    from ouroboros.remote_placement import catalog_facts, placed_on
+
     handles = roster_handles(config, settings)
     rows: list[dict[str, Any]] = []
+    placed = ""  # the Remote switch's engine, once a row's new start runs there (``runs_on``)
     for row in config.items:
         # An owner-disabled row keeps its saved configuration and stays
         # editable in Settings; it is simply not offered for a NEW selection.
@@ -165,12 +168,14 @@ def model_visible_subagent_catalog(settings: Mapping[str, Any]) -> dict[str, Any
         projected["review_eligible"] = row.review_eligible
         if row.review_eligible and not session:
             projected["delivery"] = row.delivery or "native"
+        if runs_on := placed_on(row.route, settings):
+            projected["runs_on"] = placed = runs_on
         # The row's guidance, verbatim and last; authorship is not recorded here.
         projected["recommended_use"] = row.recommended_use
         rows.append(projected)
     if not rows:
         return {}
-    return {"rows": rows}
+    return {"rows": rows, **(catalog_facts(placed) if placed else {})}
 
 
 def subagents_availability(settings: Mapping[str, Any]) -> str:
@@ -1235,6 +1240,8 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
                 effective_runtime_subagent_settings(runtime_settings()),
                 subagent_id=selected_id,
             )
+            from ouroboros.remote_placement import place_delegated  # the Remote switch; a continuation, its predecessor
+            selected_snapshot = place_delegated(ctx, selected_snapshot, options.get("continue_from"))
         if selected_snapshot is not None:
             from ouroboros.delegate_plan import inherited_mode
 

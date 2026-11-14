@@ -1,12 +1,13 @@
 /** A room's bar, declared once (docs/DESIGN.md §10 "Page header"): what has a state, and the emergency exit. Main's bar
- * holds the room's status, the consciousness chip, Restart, Panic and the budget; a Project's bar the status, the chip
- * and Panic. There is no More and no ⋯: a command lives in the Shade of the state it changes (consciousness in the
+ * holds the room's status, the consciousness chip, Remote, Restart, Panic and the budget; a Project's bar the status,
+ * the chip, Remote and Panic. There is no More and no ⋯: a command lives in the Shade of the state it changes (consciousness in the
  * chip's), and a narrow bar moves Restart and the budget into the room status's Shade
  * (page_header.js `bindHeaderControlPlacement`). Each control keeps one node and one handler wherever it stands. */
 import { confirmAndSendRestart, headerBudgetPresentation, sendPanic } from './chat_activity.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { createConsciousnessStatus } from './consciousness_status.js';
 import { bindHeaderControlPlacement } from './page_header.js';
+import { createRemoteSwitch } from './remote_switch.js';
 
 /** Panic: immediate in every room's bar, never behind a menu or a save. */
 export function panicButtonHtml() {
@@ -33,9 +34,11 @@ export function mainHeaderActionsHtml() {
 /**
  * Wire one room's bar: Restart and Panic on their own buttons, the budget's door and its words, the consciousness chip,
  * and (Main, `shade` = the room status control of room_work.js) the narrow bar's placement of Restart and the budget.
- * `update(data)` takes every `/api/state` answer the room reads. Returns `{ update, destroy }`.
+ * `update(data)` takes every `/api/state` answer the room reads; `retireState()` retires the page's reads in flight
+ * after Remote's save landed (remote_switch.js). Returns `{ update, destroy }`.
  */
-export function createRoomHeader({ bar, ws, shade = null, openDashboardTab = null, refreshState = () => {} }) {
+export function createRoomHeader({ bar, ws, shade = null, openDashboardTab = null, openSettings = null, refreshState = () => {},
+    retireState = () => {} }) {
     if (!bar) return null;
     const actions = bar.querySelector('.chat-header-actions');
     const budget = bar.querySelector('.chat-budget-pill');
@@ -55,9 +58,12 @@ export function createRoomHeader({ bar, ws, shade = null, openDashboardTab = nul
     const endGroup = [...bar.children].find((node) => node.classList?.contains('app-page-actions')
         || node.classList?.contains('app-page-trailing'));
     if (consciousness?.chip && endGroup) endGroup.prepend(consciousness.chip);
+    // Remote follows the chip: where Main and new agents run, one press (remote_switch.js).
+    const remote = createRemoteSwitch({ bar, openSettings, refreshState, retireState });
     return {
         update(data) {
             consciousness?.update(data);
+            remote?.update(data);
             if (!budget) return;
             const view = headerBudgetPresentation(data);
             const text = budget.querySelector('.chat-budget-text');
@@ -71,6 +77,7 @@ export function createRoomHeader({ bar, ws, shade = null, openDashboardTab = nul
             budget?.removeEventListener('click', onBudget);
             disposePlacement();
             consciousness?.destroy();
+            remote?.destroy();
         },
     };
 }

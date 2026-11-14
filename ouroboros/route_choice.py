@@ -63,6 +63,7 @@ ROUTE_SETTING_KEYS: frozenset = frozenset({
     *MODEL_ROLE_SETTINGS.values(), *(key for key in SETTINGS_DEFAULTS if key.startswith("USE_LOCAL_")),
     MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_PREFERENCE_KEY,
     "OUROBOROS_OR_PROVIDER", "OUROBOROS_WEBSEARCH_BACKEND", "OUROBOROS_ENGINE_CONNECTIONS", *ROUTE_CREDENTIAL_SETTING_KEYS,
+    "OUROBOROS_REMOTE_EXECUTION",  # the Remote switch: where Main and new helpers run (remote_placement)
 })
 _EXPORTED_ROUTE_KEYS = frozenset(settings_env_keys()) & ROUTE_SETTING_KEYS
 # The operator variables a read lets stand in, and the projection records that tell them from our echo.
@@ -248,14 +249,16 @@ def model_role_slot_override(task_metadata: Mapping) -> Optional[Tuple[str, bool
 
 def following_route(role: str, llm: Any = None) -> Tuple[str, bool]:
     """The binding a following route uses NOW: the role's own slot (an empty one is Main's model, local when its
-    own box is checked under a cloud Main), else Main and its local flag; ``llm`` is the loop's client if any."""
+    own box is checked under a cloud Main), else Main and its local flag where Main runs now (the Remote switch,
+    ``remote_placement.effective_main``); ``llm`` is the loop's client if any."""
     slot = model_role_slot_override({"model_role": role})
     if slot is not None:
         return slot
     from ouroboros.model_slots import _main_model
+    from ouroboros.remote_placement import effective_main
 
     model = str(llm.default_model() if llm is not None else _main_model())
-    return model, str(runtime_setting("USE_LOCAL_MAIN", "") or "").strip().lower() in ("true", "1")
+    return effective_main(model, str(runtime_setting("USE_LOCAL_MAIN", "") or "").strip().lower() in ("true", "1"))
 
 
 def _local_flag(key: str) -> bool:
@@ -263,10 +266,9 @@ def _local_flag(key: str) -> bool:
 
 
 def configured_references() -> dict:
-    """Main's current route, which rooms without a chosen model follow live."""
-    from ouroboros.model_slots import _main_model
-
-    return {"main": {"model": _main_model(), "use_local": _local_flag("USE_LOCAL_MAIN")}}
+    """Main's current route where it runs now (``following_route``), which rooms without a chosen model follow live."""
+    model, use_local = following_route("main")
+    return {"main": {"model": model, "use_local": use_local}}
 
 
 def lead_snapshot(value: Any) -> Optional[dict]:
@@ -437,11 +439,38 @@ def round_route(ctx: Any, llm: Any, acting: Tuple[str, bool]) -> Optional[Tuple[
     return None if current in (acting, bound) else current
 
 
+#: A refused call's wait yields with this reason when the role its turn follows moved (``following_moved``).
+ROUTE_MOVED_WAKE = "route_moved"
+
+
+def following_moved(ctx: Any) -> bool:
+    """Whether the role this turn follows is bound elsewhere now than where it acts: ``round_route``'s test, read
+    only. A refused call's resource wait yields to such a move (a Settings save of Main, the Remote switch) so the
+    next round's handover moves the turn (``owner_model.waiting_wake``)."""
+    role = follows(getattr(ctx, "route_choice", None))
+    if not role:
+        return False
+    acting = (str(getattr(ctx, "active_model", "") or ""), bool(getattr(ctx, "active_use_local", False)))
+    return following_route(role) not in (acting, tuple(getattr(ctx, "_route_binding", None) or acting))
+
+
 def note_settings_change(ctx: Any, previous: str, current: str, role: str) -> None:
-    """One route-facts notice to the mind: its following route moved with Settings."""
+    """One route-facts notice to the mind: its following route moved with Settings, or with the Remote switch when
+    only the engine of the same subscription model changed (``remote_placement``)."""
+    from ouroboros.model_slots import _configured_engine
+    from ouroboros.remote_placement import placement_engine
+
     label = ROLE_LABELS.get(role, role)
+    engines = [provider_models.claudexor_engine(route) for route in (previous, current)]
+    try:
+        moved = (engines[0] != engines[1] and engines[1] == placement_engine() and not _configured_engine(role, None)
+                 and provider_models.parse_claudexor_model(previous) == provider_models.parse_claudexor_model(current))
+    except ValueError:
+        moved = False
+    place = f"the remote engine {engines[1]} (its own Auto account)" if engines[1] else "this computer"
+    change = f"moved with my human's Remote switch to {place}" if moved else "changed in Settings"
     ctx._route_facts_pending = (
-        f"[ROUTE FACTS] {label} changed in Settings: {previous} → {current}. This task follows {label}, so this "
+        f"[ROUTE FACTS] {label} {change}: {previous} → {current}. This task follows {label}, so this "
         f"call and the next ones run on {current}; the transcript carries over. A route you choose with "
         'switch_model stays yours until switch_model(primary="return").')
 

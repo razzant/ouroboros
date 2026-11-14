@@ -532,18 +532,24 @@ def _rebind_context_fit_plan(
     from ouroboros.capability_evidence import evidence_model_route
     from ouroboros.context_fit import (_failed_route_evidence, _route_calibration_ratio,
                                        estimate_context_prompt_tokens, main_output_reserve_tokens)
+    from ouroboros.provider_models import claudexor_engine
 
     role = model_role or getattr(plan, "model_role", "main")
     plan, start_mode = held_primary_view(tools._ctx, plan, start_mode, model=model, use_local=use_local, role=role)
     metadata = getattr(tools._ctx, "task_metadata", {})
     metadata = metadata if isinstance(metadata, dict) else {}
+    # The plan's own observed account is carried only on the engine it was observed on (as ``plan_account`` names it for
+    # a send): a move to another engine, the Remote switch's, asks that engine for its own. An explicit receipt stands.
+    if model_route is None:
+        same_engine = claudexor_engine(str(getattr(plan, "model", "") or "")) == claudexor_engine(model)
+        model_route = getattr(plan, "model_route", {}) if same_engine else {}
     task = {
         "model": model,
         "use_local_model": use_local,
         "task_metadata": metadata,
         "delegation_role": metadata.get("delegation_role"),
         "model_role": role,
-        "model_route": model_route if model_route is not None else getattr(plan, "model_route", {}),
+        "model_route": model_route,
         "credential_profile_id": credential_profile_id, **({"model_route_preferred": True} if route_is_preference else {}),
     }
     try:

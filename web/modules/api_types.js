@@ -41,7 +41,8 @@
  * @property {"available"|"disabled"|"unsaved"} subagents_availability
  * @property {boolean} context_mode_auto_low  // frozen compatibility field; always false
  * @property {EffortRange} effort_range  // the owner's effort range (POST /api/owner/effort-range), the tolerant read
- * @property {ChatModelRoute} main_route  // Main itself, written by POST /api/owner/chat-model without project_id
+ * @property {ChatModelRoute} main_route  // Main where following work runs it now (the Remote switch's engine), its saved route else
+ * @property {?import('./work_types.js').RemoteExecutionState} remote_execution  // the Remote switch beside what it moves; null: unread, never Off
  * @property {string} safety_mode
  * @property {boolean} skills_repo_configured
  * @property {boolean} github_token_configured

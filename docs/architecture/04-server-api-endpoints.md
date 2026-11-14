@@ -233,7 +233,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 
 Update-status, log-tail and schedule-list reads run off the event loop.
 
-`/api/state` adds `current_questions`/`main_attention` and the work projection (`works`, `rooms`), each with completeness and typed gaps (§3); `active_chat_activities` stays root-only. GET neither scans chat nor writes; requests share one display publication, rebuilt only when its revision moved (`gateway/state_publication.py`), never an authority; actions reuse `/api/decisions` and task endpoints.
+`/api/state` adds `current_questions`/`main_attention` and the work projection (`works`, `rooms`), each with completeness and typed gaps (§3); `active_chat_activities` stays root-only. GET neither scans chat nor writes; requests share one revision-bound display publication (`gateway/state_publication.py`), never authority. A committed Settings receipt retires older productions for subsequent readers; they share one replacement rather than confirm a save from an older body. Actions reuse `/api/decisions` and task endpoints.
 
 ### WebSocket protocol
 

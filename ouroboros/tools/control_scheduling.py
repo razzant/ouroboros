@@ -817,6 +817,8 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
             legacy_model_lane_supplied="model_lane" in params,
             legacy_executor_supplied="executor" in params,
         )
+        from ouroboros.remote_placement import place_delegated
+        configured_subagent = place_delegated(ctx, configured_subagent)  # where a new helper runs: the Remote switch
         parent_cognitive_route = capture_cognitive_route(
             ctx, configured_subagent, settings, **({"supervisor": params["supervisor"]} if "supervisor" in params else {}))
     except SubagentSelectionError as exc:

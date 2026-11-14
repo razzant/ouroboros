@@ -19,7 +19,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D09 | Cancellation, owner control & process custody | 28 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
 | D11 | Gateway, server & Web UI | 120 | 0 |
-| D12 | Settings & configuration | 28 | 0 |
+| D12 | Settings & configuration | 29 | 0 |
 | D13 | Safety, guards & runtime mode | 12 | 0 |
 | D14 | Skills & extensions | 73 | 0 |
 | D15 | Memory, knowledge, consciousness & self-evolution | 39 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 42 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 26 | 0 |
-| **total** | | **1045** | **0** |
+| **total** | | **1046** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -968,6 +968,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/launcher_onboarding.py`
 - `ouroboros/model_slots.py`
 - `ouroboros/onboarding_wizard.py`
+- `ouroboros/remote_placement.py`
 - `ouroboros/review_model_routes.py`
 - `ouroboros/review_run_isolation.py`
 - `ouroboros/route_choice.py`

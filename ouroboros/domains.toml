@@ -102,6 +102,7 @@ D20 = "Presence"
 "ouroboros/panic_source.py" = "D18"
 "ouroboros/platform_peer.py" = "D18"
 "ouroboros/route_choice.py" = "D12"
+"ouroboros/remote_placement.py" = "D12"  # the owner's Remote switch: where Main and new agents run
 "ouroboros/schedule_continuation.py" = "D01"
 "ouroboros/chat_references.py" = "D11"
 "ouroboros/gateway/reference_contracts.py" = "D19"

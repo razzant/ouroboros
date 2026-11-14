@@ -496,6 +496,10 @@ export const HAND_WRITTEN = [
     { id: 'OUROBOROS_ENGINE_CONNECTIONS', keys: ['OUROBOROS_ENGINE_CONNECTIONS'], page: 'accounts', name: 'Remote engines',
         meta: 'A Claudexor engine already running on a host your SSH reaches.',
         aliases: ['Add remote engine', 'Remote engine', 'SSH', 'VPS', 'Claudexor'], writer: 'generic' },
+    // The Remote switch: where Main and new agents run, written by the rooms' bars (remote_switch.js), never a page row.
+    { id: 'OUROBOROS_REMOTE_EXECUTION', keys: ['OUROBOROS_REMOTE_EXECUTION'], page: 'accounts', name: 'Remote',
+        meta: 'Runs Main and new agents on a remote engine; switched in the bar of Main and of a Project.',
+        aliases: ['Remote switch', 'Run on VPS'], writer: 'generic' },
     // Settings › Tools: the list of tool servers, a head each; a head's switch and a server's Save write one entry.
     { id: 'MCP_SERVERS', keys: ['MCP_SERVERS'], page: 'tools', name: 'Tool servers', aliases: ['MCP Servers', 'Add server'], writer: 'generic' },
     // Settings › Models: a line per role, each opening its own page. The routes of Main, Light and the Safety

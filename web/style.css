@@ -1545,6 +1545,77 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 .chat-budget-pill[data-attention="1"] .chat-budget-bar { background: var(--amber-dim); }
 .chat-budget-pill[data-attention="1"] .chat-budget-bar-fill { background: var(--amber); }
 
+/* Remote (remote_switch.js; DESIGN "Page header"): one capsule of the bar in Panic's material, after the
+   consciousness chip, holding two controls: the switch (the computer, its word, "agents" while On leaves Main where it
+   is, its one mark) and the chevron of its chooser. On is the switched-on capsule's soft crimson with that tone's ink;
+   Off greys the computer and its word, as the chip's Off does. A state changes colour, never height; the word yields
+   first where the bar is short (room_work.js fitWord, and always in the stack layout), the glyph and mark stay. */
+.rx-capsule {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: stretch;
+    flex: 0 1 auto;
+    min-width: 0;
+    height: var(--control-h-float);
+    border-radius: var(--pill-radius);
+    background: var(--chip-float);
+    color: var(--text-primary);
+    box-shadow: var(--elev-rest);
+    -webkit-backdrop-filter: var(--glass);
+    backdrop-filter: var(--glass);
+    transition: var(--motion-tone);
+}
+.rx-capsule[hidden] { display: none; }
+.rx-capsule > button {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    margin: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: var(--type-meta);
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+    border-radius: var(--pill-radius);
+    cursor: pointer;
+}
+.rx-capsule > button:focus { outline: none; }
+.rx-capsule > button:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: -2px; }
+.rx-toggle { gap: 6px; min-width: 0; padding: 0 6px 0 var(--pill-padding-x); }
+.rx-capsule[data-chooser="false"] .rx-toggle { padding-right: var(--pill-padding-x); }
+.rx-more { justify-content: center; min-width: 28px; padding: 0 10px 0 2px; color: var(--text-meta); }
+.rx-glyph, .rx-more svg { display: inline-flex; flex: none; }
+.rx-glyph svg { display: block; width: 18px; height: 18px; }
+.rx-more svg { display: block; width: 14px; height: 14px; }
+.rx-word { min-width: 0; max-width: 12em; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.rx-scope { color: var(--text-meta); font-weight: 500; }
+.rx-scope[hidden], .rx-capsule[data-fit="mark"] .rx-word { display: none; }
+/* The target name can yield, but the agents-only scope must stay visible on a narrow bar too. */
+html[data-layout="stack"] .rx-capsule .rx-word { display: none; }
+.rx-capsule[data-on="false"] :is(.rx-glyph, .rx-word) { color: var(--text-meta); }
+.rx-capsule[data-on="true"] { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); }
+.rx-capsule[data-on="true"] :is(.rx-more, .rx-scope) { color: inherit; }
+@media (hover: hover) {
+    .rx-capsule[data-on="false"]:hover, .rx-capsule[data-on="false"][data-open="1"] { background: var(--chip-float-hover); }
+}
+.rx-capsule > button:not(:disabled):active { filter: var(--press); }
+.rx-capsule .rx-toggle[aria-busy="true"] { cursor: progress; }
+@media (pointer: coarse) {
+    .rx-more { min-width: var(--touch-target-min); }
+}
+/* Its chooser: the shared menu (ui.css .ui-popup), the target as a radio row, then the words of what it does. */
+.ui-popup[role="menu"].rx-menu { width: min(360px, var(--ui-popup-max-width)); }
+.ui-popup .rx-menu-item { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.ui-popup .rx-menu-item[aria-checked="true"] { background: var(--accent-12); }
+.rx-menu-item[aria-checked="true"] .rx-menu-name { color: var(--accent-light); }
+.rx-menu-name { font-weight: 500; }
+.rx-menu-line, .rx-menu-note { color: var(--text-meta); font-size: var(--type-meta); }
+.rx-menu-head { padding: var(--space-2) var(--space-3) var(--space-1); color: var(--text-meta); font-size: var(--type-meta); font-weight: 500; }
+.rx-menu-note { margin: 0; padding: var(--space-1) var(--space-3); line-height: var(--line-meta); white-space: normal; }
+
 .status-badge {
     padding: 4px 10px;
     font-size: var(--type-meta);

@@ -3,6 +3,30 @@
 // Words come from the server's codes through tr(); a client never derives a state, mark or control.
 
 /**
+ * One saved remote engine as the Remote switch offers it (no host contacted).
+ * @typedef {Object} RemoteExecutionEngine
+ * @property {string} name
+ * @property {string} label
+ * @property {boolean} enabled  // false: switched off in Settings, it takes no new work
+ */
+/**
+ * Main as configured, where work that follows it runs now (`effective`, the state's `main_route`) and why the switch
+ * does or does not move it.
+ * @typedef {Object} RemoteExecutionMain
+ * @property {string} model
+ * @property {boolean} use_local
+ * @property {"follows"|"local"|"api"|"engine"|"unreadable"} scope
+ * @property {import('./client_contract_types.js').ChatModelRoute} effective
+ */
+/**
+ * `/api/state`'s `remote_execution`: the saved Remote preference beside what it does now (remote_switch.js).
+ * @typedef {Object} RemoteExecutionState
+ * @property {boolean} on
+ * @property {string} engine  // the remembered target, '' for none; On names it even if since removed or switched off
+ * @property {RemoteExecutionEngine[]} engines
+ * @property {RemoteExecutionMain} main
+ */
+/**
  * The owner's cited words, bounded for publication (CLIENT_CONTRACT §5); text stays authored.
  * @typedef {Object} CitedModelWords
  * @property {string} text

@@ -213,7 +213,7 @@ def resolve_reviewer_window(
             model, role=model_role, credential_profile_id=credential_profile_id,
             model_route=model_route,
         ) if effective_provider == "claudexor" else None
-        asserted_window = int(model_role_option(MODEL_CONTEXT_WINDOWS_KEY, model_role))
+        asserted_window = int(model_role_option(MODEL_CONTEXT_WINDOWS_KEY, model_role, model=model))
         route_fp = route_fingerprint(
             provider=effective_provider, base_url=base_url, model=model,
             options=options,

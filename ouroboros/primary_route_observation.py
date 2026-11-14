@@ -109,7 +109,7 @@ def fallback_route_words(tool_ctx, model: str, use_local: bool, role: str, waite
         name, local, _account = route_binding(model, use_local, role, overrides=overrides)
         _role, bound = task_model_binding({"model_role": role, "task_metadata": getattr(tool_ctx, "task_metadata", {})},
                                           overrides=overrides)
-        account = bound.strip() if bound is not None else str(model_role_option(MODEL_ACCOUNTS_KEY, role) or "")
+        account = bound.strip() if bound is not None else str(model_role_option(MODEL_ACCOUNTS_KEY, role, model=name) or "")
     else:
         (name, local), account = call_route(own_call, model, use_local), call_account(own_call)
     note = ""

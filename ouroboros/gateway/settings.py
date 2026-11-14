@@ -49,7 +49,7 @@ from ouroboros.gateway.owner_settings import (
 from ouroboros.onboarding_wizard import render_onboarding_html
 from ouroboros.platform_layer import is_container_env
 from ouroboros.provider_connections import connection_references, connections_meta, normalize_connections
-from ouroboros.remote_engines import ENGINE_CONNECTIONS_KEY, normalize_engine_connections
+from ouroboros.remote_placement import remote_settings_error
 from ouroboros.provider_models import CONNECTIONS_KEY, normalize_builtin_choices
 from ouroboros.gateway.secret_rows import (
     ConnectionSecretIdentityAmbiguous, MCPSecretIdentityAmbiguous, mask_connections, rehydrate_connections,
@@ -1249,8 +1249,8 @@ def _api_settings_post_locked(request: Request, body: Any, *, retry: bool = True
                 return unsaved_error(str(exc), 409, code=exc.code)
             except ValueError as exc:
                 return unsaved_error(str(exc), 400, code="MCP_CONFIG_ERROR")
-        if ENGINE_CONNECTIONS_KEY in body and (engines_error := normalize_engine_connections(body[ENGINE_CONNECTIONS_KEY])[1]):
-            return unsaved_error(engines_error, 400, code="engine_connections_invalid")
+        if (remote_error := remote_settings_error(body, old_settings))[0]:  # engine rows and the Remote switch
+            return unsaved_error(remote_error[0], 400, code=remote_error[1])
         if CONNECTIONS_KEY in body:
             rows, connections_error = normalize_connections(body.get(CONNECTIONS_KEY))
             if connections_error:

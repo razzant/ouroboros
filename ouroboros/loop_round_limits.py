@@ -914,7 +914,7 @@ def _handle_model_wait_control(
     # catches a hold's interruption raised outside the model call, must not
     # hand the same error back here.
     error.control_rails_seen = True
-    if reason in {"owner_model", OWNER_WORDS_WAITING}:
+    if reason in {"owner_model", OWNER_WORDS_WAITING, "route_moved"}:  # route_moved: route_choice.ROUTE_MOVED_WAKE
         return None  # a refused call's wait or a granted repeat yielded; the next drain applies the primary or the words
     if reason == "owner_launch_authority_unavailable":
         # Only the positively unsent handoff waits, and only on positive lock contention;

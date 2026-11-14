@@ -101,6 +101,9 @@ _ADDED_OWNERS = {
     "MODEL_ROLE_SETTINGS": model_slots,
     "normalize_model_role_options": model_slots,
     "model_role_option": model_slots,
+    # A role's pin and window are its configured route's engine's own (the Remote switch places routes elsewhere).
+    "_authored_role_option": model_slots,
+    "_configured_engine": model_slots,
     "task_model_binding": model_slots,
     "route_binding": model_slots,
     "apply_model_role_override": model_slots,

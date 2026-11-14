@@ -951,7 +951,7 @@ class TaskModelWait:
         problem_context = (getattr(error, "problem", {}) or {}).get("context") or {}
         account_intent = kwargs.get("model_account_override")
         if account_intent is None:
-            account_intent = model_role_option(MODEL_ACCOUNTS_KEY, role)
+            account_intent = model_role_option(MODEL_ACCOUNTS_KEY, role, model=kwargs["model"])
         wait_id = uuid.uuid4().hex
         scope = current_usage_scope()
         slot_id = str(getattr(scope, "review_slot_id", "") or "")
@@ -1030,7 +1030,7 @@ class TaskModelWait:
 
                             account = kwargs.get("model_account_override")
                             if account is None:
-                                account = model_role_option(MODEL_ACCOUNTS_KEY, role)
+                                account = model_role_option(MODEL_ACCOUNTS_KEY, role, model=kwargs["model"])
                             catalog = llm.claudexor_model_catalog(source, account or None, requested_model=native_model,
                                                                  **claudexor_engine_kwargs(kwargs["model"]))
                             if (catalog.get("source") == source
@@ -1378,7 +1378,8 @@ def model_waitable(function: Callable | None = None, *, client_parameter: str = 
         role = str(values.get("model_role") or "")
         account = values.get("model_account_override")
         return {"role": role, "model": values["model"], "use_local": bool(values.get("use_local")),
-                "credential_profile_id": account if account is not None else model_role_option(MODEL_ACCOUNTS_KEY, role)}
+                "credential_profile_id": account if account is not None else model_role_option(
+                    MODEL_ACCOUNTS_KEY, role, model=values["model"])}
 
     def record_attempts(attempts, error):
         attempts.extend(getattr(error, "ledger_attempt_ids", []))
