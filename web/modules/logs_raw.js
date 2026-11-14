@@ -5,11 +5,12 @@ import { downloadBlobViaHostBridge, shellBridgeApi } from './ui_helpers.js';
 // silently substitute newer bytes. File rows use the gateway's verified reader; unreferenced live events say
 // "Received event" and serialize large snapshots off the UI thread. Neither path accumulates pages in the DOM.
 // The record is the last section of the event's one fold (logs.js): opening the fold reads it, closing it lets the
-// page go. The tools are small neutral capsules, as every other Retry is (UI_CONTROL_TEXT_INVENTORY.md).
+// page go. Paging shows only for a record of more than one page. The tools are small neutral capsules, as every other
+// Retry is (UI_CONTROL_TEXT_INVENTORY.md).
 export const LOG_RAW_HTML = `<pre class="log-raw" hidden></pre>
     <div class="log-raw-tools" hidden><div class="log-raw-status ui-status" role="status"></div>
-        <div class="log-raw-pages"><button class="btn btn-default btn-sm" data-raw-action="first" type="button">First page</button>
-        <button class="btn btn-default btn-sm" data-raw-action="next" type="button">Next page</button>
+        <div class="log-raw-pages"><button class="btn btn-default btn-sm" data-raw-action="first" type="button" hidden>First page</button>
+        <button class="btn btn-default btn-sm" data-raw-action="next" type="button" hidden>Next page</button>
         <button class="btn btn-default btn-sm" data-raw-action="retry" type="button" hidden>Retry</button>
         <a class="btn btn-default btn-sm log-raw-download" download="log-row.json" hidden>Download full</a></div></div>`;
 const PAGE_BYTES = 65536;
@@ -21,6 +22,12 @@ const RECEIPT_GAPS = { receipt_unavailable: 'receipt unavailable', receipt_misma
 function receiptGap(data) {
     const missing = data.unavailable_fields?.length || 0;
     return missing ? ` · ${RECEIPT_GAPS[data.unavailable_reason] || 'receipt not used'}: ${missing} declared ${missing === 1 ? 'field' : 'fields'} missing` : '';
+}
+const digest = (sha) => `${String(sha).slice(0, 12)}…`;  // a glance compares it; a download is checked whole
+// A record read whole is one JSON value: it reads indented, as a received event does. A page of a longer one stays as read.
+function wholeText(data) {
+    if (data.offset !== 0 || data.has_more) return data.text;
+    try { return JSON.stringify(JSON.parse(data.text), null, 2); } catch { return data.text; }
 }
 
 // Only a demonstrably small JSON value is serialized on the UI thread. The budget includes escaping and nesting;
@@ -69,14 +76,14 @@ export function createLogRaw({ visible }) {
     function showPage(view, data) {
         view.next = data.next_offset;
         view.shown = data.offset;
-        view.pre.textContent = data.text;
+        view.pre.textContent = wholeText(data);
         view.pre.scrollTop = 0;
         view.first.disabled = data.offset === 0;
         view.nextButton.disabled = !data.has_more;
+        view.first.hidden = view.nextButton.hidden = data.offset === 0 && !data.has_more;
         view.retry.hidden = true;
         view.download.hidden = false;
-        const identity = view.raw ? `${data.representation}${receiptGap(data)} · Source SHA-256 ${data.source.sha256} · Payload SHA-256 ${data.sha256}`
-            : 'Received event';
+        const identity = view.raw ? `${data.representation}${receiptGap(data)} · Source SHA-256 ${digest(data.source.sha256)}` : 'Received event';
         status(view, `${data.offset}–${data.next_offset} of ${data.total_bytes} bytes · ${identity}`);
         view.loading = false;
     }

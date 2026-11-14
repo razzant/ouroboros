@@ -319,7 +319,8 @@ for (const [unavailable, reason, said] of [[[], '', null], [['source_refs', 'cap
         assert.match(status, /^0–\d+ of \d+ bytes · reconstructed/);
         if (said) assert.match(status, said);
         else assert.doesNotMatch(status, /missing/);
-        assert.equal(entry.querySelector('.log-raw').textContent, text);
+        // A record read whole reads as one JSON value, indented as a received event is (one format for raw data).
+        assert.equal(entry.querySelector('.log-raw').textContent, '{\n  "checkpoint_kind": "context_view"\n}');
     });
 }
 

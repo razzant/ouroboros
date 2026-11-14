@@ -6262,6 +6262,8 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .log-raw-tools { margin-top: var(--space-2); }
 .log-raw-status { overflow-wrap: anywhere; }
 .log-raw-pages { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+/* Download is a link (the browser streams the file) in the capsule's look: the shared .btn leaves a link's underline. */
+.log-raw-download { text-decoration: none; }
 
 /* What an event is, in its kind's colour; System has none, so its kind reads in the ink of the words. */
 .log-type.tools { color: var(--status-info-fg); }
