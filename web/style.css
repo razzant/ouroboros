@@ -251,7 +251,7 @@ html[data-layout="stack"] .shell-icon-control {
     font-size: var(--type-body);
     font-weight: 400;
 }
-.nav-tools > .nav-row > .nav-row-label { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
+.nav-tools > .nav-row > .nav-row-label { overflow: visible; text-overflow: clip; white-space: normal; hyphens: auto; overflow-wrap: break-word; }
 .nav-tools > .nav-row:not(.active) > svg { color: var(--text-meta); }
 .nav-tools > .nav-row { justify-self: start; }
 @container (min-width: 226px) {
