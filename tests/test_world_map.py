@@ -663,3 +663,28 @@ def test_a_map_whose_bytes_are_not_text_takes_an_overwrite_with_the_block_and_re
     row = json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])
     assert (row["old_sha256"], row["old_not_text"], row["old_bytes"]) == (revision, True, len(bad)), row
     assert "old_content" not in row and row["new_content"] == world.read_text(encoding="utf-8")
+
+
+def test_the_maps_refusal_names_only_the_items_at_fault(tmp_path, monkeypatch):
+    """C5: an item anchored on the measured block's unchanged edge keeps the block byte for byte, and a marker mentioned
+    inside a sentence is no marker line: neither is named when another item of the same edit changes the block or
+    brings a marker line, and that item is. Without the faulty item the same two items land."""
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")
+    canonical, world = _map_with_block(tmp_path)
+    ctx = _world_ctx(canonical, canonical)
+    edge = {"old_str": f"{wprof.MEASURED_END}\n\n## What lives here",
+            "new_str": f"{wprof.MEASURED_END}\n\n## What lives here (mine)"}
+    mention = {"old_str": "- old note", "new_str": f"- old note (it mentions {wprof.MEASURED_START} inline)"}
+    before = world.read_bytes()
+    for bad, named in (({"old_str": "- **OS**: test", "new_str": "- **OS**: mine"}, "item 3 overlaps it"),
+                       ({"old_str": wprof.TITLE, "new_str": f"{wprof.TITLE}\n{wprof.MEASURED_END}"},
+                        "item 3's new_str brings a marker")):
+        reply = _update_world(ctx, mode="edit", edits=[edge, mention, bad], expected_revision=_rev(world))
+        assert reply.startswith("⚠️ TOOL_ERROR: host_block: ") and named in reply, reply
+        assert "item 1" not in reply and "item 2" not in reply, reply
+        assert world.read_bytes() == before
+    landed = _update_world(ctx, mode="edit", edits=[edge, mention], expected_revision=_rev(world))
+    assert landed.startswith("OK: world map updated (edit") and world.read_text(encoding="utf-8").count(
+        _measured("host")) == 1, landed

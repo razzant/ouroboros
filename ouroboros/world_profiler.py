@@ -260,24 +260,25 @@ def edited_map(edited: str, old: str, items: list, repo_dir: str = "", data_dir:
     """An edit of the map (``old`` with exact ``items`` applied, ``edited``), published with the host's block.
 
     The result must hold the current measured block byte for byte as its fence and no marker line
-    outside it (an unfenced legacy map: no marker line at all), else ``ValueError`` names the items whose
-    spans overlap the block, or whose new text brings a marker, and where the stray marker stands; the
-    whole edit is refused. An unchanged block used as an anchor's context, or an item beside it, is
-    fine. Then today's overwrite rule (``with_measured_block``): an unfenced legacy map gets its block."""
+    outside it (an unfenced legacy map: no marker line at all), else ``ValueError`` names the items that,
+    applied alone, change the block or add a marker line, and where the stray marker stands; the whole
+    edit is refused. An unchanged block used as an anchor's context (an item on its edge that keeps it byte
+    for byte), an item beside it, or a marker mentioned inside a sentence is fine and never named. Then
+    today's overwrite rule (``with_measured_block``): an unfenced legacy map gets its block."""
     kept, found = _FENCE_RE.search(old), _FENCE_RE.search(edited)
     allowed = len(_MARKER_LINE_RE.findall(kept.group(0))) if kept else 0
     if (found is None or kept is None or found.group(0) == kept.group(0)) and (kept is None or found is not None) \
             and len(_MARKER_LINE_RE.findall(edited)) == allowed:
         return with_measured_block(edited, old, repo_dir, data_dir)
-    problems = []
-    if kept is not None:
-        raw = old.encode("utf-8")
-        start, end = len(old[:kept.start()].encode("utf-8")), len(old[:kept.end()].encode("utf-8"))
-        hits = [(number, raw.find(gone.encode("utf-8")), len(gone.encode("utf-8"))) for number, (gone, _new) in
-                enumerate(items, 1)]
-        problems += [f"item {number} overlaps it" for number, at, size in hits if at < end and at + size > start]
-    problems += [f"item {number}'s new_str brings a marker" for number, (_gone, new) in enumerate(items, 1)
-                 if MEASURED_START in new or MEASURED_END in new]
+    problems, markers = [], len(_MARKER_LINE_RE.findall(old))
+    for number, (gone, new) in enumerate(items, 1):  # each item alone, found once in ``old``: only its own fault
+        alone, at = old.replace(gone, new, 1), old.find(gone)
+        if kept is not None and at < kept.end() and at + len(gone) > kept.start():
+            still = _FENCE_RE.search(alone)
+            if still is None or still.group(0) != kept.group(0):
+                problems.append(f"item {number} overlaps it")
+        if len(_MARKER_LINE_RE.findall(alone)) > markers:
+            problems.append(f"item {number}'s new_str brings a marker")
     strays, before = _stray_lines(edited, found if kept is not None else None), _stray_lines(old, kept)
     if strays:
         problems.append("the result has a marker line outside it at line " + ", ".join(map(str, strays)) + (
