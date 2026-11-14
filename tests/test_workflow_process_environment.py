@@ -415,7 +415,9 @@ def test_docker_target_env_uses_only_inert_host_aliases(monkeypatch, tmp_path, r
             return "done", ""
     def probe(command, **kwargs):
         assert command[:3] == ["docker", "exec", "isolated-fixture"]
-        assert command[-1].endswith('= completed ] && printf completed')
+        # The wait receipt is guarded first (``completed`` or ``completed:<pid>``, else no claim), then settled.
+        assert command[-1].startswith('case "$(cat ') and "in completed|completed:*) ;; *) exit 1;; esac; " in command[-1]
+        assert command[-1].endswith(" && printf completed")
         assert kwargs["timeout"] == 5 and "env" not in kwargs
         probes.append(command)
         return subprocess.CompletedProcess(command, 0, receipt, "")
