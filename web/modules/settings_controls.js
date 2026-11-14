@@ -120,6 +120,7 @@ export function settingsSection({ title, lead = '', details = '', body = '', act
 
 let lastSettings = null;         // the last GET /api/settings: values, `_meta.effects`, `_meta.tokens`, the setup contract
 let settingsEpoch = 0;           // a read that started before a newer read or write never puts an old document back
+let unreadFailed = false;        // nothing was read and the newest read failed: until a read starts again, rows say so
 const ROW_STATES = new Map();    // row id -> { row, busy, job, waiting, outcome, seen, typed, reread, sent }
 const BOUND = new Map();         // row id -> the painters of that row on screen
 const ENTRY_QUEUES = new Map();  // list key -> the tail of its entry writes
@@ -132,33 +133,54 @@ function rowState(row) {
     return ROW_STATES.get(row.id);
 }
 const repaintRow = (id) => BOUND.get(id)?.forEach((paint) => paint());
+const repaintAll = () => BOUND.forEach((paints) => paints.forEach((paint) => paint()));
 
 // The composer's list and the circle and place Model fields learn the tiers and keys from the newest document
 // (model_catalog_store.js): a read, or a row's landed write.
 const announce = (data) => globalThis.document?.dispatchEvent?.(new CustomEvent('settings-document:applied', { detail: data }));
 
 /** One fresh read of the settings document; the helper keeps the newest for values, effects, tokens and the setup
- *  contract. A row whose write was not confirmed says it saved once a read shows the value it sent. */
+ *  contract. A row whose write was not confirmed says it saved once a read shows the value it sent. The rows on
+ *  screen are painted from the read that lands; while none has, from what the newest read says (settingsReadMessage). */
 export async function readSettings() {
     const epoch = ++settingsEpoch;
-    const data = await fetchJson('/api/settings', { cache: 'no-store' });
+    if (unreadFailed) { unreadFailed = false; repaintAll(); }
+    let data;
+    try { data = await fetchJson('/api/settings', { cache: 'no-store' }); } catch (error) {
+        // Only the newest read, and only while nothing was read: an older failure never stands over a newer answer.
+        if (epoch === settingsEpoch && !lastSettings) { unreadFailed = true; repaintAll(); }
+        throw error;
+    }
     if (epoch !== settingsEpoch && lastSettings) return data;
     lastSettings = data;
     announce(data);
     ROW_STATES.forEach((state) => {
         if (state.busy || state.outcome?.state !== 'unknown' || !sameValue(currentValue(state.row, data), state.sent)) return;
         Object.assign(state, { outcome: { ...state.outcome, state: 'saved', message: '', details: '' }, reread: false, typed: null, seen: false });
-        repaintRow(state.row.id);
     });
+    repaintAll();
     return data;
 }
 let firstRead = null;  // writes that come before any read wait on one read
 const ensureRead = () => (firstRead ||= readSettings().catch(() => null).finally(() => { firstRead = null; }));
 
+/** The last settings document read, null before any: what a page paints at once, before its own read answers. */
+export const settingsSnapshot = () => lastSettings;
+/** What a row of the settings says until a read answers: that it is being read, or that it could not be ('' once read). */
+export const settingsReadMessage = () => (lastSettings ? '' : unreadFailed ? 'Could not be read' : 'Reading…');
+/** Paint `paint` with the bound rows of `id`, for a row a page draws by hand (the Agents switch, Your rules): when a
+ *  read lands, when the newest first read fails, when a read starts again. Answers its disposer. */
+export function paintWithRow(id, paint) {
+    if (!BOUND.has(id)) BOUND.set(id, new Set());
+    BOUND.get(id).add(paint);
+    return () => BOUND.get(id)?.delete(paint);
+}
+
 /** Forget every row's standing and the last read (a signed-out page, a test). */
 export function forgetSettingRows() {
     lastSettings = null;
     settingsEpoch += 1;
+    unreadFailed = false;
     firstRead = null;
     [ROW_STATES, BOUND, ENTRY_QUEUES, HOST_STATES].forEach((map) => map.clear());
 }
@@ -717,6 +739,7 @@ function paintRow(node, row) {
     const running = state.outcome?.running ?? CODECS[row.codec]?.running?.(lastSettings, row)
         ?? lastSettings?._meta?.restart_state?.running?.[row.keys[0]];
     const waits = running !== undefined && stored !== undefined && !sameValue(running, stored);
+    const unread = row.keys.length ? settingsReadMessage() : '';  // no read has answered: nothing here is a value yet
     if (row.hiddenWhen) node.hidden = Boolean(HIDDEN_WHEN[row.hiddenWhen]?.(lastSettings));
     if (isTyped(row)) {
         const text = (value) => (value === undefined ? undefined : control.kind === 'secret' || (control.noLimit && isUnlimited(value)) ? '' : String(value ?? ''));
@@ -775,12 +798,16 @@ function paintRow(node, row) {
                 if (!active || active === doc.body || active === element) element.focus?.();
             }
         }
+        // Not read yet: not operable. The lock is marked as this helper's, so only it is lifted when the value comes
+        // and a control its own module disabled stays as that module left it.
+        if (unread && !element.disabled) Object.assign(element, { disabled: true }).dataset.settingUnread = '1';
+        else if (!unread && element.dataset.settingUnread) { element.disabled = Boolean(element.dataset.settingBusy); delete element.dataset.settingUnread; }
     });
     // A strip or a select whose options carry a line of meaning says the chosen one's (a `choices` row and a page's own
     // `custom` control draw each option's line themselves).
     const noted = ['strip', 'select'].includes(control.kind)
         && (control.options || []).find((option) => String(option.value) === String(shown ?? ''))?.note;
-    const meta = waits ? `Running: ${valueWords(row, running)} · after restart: ${valueWords(row, stored)}` : noted || row.meta || '';
+    const meta = unread || (waits ? `Running: ${valueWords(row, running)} · after restart: ${valueWords(row, stored)}` : noted || row.meta || '');
     const metaNode = node.querySelector('[data-setting-meta]');
     if (metaNode && metaNode.textContent !== meta) metaNode.textContent = meta;
     paintResult(node.querySelector('[data-setting-result]'), outcomeLine(row, state.outcome));
@@ -815,8 +842,10 @@ function commitTyped(row, text, ctx) {
  * Wire the rows drawn in `container`: a typed value, a switch and a select commit on `change` (for a field: leaving it
  * or Enter); a strip option and "No limit" on the press. Each row shows its result line and its Undo. `ctx.rows` names
  * descriptors that are not in settings_rows.js; `ctx.ask` stands in for the confirm dialog; `ctx.openDoor(row)` takes
- * a door's press. Answers `{ paint, leave, dispose }`: `paint()` after a fresh read (it never touches a focused or
- * typed field), `leave()` when the page is left (a result the owner saw ends there), `dispose()` when it is torn down.
+ * a door's press; `ctx.onPaint(settings)` paints a `custom` control from the last read whenever its row is painted (at
+ * bind, and at every read that lands). Answers `{ paint, leave, dispose }`: `paint()` after a fresh read (it never
+ * touches a focused or typed field), `leave()` when the page is left (a result the owner saw ends there), `dispose()`
+ * when it is torn down.
  */
 export function bindSettingRows(container, ctx = {}) {
     const find = (id) => ctx.rows?.find((row) => row.id === id) || rowById(id);
@@ -827,9 +856,9 @@ export function bindSettingRows(container, ctx = {}) {
         const paint = () => {
             if (node.isConnected === false) { BOUND.get(row.id)?.delete(paint); return; }
             paintRow(node, row);
+            if (row.control?.kind === 'custom') ctx.onPaint?.(lastSettings);  // a page's own control, by its own painter
         };
-        if (!BOUND.has(row.id)) BOUND.set(row.id, new Set());
-        BOUND.get(row.id).add(paint);
+        paintWithRow(row.id, paint);
         bindings.push({ row, node, paint });
         paint();
         if (CODECS[row.codec]?.host && !HOST_STATES.has(row.codec)) void readHost(row);

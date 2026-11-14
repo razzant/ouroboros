@@ -801,3 +801,27 @@ test('a root font that moves the two panes\' 40rem repaints the Dashboard: the p
     assert.deepEqual([dashboard.page.dataset.sectionView, listBack.hidden], ['page', true], 'beside the list again, without Back');
     dashboard.destroy();
 });
+
+test('a tab drawn before any read is no value; a read made elsewhere paints its rows and its own choice by its painter, before it is shown', async (t) => {
+    const server = settingsServer(t, { OUROBOROS_UPDATE_CHANNEL: 'qa' });
+    const host = new NodeStub();
+    server.mount.appendChild(host);
+    // Drawn at the app's start, as every tab is; Settings is shown, so the tab reads nothing itself.
+    const state = { activePage: 'settings', dashboardActiveSubtab: 'logs' };
+    const row = rowById('OUROBOROS_UPDATE_CHANNEL');
+    const mounted = mountTabSettings(host, 'updates', { state, cards: [{ label: 'Which updates', solo: true }],
+        onPaint: (settings) => host.querySelectorAll('[data-setting-value]').forEach((choice) =>
+            choice.setAttribute('aria-pressed', String(choice.dataset.settingValue === String(settings?.OUROBOROS_UPDATE_CHANNEL ?? '')))),
+        custom: () => row.control.options.map((option) => `<button data-setting-value="${option.value}" aria-pressed="false">${option.label}</button>`).join('') });
+    const choices = host.querySelectorAll('[data-setting-value]');
+    const facts = () => [choices.filter((choice) => choice.getAttribute('aria-pressed') === 'true').map((choice) => choice.dataset.settingValue),
+        choices.map((choice) => choice.disabled), rowNode(host, 'OUROBOROS_UPDATE_CHANNEL').querySelector('[data-setting-meta]').textContent];
+    assert.deepEqual(facts(), [[], [true, true, true], 'Reading…']);
+    assert.deepEqual(server.calls, [], 'a tab not shown reads nothing');
+    await readSettings();  // Settings read it for one of its pages
+    assert.deepEqual(facts(), [['qa'], [false, false, false], '']);
+    // A row of another page saved: the tab repaints from the last read, which it never made itself.
+    server.window.dispatchEvent(new CustomEvent('ouro:settings-updated', { detail: { source: 'settings-row', page: 'models', row: 'OUROBOROS_MODEL' } }));
+    assert.deepEqual(facts(), [['qa'], [false, false, false], '']);
+    mounted.dispose();
+});

@@ -598,3 +598,72 @@ test('a write that waits for a restart says why its line is yellow, with a recei
     assert.deepEqual(outcomeLine(ACCESS, { state: 'saved', effect: 'restart', old: 'light' }).text, 'Saved · applies after restart');
     assert.equal(outcomeLine(CHECKER, { state: 'saved', effect: 'next_call' }).text, 'Saved', 'a quiet effect without a receipt still says nothing more');
 });
+
+test('a row not read yet is no value: inert, its meta says Reading…; the read that lands paints it and lifts only its own lock', async (t) => {
+    forgetSettingRows();
+    const env = setup(t);
+    fakeServer(env.routes, { T_SWITCH: true });
+    const container = new NodeStub();
+    container.innerHTML = [SWITCH, STRIP].map((row) => settingsRow(row)).join('');
+    const option = (value) => container.querySelectorAll('[data-setting-value]').find((button) => button.dataset.settingValue === value);
+    // A control its own module keeps disabled (an option this host cannot take): the row helper never lifts that lock.
+    option('blocking').disabled = true;
+    const bound = bindSettingRows(container, { rows: TEST_ROWS });
+    t.after(() => bound.dispose());
+    const field = container.querySelector('#setting-T_SWITCH');
+    const meta = (row) => container.querySelector(`#setting-${row.id}-meta`).textContent;
+    assert.deepEqual([field.disabled, option('advisory').disabled, meta(SWITCH), meta(STRIP)], [true, true, 'Reading…', 'Reading…']);
+    await readSettings();  // made for another page: every row on screen is painted from it
+    assert.deepEqual([field.disabled, field.checked, option('advisory').disabled, option('advisory').getAttribute('aria-pressed'),
+        option('blocking').disabled, meta(SWITCH), meta(STRIP)], [false, true, false, 'true', true, 'T_SWITCH meta', 'T_REVIEW meta']);
+    // A lock its page sets after a read is the page's as well.
+    field.disabled = true;
+    await readSettings();
+    assert.equal(field.disabled, true);
+    // Drawn after a read, a row shows that read as it is bound.
+    const later = draw([STRIP]);
+    const chosen = later.container.querySelectorAll('[data-setting-value]').filter((button) => button.getAttribute('aria-pressed') === 'true');
+    assert.deepEqual([chosen.map((button) => button.dataset.settingValue), chosen[0].disabled, later.meta(STRIP)], [['advisory'], false, 'T_REVIEW meta']);
+    later.bound.dispose();
+});
+
+test('a first read that fails says so and keeps the rows inert until a read starts again; an older failure never stands over a newer read', async (t) => {
+    forgetSettingRows();
+    const env = setup(t);
+    fakeServer(env.routes, { T_SWITCH: true });
+    const answer = env.routes.get('/api/settings');
+    const gates = [];
+    env.routes.set('/api/settings', async (url, init = {}) => {
+        const gate = deferred();
+        gates.push(gate);
+        return (await gate.promise) === 200 ? answer(url, init) : response({ error: 'offline' }, 500);
+    });
+    const container = new NodeStub();
+    container.innerHTML = settingsRow(SWITCH);
+    const bound = bindSettingRows(container, { rows: TEST_ROWS });
+    t.after(() => bound.dispose());
+    const field = container.querySelector('#setting-T_SWITCH');
+    const said = () => [container.querySelector('#setting-T_SWITCH-meta').textContent, field.disabled];
+    const failed = readSettings().catch(() => 'failed');
+    await settle();
+    gates[0].resolve(500);
+    assert.equal(await failed, 'failed');
+    assert.deepEqual(said(), ['Could not be read', true]);
+    // Read again (the page shown again): an older read fails while the newer one runs, and the row still reads.
+    const older = readSettings().catch(() => 'failed');
+    const newer = readSettings();
+    assert.deepEqual(said(), ['Reading…', true]);
+    await settle();
+    gates[1].resolve(500);
+    await older;
+    assert.deepEqual(said(), ['Reading…', true], 'an older failure is not the answer of the read still running');
+    gates[2].resolve(200);
+    await newer;
+    assert.deepEqual([...said(), field.checked], ['T_SWITCH meta', false, true]);
+    // A row that has an answer keeps it when a later read fails.
+    const later = readSettings().catch(() => 'failed');
+    await settle();
+    gates[3].resolve(500);
+    await later;
+    assert.deepEqual([...said(), field.checked], ['T_SWITCH meta', false, true]);
+});
