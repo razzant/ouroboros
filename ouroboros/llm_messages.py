@@ -250,8 +250,10 @@ class _MessageShapingMixin:
         (``SHARED_HEAD_KEY``), that block is sent as two text blocks, head then story,
         whose texts concatenate to its bytes. It keeps its one breakpoint: at the end
         of the head when the story was narrowed for this work (only the head can then
-        be another work's bytes), at its own end when the story is whole (a head
-        entry another work wrote is still read from there, one position back).
+        be another work's bytes; the work itself reads its story through C's
+        breakpoint, so a request whose C moved under the same narrowed story writes
+        that story again), at its own end when the story is whole (a head entry
+        another work wrote is still read from there, one position back).
         Nothing is added: never a fifth breakpoint.
 
         Called only by direct/OR Anthropic builders on their fresh payload, before

@@ -261,10 +261,13 @@ are bytes of their sources alone; the changing context C and the transcript are
 reused within one captured view (DEVELOPMENT "Cache-friendliness invariant"). Resident
 memory is two scopes: its head (identity, the catalogue, the maps) follows the state of
 memory, the mode and the forms the host gave its sections, while my story after it is one
-text only until a work has it narrowed for its window. On Anthropic routes the block goes
-as those two texts and its mark ends the story while that is whole, the head once it was
-narrowed (`llm_messages.SHARED_HEAD_KEY`), so a new work reads another work's start
-through the head. Before
+text only until a work has it narrowed for its window. On Anthropic routes, where the
+transport gives the changing context the spare mark
+(`llm_messages._cache_declared_system_context`), the block goes as those two texts and its
+mark ends the story while that is whole, the head once it was narrowed
+(`llm_messages.SHARED_HEAD_KEY`), so a new work reads another work's start through the
+head. The cut is the transport's: the canonical messages, and with them the prefix fact
+below, do not see it. Before
 a Main candidate is dispatched, the host compares it with
 the last ANSWERED request of the same route in this task and writes the result on
 the attempt's ledger row (`transcript_prefix.attempt_prefix_fact` →
