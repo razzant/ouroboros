@@ -880,10 +880,10 @@ Two shapes carry a tone, and they are not interchangeable:
   *is* the status and has nothing else to carry it.
 
 Surfaces whose tone is a class suffix rather than `data-tone`
-(`.toast-*`, `.log-phase`, `.widget-table-status`,
+(`.toast-*`, `.widget-table-status`,
 `.widget-metric` / `.widget-callout`) name the same tokens. A task card's chip
-(`.chat-live-phase`) and a settled Logs task headline keep their phase classes as
-facts and take their tone from the `data-chip-tone` attribute their painters write. A surface that
+(`.chat-live-phase`) keeps its phase classes as facts, its tone in the
+`data-chip-tone` its painter writes; Logs reuses it for a failure alone (owner 14.11, «переиспользуются»). A surface that
 paints only its edge (a card tinted by its state, a callout's left rule) takes
 the border and leaves its own background alone; a toast keeps its glass
 background, because a translucent status fill over live page content costs the
@@ -945,10 +945,10 @@ status sentence's or a composer chip's dot is its tone, §4).
   changes before an update, an Evolution chip, the consciousness chip or a Consciousness sentence that needs the owner
   or was stopped by the spending limit (new starts refused, or its wake proven held at the allowance it started
   with); (2) a warning worth reading — warn toasts and sentences,
-  Settings and onboarding notes, warnings inside task timelines, reviews and Logs
-  events, account quota, and a work that went to a fallback route by itself, until that is resolved
+  Settings and onboarding notes, warnings inside task timelines and reviews,
+  account quota, and a work that went to a fallback route by itself, until that is resolved
   (its card's model fact and the same word in the Main sheet); (3) the System voice (a pale tint in the light theme, its name
-  in the dark one), a voice, not a status; (4) a few data categories that are not statuses (Logs and Storage
+  in the dark one), a voice, not a status; (4) a few data categories that are not statuses (Storage
   categories, the fourth default chart series). What goes on by itself or what someone chose — queued, waiting,
   paused, pausing, stopped, unconfirmed, work in flight, a mode, a level, a setting
   value — is never amber; the fallback above is amber because the work then runs on a model nobody chose for it.
