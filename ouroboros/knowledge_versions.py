@@ -159,7 +159,10 @@ class NoteHistory:
         return out
 
 
-def find_version(address: Any, version: Any) -> tuple[str, dict]:
+_READ = object()  # find_version reads the live text itself
+
+
+def find_version(address: Any, version: Any, live: Any = _READ) -> tuple[str, dict]:
     """The exact text of one version of this text and the row that wrote it, newest rows first.
 
     Every row that names the version, as the text it published (``new_sha256``) or replaced
@@ -168,13 +171,16 @@ def find_version(address: Any, version: Any) -> tuple[str, dict]:
     the live note); the text is returned only when it hashes to the version (an empty text is the
     version sha256(b"")). The row is the one that wrote the version, or ``{}`` when none did (an
     outside edit, or a write before history). ``VersionUnavailable`` says why there is no text and
-    names the gaps among the lines that name this note."""
+    names the gaps among the lines that name this note. ``live`` is the current text a writer already
+    captured under its lock (the journal and the text it reads are then one state); by default the file
+    is read here."""
     if not isinstance(version, str) or len(version) != 64 or version.strip("0123456789abcdef"):
         raise VersionUnavailable("a version is a revision: the 64 lowercase hex characters of its sha256")
-    try:
-        live = address.path.read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError):
-        live = None
+    if live is _READ:
+        try:
+            live = address.path.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            live = None
     texts, why, held = knowledge_rows.Texts(journal_path(address), live), "", None
     history = NoteHistory(address, version.encode("ascii"))
     for offset, row in history:

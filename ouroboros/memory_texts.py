@@ -150,9 +150,10 @@ def plain_text(source: TextSource, text: str) -> PlainText:
     return PlainText(parsed.raw, text, parsed.source, revision_of(parsed.raw), source)
 
 
-def _prepare(source: TextSource, mode: str, content: str, items: list | None, version: str | None, target: Any):
+def _prepare(source: TextSource, mode: str, content: str, items: list | None, version: str | None):
     """The new text from the current one, under the lock: the edit compiled over the current bytes, the version put
-    back, the result checked, then the map's measured block kept the host's."""
+    back (looked up there, after the revision checks, against the text captured under the lock: A9), the result
+    checked, then the map's measured block kept the host's."""
 
     def prepare(old: str) -> str:
         if mode == "edit":
@@ -163,10 +164,11 @@ def _prepare(source: TextSource, mode: str, content: str, items: list | None, ve
         elif mode == "revert":
             if revision_of(old.encode("utf-8")) == version:
                 text = old  # the current version reads even when no row names it
-            elif isinstance(target, Exception):
-                raise Refused("version_unavailable", str(target))
             else:
-                text = target
+                try:
+                    text = knowledge_versions.find_version(source, version, old)[0]
+                except knowledge_versions.VersionUnavailable as exc:
+                    raise Refused("version_unavailable", str(exc)) from None
         else:
             text = content
         if source.nonempty and not text.strip():  # judged before a generated host block could fill it
@@ -343,15 +345,9 @@ def write_text(ctx: Any, source: Any, *, content: Any = None, mode: Any = "overw
                                                     text=f"⚠️ TOOL_ARG_ERROR: {exc}{said}"))
     if isinstance(source, Deferred):
         source = source.build()
-    target: Any = None
-    if mode == "revert":  # outside the lock: a recorded row never changes, and the text is verified by its hash
-        try:
-            target = knowledge_versions.find_version(source, version)[0]
-        except knowledge_versions.VersionUnavailable as exc:
-            target = exc
     from ouroboros.knowledge import focus_signature
 
-    publication = publish_text(source, expected_revision, _prepare(source, mode, content, items, version, target),
+    publication = publish_text(source, expected_revision, _prepare(source, mode, content, items, version),
                                author=focus_signature(ctx), source_type=source_type, mode=mode, reason=reason,
                                reverted_from=version if mode == "revert" else None)
     if not publication.ok:

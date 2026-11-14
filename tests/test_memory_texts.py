@@ -576,3 +576,44 @@ def test_a_text_gone_before_its_read_is_absent_and_its_history_still_lists(tmp_p
     assert _read(ctx, source="identity", version=first).endswith(IDENTITY)
     identity.mkdir()  # a directory where the text should be: present, and unreadable
     assert _read(ctx, source="identity").startswith("⚠️ TOOL_ERROR: identity unreadable: IsADirectoryError")
+
+
+def test_a_reverts_version_is_looked_up_under_the_publication_lock_after_the_checks(tmp_path, identity, monkeypatch):
+    """C2 (A9): a revert reads its version inside the publication lock, against the text captured there, so the
+    journal and the text it reads are one state; a revert refused before that (no revision, a stale one, a text that
+    does not exist) reads no history at all. The revert still puts back the version exactly."""
+    from contextlib import contextmanager
+
+    from ouroboros import knowledge_versions, memory_publication
+
+    ctx, first = _ctx(tmp_path), _sha(identity.read_bytes())
+    _update_identity(ctx, IDENTITY + "\nTwo.\n", first)
+    second = _sha(identity.read_bytes())
+    held, lookups = [False], []
+    real_lock, real_find = memory_publication._publication_lock, knowledge_versions.find_version
+
+    @contextmanager
+    def lock(path):
+        with real_lock(path):
+            held[0] = True
+            try:
+                yield
+            finally:
+                held[0] = False
+
+    def find(*args, **kwargs):
+        lookups.append(held[0])
+        return real_find(*args, **kwargs)
+
+    monkeypatch.setattr(memory_publication, "_publication_lock", lock)
+    monkeypatch.setattr(knowledge_versions, "find_version", find)
+    for refused in (_update_identity(ctx, mode="revert", version=first),
+                    _update_identity(ctx, mode="revert", version=first, expected_revision="0" * 64),
+                    _update_identity(_ctx(tmp_path / "elsewhere"), mode="revert", version=first, expected_revision="")):
+        assert refused.startswith(("⚠️ RESOURCE_CONSTRAINT_BLOCKED", "⚠️ TOOL_ERROR: revert_source_missing")), refused
+    assert lookups == [] and identity.read_bytes() == (IDENTITY + "\nTwo.\n").encode("utf-8")
+    reverted = _update_identity(ctx, mode="revert", version=first, expected_revision=second)
+    assert reverted.startswith("OK: identity updated (revert") and identity.read_bytes() == IDENTITY.encode("utf-8")
+    assert lookups == [True], lookups
+    missing = _update_identity(ctx, mode="revert", version="0" * 64, expected_revision=first)
+    assert missing.startswith("⚠️ TOOL_ERROR: version_unavailable: no version") and lookups == [True, True], missing
