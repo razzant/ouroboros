@@ -6103,6 +6103,17 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .logs-inline-clear {
     margin-left: auto;
 }
+/* A pane narrower than the six chips and Clear at their usual spacing draws them closer, so they still keep to one
+   line beside a section's list (owner's window: a 455 px tab body); where even that line does not fit, they stand
+   in two even rows of three, Clear at the end of the first, never one chip alone on a row of its own. */
+@container dashboard (max-width: 34rem) {
+    .logs-filters { gap: var(--space-1); }
+    .logs-filters > .filter-chip { --control-pad-x: var(--space-2); }
+}
+@container dashboard (max-width: 27.75rem) {
+    .logs-filters { display: grid; grid-template-columns: repeat(3, auto) minmax(0, 1fr); justify-items: start; }
+    .logs-filters > .logs-inline-clear { grid-column: 4; grid-row: 1; justify-self: end; }
+}
 
 .logs-card { display: grid; gap: var(--space-2); min-width: 0; }
 .logs-empty { margin: 0; color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
@@ -6169,7 +6180,13 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     color: var(--text-primary);
     font-weight: 600;
     word-break: break-word;
+    flex: 1 1 auto;
+    min-width: 0;
 }
+/* The headline, its count and Raw are one lead (logs.js logMainHtml): it shares the time's line where it fits whole,
+   else it takes the next line, and the headline wraps inside it only when it is longer than a line. Raw stays at the
+   end of the headline's own line instead of dropping to a line of its own. */
+.log-main > .log-lead { display: flex; flex: 1 1 auto; align-items: baseline; gap: 8px; min-width: 0; }
 
 .log-entry .log-repeat {
     margin-left: auto;
@@ -6177,9 +6194,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     font-size: var(--type-meta);
 }
 
-/* Raw is the line's last, quiet control (.btn.btn-ghost.btn-sm); after a count it follows it, else it takes the end. */
-.log-raw-toggle { flex: none; align-self: center; }
-.log-main > .log-repeat[hidden] + .log-raw-toggle { margin-left: auto; }
+/* Raw is the line's last, quiet control (.btn.btn-ghost.btn-sm); after a count it follows it, else it takes the end.
+   Its word stands on the headline's baseline, as the line's other words do. */
+.log-raw-toggle { flex: none; }
+.log-lead > .log-repeat[hidden] + .log-raw-toggle { margin-left: auto; }
 
 .log-meta {
     display: flex;
@@ -6325,7 +6343,7 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 /* How Ouroboros changed: the head, one measure at a time (the shared segments, wrapping on a narrow card so none
    hides past its edge), the chart, how it is measured behind a disclosure, and the chosen version. */
 .evo-story { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-.evo-story-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3) var(--space-4); flex-wrap: wrap; }
+.evo-story-head { container: evostoryhead / inline-size; display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-3) var(--space-4); flex-wrap: wrap; }
 .evo-story-words { display: grid; gap: 2px; min-width: 0; }
 .evo-story-body { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
 .evo-story-status { display: flex; align-items: center; gap: 2px var(--space-2); flex-wrap: wrap; margin: 0; min-height: calc(var(--type-meta) * var(--line-meta)); }
@@ -6337,6 +6355,12 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     .evo-measures { --control-h: var(--touch-target-min); }
 }
 .evo-measures-sep { width: 1px; align-self: stretch; margin: 0; background: rgba(var(--neutral-rgb), 0.12); }
+/* The divider parts the release's measures from the installation's own (Identity, Scratchpad) on one line. A head too
+   narrow for the five on one line (about 32rem) wraps them, and the divider would hang at the end of a row with nothing
+   after it, so there it becomes the break: the installation's two take the next line together. */
+@container evostoryhead (max-width: 33rem) {
+    .evo-measures-sep { flex-basis: 100%; height: 0; background: none; }
+}
 .evo-quiet { --control-pad-x: var(--space-2); }
 .evo-quiet svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .evo-link { padding: 0; border: 0; background: none; color: var(--text-primary); font-family: inherit; font-size: var(--type-meta);
@@ -6529,8 +6553,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .cost-empty-cell { color: var(--text-muted); text-align: center; }
 /* A narrow card reads a row as its name on its own line, then its calls and its amount (the header reads the same
    way): three columns there cut a name to its first letters and push the tab sideways. A name longer than its line
-   still ends in an ellipsis in place. */
-@container dashboard (max-width: 480px) {
+   still ends in an ellipsis in place. A breakdown keeps its three columns down to a 26rem tab body, where its name
+   keeps about 7.5rem beside the calls and the amount with its one-line note (the pane beside the section's list is
+   wider; a phone's tab body is narrower); the period's writes, four figures wide, stack from 480px. */
+@container dashboard (max-width: 26rem) {
     .cost-table, .cost-table :is(thead, tbody, th, td) { display: block; }
     .cost-table tr {
         display: grid;
@@ -6542,11 +6568,22 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     .cost-table :is(th, td) { border-bottom: 0; }
     .cost-table tr > :first-child { grid-column: 1 / -1; }
     .cost-table tr > :nth-child(2) { text-align: left; }
-    /* Its three figures share one line, in columns every row shares; a figure wraps between words, never inside one. */
-    .costs-period-writes tr { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.5fr); }
-    .cost-table.costs-period-writes :is(th, td) { white-space: normal; }
     .cost-table .cost-cell-name { width: auto; max-width: none; padding-bottom: 0; }
     .cost-table .cost-cell-note { white-space: normal; }
+}
+@container dashboard (max-width: 480px) {
+    .costs-period-writes, .costs-period-writes :is(thead, tbody, th, td) { display: block; }
+    /* Its three figures share one line, in columns every row shares; a figure wraps between words, never inside one. */
+    .costs-period-writes tr {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.5fr);
+        column-gap: var(--space-3);
+        border-bottom: 1px solid rgba(var(--neutral-rgb), 0.04);
+    }
+    .costs-period-writes thead tr { border-bottom-color: var(--divider); }
+    .cost-table.costs-period-writes :is(th, td) { border-bottom: 0; white-space: normal; }
+    .costs-period-writes tr > :first-child { grid-column: 1 / -1; }
+    .costs-period-writes tr > :nth-child(2) { text-align: left; }
 }
 
 /* Dashboard Storage (the owner-started count and the free-space tray): shared card, type, spacing
@@ -6875,6 +6912,8 @@ html[data-layout="stack"] #page-dashboard[data-section-view="home"] > .app-page-
 .dashboard-hero > :not(.dashboard-hero-actions) { grid-column: 1; min-width: 0; margin: 0; }
 .dashboard-hero-kicker,
 .dashboard-hero-meta { color: var(--text-meta); font-size: var(--type-meta); line-height: var(--line-meta); }
+/* A headline longer than its line breaks into even lines ("Update available:" over "163 new changes"), never leaving
+   its last word alone under a full line. */
 .dashboard-hero-figure {
     color: var(--text-primary);
     font-size: var(--type-page);
@@ -6882,6 +6921,7 @@ html[data-layout="stack"] #page-dashboard[data-section-view="home"] > .app-page-
     font-weight: 650;
     font-variant-numeric: tabular-nums;
     overflow-wrap: anywhere;
+    text-wrap: balance;
 }
 .dashboard-hero-actions {
     grid-column: 2;
@@ -6891,8 +6931,18 @@ html[data-layout="stack"] #page-dashboard[data-section-view="home"] > .app-page-
     flex-wrap: wrap;
     gap: var(--space-2);
 }
+/* Under the words the actions leave the second column empty, and the hero drops it with its gap, so the words keep the
+   card's whole width. */
 @container dashboard (max-width: 480px) {
+    .dashboard-hero { grid-template-columns: minmax(0, 1fr); }
     .dashboard-hero-actions { grid-column: 1; grid-row: auto; align-self: start; }
+}
+/* Updates' headline is long and its action wide ("Update to 7.10.2-alpha.0"): side by side they need about 42rem, so a
+   narrower tab body (the pane beside the section's list, a narrow window) puts the action under the words, and the
+   headline keeps its one line wherever the card holds it. */
+@container dashboard (max-width: 42rem) {
+    .updates-card > .dashboard-hero { grid-template-columns: minmax(0, 1fr); }
+    .updates-card .dashboard-hero-actions { grid-column: 1; grid-row: auto; align-self: start; }
 }
 /* A Dashboard card's title (16/600) and its list of facts (label, value): the tabs' cards share these two parts of the
    tab body (Costs, Consciousness, Updates, Activity, Evolution). */
@@ -6906,6 +6956,17 @@ html[data-layout="stack"] #page-dashboard[data-section-view="home"] > .app-page-
 .dashboard-settings-lead { margin: calc(-1 * var(--space-2)) 0 var(--space-3); color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
 .dashboard-settings-fold { margin-top: var(--space-3); }
 .costs-limits .settings-row-field > .ui-control { width: 5.25rem; }  /* money: room for a larger limit than a row's short number */
+/* A limit that may be lifted (More limits): the field takes a number, and "No limit" beside it lifts the limit and,
+   chosen, says so. The field's own "No limit" placeholder read as a second switch of the same name beside it, so here
+   the empty field draws none, and a quiet "or" between the two reads the row as one sentence: [ 40 ] s or No limit. */
+.costs-limits .settings-row[data-no-limit] .settings-row-field > .ui-control::placeholder { color: transparent; }
+.costs-limits .settings-row[data-no-limit] .settings-row-field::after {
+    content: "or";
+    margin-inline-start: var(--space-1);
+    color: var(--text-meta);
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+}
 /* A card that is one row (data-solo): the row's name is the card's title, its meta the lead, its control the body. */
 .dashboard-settings[data-solo] > .settings-row { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-1); padding: 0; border: 0; background: none; }
 .dashboard-settings[data-solo] .ui-row-title { font-size: var(--type-section); font-weight: 600; }
@@ -6929,7 +6990,9 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     font-size: var(--type-meta);
     line-height: var(--line-meta);
 }
-.dashboard-facts dd { margin: 0; color: var(--text-primary); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+/* A value longer than its column breaks into even lines: a list of duties breaks between them, not before its last
+   count ("×1" alone), and a long code breaks at its middle (updates.js factValueHtml), not before its last character. */
+.dashboard-facts dd { margin: 0; color: var(--text-primary); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; text-wrap: balance; }
 /* A narrow tab body reads each fact as its label over its value. */
 @container dashboard (max-width: 480px) {
     .dashboard-facts { grid-template-columns: minmax(0, 1fr); row-gap: 0; }
@@ -6937,10 +7000,13 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 }
 /* A headline card's Details follow the hero. Under a finger every control and summary reaches out to the touch minimum
    (ui.css "Touch reach"); a disclosure that follows the headline's actions (or the letter's last line) keeps the two
-   reaches apart, so neither covers the other. */
+   reaches apart, so neither covers the other. A disclosure's summary is itself the minimum tall there, so under the
+   headline's actions it parts from them only by a small capsule's reach below them: a wider step left a band as tall
+   as a row between the button and Details. */
 .dashboard-hero + .ui-disclosure { margin-top: var(--space-3); }
 @media (pointer: coarse) {
-    .dashboard-hero + .ui-disclosure, .updates-letter-details { margin-top: var(--space-5); }
+    .dashboard-hero + .ui-disclosure { margin-top: calc((var(--touch-target-min) - var(--control-h-sm)) / 2); }
+    .updates-letter-details { margin-top: var(--space-5); }
 }
 
 /* P4: Activity subtab — what runs now, the background mind, scheduled tasks: three cards on the Dashboard tab body.
@@ -6953,6 +7019,35 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 .activity-lines { display: grid; gap: 2px; }
 /* A row's one Details (the whole order, a schedule's codes) takes the row's full width under its words. */
 .activity-row > .activity-details { grid-column: 1 / -1; min-width: 0; }
+/* A row with one control (a work's Stop…, a kept service's Stop) keeps it beside its title and meta down to a row of
+   18rem, not the shared row's 28rem: a pane beside the section's list holds a row of about 25rem, and moving Stop…
+   under the meta there doubled every card. Narrower still it goes under the words at the row's end, so the menu Stop…
+   opens (aligned to its right edge) stays over the row instead of reaching over the list or the sidebar beside the
+   page. A row with two controls (a schedule's Disable and Delete) keeps the shared rule: beside its words they would
+   leave a phone's words a column of a few words. The row says it holds one control in its own compound, and its words
+   and its Details read the answer from it: a :has() left of a combinator would cost WebKit a re-check of the document
+   on every write (test_design_system_css_static.py). */
+.ui-row.activity-row {
+    --activity-words-column: 1 / -1;
+    --activity-details-step: var(--space-3);
+}
+.ui-row.activity-row:has(> .ui-row-actions > :only-child) {
+    --activity-words-column: 1;
+    --activity-details-step: var(--space-1);
+}
+@container (max-width: 28rem) {
+    .ui-row.activity-row > :is(.ui-row-title, .ui-row-meta) { grid-column: var(--activity-words-column); }
+    .ui-row.activity-row > .ui-row-actions:has(> :only-child) { grid-column: 2; grid-row: 1 / span 2; justify-content: flex-end; }
+}
+@container (max-width: 18rem) {
+    .ui-row.activity-row > :is(.ui-row-title, .ui-row-meta) { grid-column: 1 / -1; }
+    .ui-row.activity-row > .ui-row-actions:has(> :only-child) { grid-column: 1 / -1; grid-row: 3; justify-content: flex-end; }
+}
+/* Beside the words the control's reach ends above Details, so under a finger the row needs only a small parting. */
+@media (pointer: coarse) {
+    @container (min-width: 18.01rem) { .ui-row.activity-row > .activity-details { margin-top: var(--activity-details-step); } }
+}
+
 /* Under a finger the row's small actions (each with its reach) and the Details summary under them part by more than
    that reach, so a tap just under Stop… or Delete never opens Details. */
 @media (pointer: coarse) {
@@ -10128,6 +10223,13 @@ html[data-layout="stack"] .project-panel {
 .updates-restore-row .btn {
     margin-left: auto;
     flex: none;
+}
+/* In a narrow tab body (the pane beside the section's list) the name, the date and Restore leave the subject a few
+   words ("Merge pull request #..."), so the subject takes the row's second line under them, Restore at the end. */
+@container dashboard (max-width: 34rem) {
+    .updates-restore-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px var(--space-2); }
+    .updates-restore-msg { grid-column: 1 / 3; grid-row: 2; }
+    .updates-restore-row .btn { grid-column: 3; grid-row: 1 / span 2; }
 }
 .updates-empty {
     font-size: var(--type-meta);
