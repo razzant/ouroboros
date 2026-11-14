@@ -272,8 +272,9 @@ def _project_store_reader_hint(parts: list) -> str:
                         "replace the global note even with a project scope, never this project copy; "
                         f"knowledge_list({scope}) may still list it.")
             return (f"This is a project knowledge topic: knowledge_read(topic={topic!r}, {scope}) reads it and "
-                    f"knowledge_write(topic={topic!r}, {scope}, content=..., expected_revision=...) writes it; "
-                    "expected_revision is the revision knowledge_read returned, omitted only to create a missing note.")
+                    f"knowledge_write(topic={topic!r}, {scope}, mode=..., content=..., expected_revision=...) writes it "
+                    "(edit changes exact text, append adds at the end, overwrite replaces it); expected_revision is "
+                    "the revision knowledge_read returned, omitted only to create a missing note or for a bare append.")
         part = {
             project_workpad_path(pid).relative_to(own).as_posix(): (
                 "workpad", f"workpad_read(project_id='{pid}')",

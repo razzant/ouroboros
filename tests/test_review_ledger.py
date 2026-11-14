@@ -360,10 +360,11 @@ def test_w1_the_gate_plan_vectors_keep_an_added_seat_out_of_the_decision():
             _raw("critic", "m/critic", parts=("coupling",), answers={"coupling": _answer("coupling", "FAIL", [CRITICAL])})]
     rows = rl.rows_from_plan(plan, plan["routes"], raws)
     assert [row["additional"] for row in rows] == [False, False, True]
-    # The gate's decision (``tools/review._dispatch_unified_review``) is over the assigned seats;
-    # over every row the added critic's FAIL would decide the wave.
-    assert rl.reduce_verdict([row for row in rows if not row["additional"]])["aggregate"] == "PASS"
-    assert rl.reduce_verdict(rows)["aggregate"] == "FAIL"
+    # The decision (``reduce_verdict``, which the gate and the record share) is the assigned seats':
+    # the added critic's FAIL is its own row, never the wave's.
+    verdict = rl.reduce_verdict(rows)
+    assert verdict["aggregate"] == "PASS" and verdict["per_row"]["critic"] == "FAIL"
+    assert verdict == {**rl.reduce_verdict([row for row in rows if not row["additional"]]), "per_row": verdict["per_row"]}
     described = _describe_review_wave({"row_plan": plan, "prompt": "packet"}, started_ts="t", retry_key="",
                                       wave_refusal="", exited=False, early="")
     assert [row["additional"] for row in described["rows"]] == [False, False, True]

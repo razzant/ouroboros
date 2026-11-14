@@ -159,7 +159,8 @@ def test_admitted_registry_reads_writes_and_runs_script_in_external_folder(insta
     })
     assert str(installed.workspace) in script, script
     assert (installed.workspace / "script.txt").read_text() == str(installed.workspace)
-    result = registry.execute("knowledge_write", {"topic": "workspace-experience", "content": "Remember this work."})
+    result = registry.execute("knowledge_write", {"topic": "workspace-experience", "mode": "overwrite",
+                                                  "content": "Remember this work."})
     assert "Remember this work." in (installed.data / "memory" / "knowledge" / "workspace-experience.md").read_text(), result
     assert not (installed.data / "projects").exists()
     assert not (installed.data / "state" / "headless_tasks").exists()

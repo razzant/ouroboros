@@ -188,6 +188,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/projects/{project_id}/delete` | |
 | GET | `/api/fs/dirs` | |
 | GET | `/api/chat/history` | |
+| GET | `/api/chat/search` | |
 | GET | `/api/logs/{name}` | |
 | GET | `/api/logs/{name}/raw` | |
 | POST | `/api/chat/upload` | |

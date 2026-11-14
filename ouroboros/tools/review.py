@@ -919,13 +919,19 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
         elif slot_id in _retrieving:
             record["governance_manifest"] = list(_retrieving[slot_id].get("governance_manifest") or [])
             record["brief_sha"] = (_retrieving[slot_id].get("sha") or {}).get("brief", "")
-    pending_models = [_review_actor_label(r) for r in triad_raw if not r.get("additional") and (
+    # An advisers-only wave has no counted row, but its physical adviser still
+    # owns open custody. Treat that custody as pending before reducing the
+    # non-counted verdict; otherwise the later ``no_counted_reviewers`` branch
+    # records an override while the wave is still in flight.
+    pending_rows = ([r for r in triad_raw if not r.get("additional")]
+                    if any(not r.get("additional") for r in triad_raw) else triad_raw)
+    pending_models = [_review_actor_label(r) for r in pending_rows if (
         r.get("late_result_pending") or str(r.get("operation_state") or "")
         in {"in_flight", "custody_lost"})]
     rows = rows_from_plan(prepared.get("row_plan") or {}, prepared.get("routes") or [], triad_raw)
     # The decision is over the ASSIGNED seats; a seat the author added beside the
     # pool is heard (its Part-2 findings below) but never counted in the quorum.
-    verdict = reduce_verdict([seat for seat in rows if not seat.get("additional")], pending=bool(pending_models))
+    verdict = reduce_verdict(rows, pending=bool(pending_models))
     ctx._last_review_verdict = verdict
     ctx._last_coupling_result = coupling_outcome(verdict, rows)
     # ``blocked`` is the gate's fact, not the verdict's: a FAIL on the coupling
@@ -937,6 +943,12 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
                        f"{', '.join(pending_models)}. Retry the same commit to reconcile them without a blind paid resend.")
         _handle_review_block_or_warning(
             ctx, blocked_msg, "Review is pending; collect its outcome before choosing an author continuation. ")
+        # The physical operation is still open. Do not continue into the
+        # no-counted/critical branches and turn an in-flight adviser into a
+        # second, settled-looking override outcome. Ordinary counted waves
+        # retain their existing post-pending diagnostics.
+        if not models_total:
+            return None
     failed_actors = [_review_actor_label(r) for r in triad_raw
                      if r.get("status") not in ("responded", "not_dispatched")]
     quorum = verdict["quorum"]
@@ -955,7 +967,7 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
         _handle_review_block_or_warning(ctx, blocked_msg, "Review quorum was not met; an explicit author decision is required. ")
         return None
 
-    if models_total < 2:
+    if 0 < models_total < 2:
         # A single configured reviewer is honored (owner's explicit setup), but
         # the lost cross-model diversity is recorded LOUDLY (Bible P3): the immune
         # gate ran with no second opinion. Record it on the DURABLE degraded-reasons
@@ -972,9 +984,9 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
     all_non_responded = failed_actors or errored_models
     if all_non_responded:
         errored_note = (
-            f"\n\nNote: {len(all_non_responded)} of {models_total} review models "
+            f"\n\nNote: {len(all_non_responded)} of {models_total or len(triad_raw)} review models "
             f"were unavailable or failed to parse ({', '.join(all_non_responded)}). "
-            f"Target is {models_total} working reviewers."
+            + (f"Target is {models_total} working reviewers." if models_total else "None of them is counted.")
         )
 
     if verdict["aggregate"] == "NOT_PERFORMED":
@@ -992,6 +1004,7 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
             "change_unanswered": NOT_PERFORMED_PHRASES["change_unanswered"],
             "review_late_result_pending": (NOT_PERFORMED_PHRASES["review_late_result_pending"]
                                            + f" ({', '.join(pending_models) or 'custody open'}); no verdict is counted yet"),
+            "no_counted_reviewers": NOT_PERFORMED_PHRASES["no_counted_reviewers"],
         }.get(reason, f"the wave reduced to no countable answer ({reason})")
         part = {"coupling_not_performed": "coupling", "change_unanswered": "change"}.get(reason, "")
         seat_lines = _uncounted_part_seat_lines(rows, part) if part else []
@@ -999,6 +1012,8 @@ def _dispatch_unified_review(ctx: ToolContext, commit_message: str, prepared: di
             # No seat read the work: only a retrieving row can answer Part 2.
             advice = ("retry the commit or configure a retrieving reviewer seat "
                       "(Settings → Agents, a Reviewer row that reads the work itself).")
+        elif reason == "no_counted_reviewers":
+            advice = "the same panel would again count nothing; name a pool reviewer for a counted verdict."
         elif seat_lines:
             advice = ("retry the commit — the seats asked answered in a form the gate cannot count; "
                       "each seat's error is listed above and recorded.")

@@ -17,6 +17,7 @@ from ouroboros.knowledge import sanitize_topic as _sanitize_topic
 from ouroboros.tools.arg_feedback import ignored_argument_note
 from ouroboros.tools.registry import ToolEntry, ToolContext
 from ouroboros.tools.tool_result import ToolResult, _MAX_META_BYTES, _publish_tool_result, completed_local_read
+from ouroboros.tools.tool_result import publish_no_effect
 
 KNOWLEDGE_DIR = "memory/knowledge"
 _MODES = ("overwrite", "append", "edit", "revert", "archive", "restore")
@@ -275,12 +276,41 @@ def _capture_previous(ctx: ToolContext, note: knowledge_store.KnowledgeNote) -> 
     return {**ref, "format": "json", "field": "old_content"}
 
 
+def _mode_refusal(ctx: ToolContext, mode: object) -> str:
+    """A write names its operation; without an exact mode nothing is written, and nothing else is read first.
+
+    An omitted mode once meant overwrite, so a call meant to add one section replaced the whole note.
+    Null and blank text say what omission says (``tools/arg_feedback``), now refused like it; any other
+    value is refused as received, never trimmed, case-folded or matched to the nearest operation.
+    """
+    if mode is None:
+        received = "mode is missing or null"
+    elif not isinstance(mode, str):
+        received = f"mode={mode!r} is not text"
+    elif not mode.strip():
+        # Reuse the canonical blank-value representation; keep the established
+        # refusal wording for non-blank invalid values.
+        received = ignored_argument_note("mode", mode, "is not an operation").replace(
+            " ignored: is not an operation", " is not an operation")
+    else:
+        received = f"mode={mode!r} is not an operation"
+    return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
+        f"⚠️ TOOL_ARG_ERROR: {received}. knowledge_write has no default operation: pass mode as exactly one of "
+        "overwrite (content replaces the whole body), append (content goes at the end), edit (old_str with "
+        "content, or edits, replaces exact text; summary may go alone), revert (puts back the earlier version "
+        "named by version), archive or restore (the archive state only; archive requires reason). version names "
+        "an earlier version to put back; expected_revision is the current revision a replacing write checks. "
+        "Nothing was written.")))
+
+
 def _knowledge_write(
-    ctx: ToolContext, topic: str, content: str | None = None, mode: str = "overwrite",
+    ctx: ToolContext, topic: str, content: str | None = None, mode: str | None = None,
     scope: str = "", expected_revision: str | None = None, old_str: str | None = None,
     summary: str | None = None, reason: str = "", edits: list | None = None, version: str | None = None,
     new_str: str | None = None,
 ) -> str:
+    if not isinstance(mode, str) or mode not in _MODES:  # no default operation: the call must choose one
+        return _mode_refusal(ctx, mode)
     notes = []  # a value that means what omission means takes the omitted path, said in the result (tools/arg_feedback)
     blank_version = isinstance(version, str) and not version.strip()  # empty or whitespace: it names no revision
     # Outside revert, a blank version or the revision this call already names as expected_revision asks for nothing.
@@ -300,8 +330,8 @@ def _knowledge_write(
     try:
         sanitized = _sanitize_topic(topic)
         lifecycle = mode in ("archive", "restore")
-        if mode not in _MODES or not isinstance(content, (str, type(None))):
-            raise ValueError("content must be Markdown; mode must be " + ", ".join(_MODES))
+        if not isinstance(content, (str, type(None))):
+            raise ValueError("content must be Markdown")
         if new_str is not None:  # the one-pair edit's replacement as other editors spell it: content
             if not isinstance(new_str, str):
                 raise ValueError("new_str must be text, the replacement of old_str (empty text deletes it)")
@@ -482,7 +512,8 @@ def get_tools() -> List[ToolEntry]:
                 "project), never in a Safety check; body text never replaces it. Under physical window pressure, the outline names every active "
                 "topic and keeps type person summaries; others remain readable with knowledge_list. A summary names the "
                 "note's enduring scope and when to open it, and is not a dated log of the latest edit. "
-                "Modes. overwrite replaces the note with content; its frontmatter fields merge with the retained ones. "
+                "mode is required and has no default; a call without it writes nothing. "
+                "overwrite replaces the note with content; its frontmatter fields merge with the retained ones. "
                 "append adds content at the end. edit replaces exact body text of the revision you read: one old_str by "
                 "content (or new_str), or edits, a list of {old_str, new_str} items. Each old_str must occur exactly "
                 "once in that revision's body (never in an earlier item's result); items may touch but not overlap; all "
@@ -504,7 +535,7 @@ def get_tools() -> List[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "topic": topic, "scope": scope,
                 "content": {"type": "string", "description": "Markdown, optionally with YAML frontmatter; supplied fields merge with retained ones. The text of overwrite and append, or the replacement of one old_str (empty deletes it). Omit for archive, restore, revert, an edits edit and a summary-only edit. No summary is generated from the body."},
-                "mode": {"type": "string", "enum": list(_MODES), "description": "overwrite, append, edit, revert, archive or restore, as this tool's description explains. Missing notes are created by overwrite/append only. The overview always stays active."},
+                "mode": {"type": "string", "enum": list(_MODES), "description": "Required, with no default: overwrite, append, edit, revert, archive or restore, as this tool's description explains. Missing notes are created by overwrite/append only. The overview always stays active."},
                 "reason": {"type": "string", "description": "Why this write: optional on every mode and required for archive, which also records it in the archive field. Kept in the note's history, never written into its body; no automatic classification or summarization occurs."},
                 "old_str": {"type": "string", "description": "mode=edit, one pair: non-empty exact body text that occurs once; content (or new_str) replaces it (empty text deletes it). Omit both to change only the summary; edits replaces several places at once."},
                 "new_str": {"type": "string", "description": "mode=edit with old_str: its replacement, the same as content (empty text deletes it). Pass one of the two."},
@@ -514,7 +545,7 @@ def get_tools() -> List[ToolEntry]:
                 "summary": {"type": "string", "description": "A summary names the note's enduring scope and says when to open this note, not a dated log of its latest edit: it is shown in the resident knowledge index, while the body is read on demand. Passed with overwrite, append or edit, it replaces the current summary in the same revision-checked write (mode=edit may pass it alone); omit it to keep the current one."},
                 "expected_revision": {"type": "string", "description": "The note's current revision, as knowledge_read, a receipt or a refusal returns it. Required to replace an existing note: overwrite, edit, revert, archive, restore and an append with summary. Omit it for a bare append or to create a note; pass empty only to create a missing note (on an existing note an empty value is a stale revision). A stale revision writes nothing."},
                 "version": {"type": "string", "description": "mode=revert: the revision of an earlier version of this note (knowledge_read(view='history') lists them); its exact stored bytes become the current note."},
-            }, "required": ["topic"]},
+            }, "required": ["topic", "mode"]},
         }, _knowledge_write),
         ToolEntry("knowledge_list", {
             "name": "knowledge_list",
