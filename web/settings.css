@@ -1284,8 +1284,8 @@ html[data-layout="stack"] .settings-search { height: 44px; }
 
 /* settings rows */
 /* A row that saves itself (settings_controls.js settingsRow) stands on the shared .ui-row, at least 52 px tall: its
-   name, one meta line with the row's result after it, its control at the end. The result is words in the meta line,
-   so an empty one takes no line, and Undo is a link in that sentence. A number is typed in a short field with its
+   name, one meta line and its control at the end, and the row's result on a line of its own under them (below): an
+   empty one takes no line, and Undo is a link in that sentence. A number is typed in a short field with its
    unit beside it ("No limit" next to a bound that may be unlimited) and a choice of many is a list, both as tall as
    a button with the value in the semibold weight; a path or an address has a longer field. */
 .settings-row,
@@ -1356,7 +1356,9 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
    ("No voice on this device") wraps at the end instead of squeezing them into a column of a few words. */
 .settings-row[data-kind="door"]:not([data-lead]) { grid-template-columns: minmax(60%, 1fr) auto; }
 /* A wide control (settings_controls.js marks it `data-wide`) goes under the words below 36rem, while beside it the
-   words would keep only a narrow column (ui.css moves every row's actions only below 28rem). */
+   words would keep only a narrow column (ui.css moves every row's actions only below 28rem). Beside them it leaves the
+   words 16rem whatever its own width: a wider one (Evolution's strip with its N field) wraps its own parts there. */
+.settings-row[data-wide] { grid-template-columns: minmax(min(100% - var(--space-3), 16rem), 1fr) auto; }
 @container (max-width: 36rem) {
     .settings-row[data-wide] > :is(.ui-row-title, .ui-row-meta, .ui-row-actions) { grid-column: 1 / -1; }
     .settings-row[data-wide] > .ui-row-actions { grid-row: 3; justify-content: flex-start; }
@@ -1630,9 +1632,19 @@ textarea.ui-control.settings-rules-text {
 }
 .agent-family-accounts .harness-account-row[data-tone="warn"] { background: var(--status-warn-bg); }
 .harness-account-mark { grid-area: mark; display: grid; place-items: center; min-width: 22px; color: var(--text-secondary); }
+/* An account's name is one line: an address never breaks inside itself, and one longer than the line is cut with an
+   ellipsis (the markup offers no break at its @ or its dots). */
+.agent-family-accounts .harness-account-main > strong { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .agent-family-accounts .harness-account-actions { flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 .harness-account-actions > [data-resources] { margin: 0; }
 .harness-account-extra { grid-column: 2 / -1; grid-row: 3; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-1); }
+/* A row too narrow to keep its words about 200 px beside the switch and More (a phone leaves them 150) stands them
+   under the words, at their start, and Sign in's line under them; the owner's window keeps them at the row's end. */
+@container (max-width: 22rem) {
+    .agent-family-accounts .harness-account-row > :is(.harness-account-main, .harness-account-meta, .harness-account-actions) { grid-column: 2 / -1; }
+    .agent-family-accounts .harness-account-row > .harness-account-actions { grid-row: 3; justify-content: flex-start; margin-top: var(--space-1); }
+    .agent-family-accounts .harness-account-row > .harness-account-extra { grid-row: 4; }
+}
 /* What is rare shows while More is open: the row holds the :has() in its own compound and lends the line its display;
    closed, the fallback hides it, and a line of nothing else takes no room. */
 .harness-account-row:has([data-resources][aria-expanded="true"]) {

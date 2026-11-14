@@ -308,8 +308,9 @@ html[data-layout="stack"] .sidebar-foot-meta { min-height: 44px; margin: var(--s
     --window-chrome-clearance: calc(var(--window-chrome-start) + var(--space-3));
 }
 /* The card stands right under the traffic lights (owner 12.11, the fifth round frames): a step of air under them, so
-   its top reaches into the band's lower part. */
-:root[data-window-chrome="integrated"] .sidebar-head {
+   its top reaches into the band's lower part. The stack layout's drawer has its × there, which clears the band itself
+   (.drawer-head below), so the head under it adds no second clearance. */
+:root[data-window-chrome="integrated"]:not([data-layout="stack"]) .sidebar-head {
     padding-top: max(var(--space-4), calc(var(--window-chrome-top) - var(--space-4)));
 }
 :root[data-window-chrome="integrated"] .onboarding-overlay {
@@ -570,6 +571,10 @@ html[data-layout="stack"] .resize-handle { display: none; }
     --focus-accent-border: var(--tone-crimson-ink);
     --mark-unread: var(--tone-crimson-ink);
 }
+/* The chosen Project row's Pin and ⋯ lie on that fill as the row's siblings, where its restatement does not reach:
+   their ring restates the same token the same way. */
+:root .nav-project-pin:has(+ .nav-project-row.active),
+:root .nav-project-row.active ~ .nav-project-kebab { --focus-accent-border: var(--tone-crimson-ink); }
 
 .nav-row:focus,
 .app-tab:focus,
@@ -1432,12 +1437,6 @@ html[data-layout="stack"] .app-page-header[data-back] > .app-page-leading:has(~ 
 html[data-layout="stack"] .app-page-header[data-back] > .app-page-title-block:has(> .app-page-back:not(:empty)) { display: contents; }
 html[data-layout="stack"] .app-page-header[data-back] .app-page-title-row { grid-area: title; }
 html[data-layout="stack"] .app-page-header[data-back] .app-page-back { grid-area: back; }
-.app-page-tabs[data-back] { display: flex; align-items: center; gap: var(--space-1); }
-.app-page-tabs[data-back] > :not(.app-page-back) { flex: 1 1 auto; min-width: 0; }
-/* Back starts the tabs' row at ☰'s inset and is centred on the tabs, not on the strip, which lends its tabs their
-   shadow room below them (.app-tab-strip: var(--space-2) above, var(--space-5) below). */
-.app-page-tabs[data-back] { padding-inline-start: var(--space-3); }
-.app-page-tabs[data-back] > .app-page-back { margin-bottom: calc(var(--space-5) - var(--space-2)); }
 /* A narrow content column gives the existing toolbar its own wrapping row; navigation lives below it. */
 html[data-layout="docked"] .app-page-header[data-narrow] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "toolbar"; }
 html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-leading { display: none; }
@@ -1487,6 +1486,9 @@ html[data-layout="docked"] .app-page-lead .app-tab-strip {
 }
 html[data-layout="docked"] .app-page-lead { --control-h: var(--control-h-float); }
 html[data-layout="docked"] .app-page-lead .app-tab { pointer-events: auto; }
+/* A pane too narrow for the bar keeps the strip under the row (page_header.js bindPageHeader): there too it wraps and
+   never scrolls; only the phone's strip, at the top of its page, scrolls. */
+html[data-layout="docked"] .app-page-tabs > .app-tab-strip { flex-wrap: wrap; row-gap: var(--space-1); overflow-x: visible; }
 /* Files: the folder's location starts the bar at reading size, each folder by its name, the one you are in in primary
    ink. A location longer than the bar's start scrolls inside it as a tab strip does, fading where folders hide: it
    rests at its end (files.js), so the folders above give way first, and no folder is wider than the strip less one
@@ -6319,8 +6321,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     border-bottom: 1px solid rgba(var(--neutral-rgb), 0.04);
     color: var(--text-secondary);
 }
-.cost-table tbody tr:hover td {
-    background: rgba(var(--neutral-rgb), 0.03);
+/* Only a pointer that hovers paints a row (a finger's tap would leave it painted), and the row is painted whole, so a
+   row a narrow card stacks shows no seams between its cells. */
+@media (hover: hover) {
+    .cost-table tbody tr:hover { background: rgba(var(--neutral-rgb), 0.03); }
 }
 
 /* Dashboard Evolution (evolution.js): the campaign object, then one time line of versions with the chosen version
@@ -9068,8 +9072,11 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
 
 /* While finding, a found name may take three lines, so the words that matched are not cut off behind the ellipsis
    (the resting list keeps the rows' two lines). The row grows past its fixed height; its time keeps the name's first
-   line and its newest line and mark stay under the name. */
-html .nav-projects-list[data-finding] .nav-project-row { height: auto; }
+   line and its newest line and mark stay under the name. At rest a row's two lines reach 1 px into its padding at each
+   edge (a solo name 2 px into the bottom one), so a growing row's padding gives those pixels back: a row of one or two
+   lines keeps its height, and its words their place, when a find starts. */
+html .nav-projects-list[data-finding] .nav-project-row { height: auto; padding-block: 5px; }
+html .nav-projects-list[data-finding] .nav-project-row[data-solo] { padding-block: 6px 4px; }
 .nav-projects-list[data-finding] .nav-project-row .nav-project-line1 { align-items: flex-start; }
 .nav-projects-list[data-finding] .nav-project-row .nav-row-label {
     display: -webkit-box;
@@ -9079,9 +9086,10 @@ html .nav-projects-list[data-finding] .nav-project-row { height: auto; }
     overflow-wrap: anywhere;
 }
 
-/* The list's own commands (Show more, Clear search, Show all projects, Try again) and its one sentence take a
-   Project row's geometry in the meta ink, their words on the label column (Show more's chevron in the icon column),
-   so none reads as one more Project. */
+/* The list's own commands (Show more, Clear search, Show all projects, Try again) stand on the rows' words' column,
+   semibold at the meta size in the primary ink, a command's glyph leading there and its words after it (the chevron
+   of Show more and Show all projects, Clear search's ×), and its one sentence in the meta ink on the same column, so
+   none reads as one more Project. */
 .nav-projects-more {
     display: flex;
     align-items: center;
@@ -10086,12 +10094,13 @@ html[data-layout="stack"] .project-panel {
     width: fit-content;
     max-width: 100%;
 }
-/* The meta line is facts: each one whole on its line (a fact wider than the line wraps inside itself), parted by a
-   dot that stays with the fact before it, so no line starts with a separator. A spent window is the one fact in the
-   warning's hue (DESIGN principle 3: the words that carry the state take the hue; the row's body stays neutral, so
-   rows never alternate); the plan, who it is and "checked …" keep the meta ink. */
-.harness-account-meta .meta-fact { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
-.harness-account-meta .meta-fact:not(:last-of-type)::after { content: " ·"; margin-right: 0.35em; color: var(--text-meta); }
+/* The meta line is facts: each one whole on its line (a fact wider than the line wraps between its words, and an
+   address in it, as the name's, is cut with an ellipsis rather than inside a word), parted by a dot that stays with
+   the fact before it, so no line starts with a separator. A spent window is the one fact in the warning's hue (DESIGN
+   principle 3: the words that carry the state take the hue; the row's body stays neutral, so rows never alternate);
+   the plan, who it is and "checked …" keep the meta ink. Its top stands on the line's top, as its baseline did. */
+.harness-account-meta .meta-fact { display: inline-block; max-width: 100%; overflow: hidden; overflow-wrap: normal; text-overflow: ellipsis; vertical-align: top; }
+.harness-account-meta .meta-fact:not(:last-of-type)::after { content: "\00a0·"; margin-right: 0.35em; color: var(--text-meta); }
 .harness-account-meta .meta-fact[data-tone="warn"] { color: var(--status-warn-word, var(--text-meta)); }
 /* The light seed's half of the warning row (DESIGN seed table: light — the row's tint, its words in their own ink;
    dark — a neutral row, its words in the hue): the one warning row with a body, so the theme scopes its rule here. */
