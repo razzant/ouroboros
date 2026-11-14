@@ -1,4 +1,4 @@
-"""Read-only consciousness facts from places, current roots and durable results."""
+"""Read-only consciousness facts from places, current roots, durable results and the ledger's period view."""
 
 import contextlib
 from datetime import datetime
@@ -373,8 +373,10 @@ def cache_writes_text(drive_root, now: float = 0.0) -> str:
 
 def _cache_writes_line(rows) -> str:
     """``cost_period``'s cache-write rows as one line: the calls that wrote, their tokens, the writes' share of recorded
-    cost, and the three classes that wrote most. A class goes without its detail (route and block names); a call whose
-    cost no tariff could share is counted as unsplit, and a cost nobody could share is unknown, never zero."""
+    cost, then every class of what the writes followed, in the Costs page's own order (share of cost, then tokens). A
+    class goes without its detail (route and block names). A call whose cost no tariff could share is counted as
+    unsplit: a class's dollars are of its other calls, and where no call's cost could be shared the share is unknown,
+    never zero."""
     classes: dict[str, dict] = {}
     for row in rows:
         held = classes.setdefault(row["class"], {"calls": 0, "tokens": 0, "usd": 0.0, "unsplit": 0})
@@ -383,20 +385,19 @@ def _cache_writes_line(rows) -> str:
         held["usd"] += row["write_cost"]
         held["unsplit"] += row["unshared_calls"]
     if not classes:
-        return "none in the last 24 h"
+        return "none recorded in the last 24 h"
     calls, tokens, usd, unsplit = (sum(held[key] for held in classes.values()) for key in ("calls", "tokens", "usd", "unsplit"))
 
-    def compact(count) -> str:  # the Costs page's own form (web/modules/cost_period.js ``compactTokens``)
-        for unit, word in ((1e9, "B"), (1e6, "M")):
-            if count >= unit:
-                return (f"{count / unit:.0f}" if count / unit >= 100 else f"{count / unit:.1f}".removesuffix(".0")) + word
-        return f"{int(count / 1e3 + 0.5)}k" if count >= 1e3 else str(int(count))
+    def named(name, held) -> str:
+        if held["unsplit"] >= held["calls"]:
+            return f'{name} {held["calls"]}'  # none of its calls' cost could be shared: no dollars, never $0.00
+        return f'{name} {held["calls"]} ${held["usd"]:.2f}' + (f' ({held["unsplit"]} unsplit)' if held["unsplit"] else "")
 
-    money = ("cost unknown" if unsplit >= calls else
+    money = ("write share of cost unknown" if unsplit >= calls else
              f"${usd:.2f} write share of recorded cost" + (f", {unsplit} unsplit" if unsplit else ""))
-    most = sorted(classes.items(), key=lambda item: (-item[1]["usd"], -item[1]["tokens"], item[0]))[:3]
-    return (f"{calls} in the last 24 h, {compact(tokens)} tokens, {money}; most: " + ", ".join(
-        f'{name} {held["calls"]}' + (f' ${held["usd"]:.2f}' if held["unsplit"] < held["calls"] else "") for name, held in most))
+    order = sorted(classes.items(), key=lambda item: (-item[1]["usd"], -item[1]["tokens"], item[0]))
+    return (f"{calls} in the last 24 h, {tokens:,} tokens, {money}; by what they followed: "
+            + ", ".join(named(name, held) for name, held in order))
 
 
 def roots_text(rows) -> str:
