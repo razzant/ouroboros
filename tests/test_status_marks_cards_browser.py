@@ -244,7 +244,7 @@ def test_cards_activity_logs_and_budget_speak_the_status_marks(tmp_path, engine)
                     # Logs colours only a failure: a settled task says its outcome in words, a warning in its own.
                     def headline(task_id):
                         card = page.locator(f'.log-task-card[data-task-group="{task_id}"]')
-                        return card.locator(':scope > summary > .log-words').inner_text(), card.locator('.log-failure').first.is_visible()
+                        return card.locator(':scope > summary .log-words').inner_text(), card.locator('.log-failure').first.is_visible()
                     assert headline("stopped") == ("Stopped", False)
                     assert headline("warned") == ("Done with warnings", False)
                     assert headline("checking")[1] is False

@@ -931,7 +931,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .chat-messages,
 #log-entries,
 .log-entry,
-.log-words,
+.log-line,
 .log-task-timeline,
 .chat-bubble,
 .chat-bubble .message,
@@ -6144,7 +6144,6 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     align-content: center;
     gap: 2px var(--space-2);
 }
-.log-head::before { grid-area: 1 / 1; align-self: baseline; }
 .log-head [hidden] { display: none; }
 .log-title { grid-area: 1 / 2; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--space-2); min-width: 0; }
 .log-name {
@@ -6157,8 +6156,8 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 :is(.log-task, .log-count, .log-ts) { color: var(--text-meta); font-weight: 400; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .log-ts { grid-area: 1 / 3; }
 
-/* The words read: the body size, the regular weight, the primary ink, at most three lines while closed. */
-.log-words {
+/* The words' line reads: body size, regular weight, primary ink, three lines at most while closed, a failure's chip first. */
+.log-line {
     grid-area: 2 / 2 / 3 / -1;
     color: var(--text-primary);
     font-size: var(--type-body);
@@ -6172,8 +6171,9 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     line-clamp: 3;
     overflow: hidden;
 }
-.log-title[hidden] ~ .log-words { grid-area: 1 / 2; }  /* a head without a name: its words stand in the name's place */
-.log-fold[open] > .log-head > .log-words { display: block; overflow: visible; }
+.log-line > .log-failure { margin-inline-end: var(--space-2); }
+.log-title[hidden] ~ .log-line { grid-area: 1 / 2; }  /* a head without a name: its line stands in the name's place */
+.log-fold[open] > .log-head > .log-line { display: block; overflow: visible; }
 
 /* The fold's sections: facts and notes in the meta ink, then the raw record. */
 :is(.log-facts, .log-note) {

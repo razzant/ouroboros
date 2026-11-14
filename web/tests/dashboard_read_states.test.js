@@ -556,7 +556,7 @@ test('Logs reads oldest to newest, gives every event one anatomy, and shows the 
     assert.equal(first.tagName, 'details');
     assert.equal(first.className, 'ui-disclosure log-fold log-entry');
     assert.equal(head.tagName, 'summary');
-    assert.deepEqual(head.children.map((part) => part.className), ['log-title', 'log-ts', 'log-words'], 'the head ends in its time');
+    assert.deepEqual(head.children.map((part) => part.className), ['log-title', 'log-ts', 'log-line'], 'the head ends in its time');
     const time = head.querySelector('.log-ts');
     assert.match(time.textContent, /^(Yesterday, |[A-Z][a-z]{2} \d+, )?\d\d:\d\d$/, 'Main\'s clock');
     assert.equal(time.getAttribute('datetime'), earlier.ts, 'the exact moment stays with it');
@@ -607,6 +607,27 @@ test('Logs reads oldest to newest, gives every event one anatomy, and shows the 
     assert.match(empty.textContent, /^Cleared at \d\d:\d\d\. New events appear here\.$/);
     ws.emit('log', { data: { ...live, ts: '2026-09-09T12:01:00Z' } });
     assert.equal(empty.hidden, true);
+});
+
+test('Logs leads a failure\'s line of words with its chip, so name, chip and words share one left edge', async (t) => {
+    const { mount, routes, ws } = setup(t);
+    for (const name of ['events', 'tools', 'progress', 'supervisor']) routes.set(logUrl(name), response({ entries: [] }));
+    initLogs({ mount, ws, state: { activePage: 'dashboard', dashboardActiveSubtab: 'logs' } });
+    await settle();
+    ws.emit('log', { data: { type: 'test_broken_event', ok: false, message: 'it broke', ts: '2026-09-16T12:00:00Z' } });
+    ws.emit('log', { data: { type: 'test_plain_event', message: 'all well', ts: '2026-09-16T12:00:01Z' } });
+    ws.emit('log', { data: { type: 'worker_ready', ts: '2026-09-16T12:00:02Z' } });
+    const [broken, plain, bare] = mount.querySelector('#log-entries').children.map((node) => node.children[0]);
+    const line = (head) => head.querySelector('.log-line');
+    const parts = (head) => line(head).children.map((part) => (part.hidden ? '' : part.textContent));
+    // The chip is the line's first part, its words flow on after it: under the name, not beside it on the first line.
+    assert.equal(broken.querySelector('.log-title').querySelector('.log-failure'), null, 'no chip beside the name');
+    assert.deepEqual(parts(broken), ['Failed', 'it broke']);
+    assert.equal(line(broken).hidden, false);
+    // An event that did not fail has no chip: its line is its words alone, and with no words there is no line.
+    assert.deepEqual(parts(plain), ['', 'all well']);
+    assert.equal(line(plain).hidden, false);
+    assert.equal(line(bare).hidden, true);
 });
 
 // The filter's choice lived in `state.activeFilters` as the kinds SHOWN (all six at rest, one turned off to narrow);

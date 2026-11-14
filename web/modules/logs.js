@@ -389,15 +389,15 @@ export function initLogs({ ws, state, mount }) {
     // ---- The panel (DOM): only while shown ------------------------------------------------------------------------
 
     // One anatomy for every event, a task card and a timeline row alike (U027, U028): one shared fold
-    // (details.ui-disclosure) whose summary is the event's head: its name in words right after the caret (a task's card
-    // adds its short id), a failure's chip and its count, and at the line's end its time, as a sidebar row ends in its
-    // time; then its words, at most three lines, from the name's edge. Opening it un-clamps the words in place (their
-    // whole text where the view cut them) and shows its facts and its record, or a task's timeline. A head without a
-    // name says its words in the name's place (style.css).
+    // (details.ui-disclosure) whose summary is its head: its name right after the caret, its task's short id and its count,
+    // its time at the line's end as a sidebar row's; then its line of words from the name's edge, at most three lines, led
+    // by a failure's chip. Open, the words are whole (their whole text where the view cut them) over its facts and its
+    // record, or a task's timeline. A head without a name says its line in the name's place (style.css).
     const HEAD_HTML = '<summary class="log-head"><span class="log-title"><span class="log-name"></span>'
-        + '<span class="log-task" hidden></span><span class="chat-live-phase log-failure" data-chip-tone="failed" hidden>'
+        + '<span class="log-task" hidden></span><span class="log-count" hidden></span></span><time class="log-ts"></time>'
+        + '<span class="log-line" hidden><span class="chat-live-phase log-failure" data-chip-tone="failed" hidden>'
         + `${statusMarkHtml('', markView({ outcome: 'error' }))}<span class="log-failure-word"></span></span>`
-        + '<span class="log-count" hidden></span></span><time class="log-ts"></time><span class="log-words" hidden></span></summary>'
+        + '<span class="log-words"></span></span></summary>'
         + '<div class="log-facts" hidden></div><div class="log-note log-executor-detail" hidden></div>';
     const RECORD_HTML = `<div class="log-note" data-log-omitted hidden></div>${LOG_RAW_HTML}`;
     const TIMELINE_HTML = '<div class="log-note log-task-review" hidden></div><div class="log-note" data-log-gone hidden></div>'
@@ -410,8 +410,8 @@ export function initLogs({ ws, state, mount }) {
         node.className = `ui-disclosure log-fold ${className}`;
         node.innerHTML = HEAD_HTML + body;
         const find = (selector) => node.querySelector(selector);
-        partsOf.set(node, { ts: find('.log-ts'), title: find('.log-title'), name: find('.log-name'),
-            task: find('.log-task'), failure: find('.log-failure'), failureWord: find('.log-failure-word'), count: find('.log-count'),
+        partsOf.set(node, { ts: find('.log-ts'), title: find('.log-title'), name: find('.log-name'), task: find('.log-task'),
+            count: find('.log-count'), line: find('.log-line'), failure: find('.log-failure'), failureWord: find('.log-failure-word'),
             words: find('.log-words'), facts: find('.log-facts'), detail: find('.log-executor-detail'), omitted: find('[data-log-omitted]') });
         return node;
     }
@@ -439,14 +439,14 @@ export function initLogs({ ws, state, mount }) {
         setText(parts.name, name);
         setText(parts.task, task);
         parts.task.hidden = !task;
-        setText(parts.failureWord, failure);
-        parts.failure.hidden = !failure;
         setText(parts.count, count);
         parts.count.hidden = !count;
-        parts.title.hidden = !name && !task && !failure && !count;
+        parts.title.hidden = !name && !task && !count;
+        setText(parts.failureWord, failure);
+        parts.failure.hidden = !failure;
         wordsOfNode.set(node, { words, whole });
         showWords(node);
-        parts.words.hidden = !words;
+        parts.line.hidden = !words && !failure;
         const chip = execution ? `<span class="harness-chip log-executor-chip" title="${escapeHtmlAttr(execution.title || '')}">${
             harnessIdentityMarkup(execution.harness, { label: execution.label || '', className: 'log-executor-identity' })}</span>` : '';
         const said = facts.filter(Boolean);
