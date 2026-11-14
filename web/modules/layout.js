@@ -65,22 +65,30 @@ export function pinchMagnified(w = win()) {
     return Boolean(vv && layoutWidth && Number(vv.width) < layoutWidth - 1);
 }
 
-/** A window too short for the sidebar's zones pins its head and its foot over the one scroller (style.css). Their
- * measured heights are the scroll margin of the rows there, so a row reached with Tab or brought into view is never
- * left under either bar. Their border boxes are watched: the macOS title band and the safe area are their padding
- * and can arrive after the first paint (a Telegram inset, a page zoom), which a content box never reports. Returns
+/** A window too short for the sidebar's zones pins its head and its foot (the sections, the version and the update)
+ * over the one scroller (style.css). Their measured heights are the scroll margin of the rows there, so a row reached
+ * with Tab or brought into view is never left under either bar. Their border boxes are watched: the macOS title band
+ * and the safe area are their padding and can arrive after the first paint (a Telegram inset, a page zoom), which a
+ * content box never reports. The column is watched too: where the head, one Project row and the foot no longer fit
+ * in it, `data-bars-crowd` lets the head scroll away with the list (two pinned bars would cover every row). Returns
  * the disposer. */
 export function measurePinnedBars(sidebar, { Observer = globalThis.ResizeObserver } = {}) {
     const head = sidebar?.querySelector('.sidebar-head');
-    const foot = sidebar?.querySelector('.sidebar-foot-meta');
+    const foot = sidebar?.querySelector('.sidebar-foot');
     if (!head || !foot || typeof Observer !== 'function') return () => {};
     const write = () => {
-        sidebar.style.setProperty('--sidebar-head-h', `${head.getBoundingClientRect().height}px`);
-        sidebar.style.setProperty('--sidebar-foot-h', `${foot.getBoundingClientRect().height}px`);
+        const headH = head.getBoundingClientRect().height;
+        const footH = foot.getBoundingClientRect().height;
+        sidebar.style.setProperty('--sidebar-head-h', `${headH}px`);
+        sidebar.style.setProperty('--sidebar-foot-h', `${footH}px`);
+        const row = sidebar.querySelector('.nav-project-row')?.getBoundingClientRect().height || 48;
+        const room = Number(sidebar.clientHeight) || 0;
+        sidebar.toggleAttribute?.('data-bars-crowd', room > 0 && headH + row + footH > room);
     };
     const observer = new Observer(write);
     observer.observe(head, { box: 'border-box' });
     observer.observe(foot, { box: 'border-box' });
+    observer.observe(sidebar, { box: 'border-box' });
     write();
     return () => observer.disconnect();
 }

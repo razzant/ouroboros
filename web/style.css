@@ -155,28 +155,55 @@ html[data-layout="stack"] .shell-icon-control {
 /* A window too short for the zones (the head, three list rows and the foot no longer fit): the whole column is
    the ONE scroller with the head sticky, and the list shows every row in flow, so a finger or a wheel moves one
    thing (the gate counts the sidebar's scrollers). Finger rows are 44px, so a touch column runs out of room
-   sooner (measured: 586px of zones with 30 Projects). The foot, the version and the update, stays on the bottom
-   edge there too (owner 23.10): the tools' box steps aside (its rows become the column's), so the foot sticks to
-   the column itself and the rows pass under it as they pass under the head. Its offset and negative margin reach
-   through the column's bottom padding, which it takes as its own, so its text sits where a tall window puts it.
+   sooner (measured: 586px of zones with 30 Projects). The foot, the six sections with the version and the update
+   under them, stays on the bottom edge there too (owner 23.10; DESIGN "Navigation"): it sticks to the column and
+   the Project rows pass between it and the head, so Settings and the chosen section stay in view however long the
+   list. Its offset and negative margin reach through the column's bottom padding, which it takes as its own, so its
+   text sits where a tall window puts it; with few Projects it still stands on the bottom edge (margin-top: auto).
    The two bars' measured heights (layout.js measurePinnedBars) are the scroll margin of the rows that pass under
-   them, so a row reached with Tab is never left under either bar, while a bar's own control (Main, the update)
-   leaves the column where it is (a scroll padding on the column would count the bars as covered and move it). */
+   them, so a row reached with Tab is never left under either bar, while a bar's own control (Main, a section, the
+   update) leaves the column where it is (a scroll padding on the column would count the bars as covered and move
+   it). A column too short even for the card, one Project row and the foot (layout.js sets data-bars-crowd; by the
+   bars' heights a desk under 306 px with the macOS title band, 272 px without, a touch screen under 296 px) lets
+   the card scroll away with the list instead: the sections and the version stay on the edge, the card is the
+   list's top, one scroll up, and the rows keep the room between; two pinned bars there would cover every row. */
 @media (max-height: 540px), (pointer: coarse) and (max-height: 600px) {
-    #primary-sidebar :is(.nav-projects *, .nav-tools > [data-nav-page]) {
-        scroll-margin-block: var(--sidebar-head-h, 0px) var(--sidebar-foot-h, 0px);
+    #primary-sidebar .nav-projects * {
+        scroll-margin-block: calc(var(--sidebar-head-h, 0px) + var(--space-4))
+            calc(var(--sidebar-foot-h, 0px) + var(--space-4));
     }
+    #primary-sidebar[data-bars-crowd] .nav-projects * { scroll-margin-block-start: 0px; }
+    #primary-sidebar[data-bars-crowd] .sidebar-head { position: static; }
     #primary-sidebar .nav-projects { flex: 0 0 auto; min-height: 0; }
     #primary-sidebar .nav-projects-list { flex: 0 0 auto; overflow-y: visible; }
-    #primary-sidebar .sidebar-foot { display: contents; }
-    #primary-sidebar .sidebar-foot > :first-child { margin-top: var(--space-2); }  /* the box's padding-top */
-    #primary-sidebar .sidebar-foot-meta {
+    #primary-sidebar .sidebar-foot {
         position: sticky;
         bottom: calc(-1 * var(--sidebar-pad-bottom));
         z-index: 1;
+        margin-top: auto;
         margin-bottom: calc(-1 * var(--sidebar-pad-bottom));
         padding-bottom: var(--sidebar-pad-bottom);
         background: var(--surface-side);
+    }
+    /* Rows that wait past a pinned bar fade under it (app.js binds scroll_fade.js to the column), as the tall
+       window's list fades at its edges: a row going on under the foot never reads as a broken one. A row brought
+       into view keeps clear of the fade too (its scroll margin above). */
+    #primary-sidebar[data-scroll-above]:not([data-bars-crowd]) .sidebar-head::after,
+    #primary-sidebar[data-scroll-below] .sidebar-foot::before {
+        content: '';
+        position: absolute;
+        left: 0;
+        right: 0;
+        height: var(--space-4);
+        pointer-events: none;
+    }
+    #primary-sidebar[data-scroll-above]:not([data-bars-crowd]) .sidebar-head::after {
+        top: 100%;
+        background: linear-gradient(var(--surface-side), transparent);
+    }
+    #primary-sidebar[data-scroll-below] .sidebar-foot::before {
+        bottom: 100%;
+        background: linear-gradient(transparent, var(--surface-side));
     }
 }
 
