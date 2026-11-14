@@ -702,12 +702,6 @@ class LifeBreach(AssertionError):
 # Known breaches (strict: the row goes when its cause is gone), the pattern of tests/_turn_law.py: the one clause a
 # gap excuses ("" for the row's own closing check) and why. Any other breach of the row is a real failure.
 WORK_LIFE_GAPS = {
-    "a_second_work_on_the_same_key": ("", (
-        "A new work's first request on a key that just served another work reads only the tool array and the common "
-        "governance block A' of it (the live median of 12.11: 157,902 tokens, 18 %; here 103,507 of 194,865): the next "
-        "marked block already differs per work. Remover: razzant/ouroboros#3231 (a marker after B's head and the "
-        "per-work wordings of its items 3-4), a small pull request after this one; the row pins the two elements "
-        "read.")),
     "a_total_that_cuts_the_reply": ("P3 cut reply", (
         "A route that enforces its total by cutting the reply refuses nothing, so the favourable reading has no "
         "refusal to learn from and keeps sending requests inside the reply reservation (replies stay at least the "
@@ -734,7 +728,8 @@ def test_a_works_life_writes_its_start_only_at_its_entries(name, main_call, monk
     if excused and record["text"] and found and all(line.startswith(excused) for line in found):
         raise LifeBreach(f"{name}:\n" + "\n".join(found))
     assert record["text"] and not found, f"{name}:\n" + "\n".join(found)
-    if life.second and record["second"]["common"] <= 2:  # the tool array and A'
+    if life.second:  # both stories narrowed, each its own way: the tool array, A' and B's head are what they share
         second = record["second"]
-        raise LifeBreach(f"{name}: the second work read {second['read']} of {second['tokens']} tokens "
-                         f"({second['common']} of {second['elements']} elements) from the first work's start")
+        assert all(second["narrowed"]), f"{name}: the row needs two narrowed stories, got {second['narrowed']}"
+        assert second["common"] == 3, (f"{name}: the second work read {second['read']} of {second['tokens']} tokens "
+                                       f"({second['common']} of {second['elements']} elements) from the first work's start")

@@ -1251,20 +1251,15 @@ def _story_key(level: FloorLevel) -> Tuple[Any, ...]:
                  if (shown := tuple(i for i in ids if i.startswith("quote:")) if step == "F7" else ids))
 
 
+def story_is_whole(level: FloorLevel) -> bool:
+    """Whether ``level`` names no story step: its story is then the whole story's text, the same for every focus."""
+    return not _story_key(level)
+
+
 def story_chars(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) -> int:
     """``json_chars(render_story(snapshot, level))``, read from the snapshot's pieces: what pricing a level costs."""
     key = _story_key(level)
     return snapshot.piece(("story", key), lambda: _story_text(snapshot, dict(key)))
-
-
-def whole_story_at(snapshot: MemoryViewSnapshot, level: FloorLevel) -> bool:
-    """Whether this level's story is the whole story's text. Prices decide unless a level naming story steps prices the
-    same as the whole, and only then are the two texts drawn (two renders of the build's work)."""
-    key, same = _story_key(level), story_chars(snapshot, level) == story_chars(snapshot)
-    if not same or not key:
-        return same
-    counted("view_renders", 2)
-    return _story_text(snapshot, dict(key)) == _story_text(snapshot, {})
 
 
 def _story_text(snapshot: MemoryViewSnapshot, gone: Mapping[str, Tuple[str, ...]]) -> str:
