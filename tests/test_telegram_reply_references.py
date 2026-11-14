@@ -263,13 +263,28 @@ def test_every_mirrored_media_surface_retains_reference_and_native_reply(bridge,
 def test_long_quiz_keeps_answer_door_and_earlier_parts_carry_references(bridge, monkeypatch):
     b = bridge
     event = {"chat_id": 1, "row_address": "question-row", "quiz_id": "quiz", "task_id": "task",
-             "question": "Long question " * 900, "options": [{"label": "A"}, {"label": "B"}]}
+             "question": "Long question " * 900, "options": [{"label": "A"}, {"label": "B"}],
+             "message_origin": {"room": {"kind": "main"}, "tasks": [{"id": "task", "name": "Export"}]}}
     asyncio.run(b.plugin._make_quiz(b.api)(event))
     assert len(b.calls) > 2
+    heading = "Main chat\nTask: Export\n\n"
+    parts = []
+    for method, data in b.calls:
+        assert method == "sendMessage" and data["chat_id"] == "42"
+        assert data["text"].startswith(heading) and data["text"].count(heading) == 1
+        assert b.transport._u16len(data["text"]) <= 4096
+        if "reply_markup" not in data:
+            parts.append(data["text"][len(heading):])
+    expected = b.plugin.telegram_quiz.render_quiz_text(event["question"], ["A", "B"], "", "")
+    # Existing raw chunking makes a boundary stand in for its split whitespace.
+    assert "".join("".join(part.split()) for part in parts) == "".join(expected.split())
+    assert b.calls[-1][1]["text"] == heading + "1. A\n2. B\n" + b.plugin.telegram_quiz.hint("en")
     last = 100 + len(b.calls)
     state = _state(b.plugin)
     assert all(state._reply_reference(b.api, "", 42, mid) == "question-row" for mid in range(101, last + 1))
     assert state._message_ref(b.api, "", 42, 101)["kind"] == "question"
+    record = b.plugin.telegram_quiz.quiz_for_message(b.api, "", 42, last)
+    assert record["text"] == heading + "1. A\n2. B"
     posts = _host_posts(b, monkeypatch)
     _receive(b, _owner(50, "Please explain", reply=101))
     assert posts[0][0] == "/chat/inject" and posts[0][1]["reply_to"] == "question-row"

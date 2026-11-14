@@ -114,6 +114,13 @@ def _live(task_id="t1", **fields):
     return {task_id: {"task": {"id": task_id, "chat_id": 42, "title": "Parser", **fields}}}
 
 
+def _body(sent, heading="Chat"):
+    """Assert the transport's origin and audience separately from the unchanged host line."""
+    origin, body = sent["text"].split("\n\n", 1)
+    assert origin == heading and sent["chat_id"] == "42"
+    return body
+
+
 def _refuse(reason, phone, monkeypatch):
     """Arrange one real steer refusal; return the reason the handler states."""
     from ouroboros.task_results import write_task_result
@@ -175,7 +182,10 @@ def test_a_refused_steer_of_an_owner_message_is_one_line_replying_to_that_messag
     _steer(phone, row["client_message_id"], quotes=[owner_quote(phone.data, row)] if origin == "quoted" else None)
     label = "Task" if reason == "target_unknown" else "Parser"
     [sent] = phone.sent()
-    assert sent["text"] == f"{label} · {_cause(stated)}" and sent["reply_to_message_id"] == 50
+    heading, body = sent["text"].split("\n\n", 1)
+    assert heading == "Chat"  # chat 42 is not a host-labelled Project or Main
+    assert body == f"{label} · {_cause(stated)}" and sent["reply_to_message_id"] == 50
+    assert sent["chat_id"] == "42"
     assert "disable_notification" not in sent  # a problem keeps its sound
     [ack] = phone.acks()
     assert ack["reply_to"] == reference_from_row(row) and ack["routing_notice_carrier"] == "routing_ack"
@@ -212,7 +222,7 @@ def test_a_note_only_act_of_the_mind_tells_the_owner_nothing_while_an_owner_quot
     stated = _refuse(reason, phone, monkeypatch)
     _steer(phone, row["client_message_id"], token="tok-2", quotes=[owner_quote(phone.data, row)])
     [sent] = phone.sent()
-    assert sent["text"] == f"{'Task' if reason == 'target_unknown' else 'Parser'} · {_cause(stated)}"
+    assert _body(sent) == f"{'Task' if reason == 'target_unknown' else 'Parser'} · {_cause(stated)}"
     assert sent["reply_to_message_id"] == 50
     [ack] = phone.acks()
     assert ack["reply_to"] == reference_from_row(row) and ack["routing_notice_carrier"] == "routing_ack"
@@ -282,7 +292,7 @@ def test_every_refusal_without_a_handed_over_ack_is_told_once_by_its_system_row(
     assert (notice["system_type"], notice["routing_notice_carrier"]) == ("steer_not_delivered", "system")
     assert notice["reply_to"] == reference_from_row(row)
     [sent] = phone.sent()
-    assert sent["text"] == notice["content"] == f"{'Task' if reason == 'target_unknown' else 'Parser'} · {_cause(stated)}"
+    assert _body(sent, "Chat\nTask: t1") == notice["content"] == f"{'Task' if reason == 'target_unknown' else 'Parser'} · {_cause(stated)}"
     assert sent.get("reply_to_message_id") == 50
     [stored] = [entry.row for entry in dialogue_store.newest(phone.data, "chat", limit=5)
                 if entry.row.get("type") == "steer_not_delivered"]
@@ -311,7 +321,7 @@ def test_a_task_that_spoke_for_itself_never_gets_the_system_row(phone, monkeypat
            issuer={"kind": "task", "task_id": "teller"})
     assert phone.rows() == []
     told = act == "owner_message" and failure is None
-    assert [data["text"] for data in phone.sent()] == ([f"Parser · {_cause(stated)}"] if told else [])
+    assert [_body(data) for data in phone.sent()] == ([f"Parser · {_cause(stated)}"] if told else [])
 
 
 @pytest.mark.parametrize(("act", "failure"), [
@@ -353,7 +363,7 @@ def test_an_ack_that_answers_no_chat_row_never_carries_the_notice(phone, monkeyp
     assert ack["routing_notice_carrier"] == "system" and "reply_to" not in ack
     [row] = phone.rows()
     assert (row["system_type"], row["routing_notice_carrier"]) == ("steer_not_delivered", "system")
-    assert [data["text"] for data in phone.sent()] == [row["content"]] == [f"{label} · {_cause(stated)}"]
+    assert [_body(data, "Chat\nTask: t1") for data in phone.sent()] == [row["content"]] == [f"{label} · {_cause(stated)}"]
 
     labelled = phone.owner(50)
     stated = _refuse(reason, phone, monkeypatch)
@@ -361,7 +371,7 @@ def test_an_ack_that_answers_no_chat_row_never_carries_the_notice(phone, monkeyp
     ack = phone.acks()[-1]
     assert (ack["routing_notice_carrier"], ack["reply_to"]) == ("routing_ack", reference_from_row(labelled))
     assert len(phone.rows()) == 1 and len(phone.sent()) == 2
-    assert (phone.sent()[-1]["text"], phone.sent()[-1]["reply_to_message_id"]) == (f"{label} · {_cause(stated)}", 50)
+    assert (_body(phone.sent()[-1]), phone.sent()[-1]["reply_to_message_id"]) == (f"{label} · {_cause(stated)}", 50)
 
 
 def test_two_refused_acts_of_one_owner_message_are_two_notices(phone, monkeypatch):
@@ -371,7 +381,7 @@ def test_two_refused_acts_of_one_owner_message_are_two_notices(phone, monkeypatc
     _steer(phone, row["client_message_id"], token="tok-a")
     _steer(phone, row["client_message_id"], token="tok-b")
     sent = phone.sent()
-    assert [data["text"] for data in sent] == [f"Task · {_cause('target_unknown')}"] * 2
+    assert [_body(data) for data in sent] == [f"Task · {_cause('target_unknown')}"] * 2
     assert [data["reply_to_message_id"] for data in sent] == [50, 50]
 
 
@@ -399,7 +409,7 @@ def test_a_landed_act_says_nothing_but_a_file_it_could_not_attach(phone, monkeyp
                               {"ordinal": 0, "label": "схема.png", "status": "staged"},
                               {"ordinal": 1, "label": "отчёт.pdf", "status": "rejected", "reason": "source_missing"}])
     [sent] = phone.sent()
-    assert sent["text"] == "Not attached to the task: отчёт.pdf" and sent["reply_to_message_id"] == 50
+    assert _body(sent) == "Not attached to the task: отчёт.pdf" and sent["reply_to_message_id"] == 50
 
 
 @pytest.mark.parametrize("act", ["project_unavailable", "file_not_attached", "landed"])
@@ -430,9 +440,9 @@ def test_the_direct_receipt_names_its_ack_the_carrier_from_the_fields_its_row_wa
     [sent] = phone.sent()
     if act == "project_unavailable":
         assert stored["cause"] == ack["cause"] == "Not started: the project is no longer available"
-        assert sent["text"] == f"{ack['target_label']} · {ack['cause']}"
+        assert _body(sent) == f"{ack['target_label']} · {ack['cause']}"
     else:
-        assert sent["text"] == "Not attached to the task: отчёт.pdf"
+        assert _body(sent) == "Not attached to the task: отчёт.pdf"
     assert sent["reply_to_message_id"] == 50
 
 
@@ -471,7 +481,7 @@ def test_a_refused_host_promote_is_told_once_and_a_replay_tells_nothing(phone, m
     if failure is None:
         assert notice["routing_notice_carrier"] == "routing_ack" and len(phone.acks()) == 1
     else:
-        assert notice["routing_notice_carrier"] == "system" and sent["text"] == notice["content"]
+        assert notice["routing_notice_carrier"] == "system" and _body(sent, "Chat\nTask: task-pdf") == notice["content"]
         named = ["system"] if failure == "no_message_id" else []  # the ACK that answers no chat row names the row
         assert [ack["routing_notice_carrier"] for ack in phone.acks()] == named
     replay = _handle_promote_chat_to_task(evt, phone.ctx)
@@ -496,7 +506,7 @@ def test_a_picker_gets_no_invented_reason_and_one_message_with_its_files(phone):
     picker = ("Choose a target for the last message:\n1. Parser\n2. New task in Export\n"
               "Reply with a number, or tap an option in the web chat.")
     [sent] = phone.sent()
-    assert sent["text"] == f"{picker}\nNot attached to the task: оглавление.docx" and sent["reply_to_message_id"] == 50
+    assert _body(sent) == f"{picker}\nNot attached to the task: оглавление.docx" and sent["reply_to_message_id"] == 50
     asyncio.run(phone.plugin._make_outbound(phone.api)({**ack, "cause": "Not started: the attachments could not be staged",
                                                        "target_label": "Export"}))
     assert phone.sent()[-1]["text"] == (f"Export · Not started: the attachments could not be staged\n{picker}"

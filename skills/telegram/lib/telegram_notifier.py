@@ -35,6 +35,7 @@ from ouroboros import i18n_memory as _memory
 from ouroboros.project_dialogue import OUTCOME_PHASE_HEADLINE, routing_option_label
 
 from . import telegram_i18n
+from .telegram_origin import origin_label
 from .telegram_i18n import Index
 
 
@@ -85,6 +86,7 @@ async def _push_notification(
             token, trust_env=trust_env,
             proxy=telegram_proxy(state_dir),
             **(_mirror_options(api, bot_id(token), event, chat_id) if event is not None else {}),
+            origin_label=origin_label(event, telegram_i18n.language()) if event is not None else "",
             api_base_url=telegram_api_base(state_dir),
             files_dir=telegram_files_dir(state_dir),
             binding=binding, generation=generation,
@@ -387,6 +389,9 @@ async def _check_tasks_notify(
         from ouroboros.chat_chain import format_address, row_address
 
         event = {**e, "row_address": format_address(row_address(e))}
+        from supervisor.message_origin import message_origin
+
+        event["message_origin"] = await asyncio.to_thread(message_origin, _data_dir(api), e.get("chat_id"), tid)
         send_outcome, exc = await _push_notification(api, chat_id, msg, trust_env=trust_env, event=event)
         if send_outcome == "transient":
             # Stop the batch on the first transient failure: every further

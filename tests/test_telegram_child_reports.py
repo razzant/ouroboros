@@ -203,22 +203,28 @@ def test_what_a_helper_tells_the_owner_still_arrives(bridge, monkeypatch):
     bridge.delivery._handle_send_message(events.get_nowait(), bridge.host)
     told = bridge.outbound[-1]
     assert told["system_type"] == "proactive_message" and told["delegation_role"] == "subagent"
-    assert _sent_texts(bridge) == ["Anton, the build is green."]
+    [text] = _sent_texts(bridge)
+    heading, body = text.split("</b>\n\n", 1)
+    assert heading == "<b>Main chat\nTask: root-3 › Worker: kid-3"
+    assert body == "Anton, the build is green."
 
     # The host's own notice about the child (a budget stop) is a System row and goes.
     bridge.delivery._handle_send_message({"type": "send_message", "chat_id": 1, "task_id": "kid-3",
                                           "text": "The helper stopped at its budget.", "role": "system"},
                                          bridge.host)
-    assert _sent_texts(bridge)[-1] == "The helper stopped at its budget."
+    heading, body = _sent_texts(bridge)[-1].split("\n\n", 1)
+    assert heading == "Main chat\nTask: root-3 › Worker: kid-3"
+    assert body == "The helper stopped at its budget."
     # A child's typed incident waits for its root, then goes, as before.
     incident = {"type": "send_message", "chat_id": 1, "task_id": "kid-3", "role": "system",
                 "system_type": "terminal_incident", "text": "The helper's run ended unexpectedly."}
     data = bridge.tmp / "state"  # the bridge's data dir (``_Api.get_runtime_info``)
     bridge.delivery._handle_send_message(dict(incident), bridge.host)
-    assert "The helper's run ended unexpectedly." not in _sent_texts(bridge)
+    assert all("The helper's run ended unexpectedly." not in text for text in _sent_texts(bridge))
     task_result_path(data, "root-3").parent.mkdir(parents=True, exist_ok=True)
     task_result_path(data, "root-3").write_text(json.dumps({"status": "completed"}), encoding="utf-8")
     asyncio.run(bridge.plugin._make_outbound(bridge.api)({**incident, **lineage}))
+    # This legacy direct event has no host-projected message_origin; it stays unchanged.
     assert _sent_texts(bridge)[-1] == "The helper's run ended unexpectedly."
 
     before = len(bridge.posts)

@@ -590,19 +590,19 @@ def _telegram_html_to_plain(value: str) -> str:
     return html_lib.unescape(re.sub(r"<[^>]+>", "", value))
 
 
-def message_chunks(text: str, parse_mode: str = "HTML") -> list[str]:
+def message_chunks(text: str, parse_mode: str = "HTML", *, limit: int = _TELEGRAM_TEXT_LIMIT) -> list[str]:
     """The Telegram messages ``send_message`` sends for ``text``, blank parts dropped."""
     source = str(text or "")
     if parse_mode != "HTML":
-        return [chunk for chunk in _chunk_raw_text(source) if chunk.strip()]
-    return [chunk for chunk in markdown_to_telegram_chunks(source) if _telegram_html_to_plain(chunk).strip()]
+        return [chunk for chunk in _chunk_raw_text(source, limit) if chunk.strip()]
+    return [chunk for chunk in markdown_to_telegram_chunks(source, limit) if _telegram_html_to_plain(chunk).strip()]
 
 
 class TelegramClient:
     def __init__(self, token: str, *, trust_env: bool = False, proxy: Optional[str] = None,
                  on_message=None, reply_to_message_id: int = 0,
                  api_base_url: Optional[str] = None, files_dir: Optional[str] = None, binding=None,
-                 generation: Optional[int] = None):
+                 generation: Optional[int] = None, origin_label: str = ""):
         # A client of the bridge's accepted token (lib/telegram_token.py) is one identity: the token and
         # generation of ONE snapshot (the caller's, which also chose its bot-specific references, or taken
         # here). A binding that moved on since makes it refuse its next request, never switch tokens.
@@ -618,6 +618,7 @@ class TelegramClient:
         # One observer per mirrored host row, called for EVERY confirmed part,
         # including media and edits. A later chunk failure cannot erase earlier ids.
         self.on_message = on_message
+        self.origin_label = str(origin_label or "")
         self.reply_to_message_id = int(reply_to_message_id)
         if not self.token:
             raise TelegramTokenMissing("TELEGRAM_BOT_TOKEN is missing")
@@ -637,6 +638,24 @@ class TelegramClient:
         if self._binding is not None and not self._binding.current(self.generation):
             raise TelegramBindingChanged(self.accepted)
 
+    def origin_prefix(self, parse_mode: str = "") -> str:
+        """Titles are literal text, never Markdown/HTML supplied by a task."""
+        if not self.origin_label:
+            return ""
+        label = html_lib.escape(self.origin_label) if parse_mode == "HTML" else self.origin_label
+        return (f"<b>{label}</b>" if parse_mode == "HTML" else label) + "\n\n"
+
+    @property
+    def text_limit(self) -> int:
+        return _TELEGRAM_TEXT_LIMIT - _u16len(self.origin_prefix("HTML"))
+
+    async def media_caption(self, chat_id: int, caption: str) -> str:
+        """Reserve the origin in Telegram's 1024-unit caption; spill full text once before a format fallback."""
+        if self.origin_label and _u16len(self.origin_prefix("HTML") + markdown_to_telegram_html(caption)) > 1024:
+            await self.send_message(chat_id, caption)
+            return ""
+        return caption
+
     def _failed(self, failure: Exception) -> Exception:
         """What a failed request raises: its own failure while this client's token is in force. Once the binding
         moved on, any failure (a refusal, a broken transport, an unreadable answer) belongs to the replaced token,
@@ -649,6 +668,13 @@ class TelegramClient:
         self.check_binding()
         method_text = str(method or "")
         safe_method = method_text if re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,63}", method_text) else "request"
+        if self.origin_label and method_text in {"sendMessage", "editMessageText", "sendPhoto", "sendVideo", "sendDocument", "sendAudio"}:
+            data = dict(data or {})
+            mode = str(data.get("parse_mode") or "")
+            prefix = self.origin_prefix(mode)
+            field = "text" if method_text in {"sendMessage", "editMessageText"} else "caption"
+            body = str(data.get(field) or "")
+            data[field] = prefix.rstrip() if not body else prefix + body
         if self.reply_to_message_id and method_text in {"sendMessage", "sendPhoto", "sendVideo", "sendDocument", "sendAudio"}:
             data = {**(data or {}), "reply_to_message_id": self.reply_to_message_id,
                     "allow_sending_without_reply": True}
@@ -803,7 +829,7 @@ class TelegramClient:
         """
         muted = {"disable_notification": True} if disable_notification else {}
         last_message_id = 0
-        for formatted in message_chunks(text, parse_mode):
+        for formatted in message_chunks(text, parse_mode, limit=self.text_limit):
             data = {"chat_id": str(chat_id), "text": formatted, **muted}
             if parse_mode:
                 data["parse_mode"] = parse_mode

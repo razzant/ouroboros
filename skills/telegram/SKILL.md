@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.11
+version: 1.4.12
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -48,6 +48,13 @@ their previous outcome is unknown. This assumes aligned clocks: a host ahead rej
 until Telegram reaches that second; a host behind can accept retained commands. Dates in the
 boundary second are accepted. Other slash commands keep their command-mode rules even in replies; quote a literal command
 as code or include it inside an explanation to send it as a quiz answer.
+
+Mirrored messages lead with their room (Main or the Project name), then the named
+work and nearest workers where known. Deep chains mark the hidden middle; missing
+facts show no invented Project or task title. The heading follows each new event,
+so a renamed Project updates its worker bubble. Titles are literal text. Long
+messages repeat the heading on each part; a caption that no longer fits goes out
+as full text before its media. Quizzes keep the heading through answers and edits.
 
 The bridge remembers every mirrored part, including media and completion
 notices, in a bounded durable message map. Replying passes its host row or work
