@@ -60,47 +60,6 @@ export function renderNavRows(zone) {
     return pagesInZone(zone).map(renderNavRow).join('\n');
 }
 
-/** One intrinsic column width for the six sections, at their current language and font. A Range measures the word,
- * not its allocated grid track; resizing can therefore both add and remove columns. */
-export function measureNavTools(nav) {
-    if (!nav) return () => {};
-    const doc = nav.ownerDocument, win = doc.defaultView;
-    let disposed = false;
-    const measure = () => {
-        if (disposed) return;
-        const widths = [...nav.children].map((row) => {
-            const label = row.querySelector('.nav-row-label'), glyph = row.querySelector('svg');
-            if (!label || !glyph) return 0;
-            const range = doc.createRange();
-            range.selectNodeContents(label);
-            const wrap = label.style?.whiteSpace;
-            if (label.style) label.style.whiteSpace = 'nowrap';
-            const word = range.getBoundingClientRect().width;
-            if (label.style) label.style.whiteSpace = wrap;
-            const style = win.getComputedStyle(row);
-            // The trailing inset shares the next column's leading inset (and the sidebar's end padding).
-            return word + glyph.getBoundingClientRect().width + (parseFloat(style.paddingInlineStart || style.paddingLeft) || 0)
-                + ['columnGap', 'borderLeftWidth', 'borderRightWidth']
-                    .reduce((sum, key) => sum + (parseFloat(style[key]) || 0), 0);
-        });
-        nav.style.setProperty('--nav-tool-min', `${Math.ceil(Math.max(0, ...widths))}px`);
-    };
-    const resize = win.ResizeObserver && new win.ResizeObserver(measure);
-    resize?.observe(nav);
-    const changes = win.MutationObserver && new win.MutationObserver(measure);
-    changes?.observe(nav, { childList: true, characterData: true, subtree: true });
-    changes?.observe(doc.documentElement, { attributes: true }); // Interface size and language
-    doc.fonts?.ready.then(measure);
-    doc.fonts?.addEventListener('loadingdone', measure);
-    measure();
-    return () => {
-        disposed = true;
-        resize?.disconnect();
-        changes?.disconnect();
-        doc.fonts?.removeEventListener('loadingdone', measure);
-    };
-}
-
 /** The head of the Projects list (owner 13.11: no "Projects" word, no collapse, the list starts with its search): the
  * row is Find a project (projects_nav.js puts the field first in it) and "+" (New project) at its end. The header's
  * toggle, its unread total and its one status mark are gone with the collapse they spoke for: every row carries its
