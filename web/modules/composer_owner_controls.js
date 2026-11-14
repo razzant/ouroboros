@@ -592,6 +592,16 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
     }
     function fitNames() {
         if (destroyed || !row?.dataset || capsules.some((capsule) => !capsule.isSettled())) return;
+        // Resetting a cap must reveal the full value at once, not the old width or margin mid-transition.
+        // Flush the final fit before restoring motion, so the next observer delivery reads the same geometry.
+        row.dataset.ownerFitting = 'true';
+        try { measureNames(); }
+        finally {
+            void widthOf(row);
+            delete row.dataset.ownerFitting;
+        }
+    }
+    function measureNames() {
         delete row.dataset.ownerCompact;
         delete row.dataset.ownerGlyphs;
         row.style.setProperty('--capsule-value-cap', '');
