@@ -159,6 +159,13 @@ export function boundedText(value, maxLen = 1200) {
     return text.length > maxLen ? `${text.slice(0, maxLen)}…[truncated]` : text;
 }
 
+/** A machine name in words, where nothing names it better: its underscores spaced, its first letter a capital
+ *  (`delegate_run_start_requested` → "Delegate run start requested"); '' for an empty name. */
+export function machineWords(name) {
+    const words = String(name ?? '').replace(/_+/g, ' ').trim();
+    return words && words[0].toUpperCase() + words.slice(1);
+}
+
 /** Broadcast the shared skill-lifecycle event used by marketplace/settings UI. */
 export function emitSkillLifecycle(action, name, extra = {}) {
     window.dispatchEvent(new CustomEvent('ouro:skill-lifecycle', {

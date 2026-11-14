@@ -134,7 +134,7 @@ def test_raw_byte_pages_stay_bounded_and_full_download_keeps_exact_bytes(raw_ser
                     assert query["limit"] == ["65536"]
                     offset = int(query["offset"][0]); offsets.append(offset)
             page.on("request", requested)
-            page.locator("summary", has_text="Record").click()
+            page.locator(".log-entry:not(.log-task-card) > summary").click()
             status = page.locator(".log-raw-status")
             expect(status).to_contain_text("Source SHA-256")
             page.screenshot(path=str(evidence / f"raw-page-{engine}.png"))
@@ -176,7 +176,7 @@ def test_raw_refusals_identity_and_cancelled_continuations_never_substitute_rows
             }''')
             raw = page.locator(".log-raw")
             status = page.locator(".log-raw-status")
-            record = page.locator(".log-entry:not(.log-task-card) > .log-fold > summary")
+            record = page.locator(".log-entry:not(.log-task-card) > summary")
             for code, reason in [(404, "log_source_unavailable"), (409, "log_source_changed"), (416, "raw_range_invalid"), (503, "log_source_unavailable")]:
                 record.click()
                 page.wait_for_function("() => gates.length === 1")
@@ -219,10 +219,10 @@ def test_raw_refusals_identity_and_cancelled_continuations_never_substitute_rows
             page.evaluate("answer", {"status": 200, "body": _chunk(payload, 0)})
             assert page.locator(".log-entry").count() == 0
             page.evaluate("emit", {**row, "type": "task_started", "task_id": "collapse"})
-            page.locator("summary", has_text="Timeline").click()
+            page.locator(".log-task-card > summary").click()
             page.locator(".log-task-event summary").click()
             page.wait_for_function("() => gates.length === 1")
-            page.locator("summary", has_text="Timeline").click()
+            page.locator(".log-task-card > summary").click()
             page.wait_for_function("() => gates[0].signal.aborted")
             page.evaluate("answer", {"status": 200, "body": _chunk(payload, 0)})
             assert page.locator(".log-task-event").count() == 0
@@ -253,7 +253,7 @@ def test_large_received_raw_uses_worker_and_repeat_keeps_selected_text(raw_serve
                     terminate() { if (!this.ended) {this.ended=true; workerCount--;} super.terminate();} };
                 emit({type:'worker_sha_verify', is_progress:true, task_id:'large', ts:'2026-11-04T01:00:00Z', payload:'x'.repeat(17500000), sentinel:'RECEIVED-END'});
             }''')
-            page.locator("summary", has_text="Timeline").click()
+            page.locator(".log-task-card > summary").click()
             elapsed = page.locator(".log-task-event summary").evaluate("b => {const at=performance.now(); b.click(); return performance.now()-at;}")
             expect(page.locator(".log-raw-status")).to_contain_text("Received event")
             assert page.evaluate("workerCount") == 0
@@ -264,14 +264,14 @@ def test_large_received_raw_uses_worker_and_repeat_keeps_selected_text(raw_serve
             pending.value.save_as(path)
             data = json.loads(path.read_bytes())
             assert len(data["payload"]) == 17500000 and data["sentinel"] == "RECEIVED-END"
-            selected = page.locator(".log-task-event .log-headline").evaluate('''node => {
+            selected = page.locator(".log-task-event .log-words").evaluate('''node => {
                 window.keptHeadline = node.firstChild;
                 const range=document.createRange(); range.selectNodeContents(node);
                 getSelection().removeAllRanges(); getSelection().addRange(range); return getSelection().toString();
             }''')
             page.evaluate("() => emit({type:'worker_sha_verify', is_progress:true, task_id:'large', ts:'2026-11-04T01:00:01Z'})")
             assert page.evaluate("() => getSelection().toString()") == selected
-            assert page.locator(".log-task-event .log-headline").evaluate("n => n.firstChild === keptHeadline")
+            assert page.locator(".log-task-event .log-words").evaluate("n => n.firstChild === keptHeadline")
             expect(page.locator(".log-raw-status")).to_contain_text("entry changed")
             page.screenshot(path=str(evidence / f"raw-repeat-{engine}.png"))
             (evidence / f"received-raw-{engine}.json").write_text(json.dumps({"contract_stub": True,
@@ -298,7 +298,7 @@ def test_raw_desktop_bytes_bridge_verifies_download_and_cancels_late_save(raw_se
                     download_file_to_downloads:()=>{throw Error('Raw URL must not enter the old launcher allowlist');}}};
                 (await import('/static/modules/ui_helpers.js')).installDesktopShellLinkInterceptor();
             }""")
-            page.locator("summary", has_text="Record").click()
+            page.locator(".log-entry:not(.log-task-card) > summary").click()
             expect(page.locator(".log-raw-status")).to_contain_text("Source SHA-256")
             page.get_by_role("link", name="Download full").click()
             expect(page.locator(".log-raw-status")).to_have_text("Full Raw saved.")
@@ -343,7 +343,7 @@ def test_backfill_keeps_an_open_timeline_in_time_order_and_discloses_skipped_rec
             page, _calls = _mount(browser, raw_server.url)
             page.evaluate("row => emit(row)", row(30, "third_tool"))
             card = page.locator('[data-task-group="ordered"]')
-            card.locator("summary", has_text="Timeline").click()
+            card.locator(":scope > summary").click()
             card.locator(".log-task-event").first.evaluate("node => { window.thirdRow = node; }")
 
             def history(route):
@@ -357,7 +357,7 @@ def test_backfill_keeps_an_open_timeline_in_time_order_and_discloses_skipped_rec
             page.evaluate("() => reopen()")
             status = page.locator(".logs-history-status")
             expect(status).to_have_text("Damaged records skipped in the recent history read: events 1 (malformed line).")
-            headlines = card.locator(".log-task-event .log-headline")
+            headlines = card.locator(".log-task-event .log-name")
             expect(headlines).to_have_text(["first_tool finished", "second_tool finished", "third_tool finished"])
             assert card.locator(".log-task-event").nth(2).evaluate("node => node === window.thirdRow"), "the shown row keeps its node"
             note = page.locator(".log-entry:not(.log-task-card) [data-log-omitted]")

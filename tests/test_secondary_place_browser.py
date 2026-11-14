@@ -202,18 +202,18 @@ def test_hidden_logs_take_a_burst_without_drawing_and_shown_keep_filters_raw_sel
             assert body.evaluate("box => box.scrollHeight - box.scrollTop - box.clientHeight") <= 48, "following the newest"
 
             # A record is written when its fold opens and released when it closes.
-            entry = entries.locator(".log-entry:not(.log-task-card)").filter(has_text="burst_note_").last
+            entry = entries.locator(".log-entry:not(.log-task-card)").filter(has_text="Burst note ").last
             raw = entry.locator(".log-raw")
             assert raw.evaluate("pre => pre.textContent") == ""
-            entry.locator("summary", has_text="Record").click()
+            entry.locator(":scope > summary").click()
             expect(entry.locator(".log-raw-status")).to_contain_text("bytes")
             assert json.loads(raw.inner_text())["type"].startswith("burst_note_")
-            entry.locator("summary", has_text="Record").click()
+            entry.locator(":scope > summary").click()
             assert raw.evaluate("pre => pre.textContent") == ""
 
             # The owner's filter stays across another page; so does a card's open Timeline.
             card = entries.locator(".log-task-card").last
-            card.locator("summary", has_text="Timeline").click()
+            card.locator(":scope > summary").click()
             rows = card.locator(".log-task-event")
             assert rows.count() >= 1
             chip = page.locator(".filter-chip", has_text="System")
@@ -224,14 +224,14 @@ def test_hidden_logs_take_a_burst_without_drawing_and_shown_keep_filters_raw_sel
             _nav(page, "dashboard")
             expect(chip).to_have_class(re.compile(r"\bactive\b"))
             expect(chip).to_have_attribute("aria-pressed", "true")
-            assert card.locator("details").first.evaluate("d => d.open")
+            assert card.evaluate("d => d.open")
             chip.click()
 
             # A live event for the card holding the selection and the focus moves the card, not them.
             group = card.get_attribute("data-task-group")
             card.locator(".log-task-event summary").first.focus()
             page.evaluate("""group => {
-                const row = document.querySelector(`[data-task-group="${group}"] .log-task-event .log-headline`);
+                const row = document.querySelector(`[data-task-group="${group}"] .log-task-event .log-name`);
                 const range = document.createRange();
                 range.setStart(row.firstChild, 0);
                 range.setEnd(row.firstChild, Math.min(5, row.firstChild.length));
@@ -287,7 +287,7 @@ def test_logs_reader_inside_the_newest_open_card_keeps_their_place_when_that_car
             steps = 20
             page.evaluate(_TASK_STEPS, [group, 0, steps])
             card = page.locator(f'#log-entries [data-task-group="{group}"]')
-            card.locator("summary", has_text="Timeline").click()
+            card.locator(":scope > summary").click()
             expect(card.locator(".log-task-event")).to_have_count(steps)
             body = page.locator("#page-logs")  # the tab body is the Logs scroller (style.css .dashboard-body)
             box = body.bounding_box()
@@ -366,8 +366,8 @@ def test_received_raw_shown_again_keeps_its_page_scroll_and_selection_and_a_page
             page.evaluate("""() => window.__testSockets[0].dispatchEvent(new MessageEvent('message', {data: JSON.stringify({type: 'log',
                 data: {type: 'raw_return_probe', ts: '2026-11-04T02:00:00.000Z', payload: 'x'.repeat(200000), sentinel: 'RAW-END'}})}))""")
             _nav(page, "dashboard")
-            entry = page.locator("#log-entries .log-entry:not(.log-task-card)").filter(has_text="raw_return_probe").last
-            entry.locator("summary", has_text="Record").click()
+            entry = page.locator("#log-entries .log-entry:not(.log-task-card)").filter(has_text="Raw return probe").last
+            entry.locator(":scope > summary").click()
             status = entry.locator(".log-raw-status")
             expect(status).to_contain_text("Received event")
             download = entry.get_by_role("link", name="Download full")

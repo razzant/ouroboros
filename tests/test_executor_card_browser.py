@@ -317,11 +317,12 @@ def test_logs_print_the_executor_detail_beside_the_quiet_chip(engine_ui, theme):
     page.locator('.log-task-card[data-task-group="m-blocked"]').wait_for()
     for task, _, label, fragment in MATRIX:
         card = page.locator(f'.log-task-card[data-task-group="{task}"]')
+        # The quiet chip stands among the card's facts and its detail sentence is text beside them: the card is its one
+        # fold, and its head (the summary) opens it.
+        card.locator(':scope > summary').click()
         chip = card.locator(':scope > .log-facts > .log-executor-chip')
         assert chip.inner_text().strip() == label, task
-        # The quiet chip stands among the card's facts; its detail sentence is text in the card's one fold.
-        card.locator(':scope > .log-fold > summary').click()
-        detail = card.locator(':scope > .log-fold > .log-executor-detail')
+        detail = card.locator(':scope > .log-executor-detail')
         assert detail.is_visible() and fragment in detail.inner_text(), task
         assert detail.inner_text().strip() == chip.get_attribute('title'), task
     page.locator('.log-task-card[data-task-group="m-mixed"]').scroll_into_view_if_needed()

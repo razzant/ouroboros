@@ -1,6 +1,7 @@
 // Dashboard › Logs is data first: a hidden panel keeps every entry current and writes no node, reads no history;
-// shown, it catches up newest first a chunk per frame, an event's record is the received event written only while its
-// fold is open, and an open Timeline grows in place. Runs the real module on the shared dashboard DOM fixture.
+// shown, it catches up newest first a chunk per frame, an event's record is the received event written only while it
+// is open (an event is its own fold), and an open timeline grows in place. Runs the real module on the shared
+// dashboard DOM fixture.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -28,11 +29,10 @@ function mountLogs(t, { page = 'dashboard', history = {} } = {}) {
         card: (id) => list.children.find((node) => node.dataset.taskGroup === id),
         click: (target) => list.dispatchEvent({ type: 'click', target }),
         toggle: (details, open) => { details.open = open; list.dispatchEvent({ type: 'toggle', target: details }); },
-        // An event's one fold, opened or closed the way the browser does: its `toggle` reaches the list.
+        // An event is its one fold, opened or closed the way the browser does: its `toggle` reaches the list.
         record: (node, open = true) => {
-            const fold = node.querySelector('.log-fold');
-            fold.open = open;
-            list.dispatchEvent({ type: 'toggle', target: fold });
+            node.open = open;
+            list.dispatchEvent({ type: 'toggle', target: node });
         },
     };
 }
@@ -82,16 +82,17 @@ test('a hidden panel writes no node and reads no history; shown, it catches up a
     const busy = logs.card('busy');
     assert.equal(busy.dataset.category, 'errors', 'the failure earned while hidden still files the card under Errors');
     assert.equal(busy.querySelector('.log-words').textContent, 'Still working');
-    assert.equal(busy.querySelector('.log-repeat').textContent, '×2');
-    assert.match(logs.list.textContent, /test_backfilled_event|earlier/i);
+    assert.equal(busy.querySelector('.log-count').textContent, '2 events', 'a task\'s count says what it counts');
+    assert.equal(busy.querySelector('.log-failure-word').textContent, '1 step failed', 'and its failure in words');
+    assert.match(logs.list.textContent, /Test backfilled event|earlier/i);
 
     // Away and back: nothing new, nothing read again.
     logs.state.activePage = 'settings';
     logs.emit({ type: 'task_heartbeat', phase: 'running', task_id: 'busy', ts: at(4) });
-    assert.equal(busy.querySelector('.log-repeat').textContent, '×2', 'a hidden card is not redrawn');
+    assert.equal(busy.querySelector('.log-count').textContent, '2 events', 'a hidden card is not redrawn');
     logs.show();
     await settle();
-    assert.equal(busy.querySelector('.log-repeat').textContent, '×3');
+    assert.equal(busy.querySelector('.log-count').textContent, '3 events');
     assert.equal(logs.calls.length, STREAMS.length);
 });
 
@@ -104,17 +105,17 @@ test('the first showing after a burst draws the newest entries at once and the r
     assert.equal(logs.list.children.length, 0);
 
     logs.show();
-    // An event's name is its kind on the first line, said once (U028): an unknown event has no other words.
-    const types = () => logs.list.children.map((node) => node.querySelector('.log-type').textContent);
+    // An event's name is its type in words on its first line, said once (U028): an unknown event has no other words.
+    const types = () => logs.list.children.map((node) => node.querySelector('.log-name').textContent);
     assert.equal(logs.list.children.length, 40, 'the newest chunk is on screen at once');
-    assert.equal(types().at(-1), 'burst_event_99');
+    assert.equal(types().at(-1), 'Burst event 99');
     runFrame();
     assert.equal(logs.list.children.length, 80);
     logs.emit({ type: 'live_during_catch_up', ts: at(59) });  // a live entry meanwhile is newest
     runFrame();
     runFrame();
     assert.equal(logs.list.children.length, 101);
-    assert.deepEqual(types(), [...Array.from({ length: 100 }, (_, index) => `burst_event_${index}`), 'live_during_catch_up']);
+    assert.deepEqual(types(), [...Array.from({ length: 100 }, (_, index) => `Burst event ${index}`), 'Live during catch up']);
     await settle();  // the history owed since the panel was hidden has been read; nothing outlives the test
     for (let index = 0; index < 4 && frames.length; index += 1) runFrame();
 });
@@ -126,7 +127,8 @@ test('an open record pins the received event, discloses a repeat, and releases i
     logs.emit(first);
     const entry = logs.list.children[0];
     const raw = entry.querySelector('.log-raw');
-    assert.equal(entry.querySelector('summary').textContent, 'Record', 'the fold is named for what it holds');
+    assert.equal(entry.querySelector('summary'), entry.querySelector('.log-head'), 'the event\'s head is its fold\'s summary');
+    assert.equal(entry.querySelector('.log-name').textContent, 'Dependencies in sync');
     assert.equal(raw.textContent, '', 'no record text exists before it is asked for');
     logs.record(entry);
     await settle();
@@ -135,7 +137,7 @@ test('an open record pins the received event, discloses a repeat, and releases i
     const repeat = { ...first, ts: at(2), detail: { n: 2 } };
     logs.emit(repeat);  // collapses into the same entry (×2)
     assert.equal(logs.list.children.length, 1);
-    assert.equal(entry.querySelector('.log-repeat').textContent, '×2');
+    assert.equal(entry.querySelector('.log-count').textContent, '×2', 'a repeat of one event says ×N');
     assert.equal(raw.textContent, JSON.stringify(first, null, 2), 'an open record keeps the source the owner asked for');
     assert.match(entry.querySelector('.log-raw-status').textContent, /entry changed/);
     logs.record(entry, false);
@@ -154,8 +156,8 @@ test('an open Timeline grows in place, keeps MAX rows, and closed lets its rows 
     logs.emit({ type: 'task_started', task_id: 't', ts: at(1) });
     logs.emit({ type: 'tool_call_finished', tool: 'read_file', is_error: false, task_id: 't', ts: at(2) });
     const card = logs.card('t');
-    const details = card.querySelector('details');
-    assert.equal(details.querySelector('summary').textContent, 'Timeline', 'a task\'s one fold holds its timeline');
+    const details = card;
+    assert.equal(card.querySelectorAll('details').length, 0, 'a task\'s card is its one fold: it opens its timeline');
     const rows = () => card.querySelector('.log-task-timeline').querySelectorAll('.log-task-event');
     assert.equal(rows().length, 0, 'a closed Timeline holds no rows');
     logs.toggle(details, true);
@@ -190,10 +192,10 @@ test('a history owed while hidden merges by time: old rows go before the live on
     assert.equal(list[1].dataset.taskGroup, 'busy');
     assert.notEqual(list.at(-1).dataset.taskGroup, 'busy', 'the newest live row stays last');
     const busy = logs.card('busy');
-    assert.equal(busy.querySelector('.log-repeat').textContent, '×2');
+    assert.equal(busy.querySelector('.log-count').textContent, '2 events');
     assert.equal(busy.querySelector('.log-words').textContent, 'read_file finished', 'the older row does not take over the card');
-    logs.toggle(busy.querySelector('details'), true);
-    const rows = busy.querySelectorAll('.log-task-event').map((row) => row.querySelector('.log-words').textContent);
+    logs.toggle(busy, true);
+    const rows = busy.querySelectorAll('.log-task-event').map((row) => row.querySelector('.log-name').textContent);
     assert.equal(rows.at(-1), 'read_file finished', 'the timeline is in time order');
 });
 
@@ -206,7 +208,7 @@ test('past the bound a merge lets the oldest go by time, never the entries that 
     logs.show();
     await settle();
     assert.equal(logs.list.children.length, 500);
-    assert.match(logs.list.children.at(-1).textContent, /test_live_keeps_its_place|Event/);
+    assert.match(logs.list.children.at(-1).textContent, /Test live keeps its place/);
     logs.record(logs.list.children.at(-1));
     await settle();
     assert.match(logs.list.children.at(-1).querySelector('.log-raw').textContent, /test_live_keeps_its_place/);
@@ -236,14 +238,14 @@ test('backfilled rows older than an open Timeline\'s rows take their places in t
     await settle();
     const row = (second, tool) => ({ type: 'tool_call_finished', tool, is_error: false, task_id: 't', ts: at(second) });
     logs.emit(row(30, 'third_tool'));
-    logs.toggle(logs.card('t').querySelector('details'), true);
+    logs.toggle(logs.card('t'), true);
     const timeline = logs.card('t').querySelector('.log-task-timeline');
     const [third] = timeline.querySelectorAll('.log-task-event');
     logs.routes.set(logUrl('events'), response({ entries: [row(10, 'first_tool'), row(20, 'second_tool')] }));
     logs.ws.emit('open');  // a reconnect reads the recent history again
     await settle();
     const rows = timeline.querySelectorAll('.log-task-event');
-    assert.deepEqual(rows.map((node) => node.querySelector('.log-words').textContent),
+    assert.deepEqual(rows.map((node) => node.querySelector('.log-name').textContent),
         ['first_tool finished', 'second_tool finished', 'third_tool finished']);
     assert.equal(rows[2], third, 'the row already shown keeps its node');
 });
@@ -286,9 +288,9 @@ test('a compact row names the fields its view left out in its record; an adopted
     assert.ok(note, 'the entry says what is missing');
     assert.match(note.textContent, /error, response_body and 1 more/);
     assert.match(note.textContent, /The record below reads the whole row\./);
-    assert.equal(note.parentElement, entry.querySelector('.log-fold'), 'the note stands in the fold, beside the record');
+    assert.equal(note.parentElement, entry, 'the note stands in the fold, beside the record');
     logs.emit({ type: 'task_heartbeat', phase: 'running', task_id: 'g', ts: at(2), note: 'live' });
-    logs.toggle(logs.card('g').querySelector('details'), true);
+    logs.toggle(logs.card('g'), true);
     logs.routes.set(logUrl('events'), response({ entries: [compactRef({ type: 'task_heartbeat', phase: 'running', task_id: 'g', ts: at(2) },
         { omitted_fields: ['note'], omitted_field_count: 1 })] }));
     logs.ws.emit('open');

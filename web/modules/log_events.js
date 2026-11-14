@@ -1,4 +1,4 @@
-import { accountedUpperBound, accountedUpperBoundWithChildren, isoMicros, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
+import { accountedUpperBound, accountedUpperBoundWithChildren, isoMicros, machineWords, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
 import { formatUsd } from './storage_format.js';
 import { compactTokens } from './cost_period.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
@@ -28,11 +28,11 @@ const REVIEW_LIFECYCLE_ERROR_STATUSES = new Set([
 
 export { formatReviewProjection } from './review_presentation.js';
 
-// The Logs kinds and their filter labels; each kind's colour is the sheet's (style.css `.log-type.<kind>`).
+// The Logs kinds and their filter labels. A kind is a filter, never a hue: only a failure is coloured (logs.js).
 export const LOG_CATEGORIES = { tools: 'Tools', llm: 'LLM', errors: 'Errors', tasks: 'Tasks', system: 'System', consciousness: 'Consciousness' };
 
-// The Errors filter follows the same typed failure phases on live and replay rows.
-const ERROR_LOG_PHASES = new Set(['error', 'timeout', 'lifecycle_error']);
+// The Errors filter follows the same typed failure phases on live and replay rows; they are the only coloured ones.
+export const ERROR_LOG_PHASES = new Set(['error', 'timeout', 'lifecycle_error']);
 
 export function categorizeLogEvent(evt, view = summarizeLogEvent(evt)) {
     const t = evt.type || evt.event || '';
@@ -733,10 +733,11 @@ function taskOutcomeMeta(evt) {
 
 export function summarizeLogEvent(evt) {
     const t = evt.type || evt.event || 'unknown';
-    // An event's words (`headline`, then `body`; `full` is their whole text where the list shows a cut) and its facts
-    // (`meta`). A machine reference (an id, a hash, a path, a run's source) is no fact of the list: its record has it.
-    const view = (phase, headline, { body = '', full = '', meta = [], typeLabel = t } = {}) => ({
-        typeLabel, phase, headline, body, full, meta: meta.filter(Boolean),
+    // An event's name (`headline`: what it is, in words; empty where its words say it), its words (`body`; `full` is
+    // their whole text where the list shows a cut, `markdown` when they are authored prose) and its facts (`meta`). A
+    // machine reference (an id, a hash, a path, a run's source) is neither: its record has it.
+    const view = (phase, headline, { body = '', full = '', meta = [], markdown = false } = {}) => ({
+        phase, headline, body, full, meta: meta.filter(Boolean), markdown,
     });
 
     if (evt.is_progress || t === 'send_message') {
@@ -745,22 +746,22 @@ export function summarizeLogEvent(evt) {
         // its range and its source stay in its record.
         const delegated = delegatedActivityView(evt);
         if (delegated) {
-            return view('progress', delegated.body || 'Progress update', {
+            return view('progress', '', { body: delegated.body || 'Progress update', markdown: true,
                 full: delegated.fullBody === delegated.body ? '' : delegated.fullBody });
         }
         // A host note loses only the opening its producer marks it with (host_notice_text.js), as in a chat's timeline.
         const narration = describeText(hostRowDisplayText({ ...evt, text: String(evt.content || evt.text || '').replace(/^💬\s*/, '') }),
             240, { markdown: true });
+        const words = { body: narration.preview || 'Progress update', full: narration.full === narration.preview ? '' : narration.full, markdown: true };
         if (isSubagentEvent(evt)) {
             const sid = subagentId(evt);
             const event = String(evt.subagent_event || 'update').toLowerCase();
             const role = String(evt.subagent_role || '').trim();
-            return view(event === 'completed' ? 'done' : event === 'failed' || event === 'rejected' ? 'warn' : 'progress', subagentHeadline(sid, role, event, evt.model, { full: true }), {
-                body: narration.preview, full: narration.full === narration.preview ? '' : narration.full,
-                meta: [role ? `role=${role}` : '', evt.model ? `model=${evt.model}` : '', evt.write_surface ? `write=${evt.write_surface}` : ''],
-            });
+            return view(event === 'completed' ? 'done' : event === 'failed' || event === 'rejected' ? 'warn' : 'progress',
+                subagentHeadline(sid, role, event, evt.model, { full: true }), { ...words, body: narration.preview,
+                    meta: [role ? `role=${role}` : '', evt.model ? `model=${evt.model}` : '', evt.write_surface ? `write=${evt.write_surface}` : ''] });
         }
-        return view('progress', narration.preview || 'Progress update', { full: narration.full === narration.preview ? '' : narration.full });
+        return view('progress', '', words);
     }
 
     if (t === 'task_started') {
@@ -1052,27 +1053,16 @@ export function summarizeLogEvent(evt) {
     // unknown name that carries no typed fact: it keeps a genuine producer-side failure with
     // only a name visible under Errors, and it is pinned as a remainder, not a taxonomy.
     const level = String(evt.level || '').toLowerCase();
+    const name = [machineWords(t), evt.tool].filter(Boolean).join(' · ');
     const body = shortText(
         evt.error || evt.message || evt.text || evt.result_preview || effortEvidenceText(evt)
             || compactJson(evt.args || evt.task || evt.checks, 260), 260,
     );
-    if (evt.ok === true) {
-        return view('ok', shortText(t, 120), { body });
-    }
-    if (evt.ok === false || level === 'error' || level === 'critical' || level === 'fatal') {
-        return view('error', shortText(t, 120), { body, meta: [evt.tool ? `tool=${evt.tool}` : ''] });
-    }
-    if (level === 'warning' || level === 'warn') {
-        return view('warn', shortText(t, 120), { body });
-    }
-    if (t.includes('error') || t.includes('crash') || t.includes('fail')) {
-        return view('error', t, { body, meta: [evt.tool ? `tool=${evt.tool}` : ''] });
-    }
-
-    return view('info', shortText(t, 120), {
-        body,
-        meta: [evt.model || '', formatLogMoney(accountedUpperBound(evt) ?? evt.cost)],
-    });
+    if (evt.ok === true) return view('ok', name, { body });
+    if (evt.ok === false || level === 'error' || level === 'critical' || level === 'fatal') return view('error', name, { body });
+    if (level === 'warning' || level === 'warn') return view('warn', name, { body });
+    if (t.includes('error') || t.includes('crash') || t.includes('fail')) return view('error', name, { body });
+    return view('info', name, { body, meta: [evt.model || '', formatLogMoney(accountedUpperBound(evt) ?? evt.cost)] });
 }
 
 function chatView({

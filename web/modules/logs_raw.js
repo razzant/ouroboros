@@ -70,7 +70,7 @@ export function createLogRaw({ visible }) {
         if (view.url) { URL.revokeObjectURL(view.url); view.download.removeAttribute('href'); view.download.hidden = true; }
         view.url = null; view.blob = null;
     }
-    const shown = view => visible() && !view.root.closest?.('[hidden]');
+    const shown = view => visible() && !view.fold.closest?.('[hidden]');
     const current = (view, turn) => opened.has(view) && view.turn === turn && shown(view);
     function status(view, text) { view.status.textContent = text; }
     function showPage(view, data) {
@@ -185,7 +185,7 @@ export function createLogRaw({ visible }) {
         } finally { if (view.downloadAbort === abort) view.downloadAbort = null; }
     }
     return {
-        bind(root, source) { bindings.set(root.querySelector('.log-fold'), { root, source }); },
+        bind(fold, source) { bindings.set(fold, source); },
         changed(root) {
             for (const view of opened) {
                 if (!root.contains(view.fold)) continue;
@@ -206,13 +206,13 @@ export function createLogRaw({ visible }) {
         },
         // The record follows its fold: opened, its first page is read; closed, the page is let go.
         toggled(fold) {
-            const binding = bindings.get(fold);
-            if (!binding) return false;
+            const source = bindings.get(fold);
+            if (!source) return false;
             const existing = [...opened].find(view => view.fold === fold);
             if (!fold.open) { if (existing) close(existing); return true; }
             if (existing) return true;
-            const { root, source } = binding, event = source();
-            const view = { root, source, fold, event, raw: event?._raw, turn: 0,
+            const event = source();
+            const view = { source, fold, event, raw: event?._raw, turn: 0,
                 pre: fold.querySelector('.log-raw'), tools: fold.querySelector('.log-raw-tools'), status: fold.querySelector('.log-raw-status'),
                 first: fold.querySelector('[data-raw-action="first"]'), nextButton: fold.querySelector('[data-raw-action="next"]'),
                 retry: fold.querySelector('[data-raw-action="retry"]'), download: fold.querySelector('.log-raw-download') };
@@ -232,7 +232,7 @@ export function createLogRaw({ visible }) {
             }
             const action = target?.closest?.('[data-raw-action]');
             if (!action) return false;
-            const view = [...opened].find(item => item.root.contains(action));
+            const view = [...opened].find(item => item.fold.contains(action));
             if (view && !view.invalid && !action.disabled) void read(view, action.dataset.rawAction === 'first' ? 0 : action.dataset.rawAction === 'next' ? view.next : view.offset);
             return true;
         },

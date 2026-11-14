@@ -1,8 +1,10 @@
-import { escapeHtml, escapeHtmlAttr } from './utils.js';
+import { escapeHtml, escapeHtmlAttr, formatMsgTime, machineWords } from './utils.js';
 import { apiFetch } from './api_client.js';
 import { setInlineStatus } from './ui_helpers.js';
 import { harnessIdentityMarkup } from './harness_presentation.js';
+import { plainActivityText, selectionInside as selectionWithin } from './chat_activity.js';
 import {
+    ERROR_LOG_PHASES as FAILED_PHASES,
     LOG_CATEGORIES,
     categorizeLogEvent,
     duplicateLogEventKey,
@@ -10,10 +12,10 @@ import {
     formatReviewProjection,
     getLogTaskGroupId,
     isGroupedTaskEvent,
-    normalizeLogTs,
     summarizeLogEvent,
+    taskPresentation,
 } from './log_events.js';
-import { outcomeTone } from './task_phase_chip.js';
+import { markView, statusMarkHtml } from './status_mark.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { createLogRaw, LOG_RAW_HTML } from './logs_raw.js';
 
@@ -21,15 +23,24 @@ import { createLogRaw, LOG_RAW_HTML } from './logs_raw.js';
  * backfilled row updates its entry (task grouping, ×N collapse, the sticky Errors filter, the settled headline) whether
  * or not the panel is on screen, while the DOM follows only a shown panel. Hidden, the panel writes no node and reads no
  * history; shown again it places what changed newest first, RENDER_CHUNK entries a frame, so a burst that arrived
- * meanwhile never becomes one long rebuild. Every event has one fold: a task's holds its timeline, whose rows exist
- * while it is open; an event's holds its record, which pins one compact row's source or received event while open,
- * pages asynchronously and offers a full download (logs_raw.js). The reader keeps their place across hide and show:
- * following the newest entry, or on the entry they were reading. The compact history says what it left out: the fields
- * a row's view omits (in its record) and the damaged records a read skipped (in the status line).
- * The panel is one Dashboard tab body, its scroller; an event is one tray of the list's one card (U026-U035). */
+ * meanwhile never becomes one long rebuild. Every event is one shared fold whose summary is its head: a task's opens
+ * its timeline, whose rows exist while it is open; an event's opens its facts and its record, which pins one compact
+ * row's source or received event while open, pages asynchronously and offers a full download (logs_raw.js). The reader
+ * keeps their place across hide and show: following the newest entry, or on the entry they were reading. The compact
+ * history says what it left out: the fields a row's view omits (in its record) and the damaged records a read skipped
+ * (in the status line). The panel is one Dashboard tab body, its scroller; an event is one tray of the list's one card
+ * (U026-U035). Only a failure is coloured: the shared outcome chip, beside the failure's own words. */
 
 // The kinds of damaged record a compact read skips (`gaps`, ouroboros/gateway/logs.py); an unknown kind is shown as named.
 const GAP_WORDS = { malformed_jsonl: 'malformed line', incomplete_live_line: 'unfinished live line', torn_archive_line: 'torn archive line' };
+
+// The exact moment an opened event names among its facts; its head says it in Main's clock (utils.js formatMsgTime).
+const exactTime = (ts) => (Number.isNaN(Date.parse(ts)) ? ''
+    : new Date(ts).toLocaleString([], { dateStyle: 'medium', timeStyle: 'medium', hour12: false }));
+// A task's id said short: its first eight characters, past the `presence-` its live turns' ids begin with.
+const shortTaskId = (id) => String(id || '').replace(/^presence-/, '').slice(0, 8);
+// Words an author wrote (narration, an executor's message) read as text, without Markdown's marks (chat_activity.js).
+const wordsOf = (view, text) => (view.markdown && text ? plainActivityText(text) : text);
 
 // What a compact row's view leaves out (`_raw.omitted_fields`, at most 64 names of `omitted_field_count`); its record has it.
 function omittedNote(evt) {
@@ -182,7 +193,8 @@ export function initLogs({ ws, state, mount }) {
     }
 
     // The shared filter chips (ui.css `.filter-chip`, as Skills' strip): All leads, lit while no kind is chosen; a kind
-    // pressed is lit beside the others chosen and All goes out; All pressed clears the choice.
+    // pressed is lit beside the others chosen and All goes out; All pressed clears the choice. A card that holds a
+    // failure says it in the failure's own words while Errors is chosen, so a change of choice redraws those cards.
     const chips = new Map([...filtersDiv.querySelectorAll('[data-log-kind]')].map((chip) => [chip.dataset.logKind, chip]));
     function syncFilterChips() {
         chips.forEach((chip, key) => {
@@ -194,7 +206,8 @@ export function initLogs({ ws, state, mount }) {
 
     function applyFilters() {
         syncFilterChips();
-        entries.forEach(updateVisibility);
+        entries.forEach((entry) => { if (entry.failure) stale.add(entry); updateVisibility(entry); });
+        paint();
         updateEmptyState();
         follow();
     }
@@ -272,7 +285,7 @@ export function initLogs({ ws, state, mount }) {
             const parsed = evt.ts ? Date.parse(evt.ts) : NaN;
             return Number.isFinite(parsed) ? parsed : Date.now();
         })();
-        const tsText = normalizeLogTs(evt.ts || evt.timestamp);
+        const ts = evt.ts || evt.timestamp || '';
 
         if (dedupeKey) {
             let last = duplicateState.get(dedupeKey);
@@ -284,7 +297,7 @@ export function initLogs({ ws, state, mount }) {
                 last.count += 1;
                 last.entry.repeat = last.count;
                 // A backfilled twin may be the older one: the entry keeps showing the newest.
-                if (now >= last.ts) Object.assign(last.entry, { evt, tsText, at: now });
+                if (now >= last.ts) Object.assign(last.entry, { evt, ts, at: now });
                 last.ts = Math.max(last.ts, now);
                 touch(last.entry);
                 return;
@@ -292,9 +305,10 @@ export function initLogs({ ws, state, mount }) {
         }
 
         const view = summarizeLogEvent(evt);
+        // An event of a task that has no card of its own says its task, so two runs side by side read apart.
         const entry = addEntry({
-            kind: 'standalone', evt, view, tsText, repeat: 1, dedupeKey, at: now, omitted: omittedNote(evt),
-            category: categorizeLogEvent(evt, view), execution: executorChip(evt),
+            kind: 'standalone', evt, view, ts, repeat: 1, dedupeKey, at: now, omitted: omittedNote(evt),
+            category: categorizeLogEvent(evt, view), execution: executorChip(evt), task: shortTaskId(evt.subagent_task_id || evt.task_id),
         });
         if (dedupeKey) duplicateState.set(dedupeKey, { entry, ts: now, count: 1 });
     }
@@ -318,12 +332,12 @@ export function initLogs({ ws, state, mount }) {
         const wake = evt.initiator === 'consciousness' || Boolean(earlier?.wake);
         const category = eventCategory === 'errors' || earlier?.category === 'errors' ? 'errors'
             : (wake ? 'consciousness' : 'tasks');
-        // A task is named by its own type and its id's first eight characters, as every other row of the log names
-        // one (U030); the type, once seen, stays the card's.
+        // A task is named by its type in words and its short id, as every other row of the log names one (U030); the
+        // type, once seen, stays the card's.
         const taskType = String(earlier?.taskType || evt.task_type || '').trim();
         const record = earlier || createTaskGroupCard(groupId);
-        const ts = normalizeLogTs(evt.ts || evt.timestamp);
-        const at = Date.parse(evt.ts || evt.timestamp || '') || Date.now();
+        const ts = evt.ts || evt.timestamp || '';
+        const at = Date.parse(ts) || Date.now();
         // A backfilled row older than what this card already shows joins its timeline in place and leaves the rest.
         const behind = batching && earlier && at < record.at;
 
@@ -331,50 +345,35 @@ export function initLogs({ ws, state, mount }) {
         record.category = category;
         record.wake = wake;
         record.taskType = taskType;
-        record.kindLabel = wake ? 'Consciousness' : `${taskType || 'task'} ${String(groupId).slice(0, 8)}`;
+        record.name = wake ? 'Consciousness' : machineWords(taskType || 'task');
         // The card's time is its newest event's: an older frame, live or from history, never dates it back.
-        if (at >= record.at) { record.tsText = ts; record.at = at; }
+        if (at >= record.at) { record.ts = ts; record.at = at; }
         // The card's headline settles only on the typed task_done frame. The bus
         // serves control before telemetry, so a task's late tool or round frame
         // (its own `done`/`error` phase included) can arrive after its task_done:
         // it stays a timeline row and never reopens or rewrites the settled
         // headline. Until then the headline follows the latest frame.
         const settles = evt.type === 'task_done';
-        if (settles || (!record.terminal && !behind)) {
-            record.phase = view.phase || 'info';
-            // A settled headline is the task's outcome and takes the cards' tone (Stopped neutral, Done with
-            // warnings green); until then it is the latest event's phase in its level's colour.
-            record.tone = settles ? outcomeTone(view.phase) : '';
-            record.headline = view.headline || 'Task activity';
+        // A task's words are its latest event's (a settled task's are its outcome); while Errors is chosen they are its
+        // newest failure's, which the card keeps even after its row leaves the timeline.
+        if (settles || (!record.terminal && !behind)) record.words = wordsOf(view, view.headline || view.body) || 'Task activity';
+        if (settles) { record.terminal = true; record.failed = view.phase === 'error'; }
+        const failed = FAILED_PHASES.has(view.phase);
+        if (failed && !settles) record.failures = (record.failures || 0) + 1;
+        if (failed && at >= (record.failure?.at || 0)) {
+            record.failure = { at, ts, words: [view.headline, wordsOf(view, view.body)].filter(Boolean).join('\n') };
         }
-        if (settles) record.terminal = true;
-        // The card's facts under its words; the type its kind already names is not said again (U029).
-        if (!behind) record.meta = view.meta.filter((item) => item !== taskType);
         const execution = executorChip(evt), review = formatReviewProjection(evt.review_projection);
         record.execution = (behind ? record.execution || execution : execution || record.execution);
         record.review = (behind ? record.review || review : review || record.review);
 
         const last = record.recent[record.recent.length - 1];
         const dedupeKey = duplicateLogEventKey(evt);
-        // A row's body and what its view left out come from the same event (an adopted file source changes neither).
+        // A row's view and what its view left out come from the same event (an adopted file source changes neither).
         if (!behind && last && last.dupKey && last.dupKey === dedupeKey) {
-            Object.assign(last, { count: last.count + 1, ts, meta: view.meta, body: view.body, full: view.full, omitted: omittedNote(evt),
-                evt, at, rev: last.rev + 1 });
+            Object.assign(last, { count: last.count + 1, ts, view, omitted: omittedNote(evt), evt, at, rev: last.rev + 1 });
         } else {
-            const row = {
-                ts,
-                phase: view.phase || 'info',
-                headline: view.headline || 'Task event',
-                meta: view.meta,
-                body: view.body,
-                full: view.full,
-                omitted: omittedNote(evt),
-                evt,
-                at,
-                count: 1,
-                dupKey: dedupeKey,
-                rev: 0,
-            };
+            const row = { ts, view, omitted: omittedNote(evt), evt, at, count: 1, dupKey: dedupeKey, rev: 0 };
             const later = behind ? record.recent.findIndex((item) => item.at > at) : -1;
             if (later >= 0) record.recent.splice(later, 0, row);
             else record.recent.push(row);
@@ -385,124 +384,133 @@ export function initLogs({ ws, state, mount }) {
     }
 
     function createTaskGroupCard(groupId) {
-        const record = { kind: 'group', groupId, events: 0, recent: [], terminal: false, meta: [], at: 0 };
+        const record = { kind: 'group', groupId, events: 0, recent: [], terminal: false, at: 0 };
         taskGroups.set(groupId, record);
         return addEntry(record);
     }
 
     // ---- The panel (DOM): only while shown ------------------------------------------------------------------------
 
-    // One anatomy for every event, a task card and a timeline row alike (U027, U028): a first line with its time, what
-    // it is in its kind's colour, its level chip (the default `info` says nothing, CSS hides it) and its repeat count at
-    // the line's end; then its words in body text, at most three lines in the list; its facts in one meta line; and one
-    // fold named for what it holds, in the same place: a task's Timeline, an event's Record. A record holds the whole
-    // words where the list shows them cut, what the compact view left out, and the raw record (logs_raw.js).
-    const RECORD_HTML = `<div class="log-whole" hidden></div><div class="log-note" data-log-omitted hidden></div>${LOG_RAW_HTML}`;
-    const TIMELINE_HTML = '<div class="log-note log-task-review" hidden></div><div class="log-task-timeline"></div>';
+    // One anatomy for every event, a task card and a timeline row alike (U027, U028): one shared fold
+    // (details.ui-disclosure) whose summary is the event's head: its time in Main's clock, its name in words (a task's
+    // card adds its short id), a failure's chip, at the line's end its count and the task it belongs to, then its words,
+    // at most three lines. Opening it un-clamps the words in place (their whole text where the view cut them) and shows
+    // its facts and its record, or a task's timeline. A head without a name says its words after its time (style.css).
+    const HEAD_HTML = '<summary class="log-head"><time class="log-ts"></time><span class="log-title"><span class="log-name"></span>'
+        + '<span class="log-task" hidden></span><span class="chat-live-phase log-failure" data-chip-tone="failed" hidden>'
+        + `${statusMarkHtml('', markView({ outcome: 'error' }))}<span class="log-failure-word"></span></span></span>`
+        + '<span class="log-count" hidden></span><span class="log-words" hidden></span></summary>'
+        + '<div class="log-facts" hidden></div><div class="log-note log-executor-detail" hidden></div>';
+    const RECORD_HTML = `<div class="log-note" data-log-omitted hidden></div>${LOG_RAW_HTML}`;
+    const TIMELINE_HTML = '<div class="log-note log-task-review" hidden></div><div class="log-note" data-log-gone hidden></div>'
+        + '<div class="log-task-timeline"></div>';
     const partsOf = new WeakMap();  // an event's node → its parts, found once when it is made
-    const wholeOf = new WeakMap();  // an event's node → its whole words, where its summary cut them
+    const wordsOfNode = new WeakMap();  // an event's node → its words and their whole text, where its view cut them
 
-    function createEvent(className, fold, foldBody) {
-        const node = document.createElement('div');
-        node.className = className;
-        node.innerHTML = `<div class="log-head"><span class="log-ts"></span><span class="log-type" hidden></span>`
-            + '<span class="log-phase"></span><span class="log-repeat" hidden></span></div>'
-            + '<div class="log-words"><span class="log-headline"></span><span class="log-body"></span></div><div class="log-facts" hidden></div>'
-            + `<details class="ui-disclosure log-fold"><summary>${fold}</summary>`
-            + `<div class="log-note log-executor-detail" hidden></div>${foldBody}</details>`;
+    function createEvent(className, body) {
+        const node = document.createElement('details');
+        node.className = `ui-disclosure log-fold ${className}`;
+        node.innerHTML = HEAD_HTML + body;
         const find = (selector) => node.querySelector(selector);
-        partsOf.set(node, { ts: find('.log-ts'), kind: find('.log-type'), phase: find('.log-phase'), repeat: find('.log-repeat'),
-            words: find('.log-words'), headline: find('.log-headline'), body: find('.log-body'), facts: find('.log-facts'),
-            fold: find('.log-fold'), detail: find('.log-executor-detail'),
-            whole: find('.log-whole'), omitted: find('[data-log-omitted]') });
+        partsOf.set(node, { ts: find('.log-ts'), title: find('.log-title'), name: find('.log-name'),
+            task: find('.log-task'), failure: find('.log-failure'), failureWord: find('.log-failure-word'), count: find('.log-count'),
+            words: find('.log-words'), facts: find('.log-facts'), detail: find('.log-executor-detail'), omitted: find('[data-log-omitted]') });
         return node;
     }
 
     const setText = (el, text) => { if (el && el.textContent !== text) el.textContent = text; };
-    const setClass = (el, name) => { if (el && el.className !== name) el.className = name; };
     const setData = (el, key, value) => { if (el.dataset[key] !== value) el.dataset[key] = value; };
     const shownHtml = new WeakMap();  // markup a node was last given, so an unchanged one is not rewritten
     const setHtml = (el, html) => { if (el && shownHtml.get(el) !== html) { el.innerHTML = html; shownHtml.set(el, html); } };
+    const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-    // An event's parts, each written only when it changed. Its words never repeat the name its kind already says (U028);
-    // a delegated executor is a quiet chip among its facts, and its detail sentence is text in the fold (#360 A).
-    function paintEvent(node, { ts = '', kind = null, phase = 'info', tone = '', repeat = 1, headline = '', body = '', full = '',
-        meta = [], execution = null, omitted = '' }) {
+    // An event's own head and fold: its name, a failure's chip (the outcome family's word), its words, and its facts
+    // after the exact moment.
+    const eventParts = (view, ts) => ({ ts, name: view.headline, failure: FAILED_PHASES.has(view.phase) ? taskPresentation(view.phase).headline : '',
+        words: wordsOf(view, view.body), whole: wordsOf(view, view.full), facts: [exactTime(ts), ...view.meta] });
+
+    // An event's parts, each written only when it changed. A delegated executor is a quiet chip among its facts, and its
+    // detail sentence is text in the fold (#360 A).
+    function paintEvent(node, { ts = '', name = '', task = '', failure = '', count = '', words = '', whole = '', facts = [],
+        execution = null, omitted = '' }) {
         const parts = partsOf.get(node);
-        setText(parts.ts, ts);
-        if (kind) { setText(parts.kind, kind.label); setClass(parts.kind, `log-type ${kind.className}`); }
-        parts.kind.hidden = !kind;
-        setText(parts.phase, phase);
-        setClass(parts.phase, `log-phase ${phase}`);
-        if (tone) parts.phase.dataset.chipTone = tone;
-        else delete parts.phase.dataset.chipTone;
-        setText(parts.repeat, repeat > 1 ? `×${repeat}` : '');
-        parts.repeat.hidden = repeat <= 1;
-        // The headline, then the body on its own line: one box of at most three lines (style.css .log-words).
-        const lead = kind?.label === headline ? '' : headline;
-        setText(parts.headline, lead);
-        setText(parts.body, lead && body ? `\n${body}` : body);
-        parts.words.hidden = !lead && !body;
-        wholeOf.set(node, full);
+        setText(parts.ts, formatMsgTime(ts)?.short || '');
+        if (parts.ts.getAttribute('datetime') !== ts) parts.ts.setAttribute('datetime', ts);
+        setText(parts.name, name);
+        setText(parts.task, task);
+        parts.task.hidden = !task;
+        setText(parts.failureWord, failure);
+        parts.failure.hidden = !failure;
+        parts.title.hidden = !name && !task && !failure;
+        setText(parts.count, count);
+        parts.count.hidden = !count;
+        wordsOfNode.set(node, { words, whole });
+        showWords(node);
+        parts.words.hidden = !words;
         const chip = execution ? `<span class="harness-chip log-executor-chip" title="${escapeHtmlAttr(execution.title || '')}">${
             harnessIdentityMarkup(execution.harness, { label: execution.label || '', className: 'log-executor-identity' })}</span>` : '';
-        setHtml(parts.facts, chip + escapeHtml(meta.join(' · ')));
-        parts.facts.hidden = !chip && !meta.length;
+        const said = facts.filter(Boolean);
+        setHtml(parts.facts, chip + escapeHtml(said.join(' · ')));
+        parts.facts.hidden = !chip && !said.length;
         setText(parts.detail, execution?.title || '');
         parts.detail.hidden = !execution?.title;
         if (parts.omitted) { setText(parts.omitted, omitted); parts.omitted.hidden = !omitted; }
-        if (parts.whole && parts.fold.open) showWhole(node);
     }
 
-    // An open record starts with the whole words where the list shows a cut: its summary shortened them, or the list
-    // holds them to three lines (one measure, when the owner opens it).
-    function showWhole(node) {
-        const { words, whole } = partsOf.get(node);
-        const full = wholeOf.get(node) || (words.scrollHeight > words.clientHeight + 1 ? words.textContent : '');
-        setText(whole, full);
-        whole.hidden = !full;
+    // Open, an event's words are whole: the CSS clamp lets go, and words its view cut read in full.
+    function showWords(node) {
+        const { words = '', whole = '' } = wordsOfNode.get(node) || {};
+        setText(partsOf.get(node).words, node.open && whole ? whole : words);
     }
 
     function renderStandalone(entry) {
         if (!entry.node) {
-            entry.node = createEvent('log-entry', 'Record', RECORD_HTML);
+            entry.node = createEvent('log-entry', RECORD_HTML);
             raw.bind(entry.node, () => entry.evt);
             entryOf.set(entry.node, entry);
         }
         const { node, view } = entry;
         setData(node, 'category', entry.category);
         setData(node, 'logTime', String(entry.at));
-        paintEvent(node, { ts: entry.tsText, kind: { label: view.typeLabel, className: entry.category }, phase: view.phase || 'info',
-            repeat: entry.repeat, headline: view.headline || 'Event', body: view.body, full: view.full, meta: view.meta,
-            execution: entry.execution, omitted: entry.omitted });
+        paintEvent(node, { ...eventParts(view, entry.ts), count: [entry.repeat > 1 ? `×${entry.repeat}` : '', entry.task]
+            .filter(Boolean).join(' · '), execution: entry.execution, omitted: entry.omitted });
         raw.changed(node);
     }
 
     function renderTaskGroup(entry) {
         if (!entry.node) {
-            const node = entry.node = createEvent('log-entry log-task-card', 'Timeline', TIMELINE_HTML);
+            const node = entry.node = createEvent('log-entry log-task-card', TIMELINE_HTML);
             node.dataset.taskGroup = entry.groupId;
-            entry.dom = { ...partsOf.get(node), review: node.querySelector('.log-task-review'), timeline: node.querySelector('.log-task-timeline') };
+            entry.dom = { review: node.querySelector('.log-task-review'), gone: node.querySelector('[data-log-gone]'),
+                timeline: node.querySelector('.log-task-timeline') };
             entry.rows = new Map();
             entryOf.set(node, entry);
         }
-        const { node, dom } = entry;
+        const { node, dom, failure } = entry;
         setData(node, 'category', entry.category);
         // A card stands where its newest event does (`at`); an older event never dates it back.
         setData(node, 'logTime', String(entry.at));
-        // A task's words are its latest headline: the body of that event is its timeline row's, said once.
-        paintEvent(node, { ts: entry.tsText, kind: { label: entry.kindLabel, className: entry.category }, phase: entry.phase,
-            tone: entry.tone, repeat: entry.events, headline: entry.headline, meta: entry.meta, execution: entry.execution });
+        // A task that failed says the outcome's word; one that holds failed steps while it works says how many, never
+        // Failed (DESIGN §4: a local failure does not relabel a working task). Its count is its events, not repeats.
+        const failed = entry.failed ? taskPresentation('error').headline : entry.failures ? `${plural(entry.failures, 'step')} failed` : '';
+        paintEvent(node, { ts: entry.ts, name: entry.name, task: shortTaskId(entry.groupId), failure: failed,
+            count: plural(entry.events, 'event'), words: failure && state.activeFilters.errors ? failure.words : entry.words,
+            execution: entry.execution });
         // The task's review sentence opens with its timeline.
         setText(dom.review, entry.review || '');
         dom.review.hidden = !entry.review;
-        if (dom.fold.open) renderTaskTimeline(entry);
+        if (node.open) renderTaskTimeline(entry);
     }
 
     // An open Timeline's rows follow the task's recent events in place: a new event appends its row, the oldest
-    // past MAX_TASK_EVENTS leaves, a collapsed repeat redraws only its own row.
+    // past MAX_TASK_EVENTS leaves, a collapsed repeat redraws only its own row. A failure older than the rows kept is
+    // said, so the timeline never looks healthy for want of its row.
     function renderTaskTimeline(entry) {
-        const { rows } = entry;
+        const { rows, failure } = entry;
+        const gone = Boolean(failure) && entry.recent[0].at > failure.at;  // the rows kept are in time order
+        setText(entry.dom.gone, gone ? `The newest failure (${exactTime(failure.ts)}) is older than the ${MAX_TASK_EVENTS} latest`
+            + ' events this card keeps, so its row is not below.' : '');
+        entry.dom.gone.hidden = !gone;
         for (const [item, row] of rows) {
             if (!entry.recent.includes(item)) { raw.remove(row); row.remove(); rows.delete(item); }
         }
@@ -513,15 +521,14 @@ export function initLogs({ ws, state, mount }) {
             const item = entry.recent[index];
             let row = rows.get(item);
             if (!row) {
-                row = createEvent('log-task-event', 'Record', RECORD_HTML);
+                row = createEvent('log-task-event', RECORD_HTML);
                 raw.bind(row, () => item.evt);
                 rows.set(item, row);
                 entry.dom.timeline.insertBefore(row, next);
             }
             next = row;
             if (row.dataset.rev === String(item.rev)) continue;
-            paintEvent(row, { ts: item.ts, phase: item.phase, repeat: item.count, headline: item.headline, body: item.body,
-                full: item.full, meta: item.meta, omitted: item.omitted });
+            paintEvent(row, { ...eventParts(item.view, item.ts), count: item.count > 1 ? `×${item.count}` : '', omitted: item.omitted });
             row.dataset.rev = String(item.rev);
             raw.changed(row);
         }
@@ -756,21 +763,21 @@ export function initLogs({ ws, state, mount }) {
     page.addEventListener('scroll', noteReader, { passive: true });
     logEntries.addEventListener('click', (event) => {
         if (raw.click(event.target, event)) return;
+        const head = event.target?.closest?.('summary');
+        // A press that selected words of a head was reading them: it neither opens nor closes the event (DESIGN §5).
+        if (head && event.detail && selectionWithin(head)) { event.preventDefault(); return; }
         // A Timeline about to open draws its rows first, so they are there when it opens.
-        const fold = event.target?.closest?.('summary')?.parentElement;
-        const entry = fold && entryOf.get(fold.parentElement);
-        if (entry?.kind === 'group' && fold === entry.dom.fold && !fold.open) renderTaskTimeline(entry);
+        const entry = head && entryOf.get(head.parentElement);
+        if (entry?.kind === 'group' && !head.parentElement.open) renderTaskTimeline(entry);
     });
-    // `toggle` does not bubble: caught on its way down. An event's record opens and closes with its fold (logs_raw.js),
-    // its whole words with it; a task's Timeline draws its rows open and lets them go closed.
+    // `toggle` does not bubble: caught on its way down. An event's words are whole while it is open, and its record
+    // opens and closes with it (logs_raw.js); a task's timeline draws its rows open and lets them go closed.
     logEntries.addEventListener('toggle', (event) => {
         const fold = event.target;
         if (!fold?.classList?.contains('log-fold')) return;
-        if (raw.toggled(fold)) {
-            if (fold.open) showWhole(fold.parentElement);
-            return;
-        }
-        const entry = entryOf.get(fold.parentElement);
+        showWords(fold);
+        if (raw.toggled(fold)) return;
+        const entry = entryOf.get(fold);
         if (entry?.kind !== 'group') return;
         if (fold.open) renderTaskTimeline(entry);
         else closeTaskTimeline(entry);

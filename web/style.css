@@ -2864,29 +2864,6 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
     background: var(--status-error-bg);
 }
 
-/* Logs phase pills name the status triples by class (DESIGN "The tone primitive"); the
-   saturated --green/--amber/--red are dot-and-indicator hues, not small-text hues. A Logs task headline that settled
-   is its task's outcome and takes the cards' tone (logs.js writes data-chip-tone): Done with warnings green, Stopped
-   neutral. A warn-level log event stays amber: a warning worth reading. */
-.log-entry .log-phase:is(.done, .ready, .ok, .result, .usage, .metrics),
-.log-entry .log-phase[data-chip-tone="ok"] {
-    color: var(--status-ok-fg);
-    border-color: var(--status-ok-border);
-    background: var(--status-ok-bg);
-}
-
-.log-entry .log-phase:is(.warn, .empty):not([data-chip-tone]) {
-    color: var(--status-warn-fg);
-    border-color: var(--status-warn-border);
-    background: var(--status-warn-bg);
-}
-
-.log-entry .log-phase:is(.error, .timeout, .lifecycle_error) {
-    color: var(--status-error-fg);
-    border-color: var(--status-error-border);
-    background: var(--status-error-bg);
-}
-
 .chat-live-title {
     font-size: var(--type-body);
     font-weight: 500;
@@ -6102,14 +6079,15 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     padding: 0;
 }
 
-/* Logs (U026-U035, U140): the tab body scrolls; its filters stay at its top on the room's colour (the stream lives
-   at its newest end, the filters must stay in reach) while the list, one card whose events are trays, scrolls under
-   them. Every event has one anatomy (logs.js createEvent): its first line in the meta size (the time in the meta ink,
-   what it is in its kind's colour, its level chip, its repeat count at the line's end), its words in body text, its
-   facts in one meta line, and one shared fold (details.ui-disclosure) for the rest. A task's timeline rows are the same
-   events inside its fold. The system face reads it all; monospace keeps only the raw record. */
-/* The body's top inset rides on the bar, so the bar sticks flush at the scroller's edge (a sticky box keeps clear of
-   its scroller's padding, which let rows show above it). */
+/* Logs (U026-U035, U140): the tab body scrolls; its strip stays at its top on the room's colour (the stream lives at its
+   newest end, the strip must stay in reach) while the list, one card whose events are trays, scrolls under it. Every
+   event is one shared fold (logs.js createEvent) whose summary is its head: the fold's caret, the time in Main's clock
+   in one width (a name stands at one x on today's rows and older ones), the name with its task and a failure's chip,
+   the count at the line's end, then the words under them, at most three lines; opened, the words are whole and its
+   facts and record, or a task's timeline, follow. Only a failure is coloured: the shared outcome chip
+   (.chat-live-phase). The system face reads it all; monospace keeps only the raw record. */
+/* The body's top inset rides on the strip, so the strip sticks flush at the scroller's edge (a sticky box keeps clear
+   of its scroller's padding, which let rows show above it). */
 #page-logs {
     padding-top: 0;
     overflow-anchor: none; /* logs.js owns the entry anchor while chunks are inserted or moved */
@@ -6144,59 +6122,50 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     min-width: 0;
 }
 
-/* An event is a tray inside the Logs object: the soft neutral fill, the inner radius, no outline. Inside a task's
-   tray its timeline rows part by space alone: a tray inside a tray drops its fill. */
+/* An event is a tray inside the Logs object: the soft neutral fill, the inner radius, no outline; its head fills the
+   tray, so it opens from anywhere on it. Inside a task's tray its timeline rows part by space alone: a tray inside a
+   tray drops its fill. */
 .log-entry {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
     min-width: 0;
-    padding: var(--space-3);
-    border: 1px solid transparent;
     border-radius: var(--radius-inner);
     background: var(--surface-tray);
 }
-.log-task-event { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
-.log-task-timeline { display: flex; flex-direction: column; gap: var(--space-4); }
+.log-entry > .log-head { padding: var(--space-3); }
+.log-entry[open] > .log-head { padding-bottom: 0; }
+.log-entry > :not(summary) { margin-inline: var(--space-3); }
+.log-entry[open] { padding-bottom: var(--space-3); }
+.log-task-timeline { display: flex; flex-direction: column; gap: var(--space-2); }
 
-/* The first line: on a narrow card it wraps (the time and the kind, then the chip and the count). */
-.log-head {
-    display: flex;
-    flex-wrap: wrap;
+/* The head is the shared summary laid out as a grid (it outranks the summary's own flex row). */
+.log-fold > .log-head {
+    --log-clock: 8em;  /* "Yesterday, 23:59" in the meta size */
+    display: grid;
+    grid-template-columns: auto minmax(var(--log-clock), max-content) minmax(0, 1fr) auto;
     align-items: baseline;
-    gap: var(--space-1) var(--space-2);
+    align-content: center;
+    gap: 2px var(--space-2);
+}
+.log-head::before { grid-area: 1 / 1; align-self: baseline; }
+.log-head [hidden] { display: none; }
+.log-ts { grid-area: 1 / 2; color: var(--text-meta); font-weight: 400; font-variant-numeric: tabular-nums; }
+.log-title { grid-area: 1 / 3; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--space-2); min-width: 0; }
+.log-name {
     min-width: 0;
-    font-size: var(--type-meta);
-    line-height: var(--line-meta);
+    color: var(--text-primary);
+    font-size: var(--type-body);
+    line-height: var(--line-title);
+    overflow-wrap: anywhere;
 }
-.log-ts { color: var(--text-meta); font-variant-numeric: tabular-nums; }
-.log-type { min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
-.log-type[hidden] { display: none; }
-.log-repeat { margin-left: auto; color: var(--text-meta); font-variant-numeric: tabular-nums; }
-.log-repeat[hidden] { display: none; }
+.log-task { color: var(--text-meta); font-weight: 400; font-variant-numeric: tabular-nums; }
+.log-count { grid-area: 1 / 4; color: var(--text-meta); font-weight: 400; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
-/* A level chip lies flat; the default `info` level says nothing and is not drawn (U028). */
-.log-entry .log-phase {
-    padding: 1px 8px;
-    border-radius: 999px;
-    font-size: var(--type-meta);
-    border: 1px solid transparent;
-    color: var(--text-secondary);
-    background: rgba(var(--neutral-rgb), 0.04);
-}
-.log-entry .log-phase.info { display: none; }
-
-.log-entry .log-phase:is(.start, .calling, .context, .progress, .thought, .boot, .working, .thinking) {
-    color: var(--accent-light);
-    background: var(--accent-10);
-}
-
-/* The words read: the body size, the regular weight, the primary ink, at most three lines in the list; the whole
-   text is the fold's. */
+/* The words read: the body size, the regular weight, the primary ink, at most three lines while closed. */
 .log-words {
+    grid-area: 2 / 1 / 3 / -1;
     color: var(--text-primary);
     font-size: var(--type-body);
     line-height: var(--line-body);
+    font-weight: 400;
     white-space: pre-line;
     overflow-wrap: anywhere;
     display: -webkit-box;
@@ -6205,32 +6174,18 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     line-clamp: 3;
     overflow: hidden;
 }
-.log-words[hidden] { display: none; }
-.log-facts {
-    color: var(--text-meta);
-    font-size: var(--type-meta);
-    line-height: var(--line-meta);
-    overflow-wrap: anywhere;
-}
-.log-facts[hidden] { display: none; }
-.log-facts > .log-executor-chip { margin-right: var(--space-2); }
+.log-title[hidden] ~ .log-words { grid-area: 1 / 3; }  /* a head without a name: its words follow its time */
+.log-fold[open] > .log-head > .log-words { display: block; overflow: visible; }
 
-/* The fold's sections: the whole words as written, then notes in the meta ink, then the raw record. */
-.log-whole {
-    color: var(--text-primary);
-    font-size: var(--type-body);
-    line-height: var(--line-body);
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-}
-.log-note {
+/* The fold's sections: facts and notes in the meta ink, then the raw record. */
+:is(.log-facts, .log-note) {
     color: var(--text-meta);
     font-size: var(--type-meta);
     line-height: var(--line-meta);
-    white-space: pre-wrap;
     overflow-wrap: anywhere;
 }
-:is(.log-whole, .log-note)[hidden] { display: none; }
+.log-note { white-space: pre-wrap; }
+.log-facts > .log-executor-chip { margin-right: var(--space-2); }
 
 .log-raw {
     margin: 0;
@@ -6246,19 +6201,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     overflow-y: auto;
 }
 
-.log-raw-tools { margin-top: var(--space-2); }
 .log-raw-status { overflow-wrap: anywhere; }
-.log-raw-pages { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.log-raw-pages { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); }
 /* Download is a link (the browser streams the file) in the capsule's look: the shared .btn leaves a link's underline. */
 .log-raw-download { text-decoration: none; }
-
-/* What an event is, in its kind's colour; System has none, so its kind reads in the ink of the words. */
-.log-type.tools { color: var(--status-info-fg); }
-.log-type.llm { color: var(--accent); }
-.log-type.errors { color: var(--status-error-fg); }
-.log-type.tasks { color: var(--status-warn-fg); }
-.log-type.system { color: var(--text-primary); }
-.log-type.consciousness { color: var(--project); }
 
 /* `width` is the vertical bar, `height` the horizontal one: without the height
    a horizontal bar falls back to the 16-17px UA default and paints thick. */
