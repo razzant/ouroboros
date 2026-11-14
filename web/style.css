@@ -5371,6 +5371,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .chat-capsule[data-name-fit="off"]:not([data-open="true"]) .chat-capsule-name {
     display: none;
 }
+/* Closed-row fitting reads settled widths and margins; opening and closing keep their own transitions. */
+.chat-toolbar-row[data-owner-fitting] .chat-capsule-value { transition: none; }
 .chat-toolbar-row[data-owner-compact="values"] .chat-capsule:not([data-open="true"]) .chat-capsule-value {
     max-width: var(--capsule-value-cap);
     /* An emptied value leaves no word spacing: 2px cancels its -2px start margin, keeping the glyph round. */
