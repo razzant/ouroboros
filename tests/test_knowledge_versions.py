@@ -554,3 +554,18 @@ def test_a_bad_position_or_fingerprint_is_an_argument_error_before_the_list_is_c
     later = tools._knowledge_read(ctx, TOPIC, view="history", start_char=120, fingerprint=fingerprint)
     assert later.startswith("[Knowledge history]") and body(first) + body(later) == body(
         tools._knowledge_read(ctx, TOPIC, view="history")), later
+
+
+def test_a_first_page_with_another_lists_fingerprint_is_told_to_read_without_one(tmp_path):
+    """R5: a first page that carries another list's fingerprint is refused (position_mismatch) and told to read
+    without the fingerprint, not to start again at the start it already had; a later page is still told to read again
+    from start_char=0."""
+    ctx, target = context(tmp_path), address(tmp_path)
+    a = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    store.write_knowledge_note(target, "# Река\n\nTwo.\n", expected_revision=a.revision)
+    first = tools._knowledge_read(ctx, TOPIC, view="history", fingerprint="0" * 16)
+    assert first.startswith("⚠️ TOOL_ERROR: position_mismatch: the fingerprint names another list of versions") and \
+        first.endswith("a first page takes none, so read it without the fingerprint") and "start_char=0" not in first, first
+    later = tools._knowledge_read(ctx, TOPIC, view="history", start_char=40, fingerprint="0" * 16)
+    assert later.endswith("read it again from start_char=0"), later
+    assert tools._knowledge_read(ctx, TOPIC, view="history").startswith("[Knowledge history]")

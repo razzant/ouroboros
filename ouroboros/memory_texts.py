@@ -515,8 +515,10 @@ def read_versions(ctx: Any, address: Any, version: Any, start: Any, fingerprint:
         read_call(source, "<revision>").replace("'<revision>'", "<revision>"), undo if current else None, blocked)
     digest = sha256(listing.encode("utf-8")).hexdigest()[:16]
     if (start or fingerprint) and fingerprint != digest:
-        return failed("TOOL_REPORTED_FAILURE", "⚠️ TOOL_ERROR: position_mismatch: that page belongs to another list of "
-                                               "versions (a write landed since): read it again from start=0.")
+        return failed("TOOL_REPORTED_FAILURE", "⚠️ TOOL_ERROR: position_mismatch: " + (
+            "that page belongs to another list of versions (a write landed since): read it again from start=0." if start
+            else "the fingerprint names another list of versions (a write landed since): a first page takes none, so "
+                 "read it without the fingerprint."))
     head = f"[{source.name}: versions newest first; {shown}; fingerprint='{digest}']{note}"
     return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=_page(
         head, listing, start, lambda end: f"memory_read(source={source.name!r}, start={end}, fingerprint='{digest}')",

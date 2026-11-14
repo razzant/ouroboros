@@ -142,7 +142,9 @@ def _note_view(note: knowledge_store.KnowledgeNote, view: str, version: str | No
         digest = hashlib.sha256(listing.encode("utf-8")).hexdigest()[:16]
         if (start_char or fingerprint) and fingerprint != digest:
             raise ListChanged("that page belongs to another list of versions (a write landed since, or no fingerprint "
-                              "named the list it continues): read it again from start_char=0")
+                              "named the list it continues): read it again from start_char=0" if start_char else
+                              "the fingerprint names another list of versions (a write landed since): a first page "
+                              "takes none, so read it without the fingerprint")
         return _rendered_view(view, listing, {**facts, "fingerprint": digest}, start_char, end_char, notes)
     label = f" — an earlier version, not the current note (current revision {note.revision})" if earlier else ""
     return _rendered_view(view, knowledge_versions.render_outline(shown, label), facts, start_char, end_char, notes)

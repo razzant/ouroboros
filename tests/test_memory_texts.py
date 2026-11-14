@@ -712,3 +712,15 @@ def test_a_list_over_bytes_that_are_not_text_offers_no_revert_and_its_overwrite_
     text = _read(ctx, source=name, version=_sha(first)).split("\n", 2)[2]  # the version, after the head and its window
     back = write(ctx, content=text, mode="overwrite", expected_revision=printed)
     assert back.startswith(f"OK: {noun} updated (overwrite") and path.read_bytes() == first, back
+
+
+def test_a_first_page_of_the_door_with_another_lists_fingerprint_is_told_to_read_without_one(tmp_path, identity):
+    """R5: memory_read(source=...) at start 0 with another list's fingerprint is refused (position_mismatch) and told
+    to read without the fingerprint; at a later start it is still told to read again from start=0."""
+    ctx = _ctx(tmp_path)
+    _update_identity(ctx, IDENTITY + "\nMore.\n", _sha(identity.read_bytes()))
+    first = _read(ctx, source="identity", fingerprint="0" * 16)
+    assert first.startswith("⚠️ TOOL_ERROR: position_mismatch: the fingerprint names another list of versions") and \
+        first.endswith("a first page takes none, so read it without the fingerprint.") and "start=0" not in first, first
+    assert _read(ctx, source="identity", start=5, fingerprint="0" * 16).endswith("read it again from start=0.")
+    assert _read(ctx, source="identity").startswith("[identity: versions newest first")
