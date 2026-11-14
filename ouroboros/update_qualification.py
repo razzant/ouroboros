@@ -309,7 +309,8 @@ def qualification_summary(qualification: dict | None) -> dict | None:
     The panel, preflight and the letter's author keep the full record (owner 8B); a task sees the range, how
     many commits carry a receipt, each check's outcomes by their source (``author_declared``: the author's
     word, not a host run), each review combination as one row (observed verdict, record state, request-time
-    relation, declaration; ``not_recorded`` for older receipts, unknown fields kept), the post-merge read.
+    relation, declaration; ``not_recorded`` for older receipts, unknown fields kept), the post-merge read, and
+    how many of this install's own commits in the range it recorded over a review FAIL or no verdict.
     """
     if not isinstance(qualification, dict):
         return qualification
@@ -335,9 +336,11 @@ def qualification_summary(qualification: dict | None) -> dict | None:
     for run in github.get("runs") or []:
         key = str(run.get("conclusion") or run.get("status") or "unknown")
         conclusions[key] = conclusions.get(key, 0) + 1
+    landed = qualification.get("landed_over_review")  # absent when this install's rows were not read: unknown
     return {"base_sha": qualification.get("base_sha"), "target_sha": qualification.get("target_sha"),
             "commits": len(commits), "with_receipt": len(receipts), "checks": checks,
             "reviews": _review_summary_rows(reviews),
+            **({"landed_over_review": len(landed)} if isinstance(landed, list) else {}),
             "post_merge": {"read": github.get("status", "unknown"), "reason": github.get("reason"),
                            "runs": conclusions, "missing": len(github.get("missing_shas") or [])},
             "full": "query_data(op='json', kind='update_letter')"}

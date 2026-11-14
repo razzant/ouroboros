@@ -16,8 +16,9 @@ reviewed attempt, which keeps the reason (``review_override_reason``); a wave ha
 its review record holds when the author goes on (nothing once it passed). After Git recorded the commit,
 ``note_override_landing`` adds it to the counter's ``landed`` list (the newest 64, under the install's data root, with
 the author's disposition when it continued) when that attempt or this call met such an outcome. ``landed_line`` names those commits in a restart's or
-an adoption's notice ("running" only on an adoption record's word), and ``landed_outcome`` one in an evolution cycle's
-notice. These rows know only FAIL or no verdict: none says PASS.
+an adoption's notice ("running" only on an adoption record's word), ``landed_outcome`` one in an evolution cycle's
+notice, and ``landed_in`` those an official update brings back (``update_letter``: the range's check facts). These rows
+know only FAIL or no verdict: none says PASS.
 """
 from __future__ import annotations
 
@@ -307,6 +308,18 @@ def _landed_rows(data_dir: Any) -> Optional[Dict[str, Dict[str, Any]]]:
         log.debug("Commits landed over a review outcome cannot be read", exc_info=True)
         return None
     return {str(row.get("sha")): row for row in rows if isinstance(row, dict)} if isinstance(rows, list) else {}
+
+
+def landed_in(data_dir: Any, commits: Any) -> Optional[list]:
+    """The ``commits`` (``{sha, subject}``, in their order) this install's ``landed`` rows name, each with its recorded
+    reason and its outcome in a notice's words; [] when the kept rows name none of them, so [] never means PASS, and
+    None when the rows cannot be read."""
+    rows = _landed_rows(data_dir)
+    if rows is None:
+        return None
+    return [{"sha": commit["sha"], "subject": str(commit.get("subject") or ""),
+             "reason": str(rows[commit["sha"]].get("reason") or "unknown"), "outcome": _outcome(rows[commit["sha"]])}
+            for commit in commits or [] if isinstance(commit, dict) and commit.get("sha") in rows]
 
 
 def landed_outcome(data_dir: Any, commit_sha: str) -> Optional[str]:
