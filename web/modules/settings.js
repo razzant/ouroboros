@@ -23,7 +23,7 @@
 import { settingsReturn } from './dashboard.js';
 import { sectionHoldsTwoPanes } from './layout.js';
 import { renderBackControl, renderPageHeader, setBackControlTarget } from './page_header.js';
-import { FADE_CLEARANCE, bindScrollFade } from './scroll_fade.js';
+import { revealPastFade, bindScrollFade } from './scroll_fade.js';
 import { readSettings } from './settings_controls.js';
 import { isDoorId, mountSettingsHome, settingsTitle } from './settings_home.js';
 import { settingsPageFor } from './settings_pages.js';
@@ -129,9 +129,21 @@ export function initSettings(ctx = {}) {
     const panes = () => sectionHoldsTwoPanes(page);
     // With two panes and no page open, the page last seen on this device comes back (Models on a first visit, or
     // when that page is no longer there).
-    const ensurePage = () => {
-        if (!panes() || levels.length || ownChosen || opening || !shown()) return;
-        go(lastFirst && !isDoorId(lastFirst) && settingsPageFor(lastFirst) ? lastFirst : 'models');
+    let landing = false;
+    const ensurePage = async () => {
+        if (!panes() || levels.length || ownChosen || opening || !shown() || landing) return;
+        landing = true;
+        const saved = lastFirst;
+        let target = 'models';
+        try {
+            const registered = !isDoorId(saved) && settingsPageFor(saved);
+            if (registered && (registered.exists ? await registered.exists(saved) : saved === registered.prefix)) target = saved;
+        } catch { /* An unread registry cannot establish that the stored page still exists. */ }
+        landing = false;
+        if (!panes() || levels.length || ownChosen || opening || !shown() || saved !== lastFirst) return;
+        // Open a resolved page directly: unknown-path search paints the home and queues ensurePage again.
+        // Landing never overwrites the device's choice, including while its registry cannot be read.
+        open(target, { under: 0, remember: false });
     };
     let panesBefore = null;
     function placeOverview(level) {
@@ -181,6 +193,7 @@ export function initSettings(ctx = {}) {
         const target = String(path || '');
         if (isDoorId(target)) return leave(target, { row, back: state.settingsPath });
         if (target && !settingsPageFor(target)) {
+            ownChosen = true; // an explicit unknown address keeps its search, rather than re-entering landing
             closeLevels(0);
             home.search((target.split('/').filter(Boolean).pop() || '').replace(/[-_]+/g, ' ').trim());
             return true;
@@ -194,8 +207,8 @@ export function initSettings(ctx = {}) {
 
     // `opener` is the control that opened the level, where focus returns: WebKit does not focus a pressed button.
     // A level put aside with unsaved words (`close`) comes back as it was left; any other is drawn anew.
-    function open(path, { row, back, under, opener, view = '' }) {
-        if (!under && path !== lastFirst) {
+    function open(path, { row, back, under, opener, view = '', remember = true }) {
+        if (remember && !under && path !== lastFirst) {
             lastFirst = path;
             try { globalThis.localStorage?.setItem(LAST_PAGE_KEY, path); } catch { /* storage blocked: kept for this load */ }
         }
@@ -356,15 +369,7 @@ export function initSettings(ctx = {}) {
     function revealInRail() {
         const chosen = homeEl.querySelector('[aria-current="page"]');
         if (!chosen) return;
-        // `block: 'nearest'` by hand (the rail alone scrolls): a row already in the rail's view never moves; one out of
-        // it, or under the fade of an edge where more waits, comes in just past that fade.
-        const rail = homeEl.getBoundingClientRect();
-        const box = chosen.getBoundingClientRect();
-        const above = homeEl.scrollTop > 1 ? FADE_CLEARANCE : 0;
-        const below = homeEl.scrollHeight - homeEl.clientHeight - homeEl.scrollTop > 1 ? FADE_CLEARANCE : 0;
-        if (box.top >= rail.top + above && box.bottom <= rail.bottom - below) return;
-        if (box.top < rail.top + above) homeEl.scrollTop += box.top - rail.top - FADE_CLEARANCE;
-        else homeEl.scrollTop += box.bottom - rail.bottom + FADE_CLEARANCE;
+        revealPastFade(homeEl, chosen);
         places.set(homeEl, homeEl.scrollTop);
     }
 

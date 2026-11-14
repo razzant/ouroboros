@@ -3,14 +3,16 @@
  * A page module registers its family once, when it is imported: `prefix` is the first part of a Settings path
  * (`agents` serves `agents`, `agents/<id>` and `agents/new`), `title` a string or `(path) => string`, and
  * `mount(container, { path, row, ctx })` renders the body for that path and may return `{ unmount() }`. The shell
- * imports the page modules; a path no page serves opens the home with the path's last word searched. */
+ * imports the page modules; a path no page serves opens the home with the path's last word searched.
+ * `exists(path)` may verify a dynamic address before restoring it from device memory. Without it only the exact
+ * registered page is known at landing; an unknown child keeps its stored address while the shell shows Models. */
 
 const PAGES = new Map();
 
-export function registerSettingsPage(prefix, { title, mount } = {}) {
+export function registerSettingsPage(prefix, { title, mount, exists } = {}) {
     const key = String(prefix || '').trim();
     if (!key || typeof mount !== 'function') throw new TypeError('registerSettingsPage: a prefix and a mount');
-    PAGES.set(key, { prefix: key, title, mount });
+    PAGES.set(key, { prefix: key, title, mount, exists });
 }
 
 /** The page registered under the longest prefix of `path`, whole parts only (`agents` serves `agents/a1`, never

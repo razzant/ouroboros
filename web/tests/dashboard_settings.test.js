@@ -17,6 +17,7 @@ import { CODECS, GUARDED_WRITERS, HIDDEN_WHEN, bindSettingRows, commitSetting, f
 import { ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
 import { initStorage } from '../modules/storage.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
+import { renderPageHeader } from '../modules/page_header.js';
 
 const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => structuredClone(data) });
 const settle = async (rounds = 8) => { for (let i = 0; i < rounds; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
@@ -556,6 +557,37 @@ test('Back to Settings: a first row and one page layer; the press, Escape or Bac
     back.show(panel, 'accounts');
     back.clear();
     assert.deepEqual([panel.querySelector('.dashboard-back'), layers.length, order.length], [null, 0, 3], 'clearing opens nothing');
+});
+
+test('Settings doors use destination slots hidden docked and shown in stack, leaving an internal Back alone', (t) => {
+    const { mount } = setup(t);
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    const display = selector => [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+        .filter(([, selectors]) => selectors.trim().split(/,\s*/).includes(selector))
+        .flatMap(([, , body]) => [...body.matchAll(/\bdisplay:\s*([^;]+);/g)].map(([, value]) => value)).at(-1);
+    const content = new NodeStub(); content.id = 'content'; mount.append(content);
+    const dashboard = initDashboard({ state: { activePage: 'dashboard' } });
+    dashboard.activateTab('costs', { back: 'models' });
+    const slots = [dashboard.page.querySelector('[data-dashboard-back-slot]')];
+    const returns = [];
+    for (const pageName of ['skills', 'circles', 'without-header']) {
+        const page = new NodeStub(); page.className = 'page';
+        page.innerHTML = pageName === 'without-header' ? '' : renderPageHeader({ page: pageName });
+        const query = page.querySelector.bind(page);
+        page.querySelector = selector => query(selector.replace(':scope > ', ''));
+        content.append(page);
+        const back = settingsReturn(); back.show(page, 'models'); returns.push(back);
+        slots.push(page.querySelector('[data-page-back]') || page.querySelector('.dashboard-back'));
+    }
+    for (const layout of ['stack', 'docked', 'stack']) {
+        for (const slot of slots) {
+            assert.ok(slot.querySelector('[data-dashboard-back]'), 'the actual caller populated its return slot');
+            assert.equal(display(`html[data-layout="${layout}"] .${slot.className}`) ?? display(`.${slot.className}`),
+                layout === 'docked' ? 'none' : 'flex', `${slot.className} in ${layout}`);
+        }
+        assert.equal(display(`html[data-layout="${layout}"] .shell-back`), undefined, 'the rule never hides a level\'s own Back');
+    }
+    returns.forEach(back => back.clear()); dashboard.destroy();
 });
 
 test('openDashboardTab: back gives the tab its Back, a row is brought into view and focused; another tab or page drops Back', async (t) => {

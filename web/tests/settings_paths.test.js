@@ -327,6 +327,7 @@ test('a row chosen under the rail\'s bottom fade comes just clear of it; a row c
     const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
     layout(t, controls, content, { on: true });
     const home = content.querySelector('[data-settings-home]');
+    home.ownerDocument.defaultView.getComputedStyle = () => ({ getPropertyValue: () => '32px' });
     // The owner's window: a rail 678 px tall from y 66, its list 1168 px, scrolled to 457 (33 px more wait below).
     Object.assign(home, { scrollHeight: 1168, clientHeight: 678, scrollTop: 457 });
     home.getBoundingClientRect = () => ({ top: 66, bottom: 744, width: 300 });
@@ -338,16 +339,16 @@ test('a row chosen under the rail\'s bottom fade comes just clear of it; a row c
         home.querySelector('[data-settings-list]').appendChild(node);
         return node;
     };
-    // Its bottom 4 px inside the rail, under the 32 px fade: pressed, it comes 24 px clear of the edge (FADE_CLEARANCE).
+    // Its bottom 4 px inside the rail, under the 32 px fade: pressed, it comes 32 px clear of the edge (the sheet’s own token).
     const low = row('test-low', 1085);
     await home.fire('click', { target: low });
     await settle();
-    assert.equal(home.scrollTop, 477);
-    assert.equal(low.getBoundingClientRect().bottom, 744 - 24);
+    assert.equal(home.scrollTop, 485);
+    assert.equal(low.getBoundingClientRect().bottom, 744 - 32);
     const mid = row('test-mid', 700);
     await home.fire('click', { target: mid });
     await settle();
-    assert.equal(home.scrollTop, 477, 'a row in the clear stays where it is');
+    assert.equal(home.scrollTop, 485, 'a row in the clear stays where it is');
 });
 
 test('Settings pressed again in the sidebar: two panes keep a first-level page and return from a deeper one; one column shows the list', async (t) => {
@@ -415,17 +416,23 @@ test('app.js: Settings pressed again goes to pressedAgain and closes the open dr
         showPage: (name) => calls.push(`show:${name}`),
     });
     vm.runInContext(source.slice(from + 1, until + 2), context);
-    context.pressNavPage('settings');
+    // Execute the actual registration too: an unused correct helper is no protection against an old callback.
+    const binding = source.match(/document.querySelectorAll\('\[data-nav-page\]'\)\.forEach\(btn => \{[\s\S]*?\n\}\);/)[0];
+    const buttons = ['settings', 'dashboard'].map((name) => ({ dataset: { navPage: name },
+        addEventListener(type, callback) { assert.equal(type, 'click'); this.click = callback; } }));
+    context.document = { querySelectorAll: () => buttons };
+    vm.runInContext(binding, context);
+    buttons[0].click();
     assert.deepEqual(calls, ['again', 'drawer:false']);
     // No drawer open (two panes, or the drawer already closed): nothing else happens.
     calls.length = 0;
-    context.pressNavPage('settings');
+    buttons[0].click();
     assert.deepEqual(calls, ['again']);
     // Away from Settings, or another page: the ordinary showing, which closes the drawer itself.
     calls.length = 0;
     context.state.activePage = 'chat';
-    context.pressNavPage('settings');
-    context.pressNavPage('dashboard');
+    buttons[0].click();
+    buttons[1].click();
     assert.deepEqual(calls, ['show:settings', 'show:dashboard']);
 });
 
@@ -438,8 +445,9 @@ test('two panes land on the first-level page last opened on this device, or on M
         getItem: (key) => (store.has(key) ? store.get(key) : null), setItem: (key, value) => store.set(key, String(value)) } });
     t.after(() => { if (saved) Object.defineProperty(globalThis, 'localStorage', saved); else delete globalThis.localStorage; });
     registerSettingsPage('test-kept', { title: 'Kept', mount() {} });
-    const land = async (sub) => {
+    const land = async (sub, extensions) => {
         const { env, content, state, showPage } = world(sub);
+        if (extensions) env.routes.set('/api/extensions', async () => ({ ok: true, status: 200, json: async () => extensions }));
         const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
         layout(sub, controls, content, { on: true });
         state.activePage = 'settings';
@@ -462,6 +470,29 @@ test('two panes land on the first-level page last opened on this device, or on M
         store.set('ouroboros.settings.last-page', 'no-such-page');
         const { state } = await land(sub);
         assert.equal(state.settingsPath, 'models');
+        assert.equal(store.get('ouroboros.settings.last-page'), 'no-such-page', 'landing does not replace the owner’s choice');
+        await controlsChoice(sub);
+    });
+    async function controlsChoice(sub) {
+        const { controls } = await land(sub);
+        await controls.open('test-kept');
+        assert.equal(store.get('ouroboros.settings.last-page'), 'test-kept');
+    }
+    await t.test('installed skill and then uninstalled skill', async (sub) => {
+        store.set('ouroboros.settings.last-page', 'skill/one');
+        const installed = await land(sub, { skills: [{ name: 'one' }], live: { settings_sections: [
+            { skill: 'one', title: 'One', render: { components: [{ type: 'markdown', text: 'Installed form' }] } },
+        ] } });
+        assert.equal(installed.state.settingsPath, 'skill/one');
+        const removed = await land(sub, { skills: [], live: { settings_sections: [] } });
+        assert.equal(removed.state.settingsPath, 'models');
+        assert.equal(store.get('ouroboros.settings.last-page'), 'skill/one');
+    });
+    await t.test('unreadable skill registry keeps the stored choice', async (sub) => {
+        store.set('ouroboros.settings.last-page', 'skill/one');
+        const { state } = await land(sub, { error: 'unavailable' });
+        assert.equal(state.settingsPath, 'models');
+        assert.equal(store.get('ouroboros.settings.last-page'), 'skill/one');
     });
 });
 

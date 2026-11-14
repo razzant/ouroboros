@@ -66,8 +66,7 @@ export function modelProgramMarkup(program, view = {}) {
     else if (pending && (view.operationError || operation?.termination === 'unconfirmed')) button = '<button type="button" class="btn btn-default" data-program-action="rejoin">Check operation</button>';
     else if ((needsUpdate && action?.available && !error) || pending) button = `<button type="button" class="btn btn-default" data-program-action="latest"${disabled ? ' disabled' : ''}>${verb}</button>`;
     return `<div class="harness-model-program ui-field-help" data-program="${escapeHtml(program.harness)}">
-        <span>${program.mixed ? `${escapeHtml(subset)} supplied by` : 'List from'} ${escapeHtml(program.label)} ${escapeHtml(versions)}</span>
-        ${needsUpdate ? `<span>${escapeHtml(maintenanceLatestLine(entry))}</span>` : ''}${button}
+        <span>${program.mixed ? `${escapeHtml(subset)} supplied by` : 'List from'} ${escapeHtml(program.label)} ${escapeHtml(versions)}${needsUpdate ? ` · ${escapeHtml(maintenanceLatestLine(entry))}` : ''}</span>${button}
         ${needsUpdate && action && !action.available ? `<span>${escapeHtml(action.reason)}</span>` : ''}
         ${operation ? `<span role="status">${escapeHtml(maintenanceOperationLine(operation, {missing: !entry?.selection?.path && !operation.before?.path}))}</span>` : ''}
         ${error ? `<span data-tone="warn">${escapeHtml(error)}</span>` : ''}

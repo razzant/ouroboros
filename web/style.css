@@ -164,7 +164,7 @@ html[data-layout="stack"] .shell-icon-control {
    them, so a row reached with Tab is never left under either bar, while a bar's own control (Main, a section, the
    update) leaves the column where it is (a scroll padding on the column would count the bars as covered and move
    it). A column too short even for the card, one Project row and the foot (layout.js sets data-bars-crowd; by the
-   bars' heights a desk under 306 px with the macOS title band, 272 px without, a touch screen under 296 px) lets
+   bars' heights and the rows' clearance at both edges) lets
    the card scroll away with the list instead: the sections and the version stay on the edge, the card is the
    list's top, one scroll up, and the rows keep the room between; two pinned bars there would cover every row. */
 @media (max-height: 540px), (pointer: coarse) and (max-height: 600px) {
@@ -230,15 +230,12 @@ html[data-layout="stack"] .shell-icon-control {
 
 /* The sections, quiet items three to a line on a desk in three columns, each as wide as its widest item: the first
    column starts where the Project names start, the last ends where the column ends, and within a column the items start
-   on one line, so the glyphs of the two rows stand under each other. A name is never cut: a column is never narrower
-   than its widest name, and where three columns do not fit the column stands them two to a line, the phone drawer
-   always (a finger high there), and a column too narrow even for two stands them one to a line. An engine without
-   container queries keeps the one-to-a-line base. The steps are the English names' widths at the body size (328 px
-   holds three, 226 px two); a longer translation that passes a step's width overflows instead of being cut. The chosen
-   one is the crimson capsule. */
+   on one line, so the glyphs of the two rows stand under each other. The column's existing steps keep three at 328 px,
+   two at 226 px (and in the drawer), otherwise one. Longer names wrap within those columns: Navigation keeps their
+   names whole, never clipped or reduced to an unlabelled icon. The chosen one is the crimson capsule. */
 .nav-tools {
     display: grid;
-    grid-template-columns: minmax(max-content, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     justify-content: space-between;
     gap: var(--space-1) 0;
     padding-top: var(--space-3);
@@ -254,14 +251,14 @@ html[data-layout="stack"] .shell-icon-control {
     font-size: var(--type-body);
     font-weight: 400;
 }
-.nav-tools > .nav-row > .nav-row-label { overflow: visible; text-overflow: clip; }
+.nav-tools > .nav-row > .nav-row-label { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
 .nav-tools > .nav-row:not(.active) > svg { color: var(--text-meta); }
 .nav-tools > .nav-row { justify-self: start; }
 @container (min-width: 226px) {
-    .nav-tools { grid-template-columns: repeat(2, minmax(max-content, 1fr)); }
+    .nav-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @container (min-width: 328px) {
-    html:not([data-layout="stack"]) .nav-tools { grid-template-columns: repeat(3, max-content); }
+    html:not([data-layout="stack"]) .nav-tools { grid-template-columns: repeat(3, minmax(0, max-content)); }
 }
 /* A finger's target in the docked layout too (a tablet, a touch laptop): the row is the touch minimum tall; a mouse
    keeps the quieter row. */
@@ -502,20 +499,20 @@ html[data-layout="stack"] .resize-handle { display: none; }
     font-weight: 600;
     line-height: 20px;
 }
-/* The quiet "Main Chat" shows whole or not at all, never cut inside its two words: it takes the room the name, the
-   count and the mark leave, and where its words do not fit there they wrap past a zero-wide first item one line tall
-   onto a second line its one-line box hides (its words stay in the card's name for a reader). */
+/* The room's name stays readable. A narrow card puts it below Ouroboros's name, leaving the count and mark at the end. */
 .nav-ouro-line1 > .nav-row-label {
-    --label-line: calc(var(--type-meta) * var(--line-meta));
-    flex: 1 1 0;
-    display: flex;
-    flex-wrap: wrap;
-    height: var(--label-line);
+    flex: 1 1 auto;
+    white-space: normal;
+    overflow: visible;
     color: var(--text-meta);
     font-size: var(--type-meta);
     line-height: var(--line-meta);
 }
-.nav-ouro-line1 > .nav-row-label::before { content: ''; height: var(--label-line); }
+@container (max-width: 327px) {
+    .nav-ouro-line1 { flex-wrap: wrap; row-gap: 0; }
+    .nav-ouro-name { flex: 1 1 auto; }
+    .nav-ouro-line1 > .nav-row-label { order: 4; flex-basis: 100%; }
+}
 /* the count stands just before the mark, a step before it, and the mark keeps the rows' own column */
 .nav-ouro-line1 > .unread-badge { order: 2; margin-right: var(--space-1); }
 .nav-ouro-line1 > .nav-mark-slot {
@@ -1416,25 +1413,14 @@ html[data-layout="docked"] .app-page-header[data-empty] {
 .app-page-lead > * { min-width: 0; }
 .app-page-lead:empty,
 .app-page-tabs:not(:has(> *)) { display: none; }
-/* The Back slot (page_header.js placePageBack): one control, never part of a lead that scrolls. On a desk it stands
-   before the lead in the bar's start; in the stack layout it starts the row under ☰: the page's tab strip when it
-   has one, else a row of the header's own. */
+/* A door between destinations uses Back only in the stack layout; beside the page the sidebar is the way back.
+   These are settingsReturn's three placements. A level inside a page keeps its own Back in either layout. */
+html[data-layout="docked"] .app-page-back,
+html[data-layout="docked"] .dashboard-lead-back,
+html[data-layout="docked"] .dashboard-back { display: none; }
+/* The stack layout's Back stays in the header's leading slot, never inside a lead that scrolls. */
 .app-page-back { display: flex; flex: none; align-items: center; }
 .app-page-back:empty { display: none; }
-html[data-layout="docked"] .app-page-title-block:has(> .app-page-back:not(:empty)) {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-}
-html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) ~ .app-page-lead { flex: 1 1 auto; }
-/* Back takes the header's start inset (a step from the column's edge) and the hidden title takes no place in the row,
-   so the tabs or the location after it keep the room they have without Back. */
-html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title-block > .app-page-title-row:has(~ .app-page-back:not(:empty)) {
-    position: absolute;
-}
-html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) {
-    margin-inline-start: calc(var(--space-2) - var(--page-header-padding-x));
-}
 /* A phone page that leads back (Circles or Skills opened from Settings): Back stands where the places control stood,
    in the header's one row, as on a Settings page (DESIGN "Page header": one leading control, no second header row). */
 html[data-layout="stack"] .app-page-header[data-back]:has(> .app-page-title-block > .app-page-back:not(:empty)) {
