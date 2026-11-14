@@ -37,6 +37,8 @@ _ADDED_OWNERS = {
     "WORKER_READY_CEILING_SEC": runtime_limits,
     # A spawned direct-Restart successor's bounded wait for its exiting parent's data-root admission.
     "SERVER_ADMISSION_WAIT_SEC": runtime_limits,
+    # The server's interpreter switch interval (``server_entrypoint.shorten_switch_interval``).
+    "SERVER_SWITCH_INTERVAL_SEC": runtime_limits,
     "STOP_ADMISSION_DRAIN_SEC": runtime_limits,
     "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC": runtime_limits,
     # The supervisor loop's bounded events pass and the budget-projection retry interval.

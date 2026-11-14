@@ -1,4 +1,4 @@
-"""CLI, data-root admission and port-binding helpers extracted from server.py."""
+"""CLI, data-root admission, port-binding and interpreter switch-interval helpers extracted from server.py."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import logging
 import os
 import pathlib
 import socket
+import sys
 import threading
 import time
 
@@ -238,3 +239,20 @@ def bound_service_socket(drive_root: pathlib.Path, service: str, host: str, port
                 clear_service_binding(drive_root, service, binding)
             except Exception:
                 log.warning("Could not retire %s service binding", service, exc_info=True)
+
+
+def shorten_switch_interval() -> None:
+    """A computing thread of the server is asked to hand the interpreter over after 1 ms instead of CPython's 5 ms when
+    another thread waits for it (owner, 14.11.2026, #3399). A hundred threads share one interpreter, and a read takes
+    the lock back after each SQLite step or file call only when its holder yields: beside one busy thread the
+    extensions index took 4.7 s at 5 ms and 1.9 s at 1 ms (0.1 s alone). It is a requested interval, not a bound: a
+    long C call that holds the lock (a large JSON decode, a fork), other waiters and the OS scheduler can stretch a
+    wait; Windows waits in whole milliseconds, so its timer resolution can limit the gain (1 ms is its shortest wait). A
+    thread nobody waits for is never asked, so an uncontended interpreter pays nothing; a contended computing thread
+    hands over more often, at a cost that grows with the waiters (beside one thread making file calls it ran about
+    14 % slower while those calls ran 2.8 times faster; beside twelve, a quarter to a half slower). Children started by
+    spawn, forkserver or exec keep CPython's default; a forked one inherits this. No setting."""
+    from ouroboros.runtime_limits import SERVER_SWITCH_INTERVAL_SEC
+
+    sys.setswitchinterval(SERVER_SWITCH_INTERVAL_SEC)
+    log.info("Interpreter switch interval %.1f ms", sys.getswitchinterval() * 1000)
