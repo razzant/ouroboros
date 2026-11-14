@@ -45,9 +45,10 @@ def _layout(page):
 
 
 def _menu_visible(page):
-    """The way to the other places: the ☰ in Settings' header on a phone, the sidebar's Settings row on a desk."""
+    """The way out: a phone page's Back, the home's places control, or the docked sidebar's Settings row."""
     if _layout(page) == "stack":
-        return page.locator("#page-settings .app-page-header [data-mobile-nav-toggle]").is_visible()
+        control = "[data-settings-back]" if top_path(page) else "[data-mobile-nav-toggle]"
+        return page.locator("#page-settings .app-page-header " + control).is_visible()
     return page.locator('[data-nav-page="settings"]').is_visible()
 
 
@@ -80,8 +81,11 @@ def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui,
 
     # The home: six groups, one row per home row, each a door to its page or place.
     wanted = page.evaluate("async () => (await import('/static/modules/settings_rows.js')).HOME_ROWS.map((r) => r.to)")
-    shown = page.locator(f"{HOME} [data-settings-open]").evaluate_all("rows => rows.map((r) => r.dataset.settingsOpen)")
+    shown = page.locator(f"{HOME} [data-settings-list] [data-settings-open]").evaluate_all("rows => rows.map((r) => r.dataset.settingsOpen)")
     assert shown == wanted
+    assert page.locator(f"{HOME} [data-settings-overview-row]").get_attribute("data-settings-open") == ""
+    if width == 320:
+        assert page.locator(f"{HOME} [data-settings-overview-row]").is_hidden()
     assert page.locator(f"{HOME} .settings-group").count() == 6
     setup_browser.capture(page, f"settings-home-{width}x{height}")
 
@@ -91,10 +95,10 @@ def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui,
     assert kept > 0, "the home scrolls at this size, so its place is worth keeping"
     assert not page.locator(HOME).is_visible(), "one column: the page alone"
     assert level.evaluate("node => getComputedStyle(node).touchAction") == touch
-    back = level.locator("[data-settings-back]")
-    assert back.inner_text().strip() == "Settings" and back.get_attribute("aria-label") == "Back to Settings"
-    assert level.locator(".settings-page-title").inner_text().strip()
-    assert _focused(page, '[data-settings-page="computer"] [data-settings-back]')
+    back = page.locator("#page-settings > .app-page-header [data-settings-back]")
+    assert back.inner_text().strip() == "" and back.get_attribute("aria-label") == "Back to Settings"
+    assert page.locator("#page-settings [data-settings-lead-name]").inner_text().strip() == "This computer"
+    assert _focused(page, '#page-settings > .app-page-header [data-settings-back]')
     assert _menu_visible(page)
     assert len(page.evaluate(SETTINGS_LAYERS)) == 1, "a narrow level is one layer of the shell's stack"
     assert page.evaluate("() => window.testShown.at(-1)") == "computer"
@@ -122,12 +126,12 @@ def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui,
 
     # Two levels: the second names the first as where Back leads, and each way back closes one level.
     first = open_settings(page, "test-shell")
-    assert first.locator("[data-settings-back]").inner_text().strip() == "Settings"
+    assert back.get_attribute("aria-label") == "Back to Settings"
     first.locator("[data-test-deeper]").click()
     second = settings_page(page, "test-shell/deeper")
     second.wait_for(state="visible")
-    assert second.locator("[data-settings-back]").inner_text().strip() == "Shell test"
-    assert second.locator(".settings-page-title").inner_text().strip() == "Deeper"
+    assert back.get_attribute("aria-label") == "Back to Shell test"
+    assert page.locator("#page-settings [data-settings-lead-name]").inner_text().strip() == "Deeper"
     assert _menu_visible(page)
     assert len(page.evaluate(SETTINGS_LAYERS)) == 2
     page.keyboard.press("Escape")
@@ -165,7 +169,7 @@ def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui,
     page.locator(f'{HOME} [data-settings-result="door:skill"]').click()
     forms = settings_page(page, "skill")
     forms.wait_for(state="visible")
-    assert forms.locator(".settings-page-title").inner_text().strip() == "Skill settings"
+    assert page.locator("#page-settings [data-settings-lead-name]").inner_text().strip() == "Skill settings"
     forms.locator("[data-skill-forms]").wait_for(state="visible")
     assert "No installed skill has settings." in forms.inner_text()
     assert go_back(page) == ""

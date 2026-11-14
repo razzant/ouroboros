@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -102,14 +103,17 @@ def test_accounts_is_passive_and_provider_activation_is_explicit(accounts_ui):
     home.locator('[data-settings-open="accounts"]').click()
     listing = settings_page(page, "accounts")
     expect(listing.locator('[data-entry-id="openrouter"]')).to_be_visible()
-    starts = [url for url in ui["reads"] if any(part in url for part in ("/claudexor/status", "/model-catalog", "/review-pool"))]
+    # The section list reads the engine's saved quota/roster, which starts no provider or catalogue.
+    account_reads = [urlsplit(url) for url in ui["reads"] if "/claudexor/status" in url]
+    assert account_reads and {(url.path, url.query) for url in account_reads} == {("/api/claudexor/status", "view=quota")}
+    starts = [url for url in ui["reads"] if any(part in url for part in ("/model-catalog", "/review-pool"))]
     assert starts == [] and ui["facts"]["program_reads"] == [] and ui["posts"] == []
     provider = open_entry(page, "codex")
     expect(provider.locator(".harness-account-row")).to_have_count(18)
     expect(provider.locator(".harness-account-row").first).to_have_attribute("data-profile", "studio-03")
     expect(provider.locator("[data-family-maintenance]")).to_contain_text("3.0.0")
     assert len(ui["facts"]["program_reads"]) == 1
-    assert len([url for url in ui["reads"] if "/claudexor/status" in url]) == 1
+    assert [urlsplit(url).query for url in ui["reads"] if "/claudexor/status" in url and urlsplit(url).query != "view=quota"] == [""]
     go_back(page)
     expect(listing.locator('[data-entry-id="codex"]')).to_have_count(1)
     expect(listing.locator('[data-entry-id="codex"]')).to_contain_text("18")

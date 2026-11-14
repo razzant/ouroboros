@@ -17,6 +17,7 @@ import { CODECS, GUARDED_WRITERS, HIDDEN_WHEN, bindSettingRows, commitSetting, f
 import { ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
 import { initStorage } from '../modules/storage.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
+import { renderPageHeader } from '../modules/page_header.js';
 
 const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => structuredClone(data) });
 const settle = async (rounds = 8) => { for (let i = 0; i < rounds; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
@@ -525,6 +526,7 @@ test('one writer: these tabs post nothing to /api/settings themselves and read n
 
 test('Back to Settings: a first row and one page layer; the press, Escape or Back blur the field first and open Settings', async (t) => {
     const { mount } = setup(t);
+    window.ouroLayout = { layout: 'stack' };
     const layers = [];
     const fakeLayers = { push: (layer) => layers.push(layer), remove: (id) => { layers.splice(0, layers.length, ...layers.filter((layer) => layer.id !== id)); } };
     const order = [];
@@ -558,8 +560,95 @@ test('Back to Settings: a first row and one page layer; the press, Escape or Bac
     assert.deepEqual([panel.querySelector('.dashboard-back'), layers.length, order.length], [null, 0, 3], 'clearing opens nothing');
 });
 
+test('Settings returns stay in place on pointer-only events in both layouts', (t) => {
+    const { mount, window } = setup(t);
+    window.ouroLayout = { layout: 'docked' };
+    let changes = 0;
+    const back = settingsReturn({ layers: { push() { changes++; }, remove() { changes++; } } });
+    const panel = new NodeStub('section');
+    panel.innerHTML = '<button>Page action</button>';
+    mount.append(panel);
+    back.show(panel, 'models');
+    t.after(() => back.clear());
+    const kept = [];
+    for (const layout of ['stack', 'docked', 'stack', 'docked']) {
+        window.ouroLayout.layout = layout;
+        window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout } }));
+        const first = panel.firstChild;
+        const button = panel.querySelector('[data-dashboard-back]');
+        (button || first).focus();
+        const before = changes;
+        window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout, pointer: 'coarse' } }));
+        kept.push([layout, panel.firstChild === first, panel.querySelector('[data-dashboard-back]') === button,
+            document.activeElement === (button || first), changes - before]);
+    }
+    assert.deepEqual(kept, ['stack', 'docked', 'stack', 'docked'].map(layout => [layout, true, true, true, 0]));
+});
+
+test('Settings returns follow both layout crossings, yielding to the section Back in docked', (t) => {
+    const { mount, window } = setup(t);
+    window.ouroLayout = { layout: 'docked' };
+    const observers = [];
+    const previous = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class {
+        constructor(fn) { this.fn = fn; observers.push(this); }
+        observe() {}
+        disconnect() {}
+    };
+    t.after(() => { globalThis.ResizeObserver = previous; });
+    const content = new NodeStub(); content.id = 'content'; mount.append(content);
+    const layers = new Map();
+    const dashboard = initDashboard({ state: { activePage: 'dashboard' }, layers: {
+        push: layer => layers.set(layer.id, layer), remove: id => layers.delete(id),
+    } });
+    let width = 735;
+    dashboard.page.getBoundingClientRect = () => ({ width });
+    dashboard.activateTab('costs', { back: 'models' });
+    const slot = dashboard.page.querySelector('[data-dashboard-back-slot]');
+    const listBack = dashboard.page.querySelector('[data-dashboard-list-back]');
+    const pages = [];
+    for (const pageName of ['circles', 'without-header']) {
+        const page = new NodeStub(); page.className = 'page';
+        page.innerHTML = pageName === 'without-header' ? '<p>Page body</p>' : renderPageHeader({ page: pageName });
+        const query = page.querySelector.bind(page);
+        page.querySelector = selector => query(selector.replace(':scope > ', ''));
+        content.append(page);
+        const back = settingsReturn(); back.show(page, 'models');
+        t.after(() => back.clear());
+        pages.push(page);
+    }
+    for (const [layout, pixels, supports] of [
+        ['docked', 735, true], ['docked', 550, true], ['stack', 700, true],
+        ['docked', 735, true], ['stack', 390, true], ['docked', 1000, false],
+    ]) {
+        width = pixels;
+        window.CSS = { supports: () => supports };
+        window.ouroLayout.layout = layout;
+        window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout } }));
+        observers.forEach(observer => observer.fn([{ target: dashboard.page }]));
+        const stack = layout === 'stack';
+        const ownBack = !stack && (width < 640 || !supports);
+        assert.equal(slot.children.length, stack ? 1 : 0, `${layout}/${width}: door return is placed only in stack`);
+        assert.equal(listBack.hidden, !ownBack, `${layout}/${width}: the section's own Back stays available`);
+        assert.equal(dashboard.page.dataset.sectionView, 'page', 'the open Costs page survives resizing');
+        assert.deepEqual([...layers.keys()], stack ? ['dashboard-back'] : ownBack ? ['dashboard-level'] : []);
+        for (const page of pages) {
+            assert.equal(page.querySelectorAll('[data-dashboard-back]').length, stack ? 1 : 0);
+            assert.equal(Boolean(page.querySelector('.dashboard-back')), stack && !page.querySelector('.app-page-header'),
+                'the headerless fallback follows the same decision');
+        }
+    }
+    listBack.dispatchEvent({ type: 'click' });
+    assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['home', 0], 'the section Back returns to its list');
+    window.ouroLayout.layout = 'stack';
+    window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout: 'stack' } }));
+    assert.equal(slot.children.length, 0, 'leaving the page forgets its Settings return');
+    dashboard.destroy();
+});
+
 test('openDashboardTab: back gives the tab its Back, a row is brought into view and focused; another tab or page drops Back', async (t) => {
     const { mount, window } = setup(t);
+    window.ouroLayout = { layout: 'stack' };
     const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
     const opened = [];
     const layers = [];
@@ -620,6 +709,7 @@ test('openDashboardTab: back gives the tab its Back, a row is brought into view 
 // show in one task (layers.js: one snapshot per batch).
 test('openDashboardTab with back changes the layer stack once in one column', (t) => {
     const { mount } = setup(t);
+    window.ouroLayout = { layout: 'stack' };
     const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
     const stack = [];
     const seen = [''];
@@ -800,4 +890,86 @@ test('a root font that moves the two panes\' 40rem repaints the Dashboard: the p
     heard(list).fn([{ target: list }]);
     assert.deepEqual([dashboard.page.dataset.sectionView, listBack.hidden], ['page', true], 'beside the list again, without Back');
     dashboard.destroy();
+});
+
+test('a page explicitly chosen beside the Dashboard list survives narrowing, while the automatic landing returns to the list', async (t) => {
+    for (const gesture of ['same row', 'another row', 'keyboard']) await t.test(gesture, async (sub) => {
+        const { mount, window, document } = setup(sub);
+        const content = new NodeStub(); content.id = 'content'; mount.append(content);
+        window.CSS = { supports: () => true };
+        let width = 735;
+        const before = { box: NodeStub.prototype.getBoundingClientRect, observer: globalThis.ResizeObserver };
+        NodeStub.prototype.getBoundingClientRect = () => ({ width });
+        const observers = [];
+        globalThis.ResizeObserver = class { constructor(fn) { observers.push(fn); } observe() {} disconnect() {} };
+        sub.after(() => { NodeStub.prototype.getBoundingClientRect = before.box; globalThis.ResizeObserver = before.observer; });
+        const layers = new Map();
+        const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
+        const dashboard = initDashboard({ state, layers: { push: layer => layers.set(layer.id, layer), remove: id => layers.delete(id) } });
+        try {
+            const list = dashboard.page.querySelector('.dashboard-tabs');
+            const rows = list.querySelectorAll('[data-dashboard-tab]');
+            const back = dashboard.page.querySelector('[data-dashboard-list-back]');
+            const resize = value => { width = value; observers.forEach(fn => fn([{ target: dashboard.page }])); };
+            resize(390);
+            assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['home', 0], 'automatic landing has not chosen a page');
+            resize(735);
+            const chosen = gesture === 'same row' ? rows[0] : gesture === 'another row' ? rows[5] : rows[6];
+            if (gesture === 'keyboard') await list.fire('keydown', { target: rows[0], key: 'End', preventDefault() {} });
+            else await list.fire('click', { target: chosen, preventDefault() {} });
+            assert.equal(state.dashboardActiveSubtab, chosen.dataset.dashboardTab);
+            assert.equal(back.hidden, true);
+            const control = new NodeStub('button'); dashboard.page.querySelector('.dashboard-panels').append(control); control.focus();
+            resize(390);
+            assert.deepEqual([dashboard.page.dataset.sectionView, back.hidden, [...layers.keys()]], ['page', false, ['dashboard-level']]);
+            assert.equal(document.activeElement, control, 'resizing keeps the focused page control');
+            resize(735);
+            assert.deepEqual([dashboard.page.dataset.sectionView, back.hidden, layers.size], ['page', true, 0]);
+            resize(390);
+            await back.fire('click');
+            assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['home', 0]);
+            assert.equal(document.activeElement, chosen, 'Back returns to the chosen row');
+        } finally { dashboard.destroy(); }
+    });
+});
+
+test('a Dashboard deep link keeps one Back entry when it replaces the phone drawer', async () => {
+    const { createLayerStack } = await import('../modules/layers.js');
+    const { runInNewContext } = await import('node:vm');
+    const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+    const door = app.slice(app.indexOf('async function openDashboardTab('), app.indexOf('// A line elsewhere'));
+    for (const drawer of [false, true]) for (const allowed of [false, true]) {
+        const historyCalls = [], shown = [], opened = [];
+        const layers = createLayerStack({ win: null, doc: null, history: {
+            pushState: () => historyCalls.push('push'), back: () => historyCalls.push('back'),
+        } });
+        try {
+            if (drawer) layers.push({ id: 'drawer', focus: false });
+            await Promise.resolve();
+            const open = runInNewContext(`${door}\nopenDashboardTab`, { layers,
+                showPage: async (name, options = {}) => {
+                    shown.push(name);
+                    if (!allowed) return false;
+                    if (options.closeDrawer !== false) layers.remove('drawer');
+                    return true;
+                },
+                dashboardControls: { activateTab: (name, options) => {
+                    opened.push([name, options]); layers.push({ id: 'dashboard-level', page: true, focus: false });
+                } },
+                setMobileDrawerOpen: value => { assert.equal(value, false); layers.remove('drawer'); },
+            });
+            const options = { row: 'updates' };
+            await open('updates', options);
+            await Promise.resolve();
+            assert.deepEqual(shown, ['dashboard']);
+            assert.deepEqual(opened, allowed ? [['updates', options]] : []);
+            assert.deepEqual(historyCalls, allowed || drawer ? ['push'] : [],
+                'the handover never consumes the entry it will still need');
+            if (allowed) {
+                layers.remove('dashboard-level');
+                await Promise.resolve();
+                assert.deepEqual(historyCalls, ['push', 'back'], 'Back consumes exactly the one layer entry');
+            }
+        } finally { layers.destroy(); }
+    }
 });

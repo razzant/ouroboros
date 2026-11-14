@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { catalogPrograms, modelProgramMarkup } from '../modules/model_program.js';
 
 const producer = {path: '/vendor/program', version: '2.0.0'};
@@ -27,9 +28,14 @@ test('newest verdict, refusal and operation outcome are engine facts, and text i
         const html = modelProgramMarkup(program, {entry: {selection: {path: '/p'}, updateAvailable: verdict,
             newest: {status: 'available', version: '1'}, actions: {update: {available: true}}}});
         assert.equal(/>Update<\/button>/.test(html), verdict !== 'no');
-        assert.doesNotMatch(html, />· /, 'wrapped clauses have no leading separator');
+        assert.equal(html.includes('class="harness-model-latest"'), verdict !== 'no');
+        assert.equal(html.match(/<span class="harness-model-latest">· ([^<]+)<\/span>/)?.[1] || '',
+            { yes: '1 available', cannot_tell: 'Latest unknown', no: '' }[verdict],
+            'the latest-version fact stays one clause beside Update when the footer wraps');
         assert.match(html, /Vendor &lt;/);
     }
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.match(css, /\.harness-model-latest\s*\{\s*white-space: nowrap;\s*\}/);
     const html = modelProgramMarkup(program, {entry: {selection: {path: '/p'}, updateAvailable: 'yes', actions: {update: {available: false, reason: 'Clear the override'}}},
         operation: {state: 'succeeded', outcome: 'not_changed', limitations: ['Nothing was removed.'], progress: ['Vendor <says>']}});
     assert.match(html, /Clear the override/); assert.match(html, /Nothing was removed/); assert.match(html, /Nothing changed/);
@@ -235,3 +241,9 @@ test('an unanswered native catalog releases the shared read at its bound; reopen
     binding.update([{...group, programs: [current]}]); await flush(); await reopen();
     assert.equal(raw, 2, 'a recovered list needs no further catalog read');
 });
+
+ test('the catalog and available version wrap between the two clauses', () => {
+    const html = modelProgramMarkup({ harness: 'codex', label: 'Codex', programs: [{version: '0.162.1'}] },
+        { entry: { selection: { path: '/codex' }, updateAvailable: 'yes', newest: { status: 'available', version: '0.169.0' } } });
+    assert.match(html, /<span>List from Codex 0\.162\.1<\/span><span class="harness-model-latest">· 0\.169\.0 available<\/span>/);
+ });

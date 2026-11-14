@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { afterUpdateRows, bindPreflightDescription, preflightDescription, preflightEvidenceRows } from '../modules/update_status.js';
-import { factValueHtml, updateLetterView } from '../modules/updates.js';
+import { factValueHtml, initUpdates, updateLetterView } from '../modules/updates.js';
+import { setup } from './dashboard_dom_fixture.js';
 
 const plan = { base_sha: 'aaaa', target_sha: 'bbbb' };
 const letter = { key: plan, text: '## Exact range\n\n- one change', description_current: true, state: 'ready', relation: 'pending' };
@@ -156,4 +157,25 @@ test('a long code in a fact offers one break at its middle; words and short code
     // Each half is escaped as the whole value was.
     assert.equal(factValueHtml('<b>&'), '&lt;b&gt;&amp;');
     assert.equal(factValueHtml('&'.repeat(30)), `${'&amp;'.repeat(15)}<wbr>${'&amp;'.repeat(15)}`);
+});
+
+test('the Updates renderer puts a midpoint break in the served SHA and leaves ordinary facts whole', async (t) => {
+    const { mount, window, ws, routes } = setup(t);
+    const sha = 'c846227a389ed7ec0dc395d6cf02e1a55d7e65ac';
+    const reply = (data) => ({ ok: true, json: async () => data });
+    routes.set('/api/settings', reply({ OUROBOROS_UPDATE_CHANNEL: 'stable' }));
+    routes.set('/api/update/status', reply({ managed: true, check_ok: true, available: false,
+        running_sha: sha, current_sha: sha, checked_target_sha: sha,
+        update_progress: { operation_id: 'sampled', result: 'failed', active: false },
+        after_update: { operation_id: 'sampled', after: { source_sha: sha, rss_bytes: 0, rss_measure: 'current' } } }));
+    routes.set('/api/git/commits', reply({ commits: [] }));
+    initUpdates({ mount, ws, state: { activePage: 'dashboard', dashboardActiveSubtab: 'updates' } });
+    window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: 'updates' } }));
+    for (let i = 0; i < 8; i++) await new Promise(resolve => setImmediate(resolve));
+    const facts = mount.querySelector('#updates-attempt-facts');
+    const values = facts.querySelectorAll('dd');
+    const source = values.find(value => value.textContent === sha);
+    assert.ok(source, 'the actual status read reached the rendered facts');
+    assert.deepEqual(source.children.map(node => node.tagName), ['wbr']);
+    assert.ok(values.some(value => value.textContent !== sha && !value.children.length), 'ordinary facts need no break');
 });

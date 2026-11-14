@@ -214,7 +214,7 @@ def test_ui_project_completion_mirror_is_an_ordinary_folded_message(direct_serve
 @pytest.mark.ui_browser
 @pytest.mark.parametrize("engine", ["chromium", "webkit"])
 def test_ui_project_completion_mirror_folds_after_mounting_on_a_hidden_page(direct_server_with_data, engine):  # noqa: F811
-    """A row mounted while another page is open has no layout box; the fade arrives when Chat is shown."""
+    """Main stays quiet behind another place; its saved answer is read and folded when Main is shown."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
@@ -237,15 +237,21 @@ def test_ui_project_completion_mirror_folds_after_mounting_on_a_hidden_page(dire
             page = browser.new_page(viewport={"width": 1280, "height": 900})
             try:
                 page.goto(url + "#dashboard", wait_until="domcontentloaded", timeout=30_000)
-                _wait_status(page, "Online", timeout=30_000)
+                page.wait_for_function("() => window.__ouroWs?.isConnected()", timeout=30_000)
+                page.locator('#page-dashboard').wait_for(state='visible')
                 row = page.locator("#chat-messages .chat-bubble.project-answer")
-                row.wait_for(state="attached", timeout=30_000)
                 assert not page.locator("#page-chat").evaluate("n => n.classList.contains('active')")
-                # No box, no measurement: the row is left unmarked rather than guessed.
-                assert row.locator(".message").evaluate("n => n.clientHeight") == 0
-                assert "is-folded" not in row.get_attribute("class")
+                # DESIGN: a room away stays quiet. It has no live status or eager history paint to await.
+                assert row.count() == 0
 
                 page.locator('[data-nav-page="chat"]').first.click()
+                _wait_status(page, "Online", timeout=30_000)
+                row.wait_for(state="visible", timeout=30_000)
+                assert row.count() == 1
+                assert [text.strip() for text in row.locator('.message p').all_text_contents()] == [
+                    "Done: release shipped. PR #7 merged into main.",
+                    *[f"Paragraph {i}: " + ("detail " * 30).strip() for i in range(1, 9)],
+                ]
                 page.wait_for_function(
                     "() => document.querySelectorAll('.chat-bubble.project-answer.is-folded').length === 1",
                     timeout=10_000)

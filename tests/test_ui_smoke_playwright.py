@@ -913,7 +913,7 @@ def test_ui_smoke_phase3_declarative_widgets_and_settings(direct_server_with_dat
                 # The skill's form stands on its own Settings page, titled by its one section.
                 page.wait_for_function("() => Boolean(window.__ouroSettings)")
                 assert page.evaluate("() => window.__ouroSettings.open('skill/phase3_widget_smoke')") is not False
-                page.locator('#page-settings .settings-page-title').filter(has_text="Phase 3 settings").wait_for(
+                page.locator('#page-settings [data-settings-lead-name]').filter(has_text="Phase 3 settings").wait_for(
                     state="visible", timeout=30_000)
                 section = page.locator('.settings-extension-section')
                 section.wait_for(state="visible", timeout=30_000)
@@ -2439,6 +2439,26 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         )
         assert len(rendered_ids) == 11, rendered_ids
         facts = page.evaluate(mobile_geometry)
+        compact = [facts["cardFacts"][0]]
+        # A finished helper belongs to its finished parent's Details (owner 09.11 A). Walk all ten depths,
+        # measuring each compact identity BEFORE opening its parent to reach the next; no hidden depth is omitted.
+        for depth in range(1, 11):
+            pid = "layout-root" if depth == 1 else f"layout-child-{depth - 1:02}"
+            cid = f"layout-child-{depth:02}"
+            child = page.locator(f'.chat-live-card[data-task-id="{cid}"]')
+            if not child.is_visible():
+                page.locator(f'.chat-live-card[data-task-id="{pid}"] > [data-live-summary-button] [data-live-disclosure]').click()
+            child.wait_for(state="visible")
+            page.evaluate("() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))")
+            if depth == 1:
+                # Measure its compact identity before Details also names the role among its facts.
+                assert page.get_by_text(long_role, exact=True).count() == 1
+            current = page.evaluate(mobile_geometry)
+            compact.append(next(card for card in current["cardFacts"] if card["id"] == cid))
+        facts["cardFacts"] = compact
+        # Opening the tree can add WebKit's scrollbar: compare both widths in the same settled layout.
+        for key in ("messageWidth", "rootWidth", "deepestWidth"):
+            facts[key] = current[key]
         assert facts["rootWidth"] >= facts["messageWidth"] * 0.95, facts
         assert facts["rootWidth"] - facts["deepestWidth"] <= 40, facts
         # Narrow regime: the side controls share the chip row, the title takes its own
@@ -2459,7 +2479,6 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         # #623: a collapsed child keeps its identity row: title beside chip and controls, whole if short, wrapped
         # if long (child-01). The summary is reading content, no button (#1998): the title holds the whole role
         # as its text, however much shows.
-        assert page.get_by_text(long_role, exact=True).count() == 1
         for card in facts["cardFacts"]:
             if card["collapsedChild"]:
                 assert 0 < card["titleClient"] and card["titleScroll"] <= card["titleClient"] + 1 and (
@@ -2495,7 +2514,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         assert expanded["titleWidth"] >= min(expanded["titleScrollWidth"], 150) - 1, expanded
         assert long_url in expanded["text"], expanded
 
-    def assert_jump_geometry(page, scope_selector, *, require_overflow=True):
+    def assert_jump_geometry(page, scope_selector, *, require_overflow=True, placement="line"):
         page.evaluate(
             """({scopeSelector, requireOverflow}) => {
                 const messages = document.querySelector(scopeSelector).querySelector('.chat-messages, #chat-messages');
@@ -2506,7 +2525,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         )
         page.wait_for_timeout(250)
         facts = page.evaluate(
-            """({scopeSelector, forceVisible}) => {
+            """({scopeSelector, forceVisible, placement}) => {
                 const scope = document.querySelector(scopeSelector);
                 const messages = scope.querySelector('.chat-messages, #chat-messages');
                 const button = scope.querySelector('.chat-scroll-bottom-btn');
@@ -2525,9 +2544,13 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                     remaining: messages.scrollHeight - messages.scrollTop - messages.clientHeight,
                     visible: button.classList.contains('visible'),
                     width: b.width, height: b.height,
-                    endInset: w.right - b.right,
-                    gap: w.top - b.bottom,
+                    endInset: (placement === 'phone' ? w : t).right - b.right,
+                    gap: (placement === 'phone' ? w : t).top - b.bottom,
+                    lineCentre: t.bottom - 16 - (b.top + b.height / 2),
                     toolbarOverlap: overlap(b, t),
+                    controlOverlap: Math.max(0, ...Array.from(toolbar.children)
+                        .filter(node => node !== button && getComputedStyle(node).visibility !== 'hidden')
+                        .map(node => overlap(b, node.getBoundingClientRect()))),
                     previewOverlap: preview ? overlap(b, preview.getBoundingClientRect()) : 0,
                     boxShadow: getComputedStyle(button).boxShadow,
                 };
@@ -2535,15 +2558,20 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 else button.style.removeProperty('transition');
                 return facts;
             }""",
-            {"scopeSelector": scope_selector, "forceVisible": not require_overflow},
+            {"scopeSelector": scope_selector, "forceVisible": not require_overflow, "placement": placement},
         )
         assert facts["visible"], facts
         if require_overflow:
             assert facts["remaining"] > 48, facts
-        assert abs(facts["width"] - 32) <= 1 and abs(facts["height"] - 32) <= 1, facts
-        # ↓ latest stands at the composer's end, never over the middle of the column.
-        assert abs(facts["endInset"] - 8) <= 1 and abs(facts["gap"] - 8) <= 1, facts
-        assert facts["toolbarOverlap"] == 0 and facts["previewOverlap"] == 0, facts
+        # Approved shell (79fac1cf4): chrome-sized at the line's end, above it on a phone or narrow panel.
+        size = 44 if placement == "phone" else 30
+        assert abs(facts["width"] - size) <= 1 and abs(facts["height"] - size) <= 1, facts
+        assert abs(facts["endInset"] - 8) <= 1, facts
+        if placement == "line":
+            assert abs(facts["lineCentre"]) <= 1 and facts["toolbarOverlap"] == size * size, facts
+        else:
+            assert abs(facts["gap"] - 8) <= 1 and facts["toolbarOverlap"] == 0, facts
+        assert facts["controlOverlap"] == 0 and facts["previewOverlap"] == 0, facts
         assert facts["boxShadow"] != "none", facts
         return facts
 
@@ -2565,7 +2593,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 mobile = mobile_context.new_page()
                 mobile.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 assert_mobile_geometry(mobile)
-                assert_jump_geometry(mobile, "#page-chat")
+                assert_jump_geometry(mobile, "#page-chat", placement="phone")
                 mobile.screenshot(
                     path=str(diagnostic_directory(data_dir.parent, "ui-smoke", publish=True) / f"live-card-depth-10-{browser_engine}.png"),
                     full_page=True,
@@ -2586,10 +2614,18 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                     "cards => cards.map(card => card.dataset.taskId)"
                 )
                 assert len(rendered_ids) == 11, rendered_ids
-                wide_facts = wide.evaluate(
-                    """() => {
+                wide_facts = []
+                for cid, parent in [('layout-root', None), ('layout-child-01', 'layout-root'),
+                                    ('layout-child-02', 'layout-child-01')]:
+                    card = wide.locator(f'.chat-live-card[data-task-id="{cid}"]')
+                    if parent and not card.is_visible():
+                        wide.locator(f'.chat-live-card[data-task-id="{parent}"] > [data-live-summary-button] [data-live-disclosure]').click()
+                    card.wait_for(state="visible")
+                    wide.evaluate("() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))")
+                    wide_facts.extend(wide.evaluate(
+                    """id => {
                         const slot = """ + _ROW_SLOT + """;
-                        const ids = ['layout-root', 'layout-child-01', 'layout-child-02'];
+                        const ids = [id];
                         return ids.map((id) => {
                             const card = document.querySelector(`#page-chat .chat-live-card[data-task-id="${id}"]`);
                             const summary = card.querySelector(':scope > .chat-live-summary-button .chat-live-summary');
@@ -2611,8 +2647,8 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                                 scroll: card.scrollWidth,
                             };
                         });
-                    }"""
-                )
+                    }""", cid
+                    ))
                 assert wide_facts[1]["left"] - wide_facts[0]["left"] >= 30, wide_facts
                 assert wide_facts[2]["left"] - wide_facts[1]["left"] >= 30, wide_facts
                 assert all(card["scroll"] <= card["client"] + 1 for card in wide_facts), wide_facts
@@ -2670,6 +2706,10 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 for key in ("x", "y", "width", "height"):
                     assert abs(before_hover[key] - after_hover[key]) <= 1, (before_hover, after_hover)
                 jump.focus()
+                # Keyboard focus owns the ring; WebKit on macOS reaches buttons with Option-Tab.
+                wide.keyboard.press("Alt+Shift+Tab" if browser_engine == "webkit" else "Shift+Tab")
+                wide.keyboard.press("Alt+Tab" if browser_engine == "webkit" else "Tab")
+                assert jump.evaluate("node => node === document.activeElement && node.matches(':focus-visible')")
                 focus = jump.evaluate(
                     "node => ({style: getComputedStyle(node).outlineStyle, "
                     "width: parseFloat(getComputedStyle(node).outlineWidth)})"
@@ -2739,7 +2779,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 assert abs(panel_facts["mainTop"] - panel_facts["sideTop"]) <= 2, panel_facts
                 assert panel_facts["titleTop"] >= max(panel_facts["mainBottom"], panel_facts["sideBottom"]) - 1, panel_facts
                 assert_jump_geometry(
-                    wide, "#panel-pchat-layout-project", require_overflow=False
+                    wide, "#panel-pchat-layout-project", require_overflow=False, placement="panel"
                 )
                 wide.screenshot(
                     path=str(diagnostic_directory(data_dir.parent, "ui-smoke", publish=True) / f"live-card-project-panel-{browser_engine}.png"),

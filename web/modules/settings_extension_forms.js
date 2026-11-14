@@ -353,5 +353,9 @@ function mountSkillSources(container, { path, ctx }) {
     return { unmount() { window.removeEventListener('ouro:settings-page-shown', onShown); rows.dispose(); } };
 }
 
-registerSettingsPage('skill', { title: skillFormTitle, mount: mountSkillForm });
+registerSettingsPage('skill', { title: skillFormTitle, mount: mountSkillForm, exists: async (path) => {
+    if (path === 'skill') return true;
+    await readSkills();
+    return FORMS.has(skillOf(path));
+} });
 registerSettingsPage('skill-sources', { title: 'Skill sources', mount: mountSkillSources });

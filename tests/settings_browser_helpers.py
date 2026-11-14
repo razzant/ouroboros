@@ -76,9 +76,9 @@ def top_path(page) -> str:
 
 
 def go_back(page):
-    """Press the open level's first row, Back, and return the path shown after it."""
+    """Press the section header's Back and return the path shown after it."""
     before = top_path(page)
-    settings_page(page, before).locator("[data-settings-back]").click()
+    page.locator(f"{SETTINGS} > .app-page-header [data-settings-back]").click()
     page.wait_for_function("before => { const levels = [...document.querySelectorAll('#page-settings "
                            "[data-settings-page]')]; return !levels.some((e) => e.dataset.settingsPage === before); }",
                            arg=before)

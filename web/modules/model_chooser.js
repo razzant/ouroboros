@@ -129,7 +129,7 @@ export function bindModelChooser(input) {
         if (popup.parentElement !== portal) portal.appendChild(popup);
         input.setAttribute('aria-expanded', 'true');
         render();
-        if (!position) position = bindPopoverPosition(popup, { anchor: input });
+        if (!position) position = bindPopoverPosition(popup, { anchor: input, field: input.closest('.ui-field') || input });
         doc.addEventListener('pointerdown', outside);
         doc.defaultView.addEventListener('blur', close);
         if (!wasOpen) programs.open();

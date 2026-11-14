@@ -121,7 +121,9 @@ FIT = """id => {
     const room = feed.closest('.project-panel') || document.getElementById('page-chat');
     const bar = room.querySelector('.chat-page-header, .project-panel-bar');
     const box = el => el.getBoundingClientRect();
-    const shown = el => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+    // Latest now belongs to the toolbar, but without .visible it has no paint or pointer target.
+    const shown = el => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden'
+        && !el.matches('.chat-scroll-bottom-btn:not(.visible)');
     const reached = el => { const r = box(el), x = (r.left + r.right) / 2, y = (r.top + r.bottom) / 2;
         const hit = y < visualViewport.height ? document.elementFromPoint(x, y) : null;
         return Boolean(hit && el.contains(hit)); };
@@ -262,17 +264,17 @@ def test_a_short_keyboard_under_telegrams_fullscreen_band_keeps_history_the_comp
         fit = measured[state]
         # A roomier keyboard, under the band too, keeps the capsule row and a line of the newest message's words.
         assert fit['words'] >= 1 and fit['foot'] and fit['unreached'] == [] and fit['composer'] <= 508, (state, fit)
-        assert fit['keyboard'] and fit['focused'] and not fit['folded'] and fit['capsules'] == 3, (state, fit)
+        assert fit['keyboard'] and fit['focused'] and not fit['folded'] and fit['capsules'] == 4, (state, fit)
     menu = measured['plus']
     assert menu['top'] >= band + 8 - 0.5 and menu['bottom'] <= menu['plusTop'] - 4 + 0.5, f'"+" clears the band: {menu}'
     assert menu['focused'] and menu['keyboard'] and menu['items'] >= 1 and menu['lastShows'], menu
     for state in ('keyboard', 'typed', 'again', 'shrunk', 'pinched'):
         fit = measured[state]
         assert fit['room'] == 250 and fit['composer'] <= 250 and fit['send'] <= 250, (state, fit)
-        # Fullscreen's room is short: its capsule row folds, ☰ beside "+", Subagents, Context and Effort out of sight
+        # Fullscreen's room is short: its capsule row folds, ☰ beside "+", Model, Subagents, Context and Effort out of sight
         # (owner 9.11); expanded keeps it. Every control in sight (the bar's Panic and a Project's ×, ☰, the capsules
         # when they show, "+" and Send) is reached, none covered.
-        assert fit['folded'] == fullscreen and fit['capsules'] == (0 if fullscreen else 3), (state, fit)
+        assert fit['folded'] == fullscreen and fit['capsules'] == (0 if fullscreen else 4), (state, fit)
         assert fit['keyboard'] and fit['focused'] and fit['unreached'] == [], (state, fit)
         assert fit['controls'] >= ((6 if project_room else 5) if fullscreen else (7 if project_room else 6)), (state, fit)
         assert fit['barTop'] >= band, f'Telegram keeps its Close and ⋯ band: {state} {fit}'
@@ -284,7 +286,7 @@ def test_a_short_keyboard_under_telegrams_fullscreen_band_keeps_history_the_comp
     assert measured['pinched'] == measured['shrunk'], 'a pinch moves nothing'
     rested = measured['rested']
     assert not rested['keyboard'] and rested['cap'] == 140 and rested['field'] == 140, rested
-    assert not rested['folded'] and rested['capsules'] == 3, f'the keyboard down brings the row back: {rested}'
+    assert not rested['folded'] and rested['capsules'] == 4, f'the keyboard down brings the row back: {rested}'
     assert field.input_value() == draft + ' and more', 'the draft stays whole'
     if not fullscreen:
         assert measured['keyboard']['cap'] == 62 and measured['keyboard']['feed'] == 60, \

@@ -316,7 +316,7 @@ BAR = """name => {
     const box = el => { const r = el.getBoundingClientRect(); return {x: r.x, y: r.y, h: r.height, bottom: r.bottom, cy: r.y + r.height / 2}; };
     const page = document.querySelector('#page-' + name), header = page.querySelector('.app-page-header');
     const lead = header.querySelector('.app-page-lead');
-    const items = [...header.querySelectorAll('.app-page-lead [role=tab], .app-page-lead .files-crumb, .app-page-toolbar button')]
+    const items = [...header.querySelectorAll('.app-page-lead [role=tab], .app-page-lead .files-crumb, .app-page-lead-title, .app-page-toolbar button')]
         .filter(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
     const hb = box(header);
     const hit = document.elementFromPoint(hb.x + header.clientWidth / 2, hb.bottom + 8);
@@ -338,7 +338,7 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
     page = _open(engine_ui, 956, 801)
     try:
         bars = {}
-        for name in ('dashboard', 'skills', 'files'):
+        for name in ('skills', 'files'):
             _goto(page, name)
             bars[name] = page.evaluate(BAR, name)
             bar = bars[name]
@@ -349,13 +349,17 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
             # The strip lends its shadows room below the bar but never takes a press meant for the page.
             assert bar['hitsPage'], (name, bar)
             setup_browser.capture(page, f'bar-a-{name}-{engine}-956')
-        # Settings keeps no navigation in its bar: Back is the first row of each page, so its header stays empty.
+        # Settings keeps its search and the open page's title in the band's lead.
         _goto(page, 'settings')
-        assert 'data-empty' in page.evaluate(BAR, 'settings')['attrs']
+        settings_bar = page.evaluate(BAR, 'settings')
+        assert settings_bar['lead'] and 'data-lead' in settings_bar['attrs'] and 'data-empty' not in settings_bar['attrs']
+        assert settings_bar['height'] == 50, settings_bar
         # The macOS window: the bar is the band, its controls centred on it; an empty header (Widgets) is only the
         # window's handle over the page, and the page's first card sits one inset (not two) under the band.
         _band(page)
+        page.set_viewport_size({'width': 1280, 'height': 801})
         _goto(page, 'dashboard')
+        page.locator('#page-dashboard [data-dashboard-tab="costs"]').click()
         dashboard_band = page.evaluate(BAR, 'dashboard')
         assert dashboard_band['height'] == 52 and abs(dashboard_band['centres'][0] - 26) <= 1, dashboard_band
         _goto(page, 'widgets')
@@ -367,20 +371,31 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         assert widgets['empty'] and widgets['bar'] == 52 and widgets['margin'] == '0px', widgets
         assert abs(widgets['card'] - (52 + 16)) <= 1, widgets
         setup_browser.capture(page, f'bar-a-widgets-band-{engine}-956')
-        # A phone: the same nodes go back under the row, focus and identity kept; the desk takes them back.
+        # The Dashboard's vertical list keeps its nodes and focus through a resize. On a phone a row opens a
+        # page level; its header's Back returns to that same row. On a desk the list stands beside the page.
         _goto(page, 'dashboard')
-        page.evaluate("window.__strip = document.querySelector('#page-dashboard .app-tab-strip')")
+        page.evaluate("window.__strip = document.querySelector('#page-dashboard [role=tablist]')")
+        assert page.locator('#page-dashboard [role=tablist]').get_attribute('aria-orientation') == 'vertical'
+        assert page.locator('#page-dashboard [data-dashboard-tab]').count() == 7
         page.locator('#page-dashboard [data-dashboard-tab="costs"]').focus()
         page.set_viewport_size({'width': 390, 'height': 844})
         page.wait_for_function("document.documentElement.dataset.layout === 'stack'")
         phone = page.evaluate(BAR, 'dashboard')
-        assert phone['under'] and not phone['lead'] and 'data-lead' not in phone['attrs'] and phone['height'] <= 56, phone
-        assert page.evaluate("""() => document.querySelector('#page-dashboard .app-page-tabs .app-tab-strip') === window.__strip
+        assert not phone['under'] and phone['height'] <= 56, phone
+        assert page.evaluate("""() => document.querySelector('#page-dashboard .dashboard-rail [role=tablist]') === window.__strip
             && document.activeElement?.dataset.dashboardTab === 'costs'""")
+        page.locator('#page-dashboard [data-dashboard-tab="costs"]').click()
+        page.locator('#page-costs').wait_for(state='visible')
+        assert page.locator('#page-dashboard .app-page-header [data-dashboard-lead-name]').inner_text() == 'Costs'
+        assert page.evaluate(BAR, 'dashboard')['height'] <= 56
+        page.locator('#page-dashboard .app-page-header [data-dashboard-list-back]').click()
+        assert page.evaluate("document.activeElement?.dataset.dashboardTab === 'costs'")
         setup_browser.capture(page, f'bar-a-dashboard-{engine}-390')
-        page.set_viewport_size({'width': 956, 'height': 801})
+        page.set_viewport_size({'width': 1280, 'height': 801})
         page.wait_for_function("document.documentElement.dataset.layout === 'docked'")
-        assert page.evaluate("document.querySelector('#page-dashboard .app-page-lead .app-tab-strip') === window.__strip")
+        assert page.evaluate("document.querySelector('#page-dashboard .dashboard-rail [role=tablist]') === window.__strip")
+        assert page.locator('#page-costs').is_visible()
+        assert page.locator('#page-dashboard [role=tablist]').is_visible()
     finally:
         page.close()
 

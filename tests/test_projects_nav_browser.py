@@ -573,12 +573,9 @@ def test_an_unread_room_beyond_the_feed_counts_while_a_find_shows_it_and_another
 
 
 def test_an_old_unread_room_no_find_shows_counts_nowhere_and_no_complete_list_is_read_for_it(pins_ui):
-    """The number counts what this sidebar shows: the feed's rooms and those an open find or browse lists, never one a
-    complete list only holds. A find for another old room reads a list that holds an unread room no row shows: the
-    number and ☰ stay as the feed says. While the find is open a registry change reads the list again. A find that
-    shows the room ends by a collapse or by clearing it: the number drops at once, and then neither a registry change
-    nor a reopened socket reads the list for the unread it holds. The next find or browse reads it again, as does a
-    socket reopened while that browse is open. Nothing is acknowledged."""
+    """Only a shown room's mark contributes to navigation's unread dot; Projects has no total. Finding another old
+    room must not leak an unseen room's unread fact. A registry change refreshes an open find, while ending the find
+    stops complete-list reads until the next find or browse. A reconnect respects that same boundary. No room is read."""
     page, root, control = pins_ui["page"], pins_ui["root"], pins_ui["control"]
     seed_archive(root)
     dialogue_store.append(root, "chat", {"ts": "2025-01-03T00:00:00Z", "direction": "out", "chat_id": 40200,
@@ -598,26 +595,27 @@ def test_an_old_unread_room_no_find_shows_counts_nowhere_and_no_complete_list_is
     find.fill("archive 201")
     expect()(status).to_have_text("1 project found")  # that list is applied, and the number said after it
     expect()(row(page, "archive-201")).to_be_visible()
-    expect()(count).to_have_text("")
+    expect()(count).to_have_count(0)
     expect()(nav).to_have_attribute("aria-label", "Open navigation")
     with page.expect_response(is_list):  # while a find is open, a registry change reads its list again
         changed(control, "archive-201")
     find.fill("archive 200")
     expect()(row(page, "archive-200").locator('.nav-project-row')).to_have_attribute("data-unread", "")
-    expect()(count).to_have_text(str(revision))
+    expect()(count).to_have_count(0)
     expect()(nav).to_have_attribute("aria-label", "Open navigation · new messages")
-    toggle = page.locator('#nav-projects-toggle')
-    toggle.click()  # a collapse ends the find: the number and ☰ say the feed's rooms again, at once
-    expect()(count).to_have_text("")
+    # Clear ends a find; the approved feed stays expanded and has no unread total in either state.
+    page.locator('.nav-find-clear').click()
+    expect()(count).to_have_count(0)
     expect()(nav).to_have_attribute("aria-label", "Open navigation")
-    toggle.click()
+    expect()(page.locator('#nav-projects-toggle')).to_have_count(0)
+    expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(51)
     expect()(find).to_have_value("")
     with page.expect_response(is_list):  # the next find reads the list as it starts
         find.fill("archive 200")
-    expect()(count).to_have_text(str(revision))
+    expect()(count).to_have_count(0)
     find.fill("")  # clearing it ends it the same way
     expect()(row(page, "archive-200")).to_have_count(0)
-    expect()(count).to_have_text("")
+    expect()(count).to_have_count(0)
     expect()(nav).to_have_attribute("aria-label", "Open navigation")
     before = lists()
     with page.expect_response(lambda response: is_state(response.request)):
@@ -626,7 +624,7 @@ def test_an_old_unread_room_no_find_shows_counts_nowhere_and_no_complete_list_is
         reopen(page, control)
     settle(page)
     assert lists() == before, "a list was read again for unread no row shows"
-    expect()(count).to_have_text("")
+    expect()(count).to_have_count(0)
     more = page.locator('#nav-projects-list > .nav-projects-more')
     expect()(more).to_have_text("Show 50 more")
     with page.expect_request(is_list):  # the next browse reads the list as it starts
@@ -635,7 +633,7 @@ def test_an_old_unread_room_no_find_shows_counts_nowhere_and_no_complete_list_is
     with page.expect_request(is_list):  # and a socket reopened while it is open reads it again
         reopen(page, control)
     expect()(row(page, "archive-200")).to_have_count(0)
-    expect()(count).to_have_text("")
+    expect()(count).to_have_count(0)
     assert not [body for body in posts if "project_seen_revision" in body]
 
 
@@ -679,22 +677,30 @@ def test_a_no_match_is_not_repeated_while_its_list_is_read_again(pins_ui):
     expect()(note).to_have_count(0)
 
 
-@pytest.mark.parametrize("press", ["#nav-projects-count", "#nav-projects-toggle"], ids=["header-facts", "toggle"])
+@pytest.mark.parametrize("press", [".nav-find-clear", ".nav-find-input"], ids=["header-facts", "toggle"])
 def test_a_pointer_collapse_of_a_browse_leaves_the_keyboard_on_the_toggle(pins_ui, press):
-    """A deep row has the keyboard when a pointer presses the header. A press need not focus the toggle (WebKit), the
-    number beside it is no control at all, and the row goes with the browse: the toggle takes the keyboard."""
+    """The retired header/collapse has no target. Clear (or the field's Escape) returns from a find to the kept
+    browse and leaves the keyboard on Find, with every browsed room still reachable."""
     page, root, control = pins_ui["page"], pins_ui["root"], pins_ui["control"]
     seed_archive(root)
-    control["unread"].add("newer")  # the header's number has a body to press
+    control["unread"].add("newer")
     refresh(page)
-    expect()(page.locator('#nav-projects-count')).to_have_text("2")
-    page.locator('.nav-find-input').fill("no such name")
+    expect()(page.locator('#nav-projects-count, #nav-projects-toggle')).to_have_count(0)
+    expect()(row(page, "newer").locator('.nav-project-row')).to_have_attribute("data-unread", "")
+    find = page.locator('.nav-find-input')
+    find.fill("no such name")
     page.locator('.nav-projects-more', has_text="Show all projects").click()
     expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(499)
-    row(page, "archive-000").locator('.nav-project-row').focus()
+    find.fill("archive 000")
+    deep = row(page, "archive-000").locator('.nav-project-row')
+    expect()(deep).to_be_visible()
+    deep.focus()
     page.locator(press).click()
-    expect()(page.locator('#nav-projects-list > .nav-project-item:not([hidden])')).to_have_count(1)  # the pin
-    expect()(page.locator('#nav-projects-toggle')).to_be_focused()
+    if press == ".nav-find-input":
+        page.keyboard.press("Escape")
+    expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(499)
+    expect()(find).to_have_value("")
+    expect()(find).to_be_focused()
 
 
 def test_a_collapse_leaves_the_keyboard_on_a_pinned_row_and_takes_it_from_any_other(pins_ui):

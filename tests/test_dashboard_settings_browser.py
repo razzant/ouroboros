@@ -6,9 +6,9 @@ The real SPA in headless Chromium and WebKit over the shared fixture's endpoints
 tab a field the owner is in keeps its text and caret through the tab's own periodic refresh and a settings read, and
 leaving it shows the row's result line; the Updates channel keeps its focused choice through a status read; the
 Evolution choice "Every N tasks" posts both keys in one body and says itself in its own sentence; the doors of
-Consciousness and Costs lead where they say and Settings leads back. Every one of the five tabs opened from the
-Settings home shows Back first, and Escape, Back itself or the system's Back return to Settings at the scroll position
-it was left at, in a window (1087 x 740) and at the 320 x 640 floor, where the menu stays and no tab scrolls sideways.
+Consciousness and Costs lead where they say. The docked sidebar returns each of the five tabs to Settings; in one
+column its Back, Escape and the system's Back return there, with the list's scroll preserved. At the 320 x 640 floor
+each page's own Back reaches the list, and every tab and three-way choice fits.
 
 The settings endpoint is answered here the way the server answers it: `_meta.effects` on a read, the receipt
 (`changes`: old, new, token) on a save. Undo's precondition and its refusal are the node test's
@@ -314,22 +314,29 @@ def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, widt
         return top
 
     def check_back(tab, leave):
-        back = page.locator(f"#dashboard-panel-{tab} > .dashboard-back")
-        back.wait_for()
-        facts = page.evaluate("""(tab) => { const panel = document.getElementById(`dashboard-panel-${tab}`);
-            const back = panel.firstElementChild, body = panel.querySelector(':scope > .dashboard-body');
-            return [back.classList.contains('dashboard-back'), back.getBoundingClientRect().bottom <= body.getBoundingClientRect().top + 1]; }""", tab)
-        assert facts == [True, True], "Back is the first row, above the tab's scroller"
-        assert back.inner_text().strip() == "Settings"
-        if width < 720:
-            assert page.locator("#page-dashboard [data-mobile-nav-toggle]").is_visible(), "the menu stays"
+        back = page.locator("#page-dashboard > .app-page-header [data-dashboard-back]")
+        assert page.locator(f"#dashboard-panel-{tab} > .dashboard-back").count() == 0
         assert _sideways(page) == [], (tab, leave)
-        if leave == "Escape":
-            page.keyboard.press("Escape")
-        elif leave == "Back":
-            back.locator("button").click()
+        if page.viewport_size["width"] >= 720:
+            # Review res3: beside the sidebar a door between sections adds no Back and no layer.
+            assert back.count() == 0
+            assert page.evaluate("() => window.__ouroLayers.ids().includes('dashboard-back')") is False
+            if leave == "Escape":
+                page.keyboard.press("Escape")
+                assert page.locator(f"#dashboard-panel-{tab}.active").is_visible()
+            page.locator('[data-nav-page="settings"]').click()
         else:
-            page.go_back()
+            back.wait_for(state="visible")
+            assert back.get_attribute("aria-label") == "Back to Settings"
+            assert back.inner_text().strip() == ""
+            assert page.locator("#page-dashboard [data-dashboard-list-back]").is_hidden()
+            assert page.locator("#page-dashboard [data-mobile-nav-toggle]").is_hidden()
+            if leave == "Escape":
+                page.keyboard.press("Escape")
+            elif leave == "Back":
+                back.click()
+            else:
+                page.go_back()
         page.wait_for_selector("#page-settings.active")
         assert back.count() == 0, leave
 
@@ -340,22 +347,32 @@ def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, widt
         assert page.evaluate("(s) => document.querySelector(s).scrollTop", HOME) == tops[tab], f"Escape from {tab} returns where Settings was"
     assert tops["storage"] > 0 and tops["updates"] > 0, f"the home was scrolled when its last rows were pressed: {tops}"
     for leave in ("Back", "system Back"):
+        # Physical and system Back remain exercised in the one-column layout that supplies them.
+        if width >= 720:
+            page.set_viewport_size({"width": 320, "height": height})
+            open_settings(page)
         top = leave_home("storage")
         check_back("storage", leave)
         assert top > 0
         assert page.evaluate("(s) => document.querySelector(s).scrollTop", HOME) == top, f"{leave} returns where Settings was"
+        if width >= 720:
+            page.set_viewport_size({"width": width, "height": height})
+            page.wait_for_function("() => document.documentElement.dataset.layout === 'docked'")
     # A tab reached any other way has no Back.
     _nav(page, "dashboard", width)
-    assert page.locator("#page-dashboard .dashboard-back").count() == 0
+    assert page.locator("#page-dashboard [data-dashboard-back]").count() == 0
 
 
 def test_no_tab_scrolls_sideways_at_the_floor_and_a_three_way_choice_keeps_one_line(ui):
     page, _ = _open(ui, tab="consciousness", width=320, height=640)
     for tab in TABS:
+        if not page.locator(f'[data-dashboard-tab="{tab}"]').is_visible():
+            page.locator('#page-dashboard [data-dashboard-list-back]').click()
         page.click(f'[data-dashboard-tab="{tab}"]')
         page.wait_for_selector(f"#dashboard-panel-{tab}.active")
         page.wait_for_timeout(200)
         assert _sideways(page) == [], tab
+    page.locator('#page-dashboard [data-dashboard-list-back]').click()
     page.click('[data-dashboard-tab="consciousness"]')
     tops = page.locator('#page-dashboard [data-setting-row="OUROBOROS_CONSCIOUSNESS_AUTONOMY"] [data-setting-value]').evaluate_all(
         "(buttons) => buttons.map((button) => Math.round(button.getBoundingClientRect().top))")

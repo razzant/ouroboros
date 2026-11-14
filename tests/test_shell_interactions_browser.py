@@ -108,7 +108,11 @@ def sync_project_rows(page):
              'project_chat_ids': [p['chat_id'] for p in rows]}
     page.route('**/api/state', lambda route: route.fulfill(json=state))
     page.evaluate("window.__ouroWs.emit('projects_changed', {})")
-    page.wait_for_function("() => document.querySelector('#nav-projects-count')?.textContent === '3'")
+    page.wait_for_function("""() => {
+        const row = document.querySelector('[data-project-id="gate-5"]');
+        return row?.hasAttribute('data-unread') && row.querySelector('.status-mark')?.dataset.hue === 'unread';
+    }""")
+    assert page.locator('#nav-projects-count').count() == 0
     page.wait_for_timeout(300)
 
 

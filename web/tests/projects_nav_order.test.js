@@ -33,7 +33,7 @@ test('an undated store orders by activity; rows with no time at all follow, by i
 // field is not shown; never the page body (the Projects header's toggle, the old target, is no longer drawn).
 const appSource = readFileSync(new URL('../app.js', import.meta.url), 'utf8').replace(/\r\n?/g, '\n');
 function liftApp(name) {
-    const from = appSource.search(new RegExp(`\\nfunction ${name}\\(`));
+    const from = appSource.search(new RegExp(`\\n(?:async )?function ${name}\\(`));
     const until = appSource.indexOf('\n}\n', from + 1);
     assert.ok(from >= 0 && until > from, `${name} is a top-level function in app.js`);
     return appSource.slice(from + 1, until + 2);
@@ -57,42 +57,61 @@ test('the list\'s keyboard home is Find a project, or New project without the fi
     assert.equal(nav.keyboardHome(), add, 'a field not shown hands it to New project');
     input.getClientRects = () => [{ width: 1, height: 1 }];
 
-    // A closed Project's row is gone: the focus fell to the body, or stayed in the panel that left; it goes home.
-    // app.js calls this as every Project closes, with the id of the one that closed.
-    assert.match(appSource, /if \(shownProjectId && !activeProjectId\) focusAfterProjectClosed\(shownProjectId\);/);
+    assert.match(appSource, /if \(shownProjectId && !activeProjectId\) focusAfterProjectClosed\(shownProjectId, focused\);/);
     const panel = new NodeStub('aside');
     const inPanel = new NodeStub('button');
     panel.append(inPanel);
-    const context = vm.createContext({ document, projectsNav: nav, projectPanel: panel, navProjectsList: list });
+    document.body.append(list, panel);
+    const context = vm.createContext({ document, projectsNav: nav, projectPanel: panel, navProjectsList: list,
+        focusedProjectRow: null });
     vm.runInContext(liftApp('focusAfterProjectClosed'), context);
-    for (const lost of [document.body, inPanel, null]) {
-        document.activeElement = lost;
-        context.focusAfterProjectClosed('p1');
-        assert.equal(document.activeElement, input, `from ${lost?.tagName ?? 'nothing'}`);
-    }
+    // No row ever held focus: a pointer reference to an unlisted room then × leaves WebKit's body alone.
+    document.activeElement = document.body;
+    context.focusAfterProjectClosed('p1', document.body);
+    assert.equal(document.activeElement, document.body, 'a pointer reference must not summon Find or the keyboard');
     // Closed with a pointer while its row is still listed (WebKit focuses no pressed row, so the layer has no opener):
     // the focus is left where it fell, never put into the field.
     const row = new NodeStub('li');
     row.dataset.navProjectId = 'p1';
+    row.setAttribute('data-nav-project-id', 'p1');
     list.append(row);
     for (const lost of [document.body, inPanel]) {
         document.activeElement = lost;
-        context.focusAfterProjectClosed('p1');
+        context.focusAfterProjectClosed('p1', lost);
         assert.equal(document.activeElement, lost, `row listed, from ${lost.tagName}`);
     }
+    // Establish the lost focus, rather than treating body focus as proof: this very row held it and was removed.
+    const button = new NodeStub('button');
+    Object.defineProperty(button, 'isConnected', { get: () => document.body.contains(button) });
+    row.append(button);
+    button.focus();
+    assert.equal(document.activeElement, button);
+    const focusBinding = appSource.match(/document.addEventListener\('focusin',[\s\S]*?\n\}\);/)[0];
+    let rememberFocus;
+    document.addEventListener = (type, listener) => { if (type === 'focusin') rememberFocus = listener; };
+    vm.runInContext(focusBinding, context);
+    rememberFocus({ target: button });
     row.remove();
+    assert.equal(button.isConnected, false);
+    document.activeElement = document.body; // the browser's result of removing its focused node
+    context.focusAfterProjectClosed('p1', document.body);
+    assert.equal(document.activeElement, input);
+    context.focusedProjectRow = null;
+    document.activeElement = inPanel;
+    context.focusAfterProjectClosed('p1', inPanel);
+    assert.equal(document.activeElement, input, 'a panel control whose opener row disappeared also goes home');
     // The focus that found a place of its own (the row back in the list, another control) is left where it is.
     const elsewhere = new NodeStub('button');
     document.body.append(elsewhere);
     document.activeElement = elsewhere;
-    context.focusAfterProjectClosed('p1');
+    context.focusAfterProjectClosed('p1', inPanel);
     assert.equal(document.activeElement, elsewhere);
     // The stack layout's closed drawer is inert: nothing in it takes the focus.
     const sidebar = new NodeStub('nav');
     sidebar.setAttribute('inert', '');
     sidebar.append(header);
     document.activeElement = document.body;
-    context.focusAfterProjectClosed('p1');
+    context.focusAfterProjectClosed('p1', inPanel);
     assert.equal(document.activeElement, document.body);
 
     // The row menu's fallback is the same place (app.js openProjectMenu hands it to project_create.js).
@@ -109,6 +128,24 @@ test('the list\'s keyboard home is Find a project, or New project without the fi
     assert.equal(menuContext.openProjectMenu(item), true);
     assert.equal(fallback, input);
     nav.destroy();
+});
+
+test('pressing an already open Project closes its drawer, while callers may keep the drawer', async () => {
+    const calls = [];
+    const context = vm.createContext({ projectNavigationGeneration: 0,
+        navState: { activeProjectId: 'p1', mobileDrawerOpen: true },
+        setMobileDrawerOpen: (open) => { calls.push(open); context.navState.mobileDrawerOpen = open; },
+        closeProjectPanel: () => calls.push('project'),
+    });
+    vm.runInContext(liftApp('openProjectPanel'), context);
+    await context.openProjectPanel({ id: 'p1' }, { openOnly: true });
+    assert.equal(context.navState.mobileDrawerOpen, false);
+    assert.deepEqual(calls, [false]);
+    calls.length = 0;
+    context.navState.mobileDrawerOpen = true;
+    await context.openProjectPanel({ id: 'p1' }, { openOnly: true, closeDrawer: false });
+    assert.equal(context.navState.mobileDrawerOpen, true);
+    assert.deepEqual(calls, []);
 });
 
 // Show more says how many rooms it adds wherever that is known (the owner's sweep of 14.11: one control, one wording):

@@ -172,6 +172,10 @@ let projectActivityIndex = buildProjectActivityIndex();
 let activitySocketDisconnected = false;
 const navToggleNames = new WeakMap();  // each ☰'s last written name (paintNavToggles)
 let shownProjectId = null;  // the Project the last navigation sync showed, so a close is told from no change
+let focusedProjectRow = null;
+document.addEventListener('focusin', (event) => {
+    focusedProjectRow = event.target.closest?.('[data-nav-project-id]') ? event.target : null;
+});
 // The place the last navigation sync showed: the room a handover leaves (shell_motion.js).
 let lastScene = { page: 'chat', project: null };
 let panelExits = 0;  // the latest close of the Project panel; a reopen voids an older one's put-away
@@ -231,10 +235,12 @@ async function openSettings(path = '', options = {}) {
 }
 
 async function openDashboardTab(tabName, options = {}) {
-    if (!await showPage('dashboard')) return false;
-    if (dashboardControls && typeof dashboardControls.activateTab === 'function') {
-        dashboardControls.activateTab(tabName, options);
-    }
+    if (!await showPage('dashboard', { closeDrawer: false })) return false;
+    // The chosen page replaces the drawer's layer in one commit, keeping its one browser Back entry.
+    layers.batch(() => {
+        dashboardControls?.activateTab(tabName, options);
+        setMobileDrawerOpen(false);
+    });
 }
 // A line elsewhere that points at a Dashboard tab (a quiet place's sheet at Consciousness) asks for it by this event.
 window.addEventListener('ouro:open-dashboard', (event) => { void openDashboardTab(String(event.detail?.tab || 'activity')); });
@@ -369,6 +375,7 @@ function handoverBetween(from, to) {
 }
 
 function syncNavigationState() {
+    const focused = document.activeElement; // before a closing layer hides or restores its focus
     const activeProjectId = navState.activeProjectId;
     syncMainLifetime();
     const drawerOpen = Boolean(navState.mobileDrawerOpen);
@@ -463,22 +470,25 @@ function syncNavigationState() {
     });
     // Last: the list's pin group and an open row menu settle, and a closed Project's focus finds its place.
     projectsNav.markPinGroup();
-    if (shownProjectId && !activeProjectId) focusAfterProjectClosed(shownProjectId);
+    if (shownProjectId && !activeProjectId) focusAfterProjectClosed(shownProjectId, focused);
     shownProjectId = activeProjectId;
     // Main's count and ☰'s dot follow whether Main is the room on screen, which an open or a close just changed; a
     // room's composer mounted since the last paint carries its ☰ too.
     updateUnreadBadge();
 }
 
-// A closed Project hands the focus back to its row (layers.js). Where that row is gone (deleted, archived, or no longer
-// in a find's result) and the focus with it, the list's first control takes it (projects_nav.js `keyboardHome`), unless
-// the sidebar is inert (the stack layout's closed drawer). With the row still listed the focus is left alone: a Project
-// opened with a pointer has no opener in WebKit, and a search field taking the focus there would light its ring and
-// raise a tablet's keyboard.
-function focusAfterProjectClosed(closedId) {
+// Only a lost row focus or a closing panel control without its row needs the list's keyboard home. Body focus alone
+// proves nothing: WebKit leaves it there when a pointer opens a reference to an unlisted Project and presses ×.
+function focusAfterProjectClosed(closedId, focused) {
     const at = document.activeElement;
-    const lost = !at || at === document.body || projectPanel?.contains(at) || at.closest?.('[hidden]');
-    if (!lost || [...(navProjectsList?.children || [])].some((el) => el.dataset?.navProjectId === closedId)) return;
+    const previous = focused === document.body ? focusedProjectRow : focused;
+    const row = previous?.closest?.('[data-nav-project-id]');
+    const lostRow = row?.dataset.navProjectId === closedId && (!previous.isConnected || previous.closest('[hidden]'));
+    const lostPanel = projectPanel?.contains(previous)
+        && ![...(navProjectsList?.children || [])].some((el) => el.dataset?.navProjectId === closedId);
+    if (!lostRow && !lostPanel) return;
+    if (at && at !== document.body && at.isConnected && !projectPanel?.contains(at) && !at.closest('[hidden]')) return;
+    focusedProjectRow = null;
     const home = projectsNav.keyboardHome();
     if (home && !home.closest('[inert]')) home.focus({ preventScroll: true });
 }
@@ -751,6 +761,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
     if (!project?.id) return;
     const navigation = ++projectNavigationGeneration;
     if (navState.activeProjectId === project.id) {
+        if (closeDrawer && navState.mobileDrawerOpen) setMobileDrawerOpen(false);
         if (!openOnly) closeProjectPanel();
         else if (taskId && quizId) await revealProjectQuestion(freshProjectRow(project), projectInstances.get(project.id), taskId, quizId);
         return;
