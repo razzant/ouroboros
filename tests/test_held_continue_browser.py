@@ -116,6 +116,9 @@ def test_held_continue_toast_activity_reason_and_no_resume(direct_server_with_da
                     page.set_viewport_size({"width": width, "height": 960})
                     if width < 700:
                         wait_drawer_closed(page)
+                        # The narrow Dashboard is a list with page levels, not the old horizontal tab strip.
+                        if not row.is_visible():
+                            page.locator('[data-dashboard-tab="activity"]').click()
                     row.scroll_into_view_if_needed()
                     geometry = row.evaluate(ROW_GEOMETRY)
                     observed[f"{theme}-{width}"] = geometry
