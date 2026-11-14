@@ -472,3 +472,62 @@ def test_a_missing_revision_on_identity_or_the_map_answers_with_the_revision_not
     _workpad_write(pad, "# Plan\n\n- one\n")
     edit = _workpad_write(pad, mode="edit", old_str="- one", content="- two")
     assert "revision_required" in edit and edit.endswith("# Plan\n\n- one\n") and "not resent" not in edit, edit
+
+
+def test_the_door_reads_the_canonical_identity_and_map_from_a_forked_drive(tmp_path):
+    """K17 (A10): a child on a forked drive reads identity's and the map's versions on the canonical root, never its
+    fork's copies: the list, the current version and an earlier one, after writing both from the fork."""
+    from ouroboros import world_profiler as wprof
+    from ouroboros.tools.control_runtime import _update_world
+
+    canonical, fork = tmp_path / "canonical", tmp_path / "fork"
+    for root in (canonical, fork):
+        (root / "memory").mkdir(parents=True)
+    world = f"{wprof.TITLE}\n\n{wprof.MEASURED_START}\n- probe\n{wprof.MEASURED_END}\n\n- a note\n"
+    (canonical / "memory" / "identity.md").write_bytes(IDENTITY.encode("utf-8"))
+    (canonical / "memory" / "WORLD.md").write_bytes(world.encode("utf-8"))
+    (fork / "memory" / "identity.md").write_bytes(b"A fork's own copy.\n")
+    child = ToolContext(repo_dir=canonical / "repo", drive_root=fork, task_id="kid",
+                        task_metadata={"budget_drive_root": str(canonical)})
+    texts = {"identity": ("identity.md", IDENTITY, IDENTITY + "\nLater.\n"),
+             "world": ("WORLD.md", world, world.replace("- a note", "- a newer note"))}
+    assert _update_identity(child, texts["identity"][2], _sha(IDENTITY.encode("utf-8"))).startswith("OK:")
+    assert _update_world(child, texts["world"][2], _sha(world.encode("utf-8"))).startswith("OK:")
+    for name, (file, old, new) in texts.items():
+        before, after = _sha(old.encode("utf-8")), _sha(new.encode("utf-8"))
+        assert (canonical / "memory" / file).read_bytes() == new.encode("utf-8")
+        earlier, current = _read(child, source=name, version=before), _read(child, source=name, version=after)
+        assert earlier.endswith(old) and "an earlier version, not the current text" in earlier, earlier[:300]
+        assert current.endswith(new) and f"{name} version {after}: the current text;" in current, current[:300]
+        listing = _read(child, source=name)
+        assert f"current revision {after}" in listing and f" · replaced {before} · " in listing, listing
+    assert (fork / "memory" / "identity.md").read_bytes() == b"A fork's own copy.\n"
+
+
+def test_one_long_crlf_version_reassembles_exactly_across_its_pages(tmp_path, monkeypatch):
+    """K17: a version longer than one result, with CRLF line ends and text outside ASCII, read page by page from the
+    start each page names, reassembles to exactly that version (no line end translated, no character lost or doubled
+    at a page edge): an earlier one stored whole and the current one rebuilt through its change."""
+    import types
+
+    from ouroboros.tools.project_journal import _workpad_write
+
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr("ouroboros.tool_capabilities.tool_result_limit", lambda _name: 900)
+    own = types.SimpleNamespace(project_id="atlas", task_id="t-1", drive_root=tmp_path, task_metadata={})
+    long = "".join(f"## Раздел {n} 🌊\r\n\r\nСтрока {n}: café, naïve, 東京.\r\n" for n in range(60))
+    edited = long.replace("Строка 7:", "Line 7:")
+    _workpad_write(own, long)
+    _workpad_write(own, mode="edit", old_str="Строка 7:", content="Line 7:", expected_revision=_sha(long.encode("utf-8")))
+    for text in (long, edited):
+        version, start, parts = _sha(text.encode("utf-8")), 0, []
+        while True:
+            _head, line, window = _read(own, source="workpad", version=version, start=start).split("\n", 2)
+            parts.append(window)
+            following = re.search(r"next_start=(\d+)", line)
+            if following is None:
+                assert line.endswith("; complete"), line
+                break
+            assert line.endswith(f"memory_read(source='workpad:atlas', version='{version}', start={following[1]})"), line
+            start = int(following[1])
+        assert len(parts) > 3 and "".join(parts) == text, (len(parts), version)
