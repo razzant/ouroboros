@@ -23,7 +23,7 @@
 import { settingsReturn } from './dashboard.js';
 import { sectionHoldsTwoPanes } from './layout.js';
 import { renderBackControl, renderPageHeader, setBackControlTarget } from './page_header.js';
-import { FADE_CLEARANCE, bindScrollFade } from './scroll_fade.js';
+import { revealPastFade, bindScrollFade } from './scroll_fade.js';
 import { readSettings } from './settings_controls.js';
 import { isDoorId, mountSettingsHome, settingsTitle } from './settings_home.js';
 import { settingsPageFor } from './settings_pages.js';
@@ -356,15 +356,7 @@ export function initSettings(ctx = {}) {
     function revealInRail() {
         const chosen = homeEl.querySelector('[aria-current="page"]');
         if (!chosen) return;
-        // `block: 'nearest'` by hand (the rail alone scrolls): a row already in the rail's view never moves; one out of
-        // it, or under the fade of an edge where more waits, comes in just past that fade.
-        const rail = homeEl.getBoundingClientRect();
-        const box = chosen.getBoundingClientRect();
-        const above = homeEl.scrollTop > 1 ? FADE_CLEARANCE : 0;
-        const below = homeEl.scrollHeight - homeEl.clientHeight - homeEl.scrollTop > 1 ? FADE_CLEARANCE : 0;
-        if (box.top >= rail.top + above && box.bottom <= rail.bottom - below) return;
-        if (box.top < rail.top + above) homeEl.scrollTop += box.top - rail.top - FADE_CLEARANCE;
-        else homeEl.scrollTop += box.bottom - rail.bottom + FADE_CLEARANCE;
+        revealPastFade(homeEl, chosen);
         places.set(homeEl, homeEl.scrollTop);
     }
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bindScrollFade } from '../modules/scroll_fade.js';
+import { bindScrollFade, revealPastFade } from '../modules/scroll_fade.js';
 
 function fixture() {
     const attrs = new Set(), listeners = new Map(), frames = new Map(), observers = [];
@@ -22,6 +22,22 @@ function fixture() {
     const flush = () => { const pending = [...frames.values()]; frames.clear(); pending.forEach(fn => fn()); };
     return { scroller, attrs, listeners, frames, observers, flush };
 }
+
+test('a revealed row clears the sheet’s current fade, including a row already inside the viewport', () => {
+    const { scroller } = fixture();
+    let edge = 32;
+    scroller.ownerDocument.defaultView.getComputedStyle = () => ({ getPropertyValue: name => name === '--scroll-fade-edge' ? `${edge}px` : '' });
+    scroller.getBoundingClientRect = () => ({ top: 20, bottom: 120 });
+    const row = { getBoundingClientRect: () => ({ top: 80, bottom: 110 }) };
+    revealPastFade(scroller, row);
+    assert.equal(scroller.scrollTop, 22, 'the last ten pixels were inside the box but under the fade');
+    edge = 40; scroller.scrollTop = 0;
+    revealPastFade(scroller, row);
+    assert.equal(scroller.scrollTop, 30, 'a different CSS token changes the clearance without a JS constant');
+    scroller.scrollTop = 400; // settled bottom: the same row has no bottom fade to clear
+    revealPastFade(scroller, row);
+    assert.equal(scroller.scrollTop, 400);
+});
 
 for (const axis of ['x', 'y']) {
     test(`${axis} fade follows both edges, content resize and disposal`, () => {

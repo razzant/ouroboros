@@ -327,6 +327,7 @@ test('a row chosen under the rail\'s bottom fade comes just clear of it; a row c
     const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
     layout(t, controls, content, { on: true });
     const home = content.querySelector('[data-settings-home]');
+    home.ownerDocument.defaultView.getComputedStyle = () => ({ getPropertyValue: () => '32px' });
     // The owner's window: a rail 678 px tall from y 66, its list 1168 px, scrolled to 457 (33 px more wait below).
     Object.assign(home, { scrollHeight: 1168, clientHeight: 678, scrollTop: 457 });
     home.getBoundingClientRect = () => ({ top: 66, bottom: 744, width: 300 });
@@ -338,16 +339,16 @@ test('a row chosen under the rail\'s bottom fade comes just clear of it; a row c
         home.querySelector('[data-settings-list]').appendChild(node);
         return node;
     };
-    // Its bottom 4 px inside the rail, under the 32 px fade: pressed, it comes 24 px clear of the edge (FADE_CLEARANCE).
+    // Its bottom 4 px inside the rail, under the 32 px fade: pressed, it comes 32 px clear of the edge (the sheet’s own token).
     const low = row('test-low', 1085);
     await home.fire('click', { target: low });
     await settle();
-    assert.equal(home.scrollTop, 477);
-    assert.equal(low.getBoundingClientRect().bottom, 744 - 24);
+    assert.equal(home.scrollTop, 485);
+    assert.equal(low.getBoundingClientRect().bottom, 744 - 32);
     const mid = row('test-mid', 700);
     await home.fire('click', { target: mid });
     await settle();
-    assert.equal(home.scrollTop, 477, 'a row in the clear stays where it is');
+    assert.equal(home.scrollTop, 485, 'a row in the clear stays where it is');
 });
 
 test('Settings pressed again in the sidebar: two panes keep a first-level page and return from a deeper one; one column shows the list', async (t) => {

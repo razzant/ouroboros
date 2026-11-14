@@ -80,7 +80,7 @@ function environment() {
         getComputedStyle: (node) => ({ visibility: node.visibility || 'visible',
             scrollPaddingInlineStart: node.scrollPadding || '0px', scrollPaddingInlineEnd: node.scrollPadding || '0px',
             scrollPaddingTop: node.scrollPadding || '0px', scrollPaddingBottom: node.scrollPadding || '0px',
-            overflowY: node.overflowY || 'visible' }),
+            overflowY: node.overflowY || 'visible', getPropertyValue: name => name === '--scroll-fade-edge' ? '32px' : '' }),
     });
     doc.body = new Node(doc, 'body');
     doc.activeElement = doc.body;
@@ -263,16 +263,19 @@ test('a vertical list brings the chosen row into view inside its own scroller, n
     const controller = bindTabStrip(strip, { dataAttr: 'data-view' });
     tabs[0].focus();
     // End chooses the last row, below the rail's visible edge (160): the rail scrolls by what it lacks and the edge
-    // fade's clearance (24, so the row is not dimmed under the fade), the page not.
+    // fade's clearance (32, so the row is not dimmed under the fade), the page not.
     strip.emit('keydown', { target: tabs[0], key: 'End' });
     assert.equal(doc.activeElement, tabs[2]);
-    assert.deepEqual([rail.scrollTop, page.scrollTop, strip.scrollLeft ?? 0], [144, 0, 0]);
+    assert.deepEqual([rail.scrollTop, page.scrollTop, strip.scrollLeft ?? 0], [152, 0, 0]);
     // A row already in view moves nothing; one above the top edge comes back to it, the same clearance inside it.
-    tabs.forEach((tab, i) => { tab.rect = { left: 0, right: 200, top: -50 + i * 100, bottom: -10 + i * 100 }; });
+    tabs.forEach((tab, i) => { tab.rect = { left: 0, right: 200, top: -20 + i * 100, bottom: 20 + i * 100 }; });
     strip.emit('keydown', { target: tabs[2], key: 'ArrowUp' });
-    assert.equal(rail.scrollTop, 144, 'the second row stands in view');
+    assert.equal(rail.scrollTop, 152, 'the second row stands clear of both fades');
+    tabs[1].rect = { top: 50, bottom: 90 };
+    controller.select('two');
+    assert.equal(rail.scrollTop, 130, 'a geometrically visible row under the top fade comes clear');
     strip.emit('keydown', { target: tabs[1], key: 'ArrowUp' });
-    assert.deepEqual([rail.scrollTop, page.scrollTop], [30, 0]);
+    assert.deepEqual([rail.scrollTop, page.scrollTop], [38, 0]);
     controller.destroy();
 });
 
