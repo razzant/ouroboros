@@ -1356,7 +1356,9 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
    ("No voice on this device") wraps at the end instead of squeezing them into a column of a few words. */
 .settings-row[data-kind="door"]:not([data-lead]) { grid-template-columns: minmax(60%, 1fr) auto; }
 /* A wide control (settings_controls.js marks it `data-wide`) goes under the words below 36rem, while beside it the
-   words would keep only a narrow column (ui.css moves every row's actions only below 28rem). */
+   words would keep only a narrow column (ui.css moves every row's actions only below 28rem). Beside them it leaves the
+   words 16rem whatever its own width: a wider one (Evolution's strip with its N field) wraps its own parts there. */
+.settings-row[data-wide] { grid-template-columns: minmax(min(100% - var(--space-3), 16rem), 1fr) auto; }
 @container (max-width: 36rem) {
     .settings-row[data-wide] > :is(.ui-row-title, .ui-row-meta, .ui-row-actions) { grid-column: 1 / -1; }
     .settings-row[data-wide] > .ui-row-actions { grid-row: 3; justify-content: flex-start; }
