@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { listOrder } from '../modules/projects_nav.js';
+import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
+import { createProjectsNav, listOrder } from '../modules/projects_nav.js';
+import { NodeStub, setup } from './dashboard_dom_fixture.js';
 
 // The Projects list's order (docs/DESIGN.md "Navigation", owner 2026-11-07): the pins, then the newest message, the
 // server's own order (projects_summary: time, then id, newest first) also where times are equal; unread is no rank.
@@ -22,4 +25,87 @@ test('an undated store orders by activity; rows with no time at all follow, by i
         { id: 'b', last_active_at: '2026-01-02T00:00:00Z' }, { id: 'x' }, { id: 'a', last_active_at: '2026-01-03T00:00:00Z' },
         { id: 'y' },
     ]), ['a', 'b', 'y', 'x']);
+});
+
+// Where the keyboard goes when what held it inside the list is gone (a Project deleted or archived from its row menu,
+// or closed while its row left a find's result): the list's first control, Find a project, or New project when the
+// field is not shown; never the page body (the Projects header's toggle, the old target, is no longer drawn).
+const appSource = readFileSync(new URL('../app.js', import.meta.url), 'utf8').replace(/\r\n?/g, '\n');
+function liftApp(name) {
+    const from = appSource.search(new RegExp(`\\nfunction ${name}\\(`));
+    const until = appSource.indexOf('\n}\n', from + 1);
+    assert.ok(from >= 0 && until > from, `${name} is a top-level function in app.js`);
+    return appSource.slice(from + 1, until + 2);
+}
+
+test('the list\'s keyboard home is Find a project, or New project without the field; app.js sends a lost focus there', (t) => {
+    const { document } = setup(t);
+    const header = new NodeStub('div');
+    const add = new NodeStub('button');
+    add.id = 'nav-projects-add';
+    header.append(add);
+    header.prepend = function prepend(node) { this.insertBefore(node, this.children[0] || null); };
+    const list = new NodeStub('div');
+    list.id = 'nav-projects-list';
+    const nav = createProjectsNav({ header, list, feed: () => [], feedOrder: () => 0, nextOrder: () => 1,
+        reserved: () => [], listableCount: () => 0, activeId: () => null, isUnread: () => false,
+        readList: async () => ({ projects: [] }), onListRead() {}, onShown() {}, open() {}, openMenu() {}, pin() {} });
+    const input = header.querySelector('input');
+    assert.equal(nav.keyboardHome(), input, 'the field leads the list');
+    input.getClientRects = () => [];
+    assert.equal(nav.keyboardHome(), add, 'a field not shown hands it to New project');
+    input.getClientRects = () => [{ width: 1, height: 1 }];
+
+    // A closed Project's row is gone: the focus fell to the body, or stayed in the panel that left; it goes home.
+    // app.js calls this as every Project closes, with the id of the one that closed.
+    assert.match(appSource, /if \(shownProjectId && !activeProjectId\) focusAfterProjectClosed\(shownProjectId\);/);
+    const panel = new NodeStub('aside');
+    const inPanel = new NodeStub('button');
+    panel.append(inPanel);
+    const context = vm.createContext({ document, projectsNav: nav, projectPanel: panel, navProjectsList: list });
+    vm.runInContext(liftApp('focusAfterProjectClosed'), context);
+    for (const lost of [document.body, inPanel, null]) {
+        document.activeElement = lost;
+        context.focusAfterProjectClosed('p1');
+        assert.equal(document.activeElement, input, `from ${lost?.tagName ?? 'nothing'}`);
+    }
+    // Closed with a pointer while its row is still listed (WebKit focuses no pressed row, so the layer has no opener):
+    // the focus is left where it fell, never put into the field.
+    const row = new NodeStub('li');
+    row.dataset.navProjectId = 'p1';
+    list.append(row);
+    for (const lost of [document.body, inPanel]) {
+        document.activeElement = lost;
+        context.focusAfterProjectClosed('p1');
+        assert.equal(document.activeElement, lost, `row listed, from ${lost.tagName}`);
+    }
+    row.remove();
+    // The focus that found a place of its own (the row back in the list, another control) is left where it is.
+    const elsewhere = new NodeStub('button');
+    document.body.append(elsewhere);
+    document.activeElement = elsewhere;
+    context.focusAfterProjectClosed('p1');
+    assert.equal(document.activeElement, elsewhere);
+    // The stack layout's closed drawer is inert: nothing in it takes the focus.
+    const sidebar = new NodeStub('nav');
+    sidebar.setAttribute('inert', '');
+    sidebar.append(header);
+    document.activeElement = document.body;
+    context.focusAfterProjectClosed('p1');
+    assert.equal(document.activeElement, document.body);
+
+    // The row menu's fallback is the same place (app.js openProjectMenu hands it to project_create.js).
+    let fallback;
+    const menuContext = vm.createContext({
+        projectsNav: { row: () => ({ id: 'p1', chat_id: 7, lifecycle: 'active' }), keyboardHome: () => input },
+        projectActivityIndex: { byChat: new Map() }, IDLE_SUMMARY: { mark: '', owner: '' },
+        openProjectRowMenu: (_project, options) => { fallback = options.fallbackFocus; return true; },
+        apiClient: {}, markView: () => ({}), markWords: () => '', pendingProjectPins: new Set(),
+    });
+    vm.runInContext(liftApp('openProjectMenu'), menuContext);
+    const item = new NodeStub('li');
+    item.dataset.navProjectId = 'p1';
+    assert.equal(menuContext.openProjectMenu(item), true);
+    assert.equal(fallback, input);
+    nav.destroy();
 });

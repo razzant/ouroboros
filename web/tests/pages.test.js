@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { PAGES, ZONES, pageById, pageLabel, pagesInZone, renderNavRow, renderNavRows, renderProjectsHeader } from '../modules/pages.js';
 import { PAGE_ICONS, SHELL_ICONS } from '../modules/page_icons.js';
 import { statusMarkHtml } from '../modules/status_mark.js';
@@ -58,4 +59,8 @@ test('the Projects header is the New project button alone, with the shell\'s plu
     assert.equal(html, `<button id="nav-projects-add" class="nav-projects-add" type="button" title="New project" aria-label="New project">${SHELL_ICONS.plus}</button>`);
     assert.doesNotMatch(html, /nav-projects-toggle|nav-projects-count|nav-projects-facts|nav-chevron|status-mark|aria-expanded/);
     assert.doesNotMatch(html, /nav-activity-marker|chat-live-typing|nav-projects-activity/);
+    // With its heading gone the list's region keeps a name of its own: "Projects" (index.html).
+    const shell = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+    const section = shell.match(/<section id="nav-projects"[^>]*>/)?.[0] || '';
+    assert.match(section, / aria-label="Projects"/);
 });

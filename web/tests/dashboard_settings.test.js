@@ -574,8 +574,12 @@ test('openDashboardTab: back gives the tab its Back, a row is brought into view 
         + '<div class="ui-row settings-row" data-setting-row="OUROBOROS_MAX_ROUNDS"><input data-setting-control></div></details></div>';
     const row = panel('costs').querySelector('[data-setting-row]');
     let scrolled = null;
-    row.scrollIntoView = (options) => { scrolled = options; };
+    let viewWhenScrolled = '';
+    // One column (the fixture measures no width): the page must be the visible level before its row is revealed,
+    // or the scroll and the focus land in a hidden pane.
+    row.scrollIntoView = (options) => { scrolled = options; viewWhenScrolled = dashboard.page.dataset.sectionView; };
     dashboard.activateTab('costs', { row: 'OUROBOROS_MAX_ROUNDS', back: '' });
+    assert.equal(viewWhenScrolled, 'page', 'the level is shown before its row is scrolled to and focused');
     assert.equal(slot.children.length, 1);
     assert.equal(slot.firstChild.getAttribute('aria-label'), 'Back to Settings');
     assert.equal(panel('costs').querySelector('[data-dashboard-back]'), null);
@@ -602,6 +606,39 @@ test('openDashboardTab: back gives the tab its Back, a row is brought into view 
     assert.equal(slot.firstChild, null, 'leaving the Dashboard drops Back');
     assert.equal(layers.length, 0);
     assert.equal(focusSettingRow(panel('costs'), 'NO_SUCH_ROW'), false);
+    // Two panes: the page stands beside the list as before, no level, its row revealed in it.
+    dashboard.page.getBoundingClientRect = () => ({ width: 1000 });
+    viewWhenScrolled = '';
+    dashboard.activateTab('costs', { row: 'OUROBOROS_MAX_ROUNDS' });
+    assert.deepEqual([viewWhenScrolled, listBack.hidden, layers.length], ['page', true, 0]);
+    assert.equal(document.activeElement, row.querySelector('[data-setting-control]'));
+    dashboard.destroy();
+});
+
+// A Settings row or search result in one column opens a Dashboard page with Back to Settings: the layer stack changes
+// once (the level that Back replaces is never pushed and removed first), so Telegram's Back is not told show, hide,
+// show in one task (layers.js: one snapshot per batch).
+test('openDashboardTab with back changes the layer stack once in one column', (t) => {
+    const { mount } = setup(t);
+    const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
+    const stack = [];
+    const seen = [''];
+    let depth = 0;
+    const commit = () => { if (depth === 0) seen.push(stack.map((layer) => layer.id).join(',')); };
+    const layers = {
+        push(layer) { if (!stack.some((open) => open.id === layer.id)) stack.push(layer); commit(); },
+        remove(id) { stack.splice(0, stack.length, ...stack.filter((layer) => layer.id !== id)); commit(); },
+        batch(fn) { depth += 1; try { return fn(); } finally { depth -= 1; commit(); } },
+    };
+    const state = { dashboardActiveSubtab: 'logs', activePage: 'dashboard' };
+    const dashboard = initDashboard({ state, openSettings() {}, layers });
+    seen.splice(0, seen.length, stack.map((layer) => layer.id).join(','));
+    dashboard.activateTab('costs', { back: 'accounts' });
+    const changes = seen.filter((ids, i) => i > 0 && ids !== seen[i - 1]);
+    assert.deepEqual(changes, ['dashboard-back'], 'one change: Back to Settings, with no level pushed and removed');
+    // Without a Back the page is the level, pushed once as well.
+    dashboard.activateTab('storage');
+    assert.deepEqual(stack.map((layer) => layer.id), ['dashboard-level']);
     dashboard.destroy();
 });
 

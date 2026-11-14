@@ -341,29 +341,36 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     resize?.observe(page);
 
     /** Show a tab's page. `back`, a Settings path ('' is its home), gives the page a Back there before its name;
-     *  without it there is none. `row` brings that row into view and focuses its control. */
-    function showTab(tabName, { row = '', back: path } = {}) {
+     *  without it there is none. `row` brings that row into view and focuses its control. `asLevel`: in one column
+     *  the page is shown as a level, made visible before its row is revealed (a hidden pane scrolls and focuses
+     *  nothing). */
+    function showTab(tabName, { row = '', back: path, asLevel = false } = {}) {
         const name = tabName || 'logs';
         if (!tabStrip.select(name)) return false;
-        back.clear();
-        panels.forEach((panel) => {
-            const on = panel.dataset.dashboardPanel === name;
-            panel.classList.toggle('active', on);
-            panel.hidden = !on;
-        });
-        state.dashboardActiveSubtab = name;
-        paint();
-        window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: name } }));
         const panel = panels.find((candidate) => candidate.dataset.dashboardPanel === name);
-        if (typeof path === 'string') back.show(panel, path);
+        // One change of the layer stack: a level that Back to Settings replaces at once is never pushed and removed
+        // first (Telegram's Back would show, hide and show again).
+        const steps = () => {
+            back.clear();
+            panels.forEach((each) => {
+                const on = each.dataset.dashboardPanel === name;
+                each.classList.toggle('active', on);
+                each.hidden = !on;
+            });
+            state.dashboardActiveSubtab = name;
+            if (asLevel && !panes()) level = true;
+            paint();
+            window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: name } }));
+            if (typeof path === 'string') back.show(panel, path);
+        };
+        if (layers?.batch) layers.batch(steps); else steps();
         if (row) focusSettingRow(panel, row);
         return true;
     }
 
     /** From outside the list (a deep link, a Settings row): the page is shown, as a level in one column. */
     function activateTab(tabName, options = {}) {
-        if (!showTab(tabName, options)) return;
-        if (!panes()) { level = true; paint(); }
+        showTab(tabName, { ...options, asLevel: true });
     }
 
     showTab(active);

@@ -309,7 +309,7 @@ function liveGlyphs({ settings, device = {} } = {}) {
 }
 
 function doorHtml({ to, name, glyph, answer = '', result = '' }) {
-    return `<button type="button" class="settings-door section-row" data-settings-open="${escapeHtml(to)}"${isDoorId(to) ? ' data-settings-door-out data-section-out' : ''}${result ? ` data-settings-result="${escapeHtml(result)}"` : ''}>`
+    return `<button type="button" class="settings-door section-row" data-settings-open="${escapeHtml(to)}"${isDoorId(to) ? ' data-section-out' : ''}${result ? ` data-settings-result="${escapeHtml(result)}"` : ''}>`
         + `<span class="settings-door-glyph section-row-glyph" aria-hidden="true" data-settings-glyph>${glyphHtml(glyph)}</span>`
         + `<span class="settings-door-words section-row-words"><span class="settings-door-title section-row-title">${escapeHtml(name)}</span>`
         + `<span class="settings-door-answer section-row-answer" data-settings-answer${result ? '' : ' data-i18n-fmt="settings.answer"'}>${escapeHtml(answer)}</span></span>`
@@ -327,7 +327,7 @@ export function homeGroupsHtml(rows = HOME_ROWS) {
 /** Search results as rows, then the line that asks Ouroboros with the words. */
 export function resultsHtml(query, found) {
     const hits = found.map((entry) => doorHtml({ to: entry.to, name: entry.name, glyph: entry.glyph, answer: entry.where, result: entry.id })).join('');
-    const ask = `<button type="button" class="settings-door section-row" data-settings-ask data-settings-door-out data-section-out><span class="settings-door-glyph section-row-glyph" aria-hidden="true">${glyphHtml('chat')}</span>`
+    const ask = `<button type="button" class="settings-door section-row" data-settings-ask data-section-out><span class="settings-door-glyph section-row-glyph" aria-hidden="true">${glyphHtml('chat')}</span>`
         + `<span class="settings-door-words section-row-words"><span class="settings-door-title section-row-title" data-i18n-fmt="settings.ask">${escapeHtml(fmt('Ask Ouroboros: “{words}”', { words: query.trim() }))}</span>`
         + `<span class="settings-door-answer section-row-answer">The words wait in Main as a draft you send.</span></span><span class="settings-door-end section-row-end" aria-hidden="true">${OUT_ICON}</span></button>`;
     return `${hits ? groupHtml('Settings', hits) : '<p class="settings-search-empty">No setting has these words.</p>'}${groupHtml('', ask)}`;
@@ -376,7 +376,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     </div>`;
     const find = (selector) => root.querySelector(selector);
     // The card and the search field keep their own references: the shell may move them (the field into the header,
-    // the card into the Ouroboros pane of landing A), and they work wherever they stand.
+    // the card into the Ouroboros pane that two panes show), and they work wherever they stand.
     const cardEl = find('[data-settings-card]');
     const [needsEl, listEl, searchEl, countEl] = [find('[data-being-needs]'), find('[data-settings-list]'), find('#settings-search'), find('[data-being-count]')];
     const [stateEl, sepEl, overviewAnswer] = [find('[data-being-state]'), find('.settings-being-sep'), find('[data-overview-answer]')];
