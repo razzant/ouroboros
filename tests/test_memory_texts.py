@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 
 import pytest
@@ -575,7 +576,9 @@ def test_a_text_gone_before_its_read_is_absent_and_its_history_still_lists(tmp_p
         f" · replaced {first} · " in listing, listing
     assert _read(ctx, source="identity", version=first).endswith(IDENTITY)
     identity.mkdir()  # a directory where the text should be: present, and unreadable
-    assert _read(ctx, source="identity").startswith("⚠️ TOOL_ERROR: identity unreadable: IsADirectoryError")
+    # Reading a directory as a file raises EACCES on Windows, EISDIR on POSIX.
+    unreadable = "PermissionError" if os.name == "nt" else "IsADirectoryError"
+    assert _read(ctx, source="identity").startswith(f"⚠️ TOOL_ERROR: identity unreadable: {unreadable}")
 
 
 def test_a_reverts_version_is_looked_up_under_the_publication_lock_after_the_checks(tmp_path, identity, monkeypatch):
