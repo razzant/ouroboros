@@ -126,6 +126,29 @@ def test_a_failed_facet_serves_its_last_read_without_refreshing_its_time(monkeyp
         "observed_at": "2026-10-10T10:05:00Z", "stale": True, "error": "malformed_response"}
 
 
+def test_the_catalog_facet_carries_the_time_the_engine_composed_it(monkeypatch):
+    # The engine may answer from a recent composition (dated by generatedAt): the facet
+    # keeps that time instead of this read's, and falls back to the read time without one.
+    clock = iter(["2026-11-14T18:00:00+00:00", "2026-11-14T18:05:00+00:00", "2026-11-14T18:10:00+00:00"])
+    monkeypatch.setattr("ouroboros.utils.utc_now_iso", lambda: next(clock))
+    reads = [_payload(), _payload(), _payload()]
+    for body, composed in zip(reads, ["2026-11-14T17:59:50.250Z", "2026-11-14T17:59:50.250Z", "2026-11-14T18:09:00"]):
+        body["_facet_observed"] = {"catalog": composed}
+    script = iter(reads)
+    monkeypatch.setattr(accounts, "_read_status_payload", lambda include_models: next(script))
+
+    first = accounts._status_payload(False)
+    assert first["facets"]["catalog"] == {"observed_at": "2026-11-14T17:59:50.250000+00:00", "stale": False,
+                                          "error": None}
+    assert first["facets"]["accounts"]["observed_at"] == "2026-11-14T18:00:00+00:00", "other facets: the read time"
+    assert "_facet_observed" not in first
+    held = accounts._status_payload(False)  # the same composition, answered again five minutes later
+    assert held["facets"]["catalog"]["observed_at"] == "2026-11-14T17:59:50.250000+00:00", "never stamped as new"
+    assert held["facets"]["accounts"]["observed_at"] == "2026-11-14T18:05:00+00:00"
+    naive = accounts._status_payload(False)  # a time without a zone is unreadable as UTC
+    assert naive["facets"]["catalog"]["observed_at"] == "2026-11-14T18:10:00+00:00"
+
+
 def test_a_facet_never_read_stays_empty_and_homes_never_share_memory(monkeypatch):
     script = iter([
         _payload(home="/home-a"),

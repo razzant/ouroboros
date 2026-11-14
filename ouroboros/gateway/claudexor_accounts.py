@@ -49,10 +49,11 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import datetime
 import logging
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -252,20 +253,24 @@ def _status_payload(include_models: bool, *, join: bool = True) -> Dict[str, Any
 def _with_facet_memory(payload: Dict[str, Any], include_models: bool = False) -> Dict[str, Any]:
     """Stamp ``facets`` and serve each unanswered facet's last answered value as stale.
 
-    An ``ok`` read replaces the facet's memory and observation time; a ``failed`` or
-    ``not_read`` facet keeps both (a stale value never refreshes its timestamp) and carries
-    this read's typed error. ``reads`` still states what THIS read established."""
+    An ``ok`` read replaces the facet's memory and observation time: the time the engine
+    dated the facet with (the catalog's ``generatedAt``: the engine may answer from a recent
+    composition), else this read's. A ``failed`` or ``not_read`` facet keeps both (a stale
+    value never refreshes its timestamp) and carries this read's typed error. ``reads``
+    still states what THIS read established."""
     from ouroboros.utils import utc_now_iso
 
     now, home = utc_now_iso(), str(payload.get("config_dir") or "")
     errors = payload.pop("_facet_errors", {})
+    observed = payload.pop("_facet_observed", {})
     facets: Dict[str, Dict[str, Any]] = {}
     with _STATUS_LOCK:
         for facet, fields in _FACET_FIELDS.items():
             key = (home, facet, include_models and facet == "catalog")
             if payload["reads"][facet] == READ_OK:
                 _FACET_MEMORY[key] = held = {
-                    "observed_at": now, "value": copy.deepcopy({name: payload[name] for name in fields if name in payload})}
+                    "observed_at": _engine_time(observed.get(facet)) or now,
+                    "value": copy.deepcopy({name: payload[name] for name in fields if name in payload})}
             else:
                 held = _FACET_MEMORY.get(key)
                 payload.update(copy.deepcopy(held["value"]) if held else {})
@@ -274,6 +279,17 @@ def _with_facet_memory(payload: Dict[str, Any], include_models: bool = False) ->
                              "error": errors.get(facet)}
     payload["facets"] = facets
     return payload
+
+
+def _engine_time(value: Any) -> Optional[str]:
+    """An engine's ISO timestamp as UTC ``isoformat``; None when absent, unreadable or naive."""
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment.astimezone(datetime.timezone.utc).isoformat() if moment.tzinfo else None
 
 
 def _read_status_payload(include_models: bool) -> Dict[str, Any]:
@@ -410,6 +426,7 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
                                        ("quota", quota_outcome)) if outcome[0] == READ_FAILED}
             payload["unified_accounts"] = profiles_outcome[0] == READ_OK
             catalog = catalog_outcome[1] if catalog_outcome[0] == READ_OK else {}
+            payload["_facet_observed"] = {"catalog": catalog.get("generatedAt")}
             # Account surfaces show only harnesses with a login concept. On a
             # transient manifest-read failure — or a successful read with zero
             # readable manifests (the helper answers None) — fail OPEN
