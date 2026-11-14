@@ -271,8 +271,10 @@ def _refusal(ctx: Any, source: TextSource, mode: str, publication: Publication, 
                    else "Reconcile your change with what came since") + f": pass expected_revision={current!r}."
                 + (f" {source.where}" if source.where else ""))
         if reason == "revision_required" and source.shown and not publication.not_text:  # resident: not resent
-            head += (f" Its text is not resent: {source.shown} carries it with this revision; "
-                     f"{read_call(source, current)} reads it.")
+            # The section was built when the request was; folded, withheld or older, it is not this revision's text.
+            head += (f" Its text is not resent: where {source.shown} is in your request whole and its revision line "
+                     "names this revision, that is the text; otherwise read it first with "
+                     f"{read_call(source, current)}.")
         else:
             head = _current(source, publication, head)
         return _answer(ctx, source, head, status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED")

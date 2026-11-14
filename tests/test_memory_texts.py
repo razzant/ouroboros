@@ -457,16 +457,18 @@ def test_a_missing_revision_on_identity_or_the_map_answers_with_the_revision_not
     ctx, current = _ctx(tmp_path), _sha(identity.read_bytes())
     missing = _update_identity(ctx, "Mine.")
     assert missing.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED: revision_required") and IDENTITY not in missing, missing
-    assert ("Its text is not resent: the resident ## Identity section carries it with this revision; "
-            f"memory_read(source='identity', version='{current}') reads it.") in missing, missing
+    assert ("Its text is not resent: where the resident ## Identity section is in your request whole and its revision "
+            "line names this revision, that is the text; otherwise read it first with "
+            f"memory_read(source='identity', version='{current}').") in missing, missing
     stale = _update_identity(ctx, "Mine.", "0" * 64)
     assert "revision_conflict" in stale and IDENTITY in stale and "not resent" not in stale, stale
     world = tmp_path / "memory" / "WORLD.md"
     world.write_bytes(f"{wprof.TITLE}\n\n{wprof.MEASURED_START}\n- probe\n{wprof.MEASURED_END}\n\n- a note\n".encode())
     refused = _update_world(ctx, "# Mine\n")
     assert "revision_required" in refused and "- a note" not in refused and "The map lives at " in refused, refused
-    assert f"the resident ## My World section carries it with this revision; memory_read(source='world', version=" \
-           f"'{_sha(world.read_bytes())}') reads it." in refused
+    assert ("where the resident ## My World section is in your request whole and its revision line names this "
+            f"revision, that is the text; otherwise read it first with memory_read(source='world', version="
+            f"'{_sha(world.read_bytes())}').") in refused, refused
     assert "- a note" in _update_world(ctx, "# Mine\n", "0" * 64)  # stale: the whole map, as before
     monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "data")
     pad = types.SimpleNamespace(project_id="atlas", task_id="t-1", drive_root=tmp_path, task_metadata={})
