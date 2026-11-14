@@ -19,7 +19,7 @@ def view_counts(snapshot, level):
     early = [item for item in room.get('lane2', ()) if item['first'] in gone.get('F1', ())]
     folded = {key for key, _rows in works(room) if any('work:' + key + suffix in gone.get('F2', ())
                                                      for suffix in (':progress', ':final'))}
-    lines = [task_gist_line(t) for t in task_gists_before_work_lines(room, gone)] + [
+    lines = [task_gist_line(t, room['room_id']) for t in task_gists_before_work_lines(room, gone)] + [
              task_line(item, folded=not gone.get('F7a') and item.get('task') in folded)
              for item in room.get('lane2', ()) if item not in early] + [
         line for group in snapshot.conversations if group['key'] not in lined

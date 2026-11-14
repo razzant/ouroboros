@@ -287,12 +287,102 @@ def test_governing_words_protect_rows_by_identity_never_by_substring(tmp_path, g
 
 
 @pytest.mark.parametrize("names, expected", [(None, ""), (("memory_read",), ""),
-    (("enable_tools",), "reachable through enable_tools"), (("list_available_tools",), "my parent task can read")])
+    (("enable_tools",), "(enable_tools loads memory_read if permitted)"),
+    (("list_available_tools",), "list_available_tools shows what this task can call)")])
 def test_floor_receipt_names_reachable_sources_and_never_promises_lossless_recall(names, expected):
     note = mf.floor_note(mv.FloorLevel((("F5", ("p",)),)), window_tokens=200_000, mode="nano", tool_names=names)
     assert expected in note and "Nothing is lost" not in note and "brings it back" not in note
+    assert "is reachable" not in note and "parent task" not in note  # no grant or reader the request does not carry
     assert "Read sources with memory_read" in note
     assert "chronicle_write" not in note
+
+
+@pytest.mark.parametrize("mode", ["max", "low"])
+def test_a_view_that_cut_nothing_still_says_nothing_outside_nano(mode):
+    """Max and Low keep their silence byte for byte: their requests send memory_read's schema whole."""
+    for names in (None, ("enable_tools",), ("memory_read",)):
+        assert mf.floor_note(mv.FULL_VIEW, window_tokens=200_000, mode=mode, tool_names=names) == ""
+
+
+LISTING_PATH = ("(memory_read was not among my tools when this view was rendered; list_available_tools shows what "
+                "this task can call)")
+
+
+@pytest.mark.parametrize("names, path", [
+    (("compact_context", "enable_tools", "list_available_tools"), "(enable_tools loads memory_read if permitted)"),
+    (("compact_context", "list_available_tools"), LISTING_PATH),
+    (("compact_context",), "(memory_read was not among my tools when this view was rendered)"),
+    (("compact_context", "enable_tools", "list_available_tools", "memory_read"), ""),
+    (None, "")])
+def test_a_nano_view_names_how_its_request_reaches_memory_read_even_when_it_cut_nothing(names, path):
+    """The owner's choice: Nano keeps memory_read on demand. A view that cut nothing still names the existing route
+    to it whenever its request lacks the schema -- the cue a quiet Nano lost -- and says nothing when the request
+    sends it or its schemas are unknown (no claim). The note promises no whole memory and no grant: a missing schema
+    is neither a missing permission nor missing memory, enable_tools loads the reader only where this task's policy
+    permits it, and a single row is no ``from`` alone."""
+    quiet = mf.floor_note(mv.FULL_VIEW, window_tokens=200_000, mode="nano", tool_names=names)
+    assert quiet == (f"### Memory check\nAddresses this view shows read with memory_read.\n{path}" if path else "")
+    assert not any(words in quiet for words in ("whole", "not missing", "Nothing is cut", "from=<row: address>"))
+    cut = mf.floor_note(mv.FloorLevel((("F5", ("p",)),)), window_tokens=200_000, mode="nano", tool_names=names)
+    assert cut.startswith("### Physical floor") and "### Memory check" not in cut and cut.endswith(path)
+
+
+def test_a_roomy_nano_projection_carries_the_memory_check_only_while_its_request_lacks_the_reader():
+    """The note reaches a real projection, priced with it, and leaves my story's bytes alone; once the request
+    sends memory_read (loaded by enable_tools) a narrowed rebuild says nothing more."""
+    snap = syn.snapshot(room_facts=syn.room("1", lane1=[syn.spoken(1, "human", 900)]))
+    sent = ("compact_context", "enable_tools", "list_available_tools")
+
+    def roomy(names):
+        return mf.render_view_for_mode(
+            snap, mode="nano", owner_mode="nano", window_tokens=1_000_000, known_window=True, output_reserve=8_192,
+            ratio=1.0, non_memory_tokens=1_000, tool_names=names)
+
+    fit = roomy(sent)
+    assert fit.facts["floor"]["steps"] == {} and "### Physical floor" not in fit.room
+    assert fit.room.endswith("\n\n### Memory check\nAddresses this view shows read with memory_read.\n"
+                             "(enable_tools loads memory_read if permitted)")
+    assert fit.story == mv.render_story(snap)  # the check is this room's block; my story keeps its bytes
+    assert roomy((*sent, "memory_read")).room == mv.render_room(snap)
+
+
+def test_a_selection_keeps_the_reader_path_of_the_request_that_follows_it(monkeypatch):
+    """compact_context(view_address=…) renders the view again (``select_view``): before, its floor note lost the
+    reader path, since no schema names reached it. It now names the path of the schemas the next request sends
+    (the loop's boundary passes them), else those its start priced (a held primary view), and claims nothing
+    when the start priced none."""
+    from ouroboros import capability_evidence as ce
+    from ouroboros import context_fit as cf
+
+    snap = syn.snapshot(story=syn.pages(3, 3_000), room_facts=syn.room("1", lane1=[syn.spoken(1, "human", 900)]))
+    core = cf.ContextCore("Required core", "Constitution", "b" * 4_000, "", "Identity", "f" * 1_000, '"Assignment"',
+                          False, memory_view_json=mv.snapshot_json(snap))
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    schemas = [{"type": "function", "function": {"name": name, "description": name, "parameters": {"type": "object"}}}
+               for name in ("compact_context", "enable_tools", "list_available_tools", "memory_read", "read_file")]
+
+    def start(tools):
+        return cf.build_context_fit_plan(None, core, {"id": "nano-room"}, preferred_mode="nano", tool_schemas=tools,
+            route_resolver=lambda *_a, **_kw: ({"provider": "test", "model": "test"},
+                                              ce.CapabilityEvidence(1_000_000, "confirmed", "metadata", "nano-route")))
+
+    path = "(enable_tools loads memory_read if permitted)"
+
+    def floor(plan):  # the note closes the room block: its lines, from its heading to the next blank line
+        text = "\n\n".join(block["text"] for block in plan.messages_for("nano")[0]["content"])
+        start_at = max(text.find("### Memory check"), text.find("### Physical floor"))
+        end = text.find("\n\n", start_at)
+        return "" if start_at < 0 else text[start_at:] if end < 0 else text[start_at:end]
+
+    plan = start(schemas)
+    assert plan.initial_mode == "nano" and floor(plan) == (
+        f"### Memory check\nAddresses this view shows read with memory_read.\n{path}")
+    address = next(f"{step}:{ident}" for step, ident, *_ in mf.floor_elements(snap) if step == "F5")
+    for names, shown in ((None, True), (("compact_context", "enable_tools", "list_available_tools"), True),
+                         (("compact_context", "enable_tools", "memory_read"), False)):
+        selected = floor(mf.select_view(plan, "nano", [address], tool_names=names))
+        assert selected.startswith("### Physical floor\nNano cuts for ") and selected.endswith(path) is shown, names
+    assert path not in floor(mf.select_view(start(None), "nano", [address]))
 
 
 def test_list_forms_do_not_address_new_or_immune_rows_and_stay_silent_when_fit():

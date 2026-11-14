@@ -269,7 +269,7 @@ def _holding_room(snapshot, level):
     for task in room.get("lane2", ()):
         if task.get("gist") and (task["first"] not in gone.get("F1", ()) or task["first"] in only_gists) and task.get("task") not in folded:
             gist = task["gist"]
-            hold("task gists", task_gist_line(task) if task["first"] in only_gists else task_line(task), f"memory_read(room_id='{gist['room_id']}', rows=true, "
+            hold("task gists", task_gist_line(task, room["room_id"]) if task["first"] in only_gists else task_line(task), f"memory_read(room_id='{gist['room_id']}', rows=true, "
                  f"from='{gist['address']}', to='{gist['address']}')", label="work " + task["task"])
     grouped_rows = {r["address"] for r in aggregate}
     for row in room.get("lane1", ()):
@@ -377,13 +377,12 @@ def _hold_conversations(snapshot, gone, hold, price, counts):
                 lines = conv._gist_lines(group, gists=gists, replies=data["replies"] if form else None)
                 pieces = []
                 for (work, gist), line in zip(gists, lines):
-                    spans = data["replies"].get(work, gist["address"]) if form else gist["address"]
-                    readers = []
-                    for span in spans.split(", "):
-                        ends = span.split(" → ")
-                        readers.append((_rows_reader(ends[0].partition("@")[0].removeprefix("row:"),
-                                                     [{"address": ends[0]}, {"address": ends[-1]}]), 1))
-                    pieces.append((line, readers))
+                    # Each room showing its replies here reads its part; else the telling's own row reads in the room
+                    # the capture found it in (the chat in its address only where a view recorded no room).
+                    own = gist.get("room_id") or gist["address"].partition("@")[0].removeprefix("row:")
+                    spans = (form and data["reply_rooms"].get(work)) or [(own, gist["address"], gist["address"])]
+                    pieces.append((line, [(_rows_reader(room, [{"address": first}, {"address": last}]), 1)
+                                          for room, first, last in spans]))
                 _holding_pieces(entries, "work gists", pieces, group["label"])
             if not form:
                 for remote in group["rooms"]:

@@ -91,7 +91,7 @@ def test_build_llm_messages_repartitions_stable_vs_dynamic_sections():
     assert "## Memory Registry" not in stable_text
 
     assert "## Scratchpad" in dynamic_text
-    assert "## This room (Main)" in dynamic_text and "## My story" not in dynamic_text
+    assert "## This room (Main [chat_id=1])" in dynamic_text and "## My story" not in dynamic_text
     for gone in ("## Dialogue History", "## Dialogue Summary", "## Recent chat"):
         assert gone not in stable_text and gone not in dynamic_text, gone
     assert "## Memory Registry (what I know / don't know)" in dynamic_text
@@ -683,6 +683,11 @@ WORK_LIVES = {
         {"entered_model": CX, "returned_to_model": OPUS}, 0),
     "the_mind_folds": (Life(places=(_A,), reads=(_WIDE,) * 3, acts=((3, ("fold",)),)),
                        _ON_A + r" history_rewritten@a( append@a)*", {"history_rewritten": "compaction"}, 0),
+    # The owner's Nano: its start carries the reader's path while its schemas lack memory_read, nothing else moves it.
+    "an_owners_nano": (Life(places=(_A,), reads=(8_000,) * 3, mode="nano", keeps_mode=True), _ON_A, {}, 0),
+    "the_mind_folds_in_an_owners_nano": (  # parts the size Nano's own targets deliver whole
+        Life(places=(_A,), reads=(8_000,) * 3, acts=((3, ("fold",)),), mode="nano", keeps_mode=True),
+        _ON_A + r" history_rewritten@a( append@a)*", {"history_rewritten": "compaction"}, 0),
     "a_200k_window_with_a_small_memory": (Life(places=(_a(window=200_000),), reads=(30_000,) * 4, memory=0.25),
                                           _ON_A + _WALLS + "?", {}, 0),
     "a_second_work_on_the_same_key": (Life(places=(_OP,), primary="opus", reads=(8_000,), second=True),
