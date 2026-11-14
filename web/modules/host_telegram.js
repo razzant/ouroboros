@@ -104,7 +104,11 @@ export function createTelegramHost({
     // ---- the host's Back control follows the layer stack and closes one layer
     const onBack = () => { layers?.back?.('host-back'); };
     function syncBack(snapshot = { size: layers?.size?.() || 0 }) {
-        callOn('BackButton', snapshot.size > 0 ? 'show' : 'hide', '6.1');
+        const back = snapshot.size > 0;
+        callOn('BackButton', back ? 'show' : 'hide', '6.1');
+        // Which control Telegram draws at the start of its row (its Back or its Close): the room's bar keeps clear of it
+        // (style.css "Telegram's shared row").
+        if (doc?.documentElement?.dataset) doc.documentElement.dataset.telegramBack = back ? 'back' : 'close';
     }
 
     // ---- keyboard recovery: a visual viewport under ~100px with a focused field (Telegram-iOS #2235)
@@ -206,7 +210,10 @@ export function createTelegramHost({
         stopWaiting();
         while (disposers.length) { try { disposers.pop()(); } catch { /* already gone */ } }
         bound = false;
-        if (doc?.documentElement?.dataset) delete doc.documentElement.dataset.telegramFullscreen;
+        if (doc?.documentElement?.dataset) {
+            delete doc.documentElement.dataset.telegramFullscreen;
+            delete doc.documentElement.dataset.telegramBack;
+        }
     }
 
     return { bind, dispose, bound: () => bound, active: () => isTelegramHost({ win, doc }), recoverKeyboard, paintChrome, mirrorInsets };
