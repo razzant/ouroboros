@@ -2250,7 +2250,7 @@ export function createChatInstance({
         const reportActivity = historyLoaded && !archived;
         const knownRows = reportActivity ? new Set(messagesDiv.children) : null;
         const knownCards = new Map([...liveCardRecords].map(([id, record]) => [id, reportActivity
-            ? { projection: captureLiveCardProjection(record), items: record.items.length } : null]));
+            ? { projection: captureLiveCardProjection(record), items: record.items.length, source: record.latestSourceTs } : null]));
         _historyReplayActive = true;
         _historyAppending = archived;
         liveCardBound.beginReplay();
@@ -2473,9 +2473,13 @@ export function createChatInstance({
                 measure(() => { const kept = keepSelection(document); return dirty.map(record => ({ scroll: timelineScroll(record), kept })); },
                     (before) => dirty.forEach((record, index) => renderLiveCardTimeline(record, before[index])));
                 return reportActivity && ([...messagesDiv.children].some(node => node.classList.contains('chat-bubble') && !knownRows.has(node))
-                    || [...liveCardRecords].some(([id, record]) => record.root?.isConnected
-                        && (liveCardProjectionChanged(knownCards.get(id)?.projection || null, record)
-                            || record.items.length > (knownCards.get(id)?.items || 0))));
+                    || [...liveCardRecords].some(([id, record]) => {
+                        const before = knownCards.get(id);
+                        // Reconciliation can change liveness or placement of words already seen; that is no arrival.
+                        return record.root?.isConnected && (record.items.length > (before?.items || 0)
+                            || (!before?.projection || isoMicros(record.latestSourceTs) > isoMicros(before.source))
+                                && liveCardProjectionChanged(before?.projection || null, record));
+                    }));
             }, { remoteContent: reportActivity });
         } finally {
             _historyRow = null;

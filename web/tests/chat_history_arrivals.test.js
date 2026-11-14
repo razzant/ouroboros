@@ -654,13 +654,13 @@ test('the saved preview takes the newest page, then merges what arrived by ident
     assert.equal(localStorage.getItem(PREVIEW_KEY), null, 'no fragment stands for the room');
 });
 
-for (const mode of ['after', 'newest']) for (const following of [false, true]) {
-    test(`returning by ${mode} marks unseen progress only for a history reader (following=${following})`, async (t) => {
+for (const mode of ['after', 'newest']) for (const following of [false, true]) for (const confirmed of [false, true]) {
+    test(`returning by ${mode} marks unseen progress only for a history reader (following=${following}, confirmed=${confirmed})`, async (t) => {
         const s = historyServer();
         s.say(1); s.work(2);
         const r = openRoom(t, s);
-        // The census confirms this live card; replaying its row adds no liveness warning either.
-        r.instance.hydrateStateSnapshot({ active_chat_activities: [{ activity_id: 'task-1', chat_id: 2,
+        // A census can confirm the work; without it replay may reconcile liveness, but adds no unseen words.
+        if (confirmed) r.instance.hydrateStateSnapshot({ active_chat_activities: [{ activity_id: 'task-1', chat_id: 2,
             kind: 'managed_task', phase: 'working', status: 'running' }], active_chat_activities_complete: false,
             supervisor_ready: true });
         let revision = 0;
