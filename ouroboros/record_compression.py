@@ -40,14 +40,14 @@ is neither a candidate nor reaped. A folder it cannot list is counted (``unreada
 ``in_scope`` names the evidence and seat places to read-only lineage staging, which streams uncompressed
 records where compression is supported; that staging copies task drives and artifact folders, never ``archive/``.
 
-Pacing: at most ``FILES_PER_RUN`` files past the stat floor a run, a stop check between files, the cursor
-durable in the job row; a run reads and rewrites at the utility disk tier (its own thread, its ``ditto``).
+Pacing: at most ``FILES_PER_RUN`` files read a run (a file ``artifact_storage.UNREAD_SKIPS`` keeps costs none), a stop
+check between files, the cursor durable in the job row; a run reads and rewrites at the utility disk tier (its own thread, its ``ditto``).
 The first pass walks every task folder and seat home (the backlog); later passes look at the rows written
 terminal since the counter the last one covered, the seat homes changed since it looked and what still
 waits for its task (a task written again, or a home changed, is walked from its start). ``COVERAGE`` names
-the evidence scope a position was earned under: a row from another scope, done or stopped partway, walks
-every task folder again from its first, since no terminal write will name an old task; what it already
-compressed costs one stat. The log plane walks once a server generation, after the other two: the row's
+the scope and floor a position was earned under: a row from another one, done or stopped partway, walks
+every task folder and seat home again from its first, since no terminal write will name an old task and a
+record the floor kept is not asked again; what it already compressed costs one stat. The log plane walks once a server generation, after the other two: the row's
 ``generation`` is the ``startup_recovery`` generation its walk ended under, ``witness`` what it listed
 then. Due while a pass is unfinished, new terminal writes arrived, the server generation is another, the
 coverage differs or another platform's ``unsupported`` is on the row, never by elapsed time or a rotation;
@@ -69,11 +69,13 @@ from ouroboros import artifact_storage, maintenance_jobs, store
 from ouroboros.temp_sweep import is_atomic_temp
 
 JOB = "record_compression"
-COVERAGE = 2  # the evidence plane's scope; a row without it was covered by the scope before retained sources
+# The scope and floor a position was earned under: 2 added retained sources to the evidence plane; 3 asks a
+# once-cloned record whether a clone still lives, where the mark alone had kept it for good (both planes).
+COVERAGE = 3
 # Task evidence (in the Task results place), reviewer seat homes (in App state), closed log segments (in Archives).
 PLANES = ("evidence", "seats", "logs")
 _WAITING = PLANES[:2]  # the planes whose records wait for their task by name; a log segment waits for no task
-FILES_PER_RUN = 2_000  # files past the stat floor one run reads (and mostly rewrites): the rest waits a run
+FILES_PER_RUN = 2_000  # files one run reads (and mostly rewrites): the rest waits a run
 _SEATS = pathlib.Path("state") / "review_checkouts" / "seats"
 _SEGMENT = re.compile(r"(.+)_\d{8}T\d{6}(?:_\d+)?\.jsonl")  # the rotator's name; its chain is the part before the stamp
 
@@ -186,7 +188,8 @@ def in_scope(root: Any, path: Any) -> bool:
     """Whether the evidence or seat plane may one day ask the floor about the file at PATH: a task folder's
     evidence or a seat home's evidence folders under ROOT (the data root), never through ``.git``. By place alone,
     whatever its size, name, task state or today's floor, so a small live record that grows is one. Read-only lineage
-    staging streams one not yet compressed: an APFS clone would leave it ``shared`` for good (``artifact_storage``).
+    staging streams one not yet compressed: an APFS clone leaves it ``shared`` while the clone lives, and for good
+    where the system cannot count clones (``artifact_storage._may_share``).
     A log segment is no such place: that staging copies only what ``tool_access.lineage_read_roots`` names. A path
     that cannot be resolved answers True: not knowing is no licence to share blocks, and a stream costs only time."""
     try:
@@ -281,7 +284,7 @@ class _Run:
                 continue  # gone since the listing
             path = pathlib.Path(entry.path)
             outcome = artifact_storage.compression_outcome(path, owned=owned, background=True)
-            if outcome not in artifact_storage.STAT_SKIPS:
+            if outcome not in artifact_storage.UNREAD_SKIPS:
                 self.left -= 1
             if outcome == "compressed":
                 tally["compressed"] += 1
@@ -455,14 +458,14 @@ def run(root: Any, should_stop: Callable[[], bool]) -> Dict[str, Any]:
 
 def _pass(root: pathlib.Path, row: Dict[str, Any], should_stop: Callable[[], bool]) -> Dict[str, Any]:
     """The run's planes in order; its position, cursor, waits, holds and totals go to the job row. A position
-    earned under another ``COVERAGE`` is dropped here, and durably only by a run that ends: one that throws
-    leaves the old row, still due. A seat pass it interrupts keeps what it owes by name; the log plane walks
+    earned under another ``COVERAGE`` is dropped here (both planes start their backlog again), and durably only
+    by a run that ends: one that throws leaves the old row, still due. The log plane walks
     only once the other two owe nothing, and its ``generation`` and ``witness`` move only when its walk ends, to
     the server generation current at the write that records them."""
     from ouroboros.utils import utc_now_iso
 
     if row.get("coverage") != COVERAGE:
-        row = {**row, "counter": None, "cursor": None, "began": None}
+        row = {**row, "counter": None, "cursor": None, "began": None, "since": None}
     counter, now, startup = _counter(root), time.time(), _startup(root)
     generation = _generation(startup)
     began = row.get("began") or {"counter": counter, "at": now}  # a backlog pass keeps its start facts
@@ -475,7 +478,7 @@ def _pass(root: pathlib.Path, row: Dict[str, Any], should_stop: Callable[[], boo
     owed_seats_now = (row.get("owed") or {}).get("seats") if owed_evidence is not None else owed_seats
     facts: Dict[str, Any] = {  # a backlog resumes at its cursor; a later pass owes its rest by name
         "state": "pending" if stopped else "done", "cursor": job.cursor if stopped else None,
-        "coverage": COVERAGE, "counter": row.get("counter"),
+        "coverage": COVERAGE, "counter": row.get("counter"), "since": row.get("since"),
         "generation": row.get("generation") if stopped else generation,
         "waiting": {plane: sorted(job.waiting[plane]) for plane in _WAITING},
         "owed": {"evidence": [] if backlog["evidence"] else owed_evidence or [],
