@@ -9138,6 +9138,9 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     justify-content: center;
     min-height: 16px;
 }
+/* A row with nothing to say under its name keeps its lines where every row has them: the name and the time on the
+   first, the mark on the second line's end (absolute, below), so a one-line name never drops the time onto the mark. */
+.nav-project-row[data-solo] { justify-content: flex-start; }
 .nav-project-row[data-solo] .nav-project-line1 { align-items: flex-start; }
 .nav-project-row[data-solo] .nav-row-label {
     white-space: normal;
