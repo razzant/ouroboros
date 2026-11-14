@@ -1,8 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { bindHeaderControlPlacement, bindPageHeader, renderMobileNavToggle, renderPageHeader } from '../modules/page_header.js';
-import { settingsReturn } from '../modules/dashboard.js';
+import { bindHeaderControlPlacement, bindPageBack, bindPageHeader, renderMobileNavToggle, renderPageHeader } from '../modules/page_header.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 import { createRoomHeader } from '../modules/chat_header.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
@@ -30,13 +29,13 @@ test('one header: no icon, no caption line, the tabs are written under the row, 
     assert.match(tabbed, /data-sidebar-names>/);
     assert.doesNotMatch(tabbed, /data-empty/);
     // The Back slot (placePageBack) stands before the lead, both after the hidden title.
-    assert.match(tabbed, /<\/h2>\s*<\/div><div class="app-page-back" data-page-back><\/div><div class="app-page-lead"><\/div>/, 'the Back slot, then the lead slot, follow the hidden title');
+    assert.match(tabbed, /<\/h2>\s*<\/div><span class="app-page-return" data-page-return><\/span><div class="app-page-lead"><\/div>/, 'the Back slot, then the lead slot, follow the hidden title');
     const acting = renderPageHeader({ title: 'Files', actionsHtml: '<button>Refresh</button>' });
     assert.match(acting, /data-sidebar-names>/);
     assert.doesNotMatch(acting, /data-empty/);
     const project = renderPageHeader({ title: '', titleId: 'project-panel-title', named: false, trailingHtml: '<button>×</button>' });
     assert.match(project, /<h2 class="app-page-title" id="project-panel-title"><\/h2>/);
-    assert.doesNotMatch(project, /data-sidebar-names|data-empty|"app-page-lead"|data-page-back/, 'a Project is named by its owner: its name stays');
+    assert.doesNotMatch(project, /data-sidebar-names|data-empty|"app-page-lead"/, 'a Project is named by its owner: its name stays');
     assert.match(project, /app-page-trailing/);
     assert.match(project, /data-mobile-nav-toggle/, 'a header shows ☰ unless its room carries it in the composer');
     assert.match(renderPageHeader({ title: 'x', titleId: '"><i>' }), /id="&quot;&gt;&lt;i&gt;"/);
@@ -263,34 +262,26 @@ test('the optional toolbar class cannot create an HTML attribute or node', () =>
     assert.match(html, /&lt;img/);
 });
 
-test('a destination return is placed only in stack and follows both layout crossings', (t) => {
+test('a named return occupies one shell slot in both layouts, and clearing releases it', (t) => {
     const { mount, window } = setup(t);
-    window.ouroLayout = { layout: 'docked' };
     const page = new NodeStub(); page.className = 'page';
     page.innerHTML = renderPageHeader({ page: 'skills', tabsHtml: '<div role="tablist"></div>' });
-    const query = page.querySelector.bind(page);
-    page.querySelector = selector => query(selector.replace(':scope > ', ''));
     mount.append(page);
     const header = page.querySelector('.app-page-header');
-    const slot = header.querySelector('[data-page-back]');
-    const tabs = page.querySelector('.app-page-tabs');
-    const back = settingsReturn();
-    t.after(() => back.clear());
-    back.show(page, 'models');
-    let button;
-    for (const layout of ['docked', 'stack', 'docked', 'stack']) {
-        window.ouroLayout.layout = layout;
-        window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout } }));
-        assert.equal(slot.children.length, layout === 'stack' ? 1 : 0, `${layout}: the real return slot`);
-        assert.equal(header.hasAttribute('data-back'), layout === 'stack', 'header state follows placement');
-        assert.equal(tabs.querySelector('[data-dashboard-back]'), null, 'Back never moves into the tabs');
-        if (layout === 'stack') {
-            button ||= slot.firstChild;
-            assert.equal(slot.firstChild, button, 'the same return control comes back');
-            assert.equal(button.getAttribute('aria-label'), 'Back to Settings');
-        }
+    header.toggleAttribute = (name, on) => on ? header.setAttribute(name, '') : header.removeAttribute(name);
+    let notify, top = { back: { label: 'Settings', title: 'Settings › Tools' } }, presses = 0;
+    const off = bindPageBack({ layers: { page: () => top, onChange: fn => { notify = fn; return () => {}; }, back: () => presses++ },
+        currentHeader: () => header });
+    t.after(off);
+    const button = header.querySelector('[data-shell-back]');
+    for (const layout of ['docked', 'stack', 'docked']) {
+        window.ouroLayout = { layout }; notify();
+        assert.equal(header.querySelector('[data-shell-back]'), button, 'one retained control, never in the tab rail');
+        assert.equal(button.getAttribute('aria-label'), 'Back to Settings › Tools');
+        assert.equal(button.querySelector('.shell-back-name').textContent, 'Settings');
     }
-    back.clear();
-    window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout: 'stack' } }));
-    assert.deepEqual([slot.children.length, header.hasAttribute('data-back')], [0, false], 'clearing releases the listener');
+    button.dispatchEvent({ type: 'click' }); assert.equal(presses, 1);
+    top = null; notify();
+    assert.equal(header.querySelector('[data-shell-back]'), null);
+    assert.equal(header.hasAttribute('data-return'), false);
 });

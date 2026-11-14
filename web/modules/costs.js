@@ -519,7 +519,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
     // Each door opens its Settings page, which leads back here.
     page.querySelector('.costs-subscriptions').addEventListener('click', (event) => {
         const path = event.target.closest?.('[data-costs-account]')?.dataset.costsAccount;
-        if (path !== undefined) void openSettings?.(path, { back: { label: 'Costs', go: () => openDashboardTab?.('costs') } });
+        if (path !== undefined) void openSettings?.(path);
     });
     // The allowance's doors: a held wake's card in Main, and the Consciousness tab.
     page.querySelector('.costs-meters').addEventListener('click', (event) => {

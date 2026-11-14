@@ -3391,9 +3391,10 @@ Telegram, and nothing depends on a haptic (`web/modules/haptics.js`).
 
 ### Layers and dismissal
 
-The drawer, the Project panel and a file Files shows
-alone on a narrow page are layers in one stack (`web/modules/layers.js`); the file is part of the page, so it lies
-under every overlay, also when its read lands after the drawer opened. Dialogs, menus and the work list keep their own
+A jump leaves a named return in the one stack (`web/modules/layers.js`), under overlays. Every move except a sidebar
+or drawer choice, a section's own list row or a tab is a jump; another stacks. Sidebar and drawer choices clear the
+returns; section rows and tabs keep them. Returning restores the page, its levels, reading place and pressed row.
+The drawer, Project panel, section levels and a file shown alone in Files use that same stack. Dialogs, menus and the work list keep their own
 Escape and outside-press dismissal. Escape, ×, a press on the scrim close the
 topmost layer and only it; a Project that covers Main (the phone's card, a finger's
 docked column) is modal with the docked sidebar live, its covered room inert once it

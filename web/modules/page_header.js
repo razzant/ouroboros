@@ -74,7 +74,7 @@ export function renderPageHeader({
             <div class="app-page-title-block">
                 <div class="app-page-title-row">
                     <h2 class="app-page-title"${id}>${escapeHtml(words)}</h2>
-                </div>${named || leadHtml ? `<div class="app-page-back" data-page-back></div><div class="app-page-lead">${leadHtml}</div>` : ''}
+                </div>${!leadHtml ? '<span class="app-page-return" data-page-return></span>' : ''}${named || leadHtml ? `<div class="app-page-lead">${leadHtml}</div>` : ''}
             </div>
             ${toolbar}
             ${trailing}
@@ -89,35 +89,43 @@ export function renderPageHeader({
  * holding the chevron-left glyph at 20 px, named for where it leads in its tooltip and accessible name. `attrs` are
  * the caller's hooks (a data attribute its handler finds it by).
  */
-export function renderBackControl({ to = '', attrs = '' } = {}) {
-    const name = to ? `Back to ${to}` : 'Back';
-    return `<button type="button" class="shell-icon-control shell-back" ${attrs} aria-label="${escapeHtml(name)}" title="${escapeHtml(name)}">${SHELL_ICONS.back}</button>`;
+export function renderBackControl({ to = '', title = to, attrs = '' } = {}) {
+    const name = title ? `Back to ${title}` : 'Back';
+    return `<button type="button" class="shell-icon-control shell-back" ${attrs} aria-label="${escapeHtml(name)}" title="${escapeHtml(name)}">${SHELL_ICONS.back}<span class="shell-back-name">${escapeHtml(to)}</span></button>`;
 }
 
-/**
- * The header's Back slot (renderPageHeader writes it before the lead): `control` stands there, so it never scrolls
- * away with a lead that is a scroller (Dashboard's tabs, Files' location). settingsReturn places a destination return
- * only in the stack layout: the header's one leading control where ☰ stood (`.app-page-header[data-back]`),
- * so a page that leads back (Skills opened from Settings) has one leading control in one row, its tabs under it as
- * they were. Returns the disposer, which takes the control away.
- */
-export function placePageBack(header, control) {
-    const slot = header?.querySelector?.('[data-page-back]');
-    if (!slot || !control) return () => {};
-    slot.replaceChildren(control);
-    header.setAttribute('data-back', '');
-    return () => {
-        slot.replaceChildren();
-        header.removeAttribute('data-back');
-    };
-}
-
-/** Point an existing Back control somewhere else: its tooltip and accessible name follow. */
-export function setBackControlTarget(button, to = '') {
-    if (!button) return;
-    const name = to ? `Back to ${to}` : 'Back';
-    button.setAttribute('aria-label', name);
-    button.title = name;
+/** The shell paints the top page layer in the page column's one slot. Placement is a writer fact; late
+ * children never decide layout through :has(:empty). Levels and jumps use the same control and Back input. */
+export function bindPageBack({ layers, currentHeader, doc = document, win = window }) {
+    let previous = null;
+    function paint() {
+        const header = currentHeader();
+        if (previous && previous !== header) {
+            previous.removeAttribute('data-return');
+            previous.querySelector('[data-page-return]')?.replaceChildren();
+        }
+        previous = header;
+        if (!header) return;
+        const slot = header.querySelector('[data-page-return]');
+        const back = layers.page()?.back;
+        header.toggleAttribute('data-return', Boolean(back));
+        if (!slot) return;
+        if (!back) { slot.replaceChildren(); return; }
+        const title = `Back to ${back.title || back.label}`;
+        let button = slot.firstElementChild;
+        if (!button) {
+            slot.innerHTML = renderBackControl({ to: back.label, title: back.title || back.label, attrs: 'data-shell-back' });
+            button = slot.firstElementChild;
+            button.addEventListener('click', () => layers.back('control'));
+        }
+        button.setAttribute('aria-label', title);
+        button.title = title;
+        button.querySelector('.shell-back-name').textContent = back.label;
+    }
+    const off = layers.onChange(paint);
+    win.addEventListener('ouro:page-shown', paint);
+    paint();
+    return () => { off(); win.removeEventListener('ouro:page-shown', paint); };
 }
 
 /**

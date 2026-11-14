@@ -1,5 +1,5 @@
-import { bindTabStrip, placePageBack, renderBackControl, renderPageHeader } from './page_header.js';
-import { currentLayout, onLayoutChange, sectionHoldsTwoPanes } from './layout.js';
+import { bindTabStrip, renderPageHeader } from './page_header.js';
+import { sectionHoldsTwoPanes } from './layout.js';
 import { fluentIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { bindSettingRows, readSettings, settingsRow, settingsSnapshot } from './settings_controls.js';
@@ -24,7 +24,6 @@ const DASHBOARD_TABS = [
 // data-dashboard-tab="activity", data-dashboard-tab="consciousness", data-dashboard-tab="costs",
 // data-dashboard-tab="updates", data-dashboard-tab="storage", and
 // data-dashboard-tab="evolution" from DASHBOARD_TABS at runtime.
-const BACK_LAYER = 'dashboard-back';
 const LEVEL_LAYER = 'dashboard-level';
 // Each page's glyph (Fluent Filled, as the Settings rows that lead to the same pages wear).
 const ROW_GLYPHS = {
@@ -143,86 +142,13 @@ export function focusSettingRow(panel, id) {
 }
 
 /**
- * The way back to Settings from a place a door of Settings opened (PINS §2): a Dashboard tab, or a page of its own
- * (Circles, Skills: settings.js `leave`). The app's one Back (page_header.js renderBackControl), "Back to Settings",
- * icon only, in the place's header Back slot (page_header.js placePageBack) in the stack layout, never inside a lead
- * that scrolls. A page with no header keeps it as a first row of `host`. Docked, the sidebar is the way back: no
- * return control or layer is placed. In stack, one `page: true` layer (`id`) lets Escape and the system's Back return
- * too. Returning leaves a focused field first, so a typed value is saved as it would be on leaving it; leaving the tab or
- * the page any other way drops it (its owner calls `clear`). Answers `{ show(host, path, before), clear() }`.
- */
-export function settingsReturn({ layers = null, openSettings = null, id = BACK_LAYER, place = null } = {}) {
-    let control = null;
-    let scope = null;
-    let unplace = null;
-    let offLayout = null;
-    const remove = () => {
-        unplace?.();
-        unplace = null;
-        control?.remove();
-        control = null;
-        layers?.remove(id);
-    };
-    const clear = () => {
-        offLayout?.();
-        offLayout = null;
-        remove();
-        scope = null;
-    };
-    const go = (path) => {
-        const field = document.activeElement;
-        if (field && scope?.contains(field)) field.blur?.();
-        clear();
-        void openSettings?.(path);
-    };
-    const show = (host, path, before = host.firstChild) => {
-        clear();
-        const holder = document.createElement('div');
-        holder.innerHTML = renderBackControl({ to: 'Settings', attrs: 'data-dashboard-back' });
-        const button = holder.querySelector('[data-dashboard-back]') || holder.firstElementChild;
-        button.addEventListener('click', () => go(path));
-        const page = host.closest?.('.page') || host;
-        const header = page.querySelector(':scope > .app-page-header');
-        scope = host;
-        let appliedLayout = null;
-        const sync = (layout = currentLayout()) => {
-            if (layout === appliedLayout) return;
-            appliedLayout = layout;
-            const steps = () => {
-                remove();
-                if (layout !== 'stack') return;
-                // The Dashboard keeps its own slot before the open page's name.
-                const own = place?.(button);
-                if (own) {
-                    unplace = own;
-                    control = button;
-                } else if (header?.querySelector('[data-page-back]')) {
-                    unplace = placePageBack(header, button);
-                    control = button;
-                } else {
-                    control = document.createElement('div');
-                    control.className = 'dashboard-back';
-                    control.append(button);
-                    host.insertBefore(control, before);
-                }
-                layers?.push({ id, el: host, page: true, modal: false, focus: false, opener: null, onClose: () => go(path) });
-            };
-            if (layers?.batch) layers.batch(steps); else steps();
-        };
-        sync();
-        offLayout = onLayoutChange(sync);
-    };
-    return { show, clear };
-}
-
-/**
  * The Dashboard: a place with seven pages, drawn as Settings is (ui.css "The section list"). Its pages are the rows of
  * one list, a vertical tablist whose rows keep the `[data-dashboard-tab]` hooks; the open page is that row's panel.
  * The place's box decides the layout: from 40rem the list stands beside the open page (never an empty page: the one
  * last shown, Logs the first time) and the header's band names that page over it; narrower, the Dashboard opens as
  * its list, and a pressed row opens its page as a level (`☰` gives way to Back, then the page's name, in one row),
  * one `page: true` layer, so Escape, the system's Back and Telegram's Back return to the list. A page opened from a
- * Settings row (`activateTab(name, { back })`) gets "Back to Settings" before its name instead. Each row says its
+ * jump gets the shell's named return instead. Each row says its
  * page's current answer where the Settings home already knows it (settings_home.js homeAnswers): no read starts here.
  */
 export function initDashboard({ state, layers = null, openSettings = null, stateSnapshots = null }) {
@@ -234,7 +160,7 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     // The band: over the list nothing; over the page `(‹) <page>` in the header's one title style.
     const leadHtml = `<div class="section-lead dashboard-lead">
             <span class="section-lead-col section-lead-rail"></span>
-            <span class="section-lead-col section-lead-page"><span class="dashboard-lead-back" data-dashboard-back-slot></span>${renderBackControl({ to: 'Dashboard', attrs: 'data-dashboard-list-back' })}<span class="app-page-lead-title" data-dashboard-lead-name></span></span>
+            <span class="section-lead-col section-lead-page"><span class="app-page-return" data-page-return></span><span class="app-page-lead-title" data-dashboard-lead-name></span></span>
         </div>`;
     page.innerHTML = `
         ${renderPageHeader({ page: 'dashboard', leadHtml })}
@@ -262,8 +188,6 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     const panels = Array.from(page.querySelectorAll('.dashboard-panel'));
     const rows = Array.from(list.querySelectorAll('[data-dashboard-tab]'));
     const leadName = page.querySelector('[data-dashboard-lead-name]');
-    const listBack = page.querySelector('[data-dashboard-list-back]');
-    const backSlot = page.querySelector('[data-dashboard-back-slot]');
     const tabStrip = bindTabStrip(list, { dataAttr: 'data-dashboard-tab', onChange: (name) => showTab(name, { asLevel: true }) });
     const disposeFade = bindScrollFade(rail);
     // Two panes from a 40rem box where the engine draws them (ui.css @container sectionplace), as Settings.
@@ -271,19 +195,12 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     let level = false;   // an explicit choice stays open when two panes narrow to one
     let layered = false;
 
-    // The way back to Settings stands in the band's Back slot, before the page's name.
-    const back = settingsReturn({ layers, openSettings, place: (button) => {
-        backSlot.replaceChildren(button);
-        paint();
-        return () => { backSlot.replaceChildren(); paint(); };
-    } });
-
     function syncLayer() {
         if (!layers) return;
-        const wanted = level && !panes() && state.activePage === 'dashboard' && !backSlot.firstChild;
+        const wanted = level && !panes() && state.activePage === 'dashboard' && !layers.returnPage?.();
         if (wanted === layered) return;
         layered = wanted;
-        if (wanted) layers.push({ id: LEVEL_LAYER, el: panelsEl, page: true, modal: false, focus: false, opener: null, onClose: () => closeLevel() });
+        if (wanted) layers.push({ id: LEVEL_LAYER, el: panelsEl, page: true, modal: false, focus: false, opener: null, back: { label: 'Dashboard' }, onClose: () => closeLevel() });
         else layers.remove(LEVEL_LAYER);
     }
 
@@ -293,7 +210,6 @@ export function initDashboard({ state, layers = null, openSettings = null, state
         shell.dataset.sectionView = view;
         const tab = DASHBOARD_TABS.find((each) => each.value === state.dashboardActiveSubtab);
         if (leadName) leadName.textContent = tab?.label || '';
-        if (listBack) listBack.hidden = panes() || !level || Boolean(backSlot.firstChild);
         syncLayer();
     }
 
@@ -316,17 +232,15 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     function openLevel() {
         level = true;
         paint();
-        if (!panes()) (listBack && !listBack.hidden ? listBack : panelsEl).focus?.({ preventScroll: true });
+        if (!panes()) panelsEl.focus?.({ preventScroll: true });
     }
 
     function closeLevel() {
         if (!level) return;
         level = false;
-        back.clear();
         paint();
         rows.find((row) => row.dataset.dashboardTab === state.dashboardActiveSubtab)?.focus?.({ preventScroll: true });
     }
-    listBack?.addEventListener('click', () => closeLevel());
 
     // Pressing even the already selected row chooses its page, so it stays open if the list later gives way.
     list.addEventListener('click', (event) => {
@@ -336,8 +250,6 @@ export function initDashboard({ state, layers = null, openSettings = null, state
 
     const onPageShown = (event) => {
         if (event.detail?.page !== 'dashboard') {
-            back.clear();
-            level = false;
             paint();
             return;
         }
@@ -363,18 +275,16 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     }) : null;
     [page, panelsEl, list].forEach((box) => resize?.observe(box));
 
-    /** Show a tab's page. `back`, a Settings path ('' is its home), gives the page a Back there before its name;
-     *  without it there is none. `row` brings that row into view and focuses its control. `asLevel`: in one column
+    /** Show a tab's page. `row` reveals its control. `asLevel`: in one column
      *  the page is shown as a level, made visible before its row is revealed (a hidden pane scrolls and focuses
      *  nothing). */
-    function showTab(tabName, { row = '', back: path, asLevel = false } = {}) {
+    function showTab(tabName, { row = '', asLevel = false } = {}) {
         const name = tabName || 'logs';
         if (!tabStrip.select(name)) return false;
         const panel = panels.find((candidate) => candidate.dataset.dashboardPanel === name);
         // One change of the layer stack: a level that Back to Settings replaces at once is never pushed and removed
         // first (Telegram's Back would show, hide and show again).
         const steps = () => {
-            back.clear();
             panels.forEach((each) => {
                 const on = each.dataset.dashboardPanel === name;
                 each.classList.toggle('active', on);
@@ -384,7 +294,6 @@ export function initDashboard({ state, layers = null, openSettings = null, state
             if (asLevel) level = true;  // an outside door keeps its page open when two panes narrow to one
             paint();
             window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: name } }));
-            if (typeof path === 'string') back.show(panel, path);
         };
         if (layers?.batch) layers.batch(steps); else steps();
         if (row) focusSettingRow(panel, row);
@@ -401,10 +310,15 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     return {
         page,
         activateTab,
+        pressedAgain: () => { level = false; paint(); },
+        capture() {
+            const tab = state.dashboardActiveSubtab, opened = level;
+            return { label: DASHBOARD_TABS.find((item) => item.value === tab)?.label || 'Dashboard',
+                restore() { level = opened; showTab(tab); paint(); } };
+        },
         destroy() {
             tabStrip.destroy();
             disposeFade();
-            back.clear();
             resize?.disconnect();
             if (frame) cancelAnimationFrame(frame);
             clearInterval(answerTimer);

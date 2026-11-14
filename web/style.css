@@ -1350,7 +1350,7 @@ html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title 
     clip-path: inset(50%);
     white-space: nowrap;
 }
-html[data-layout="docked"] .app-page-header[data-empty] {
+html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
     display: none;
 }
 /* In the macOS desktop window the band under the transparent title bar is the window's handle
@@ -1358,7 +1358,7 @@ html[data-layout="docked"] .app-page-header[data-empty] {
    is the window's, not a row of the page: a header with nothing to show lies over the top of its page as that handle
    (clear of the scrollbar, as a room's strip is), the page's first row starts below the band, and scrolled content
    passes under it with crisp edges, as a room's feed does. */
-:root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-empty] {
+:root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
     display: block;
     position: absolute;
     inset: 0 6px auto 0;
@@ -1366,12 +1366,12 @@ html[data-layout="docked"] .app-page-header[data-empty] {
     height: var(--window-chrome-top);
     padding: 0;
 }
-:root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-empty] ~ .widgets-scroll {
+:root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-empty]:not([data-return]) ~ .widgets-scroll {
     padding-top: calc(var(--space-4) + var(--window-chrome-top));
 }
 /* While a card is dragged the band lets the pointer through to the board, whose top edge is where the engine scrolls
    a drag upward; at rest the band is the window's handle. */
-:root[data-window-chrome="integrated"][data-layout="docked"] #page-widgets .app-page-header[data-empty]:has(~ .widgets-scroll .widgets-card[data-widget-lifted]) {
+:root[data-window-chrome="integrated"][data-layout="docked"] #page-widgets .app-page-header[data-empty]:not([data-return]):has(~ .widgets-scroll .widgets-card[data-widget-lifted]) {
     pointer-events: none;
 }
 
@@ -1422,20 +1422,20 @@ html[data-layout="docked"] .app-page-header[data-empty] {
 .app-page-lead > * { min-width: 0; }
 .app-page-lead:empty,
 .app-page-tabs:not(:has(> *)) { display: none; }
-/* The stack layout's Back stays in the header's leading slot, never inside a lead that scrolls. */
-.app-page-back { display: flex; flex: none; align-items: center; }
-.app-page-back:empty { display: none; }
-/* A phone page that leads back (Circles or Skills opened from Settings): Back stands where the places control stood,
-   in the header's one row, as on a Settings page (DESIGN "Page header": one leading control, no second header row). */
-html[data-layout="stack"] .app-page-header[data-back]:has(> .app-page-title-block > .app-page-back:not(:empty)) {
-    grid-template-areas: "back title toolbar";
-}
-html[data-layout="stack"] .app-page-header[data-back] > .app-page-leading:has(~ .app-page-title-block > .app-page-back:not(:empty)) {
-    display: none;
-}
-html[data-layout="stack"] .app-page-header[data-back] > .app-page-title-block:has(> .app-page-back:not(:empty)) { display: contents; }
-html[data-layout="stack"] .app-page-header[data-back] .app-page-title-row { grid-area: title; }
-html[data-layout="stack"] .app-page-header[data-back] .app-page-back { grid-area: back; }
+/* Levels and returns share the shell's leading capsule. The writer supplies presence and placement. */
+.app-page-return { display: flex; align-items: center; min-width: 0; max-width: 40%; order: -1; }
+.app-page-return:empty { display: none; }
+.shell-back { width: auto; max-width: 100%; gap: var(--space-1); padding-inline: var(--space-2); }
+.shell-back > svg { flex: none; }
+.shell-back-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html[data-layout="stack"] .shell-back { width: auto; }
+.app-page-header[data-return] > .app-page-title-block { display: flex; align-items: center; gap: var(--space-2); }
+.app-page-header[data-return] .app-page-lead { flex: 1; }
+html[data-layout="stack"] .app-page-header[data-return] { grid-template-areas: "back title toolbar"; }
+html[data-layout="stack"] .app-page-header[data-return] > .app-page-leading { display: none; }
+html[data-layout="stack"] .app-page-header[data-return] > .app-page-title-block { display: contents; }
+html[data-layout="stack"] .app-page-header[data-return] .app-page-title-row { grid-area: title; }
+html[data-layout="stack"] .app-page-header[data-return] > .app-page-title-block > .app-page-return { grid-area: back; max-width: 36vw; }
 /* A narrow content column gives the existing toolbar its own wrapping row; navigation lives below it. */
 html[data-layout="docked"] .app-page-header[data-narrow] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "toolbar"; }
 html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-leading { display: none; }

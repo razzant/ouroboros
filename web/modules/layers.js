@@ -50,6 +50,8 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
     const top = () => stack[stack.length - 1] || null;
     const has = (id) => stack.some((layer) => layer.id === id);
     const get = (id) => stack.find((layer) => layer.id === id) || null;
+    const page = () => [...stack].reverse().find((layer) => layer.page) || null;
+    const returnPage = () => [...stack].reverse().find((layer) => layer.returnTo) || null;
 
     function emit() {
         const snapshot = { size: stack.length, top: top()?.id || null, ids: stack.map((layer) => layer.id) };
@@ -252,9 +254,15 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
     function pop(reason = 'close') {
         const layer = top();
         if (!layer) return false;
-        try { layer.onClose?.(reason); } finally {
-            if (has(layer.id)) remove(layer.id);  // an owner that did not call remove
-        }
+        if (layer.closing) return true;
+        const finish = (allowed) => {
+            delete layer.closing;
+            if (allowed !== false && get(layer.id) === layer) remove(layer.id);
+            reconcileHistory();
+        };
+        const result = layer.onClose?.(reason);
+        if (result?.then) layer.closing = result.then(finish, (err) => { finish(false); console.error('layers: close failed', err); });
+        else finish(result);
         return true;
     }
 
@@ -300,7 +308,7 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
     return {
         push, remove, batch, pop, back, onChange, destroy,
         top: () => top()?.id || null,
-        has,
+        has, get, page, returnPage,
         size: () => stack.length,
         ids: () => stack.map((layer) => layer.id),
         /** The history sentinel state, for tests and the host adapter. */
