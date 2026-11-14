@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 import ouroboros.loop as loop_mod
+import ouroboros.loop_llm_call as loop_llm_call
 import ouroboros.loop_transport as loop_transport
 from ouroboros import model_wait, owner_model, route_choice
 from ouroboros import usage_accounting as ua
@@ -66,6 +67,22 @@ class _Routes:
         return {"role": "assistant", "content": f"answer from {model}"}, {"prompt_tokens": 1, "completion_tokens": 1}
 
 
+class _BurstOwnerTime:
+    """``loop_llm_call``'s own ``time`` binding, whose one sleep is the burst's plain pause without a wake; it is
+    recorded instead of slept. Every other attribute and every other module's clock and sleep stay real: a sleep
+    the global ``time.sleep`` sees is not the burst's (on macOS the model-wait owner reads its birth with ``ps``, and
+    the stdlib's subprocess wait may poll with ``time.sleep(0.001)``)."""
+
+    def __init__(self, recorded):
+        self.recorded = recorded
+
+    def sleep(self, seconds):
+        self.recorded.append(seconds)
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     root = tmp_path / "data"
@@ -79,7 +96,7 @@ def env(tmp_path, monkeypatch):
     from ouroboros import fallback_cooldown
     monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_a: False)
     sleeps = {"burst": [], "episode": []}
-    monkeypatch.setattr(time, "sleep", lambda sec: sleeps["burst"].append(sec))
+    monkeypatch.setattr(loop_llm_call, "time", _BurstOwnerTime(sleeps["burst"]))
     monkeypatch.setattr(loop_transport, "interruptible_wait_sleep",
                         lambda sec, _wake: (sleeps["episode"].append(sec), False)[1])
     return SimpleNamespace(root=root, sleeps=sleeps)
