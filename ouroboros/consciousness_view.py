@@ -1,9 +1,10 @@
-"""Read-only consciousness facts from places, current roots and durable results."""
+"""Read-only consciousness facts from places, current roots, durable results and the ledger's period view."""
 
 import contextlib
 from datetime import datetime
 import json
 import logging
+import pathlib
 import time
 from typing import Any
 
@@ -356,6 +357,47 @@ def spend_text(rows) -> str:
         return "unknown"
     return "; ".join(f'{row["label"]}: {"at least " if row["unmetered_calls"] else ""}'
                      f'${row["usd"]:.2f} ({row["unmetered_calls"]} unmetered calls)' for row in rows) or "none"
+
+
+def cache_writes_text(drive_root, now: float = 0.0) -> str:
+    """The install's cache writes of the last 24 hours as one wake fact (``gateway.cost_period``, the Costs page's own
+    view, read once per wake). A view that cannot be read is said as unknown, never as none, and the wake goes on."""
+    try:
+        from ouroboros.gateway.cost_period import cost_period
+
+        return _cache_writes_line(cost_period(pathlib.Path(drive_root), "24h", now=now or None)["cache_writes"])
+    except Exception:
+        log.warning("The last day's cache writes could not be read for this wake", exc_info=True)
+        return "unknown (could not be read)"
+
+
+def _cache_writes_line(rows) -> str:
+    """``cost_period``'s cache-write rows as one line: the calls that wrote, their tokens, the writes' share of recorded
+    cost, then every class of what the writes followed, in the Costs page's own order (share of cost, then tokens). A
+    class goes without its detail (route and block names). A call whose cost no tariff could share is counted as
+    unsplit: a class's dollars are of its other calls, and where no call's cost could be shared the share is unknown,
+    never zero."""
+    classes: dict[str, dict] = {}
+    for row in rows:
+        held = classes.setdefault(row["class"], {"calls": 0, "tokens": 0, "usd": 0.0, "unsplit": 0})
+        held["calls"] += row["calls"]
+        held["tokens"] += row["write_tokens"]
+        held["usd"] += row["write_cost"]
+        held["unsplit"] += row["unshared_calls"]
+    if not classes:
+        return "none recorded in the last 24 h"
+    calls, tokens, usd, unsplit = (sum(held[key] for held in classes.values()) for key in ("calls", "tokens", "usd", "unsplit"))
+
+    def named(name, held) -> str:
+        if held["unsplit"] >= held["calls"]:
+            return f'{name} {held["calls"]}'  # none of its calls' cost could be shared: no dollars, never $0.00
+        return f'{name} {held["calls"]} ${held["usd"]:.2f}' + (f' ({held["unsplit"]} unsplit)' if held["unsplit"] else "")
+
+    money = ("write share of cost unknown" if unsplit >= calls else
+             f"${usd:.2f} write share of recorded cost" + (f", {unsplit} unsplit" if unsplit else ""))
+    order = sorted(classes.items(), key=lambda item: (-item[1]["usd"], -item[1]["tokens"], item[0]))
+    return (f"{calls} in the last 24 h, {tokens:,} tokens, {money}; by what they followed: "
+            + ", ".join(named(name, held) for name, held in order))
 
 
 def roots_text(rows) -> str:
