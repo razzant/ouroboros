@@ -247,7 +247,7 @@ def shorten_switch_interval() -> None:
     the lock back after each SQLite step or file call only when its holder yields: beside one busy thread the
     extensions index took 4.7 s at 5 ms and 1.9 s at 1 ms (0.1 s alone). It is a requested interval, not a bound: a
     long C call that holds the lock (a large JSON decode, a fork), other waiters and the OS scheduler can stretch a
-    wait; Windows waits in whole milliseconds at its timer tick, so the gain there is small and 1 ms is its floor. A
+    wait; Windows waits in whole milliseconds, so its timer resolution can limit the gain (1 ms is its shortest wait). A
     thread nobody waits for is never asked, so an uncontended interpreter pays nothing; a contended computing thread
     hands over more often, at a cost that grows with the waiters (beside one thread making file calls it ran about
     14 % slower while those calls ran 2.8 times faster; beside twelve, a quarter to a half slower). Children started by
