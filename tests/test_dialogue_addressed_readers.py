@@ -244,18 +244,23 @@ def test_annotation_compaction_asks_the_store_once_however_many_messages_it_keep
     for messages in (1, 30):
         root = tmp_path / str(messages)
         ids = [f"owner-{number}" for number in range(messages)]
+        # Another room's row first: a root caches its cutover fact from its second store access on, so neither
+        # measured compaction pays that one-time read.
         ds.append(root, "chat", owner("foreign", chat_id=22))
         for message_id in ids:
             ds.append(root, "chat", owner(message_id))
             append_chat_annotation(root, message_id, action="steer_task", status="queued", routing_token="act")
+        quoted = 'ответ "в" \\22'  # carried only by another room's outbound row: any chat row keeps a source
+        ds.append(root, "chat", {**owner(quoted, chat_id=22), "direction": "out"})
+        append_chat_annotation(root, quoted, action="steer_task", status="queued", routing_token="act")
         append_chat_annotation(root, "absent", action="steer_task", status="delivered", routing_token="act")
         with monkeypatch.context() as patched, metered(monkeypatch) as measured:
             patched.setattr(pd, "_COMPACT_AT_BYTES", 1)
             append_chat_annotation(root, ids[-1], action="steer_task", status="delivered", routing_token="act")
         counts.append((measured["transactions"], measured["statements"]))
         sidecar = (root / "logs" / "chat_annotations.jsonl").read_text(encoding="utf-8")
-        assert [(json.loads(line)["client_message_id"], json.loads(line)["status"]) for line in sidecar.splitlines()] == [
-            *((message_id, "queued") for message_id in ids[:-1]), (ids[-1], "delivered")]
+        kept = [(row["client_message_id"], row["status"]) for row in map(json.loads, sidecar.splitlines())]
+        assert kept == [*((name, "queued") for name in ids[:-1]), (quoted, "queued"), (ids[-1], "delivered")]
     assert counts[0] == counts[1], counts
 
 
