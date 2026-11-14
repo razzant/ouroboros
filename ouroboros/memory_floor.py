@@ -516,13 +516,15 @@ def level_with(snapshot: mv.MemoryViewSnapshot, kept: mv.FloorLevel, addresses: 
     return table.level(normalized(taken), kept.by_budget)
 
 
-def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool = False):
+def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool = False, tool_names=None):
     """Render selected forms, preserving other projections and the tail.
 
     The boundary's fit callback decides publication. Ordinary Main accepts an
     authored restore with an advisory capacity deficit; dispatch fits it later.
+    ``tool_names``: the schemas the next request sends, which its floor note reads; else those its start priced.
     """
     from ouroboros.context_fit import _governance_blocks, _system_blocks, _request_tokens
+    from ouroboros.tool_policy import select_tool_schemas
 
     if plan is None or getattr(plan, "core", None) is None or not plan.core.memory_view_json:
         raise ValueError("This actor has no captured memory view")
@@ -532,7 +534,9 @@ def select_view(plan, mode: str, addresses: Iterable[str], *, owner_note: bool =
     old = shown.memory_facts.get("floor") or {}
     switched = old.get("mode_switch") or {}
     max_room = shown.memory_facts.get("max_room")  # the start's fact: a selection keeps its frame
-    note = floor_note(level, window_tokens=old.get("window_tokens"), mode=mode,
+    start = None if tool_names is not None else json.loads(getattr(plan, "start_tool_schemas_json", None) or "null")
+    names = tool_names if start is None else select_tool_schemas(start, context_mode=mode).chosen  # None: no claim
+    note = floor_note(level, window_tokens=old.get("window_tokens"), mode=mode, tool_names=names,
                       target_tokens=old.get("target_tokens"), budget_mode=plan.preferred_mode,
                       lowered_from=switched.get("from"), max_room=max_room, snapshot=snapshot)
     story, room = mv.render_story(snapshot, level), mv.render_room(snapshot, level, floor_note=note)
@@ -603,21 +607,19 @@ def view_inventory(plan, mode: str, *, memory_facts=None) -> List[Dict[str, Any]
 
 
 def memory_read_path(tool_names: Optional[Iterable[str]]) -> str:
-    """How this request reaches ``memory_read``, read from the names of the schemas it sends.
-
-    Nothing when it sends ``memory_read`` or its schemas are not known (``None``: no claim);
-    ``enable_tools`` when it sends that; otherwise the parent, who can read an address for me,
-    and ``list_available_tools`` when it sends that. A fact of the request, never of a role.
-    """
+    """How ``memory_read`` is reached, from the schema names sent when this view is rendered: nothing when they hold
+    it or are unknown (``None``: no claim); with ``enable_tools``, that it loads the reader where this task's policy
+    permits (``disabled_tools`` can refuse it); else its absence then, which a later schema-only change does not
+    redraw, and ``list_available_tools`` when sent. A fact of that rendering's tools, never of a role or a grant."""
     if tool_names is None:
         return ""
     names = set(tool_names)
     if "memory_read" in names:
         return ""
     if "enable_tools" in names:
-        return "(memory_read is reachable through enable_tools)"
-    listing = "list_available_tools shows what this task can call, and " if "list_available_tools" in names else ""
-    return f"(memory_read is not among this request's tools; {listing}my parent task can read any address I name to it)"
+        return "(enable_tools loads memory_read if permitted)"
+    listing = "; list_available_tools shows what this task can call" if "list_available_tools" in names else ""
+    return f"(memory_read was not among my tools when this view was rendered{listing})"
 
 
 def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str, target_tokens: Optional[int] = None,
@@ -626,17 +628,18 @@ def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str,
                snapshot: Optional[mv.MemoryViewSnapshot] = None) -> str:
     """Retained cuts, their final visible forms and the sources holding this room.
 
-    The three bins distinguish my telling, host facts and emergencies; the global
-    unread count is a separate window fact. Nano names the actual reader path.
-    The receipt is priced with every candidate and preserves a held view's frame.
+    The three bins distinguish my telling, host facts and emergencies; the global unread count is a
+    separate window fact. Nano names the reader path whenever the tools it is rendered with lack memory_read, cut
+    or not (``### Memory check``). The receipt is priced with every candidate and preserves a held view's frame.
     """
     names = None if tool_names is None else tuple(tool_names)
     counts = dict(level.steps)
     asked = set(counts) - set(_COLLAPSING)
     forms = form_counts(snapshot, level) if snapshot else {}
     holding = snapshot and (telling_emergency(snapshot, level) or lowered_from and crowded_by_memory(max_room))
+    path = memory_read_path(names) if mode == "nano" else ""
     if not asked and not lowered_from and not holding:
-        return ""
+        return f"### Memory check\nAddresses this view shows read with memory_read.\n{path}" if path else ""
     lines, name = ["### Physical floor"], mode.capitalize()
     if asked:
         bounds = ([f"the window ({window_tokens} tokens)"]
@@ -654,7 +657,6 @@ def floor_note(level: mv.FloorLevel, *, window_tokens: Optional[int], mode: str,
         lines.extend(holding_lines(holding_room(snapshot, level), short=physical_floor(snapshot, level, mode)))
     if lowered_from:
         lines.append(lowered_line(mode, lowered_from, max_room))
-    path = memory_read_path(names) if mode == "nano" else ""
     return "\n".join(lines + [path] if path else lines)
 
 

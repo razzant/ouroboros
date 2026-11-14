@@ -221,6 +221,22 @@ def test_an_open_wave_counts_nothing_yet_and_a_collected_outcome_counts_once(tmp
     assert _fact(ctx.drive_root, "root-1")["count"] == 3 and len(_events(ctx)) == 3, "a left-over attempt silences nothing"
 
 
+def test_replayed_collection_of_one_review_record_does_not_count_twice(tmp_path):
+    """A late collection identifies its one outcome by the durable review record."""
+    ctx = _make_ctx(tmp_path)
+    ctx.task_id = "root-1"
+    seed_result(ctx.drive_root, "root-1", {"status": "running"})
+    ctx._review_reconcile_only = True
+    ctx._pending_review_attempt = SimpleNamespace(
+        review_override_reason="review_late_result_pending", review_record_id="record-1")
+
+    _decide(ctx, "no_counted_reviewers", "the adviser wave settled")
+    _decide(ctx, "no_counted_reviewers", "the adviser wave settled again")
+
+    assert read_json_dict(ctx.drive_root / COUNTER_REL)["count"] == 1
+    assert len(_events(ctx)) == 1
+
+
 def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_says_now(tmp_path, monkeypatch):
     """B and C go over the reason the gate kept on the continued attempt, but a wave it handed back still open stands
     at what its review record holds now (REV6 C1): passed since, it is gone over by nothing; failed since, by its FAIL;

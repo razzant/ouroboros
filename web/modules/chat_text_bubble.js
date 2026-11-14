@@ -19,6 +19,35 @@ import { PROJECT_ROW_TYPES, decorateProjectRow, syncSavedProjectContext } from '
 import { markSwarmLabel } from './swarm_presentation.js';
 
 /**
+ * What a text row's `.message` shows, the one path its bubble (below) and the room's search (chat_search_words.js)
+ * read: a host sentence in the install's language, a known host prefix hidden, the owner's literal words without the
+ * composer's file-name tail, Ouroboros's (or a Markdown System row's) sanitized Markdown, other System text escaped,
+ * a Skill Review's disclosure. `attachments` are the owner's attachment views. Answers `{ rendered, rich, shown,
+ * skillReview }`: the `.message` HTML, whether it is rich Markdown (enhanced once mounted), the words Copy keeps and
+ * whether the row is a Skill Review.
+ */
+export function bubbleWords(text, role, { markdown = false, systemType = '', source = '', attachments = [], narration,
+    textPlaceholder = false, skillReview: review = null } = {}) {
+    const stored = text;
+    if (role === 'system' && ['task_pause_notice', 'legacy_memory_notice'].includes(systemType)) text = hostSentenceText(text);
+    // Render-only: Copy keeps `shown`, the pre-cleanup sentence.
+    const painted = hostRowDisplayText({ text: stored, role, system_type: systemType, narration }, text);
+    const skillReview = role === 'system' && systemType === 'skill_review' && narration !== true;
+    const rich = role !== 'user' && !skillReview && (role !== 'system' || markdown === true);
+    // Only the web composer writes the file-name tail; a Telegram/skill caption is kept word for word.
+    const shown = attachments.length ? attachmentCaption(text, attachments,
+        { placeholder: textPlaceholder === true, composed: source === 'web' }) : text;
+    const rendered = role === 'user'
+        ? linkify(shown)
+        : skillReview
+            ? renderSkillReviewDisclosure(text, review || null)
+            : role === 'system' && markdown !== true
+                ? escapeHtml(painted)
+                : renderChatMarkdown(painted);
+    return { rendered, rich, shown, skillReview };
+}
+
+/**
  * One room's text bubbles. `chatMedia` is the room's media owner (chat_media.js: a row's attachments, its Copy and the
  * room's hold on what a row's action opens), `replies` its replies (chat_reply.js) and `feed` its column of rows;
  * `isMain` and `ownProjectId` name the room; `onDomWrite` is its stable-viewport seam. The returned
@@ -43,23 +72,9 @@ export function createTextBubbles({ chatMedia, replies, feed, isMain = false, ow
         if (legacyKey) bubble.dataset.messageKey = legacyKey;
         stampHistoryNode(bubble, opts.historyId, opts.historyPosition);
 
-        const stored = text;
-        if (role === 'system' && ['task_pause_notice', 'legacy_memory_notice'].includes(systemType)) text = hostSentenceText(text);
-        // Render-only: Copy below keeps `shown`, the pre-cleanup sentence.
-        const painted = hostRowDisplayText({ text: stored, role, system_type: systemType, narration: opts.narration }, text);
-        const skillReview = role === 'system' && systemType === 'skill_review' && opts.narration !== true;
+        const { rendered, rich: richMarkdown, shown, skillReview } = bubbleWords(text, role, { markdown, systemType, source,
+            attachments, narration: opts.narration, textPlaceholder: opts.textPlaceholder, skillReview: opts.skillReview });
         if (skillReview) bubble.classList.add('chat-skill-review');
-        const richMarkdown = role !== 'user' && !skillReview && (role !== 'system' || markdown === true);
-        // Only the web composer writes the file-name tail; a Telegram/skill caption is kept word for word.
-        const shown = attachments.length ? attachmentCaption(text, attachments,
-            { placeholder: opts.textPlaceholder === true, composed: source === 'web' }) : text;
-        const rendered = role === 'user'
-            ? linkify(shown)
-            : skillReview
-                ? renderSkillReviewDisclosure(text, opts.skillReview || null)
-                : role === 'system' && markdown !== true
-                    ? escapeHtml(painted)
-                    : renderChatMarkdown(painted);
         const timeFmt = formatMsgTime(ts);
         const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
         const pendingHtml = pending ? `<div class="msg-pending">Queued until reconnect</div>` : '';

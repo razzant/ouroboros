@@ -462,7 +462,7 @@ def _reset_turn_state(ctx: Any) -> None:
 
 def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dict, usage: dict, seen: set,
                          route: tuple, cost_ceiling: Any, budget_remaining_usd: Optional[float]) -> tuple:
-    """Restore whichever saved continuation this start carries (at most one).
+    """Restore whichever saved continuation this start carries (at most one); then the start has entered.
 
     Returns ``(*route, round_idx, cost_ceiling, pending_tool_budget,
     pending_no_tool_budget, free_redial)``: a cold owner wait rejoins its tool
@@ -495,6 +495,8 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
             carried.reentered(tools._ctx, messages)
         from ouroboros.subagent_bootstrap import append_startup_receipt
         append_startup_receipt(tools._ctx, messages, getattr(tools._ctx, "_configured_startup_wake", ""), seen)
+        from ouroboros.headless import reopen_capture_at_entry  # entered: an earlier capture becomes history
+        reopen_capture_at_entry(canonical_data_root(tools._ctx), str(getattr(tools._ctx, "task_id", "") or ""))
         tools._ctx._round_prologue = section_spans()
     return resumed
 

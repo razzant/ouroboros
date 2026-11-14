@@ -1608,6 +1608,174 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 }
 .chat-page-note:not(:has(> :not([hidden]))) { display: none; }
 
+/* Search in a chat (DESIGN "Search in a chat", chat_search.js): one sheet floating under the room's bar at its
+   trailing edge, over moving content, so it wears the menus' material (--popup-float, the float shadow). Its corner is
+   the composer field's: the sheet radius, half the height of the field alone in it, so the field alone is a capsule
+   and a sheet grown by matches or a note is a card with the same corner, never an oval; the field inside is concentric
+   (the sheet radius less the sheet's inset). Its field row is built as Find a project's is (the words' row has no
+   surface; focus is the field's ring, drawn as shadows), then the count, ↑ newer, ↓ older and × as quiet icon
+   controls; while there are matches their list follows, each a quiet option (author and time in meta ink, the snippet
+   in primary ink, the query's words in the crimson word), the one landed on wearing the chooser's chosen wash. A
+   landing places its row below the sheet (chat_reply.js counts it, and while it is open the feed's top clears it). */
+.chat-find {
+    position: absolute;
+    top: calc(var(--chat-header-bar, 56px) + var(--space-1));
+    right: var(--page-header-padding-x);
+    z-index: var(--z-page-header);
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    width: min(440px, calc(100% - 2 * var(--page-header-padding-x)));
+    padding: var(--space-1);
+    border-radius: var(--radius-sheet);
+    background: var(--popup-float);
+    color: var(--text-primary);
+    box-shadow: var(--elev-float);
+    -webkit-backdrop-filter: var(--glass);
+    backdrop-filter: var(--glass);
+}
+.chat-find[hidden] { display: none; }
+html[data-layout="stack"] .chat-find {
+    left: var(--space-3);
+    right: var(--space-3);
+    width: auto;
+}
+.chat-find-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-height: calc(2 * (var(--radius-sheet) - var(--space-1)));
+    padding-inline: var(--space-3) var(--space-1);
+    border-radius: calc(var(--radius-sheet) - var(--space-1));
+    background: var(--surface-tray);
+    transition: var(--motion-tone);
+}
+.chat-find-bar:has(> .chat-find-input:focus) {
+    box-shadow: inset 0 0 0 1px var(--focus-accent-border), 0 0 0 3px var(--focus-accent-ring);
+}
+.chat-find-glyph { display: inline-flex; flex: 0 0 18px; color: var(--text-secondary); pointer-events: none; }
+.chat-find-glyph > svg { width: 18px; height: 18px; }
+.chat-find-bar > .chat-find-input {
+    flex: 1 1 auto;
+    align-self: stretch;
+    min-width: 0;
+    padding: 0 var(--space-1);
+    border: 0;
+    border-radius: var(--pill-radius);
+    background: transparent;
+    box-shadow: none;
+}
+.chat-find-bar > .chat-find-input:focus { box-shadow: none; }
+.chat-find-input::-webkit-search-cancel-button,
+.chat-find-input::-webkit-search-decoration { -webkit-appearance: none; appearance: none; display: none; }
+@media (pointer: coarse) {
+    .chat-find-bar > .chat-find-input { font-size: var(--type-section); }  /* the size a phone does not zoom into */
+}
+.chat-find-count {
+    flex: 0 0 auto;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.chat-find-count:empty { display: none; }
+.chat-find-button {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--text-meta);
+    cursor: pointer;
+    transition: var(--motion-tone);
+}
+.chat-find-button:hover:not(:disabled) { background: var(--menu-item-hover); color: var(--text-primary); }
+.chat-find-button:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: -2px; }
+.chat-find-button:disabled { color: var(--text-disabled); cursor: default; }
+.chat-find-button > svg { width: 16px; height: 16px; }
+.chat-find-results {
+    max-height: min(296px, 36vh);
+    margin: 0;
+    padding: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    list-style: none;
+}
+.chat-find-results[hidden] { display: none; }
+/* A phone's landed message gets the room: the list folds until the field is touched again (chat_search.js). */
+.chat-find[data-folded] > .chat-find-results { display: none; }
+.chat-find-result {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-inner);
+    cursor: pointer;
+}
+.chat-find-result:hover { background: var(--menu-item-hover); }
+.chat-find-result[aria-selected="true"] { background: var(--accent-12); }
+.chat-find-meta {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+    min-width: 0;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+.chat-find-author { min-width: 0; overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.chat-find-result[aria-selected="true"] .chat-find-author { color: var(--accent-light); }
+.chat-find-time { flex: 0 0 auto; white-space: nowrap; }
+.chat-find-snippet {
+    display: -webkit-box;
+    overflow: hidden;
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+    overflow-wrap: anywhere;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+}
+.chat-find-mark { padding: 0; background: none; color: var(--tone-crimson-word); font-weight: 600; }
+.chat-find-note {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-1) var(--space-2);
+    padding: var(--space-1) var(--space-3) var(--space-2);
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+.chat-find-note[hidden] { display: none; }
+.chat-find-more {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--accent-light);
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+}
+.chat-find-more:hover { text-decoration: underline; }
+.chat-find-more:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-inner); }
+/* A finger's targets side by side (ui.css "Touch reach"): ↑, ↓ and × are each the touch minimum themselves, abutting
+   with no reach over a neighbour's (the field keeps the width a gap would take; × ends the bar concentric with its
+   corner), and the bar is that tall already (its field is a .ui-control); the sheet's corner follows the taller field,
+   a capsule still. Search older messages and Try again are words with the minimum as their own box. */
+@media (pointer: coarse) {
+    .chat-find { --radius-sheet: calc(var(--touch-target-min) / 2 + var(--space-1)); }
+    .chat-find-bar { gap: 0; padding-inline-end: 0; }
+    .chat-find-button { width: var(--touch-target-min); height: var(--touch-target-min); }
+    .chat-find-more { min-width: var(--touch-target-min); min-height: var(--touch-target-min); }
+}
+/* The query's words in the landed message (the CSS Custom Highlight API: no node is written). */
+::highlight(ouro-chat-find) { background-color: var(--tone-crimson-word); color: var(--bg-primary); }
+
 /* The bars' controls (DESIGN.md design bible): neutral capsules on glass, standing on the rest shadow; Panic is the
    danger tone (--panic-fill: on dark the capsule's own veil, since the red tone there is already a neutral veil and
    stacking it washes out Panic's ink), the budget neutral and amber only while a spending limit's stop waits for the
@@ -1876,7 +2044,8 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     overflow-y: auto;
     overflow-x: hidden;
     padding: 20px;
-    padding-top: var(--chat-header-reserve, 56px);
+    /* The room's bar and note, and while its search is open what the sheet covers below them (chat_reply.js). */
+    padding-top: calc(var(--chat-header-reserve, 56px) + var(--chat-find-reserve, 0px));
     padding-bottom: 0;
     display: flex;
     flex-direction: column;
@@ -6615,6 +6784,9 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
    open page from a 40rem box, the list or the page alone below it. The shell is the section shell; the page's column
    holds the seven panels, each one tab body with its own inset and scroller. */
 .dashboard-shell { padding: 0; }
+/* The Dashboard's shell is the section shell (ui.css), which bounds its columns. A page that borrows this class
+   without a section's list (Circles) keeps the bounded column of its own, so its body is the page's scroller. */
+.dashboard-shell:not(.section-shell) { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
 .dashboard-lead-back { display: flex; flex: none; align-items: center; }
 .dashboard-lead-back:empty { display: none; }
 .dashboard-row-mark[hidden] { display: none; }
@@ -8522,7 +8694,7 @@ html[data-layout="stack"] .chat-send-inline {
 
 /* Main's transcript clears the taller phone header and the absolute composer. */
 html[data-layout="stack"] #chat-messages {
-    padding-top: var(--chat-header-reserve, 80px);
+    padding-top: calc(var(--chat-header-reserve, 80px) + var(--chat-find-reserve, 0px));
     padding-bottom: 0;
     overflow-x: hidden;
 }
@@ -8613,7 +8785,7 @@ body.keyboard-open .chat-instance-panel .chat-messages {
     position: relative;
     height: auto;
     max-height: none;
-    padding-top: 0;
+    padding-top: var(--chat-find-reserve, 0px);
     padding-bottom: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
@@ -9420,7 +9592,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     padding-bottom: 0;
 }
 .project-panel .chat-instance-panel .chat-messages {
-    padding-top: var(--chat-feed-reserve, var(--chat-header-reserve, 56px));
+    padding-top: calc(var(--chat-feed-reserve, var(--chat-header-reserve, 56px)) + var(--chat-find-reserve, 0px));
     /* Reserve the real scrollbar lane from the first layout: WebKit's auto-overflow transition can leave rows
        wider than the content box until a resize, covering the focus corners. Overlay scrollbars take no space. */
     overflow-y: scroll;
@@ -9458,7 +9630,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 }
 body.keyboard-open .project-panel .chat-panel-statusbar { padding-top: 8px; }
 body.keyboard-open .project-panel .chat-instance-panel .chat-messages {
-    padding-top: 0;
+    padding-top: var(--chat-find-reserve, 0px);
 }
 
 /* The Project composer already includes its safe-area inset in the measured

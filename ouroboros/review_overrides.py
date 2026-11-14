@@ -116,7 +116,11 @@ def record_override(ctx: Any, blocked_msg: str) -> None:
     except Exception:
         log.warning("A later landing over this decision cannot be joined to it", exc_info=True)
     if reason not in (_OPEN, collected):
-        _count(ctx, reason, message)
+        # A collecting call can be replayed after the same review record has
+        # already been counted. Carry its durable identity into the existing
+        # idempotence guard instead of counting the same outcome again.
+        record_id = str(getattr(held, "review_record_id", "") or "") if held is not None else ""
+        _count(ctx, reason, message, record_id)
 
 
 def _count(ctx: Any, reason: str, message: str, record_id: str = "") -> None:

@@ -862,7 +862,10 @@ def _read_records(root: Path, room: str, after_seq: int, limit: int) -> str:
 def _read_rows(root: Path, room: str, bounds: Dict[str, Any], start: int, limit: int) -> str:
     """One room's chat rows by address in stored order: from/to and ``next: from=`` bound stored positions
     (``chat_chain.iter_room_rows``). A room holding imported earlier messages reads by send time in its
-    view and ``chat_history``; here they stand where they were stored, and every page names the order."""
+    view and ``chat_history``; here they stand where they were stored, and every page names the order.
+    One row asked by itself (from = to, no task or period) that this room's selection does not hold is named as
+    not returned by this reading, never lost or held elsewhere: its ``row:`` address names the chat it was written
+    in, not always a room showing it (``memory_view_work.row_reader``); a range keeps its positions, a known gap its own fact."""
     try:
         int(room)
     except ValueError as exc:
@@ -892,6 +895,9 @@ def _read_rows(root: Path, room: str, bounds: Dict[str, Any], start: int, limit:
         from ouroboros.room_appearances import GAP_DETAILS
 
         head += "".join(f"; incomplete: {GAP_DETAILS[kind]}" for kind in sorted(gaps))
+    alone = bounds.get("from") and bounds.get("from") == bounds.get("to") and not (task_id or bounds.get("period"))
+    if alone and not kept:  # one row asked by itself, absent from this room's selection (not from the page)
+        head += f"; this reading of room {room} did not return that row"
 
     def continuation(k: int, done: bool) -> str:
         if done:
@@ -1516,7 +1522,7 @@ def chronicle_tools() -> List[ToolEntry]:
                                               "shown": {"type": "boolean"}}},
         "fingerprint": {"type": "string", "description": "proposed_selection: the document a later page continues, as the read's header names it; a changed one is refused position_mismatch, never joined."},
         "node_id": {"type": "string", "description": "One record: as it acts now — its coverage as counts, its text, the corrections and decisions under it, then the host stamp one line per task and its sources."},
-        "room_id": {**room, "description": room["description"] + " '*' lists all open rooms by conversation (label, period, counts, reader); 'conversations' lists the conversations whose words no page holds, with the act that seals each; 'late_reviews' lists unreleased host review marks; 'notes' lists unsealed mind notes. Lists name ids, rooms, dates and exact readers, oldest first."},
+        "room_id": {**room, "description": room["description"].removesuffix(".") + ", not always its view's This room; name the room_id its readers print. '*' lists all open rooms by conversation (label, period, counts, reader); 'conversations' lists the conversations whose words no page holds, with the act that seals each; 'late_reviews' lists unreleased host review marks; 'notes' lists unsealed mind notes. Lists name ids, rooms, dates and exact readers, oldest first."},
         "after_seq": {"type": "integer", "minimum": 0, "description": "Room records and the marks placed in it after this sequence (the previous page's next_after_seq)."},
         "rows": {"type": "boolean", "description": "true: the room's chat rows verbatim, one header line each, filtered by from/to, task_id, period, in stored order (the order from/to and next: from= follow). A room holding imported earlier messages reads by send time in its view and chat_history; here each stands where it was stored."},
         "from": address, "to": address,

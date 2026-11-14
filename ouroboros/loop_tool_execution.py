@@ -258,7 +258,7 @@ def _tc_args(tc: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(raw, str) and raw.strip():
             parsed = json.loads(raw)
             return parsed if isinstance(parsed, dict) else {}
-    except (ValueError, TypeError, AttributeError):
+    except (ValueError, TypeError, AttributeError, RecursionError):
         pass
     return {}
 
@@ -602,7 +602,7 @@ def _execute_single_tool(
 
     try:
         args = json.loads(tc["function"]["arguments"] or "{}")
-    except (json.JSONDecodeError, ValueError) as e:
+    except (json.JSONDecodeError, ValueError, RecursionError) as e:
         result = f"⚠️ TOOL_ARG_ERROR: Could not parse arguments for '{requested_fn_name}': {e}"
         tool_result = ToolResult(status="error", code="TOOL_ARG_ERROR", text=result)
         result_meta = _typed_result_metadata(fn_name, result, True, tool_result)
@@ -1001,7 +1001,7 @@ def _execute_with_timeout(
     invocation["chronicle_lead_rule"] = (view or {}).get("chronicle_lead_rule")
     try:
         arguments = json.loads(tc.get("function", {}).get("arguments") or "{}")
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         arguments = {"raw_arguments": tc.get("function", {}).get("arguments")}
     persist_dispatch_source(_tool_task_metadata(tools), drive_logs, task_id, invocation, fn_name, arguments)
     args_for_log = sanitize_tool_args_for_log(fn_name, _tc_args(tc))

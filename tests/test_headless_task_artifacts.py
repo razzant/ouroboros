@@ -318,6 +318,31 @@ def test_finalize_task_artifacts_preserves_existing_artifact_axis_fields(tmp_pat
     assert artifact_axis["error_count"] == 0
 
 
+def test_a_failed_terminal_file_preparation_stamps_the_artifact_axis_with_its_bundle(tmp_path, monkeypatch):
+    """A settled row whose file preparation fails is stamped ``failed`` as the finalizer stamps a capture: the bundle
+    and the outcome axis take that status over the live row, and the axes keep their other fields."""
+    from ouroboros import headless
+    from ouroboros.task_results import STATUS_COMPLETED, load_task_result
+
+    parent, repo = tmp_path / "data", tmp_path / "repo"
+    parent.mkdir()
+    _init_repo_with_file(repo)
+    write_task_result(parent, "stamped", STATUS_COMPLETED, workspace_root=str(repo), outcome_axes={
+        "artifacts": {"status": ARTIFACT_STATUS_FINALIZING, "diagnostics": {"existing": True}},
+        "objective": {"status": "not_evaluated", "source": "none"}})
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("capture broke")
+
+    monkeypatch.setattr(headless, "finalize_task_artifacts", broken)
+    report = headless.prepare_terminal_task_files(parent, {"id": "stamped", "workspace_root": str(repo)})
+    row = load_task_result(parent, "stamped")
+    assert report["terminal_source_present"] is True and "capture broke" in report["error"]
+    assert (row["artifact_status"], row["artifact_bundle"]["status"]) == ("failed", "failed")
+    assert row["outcome_axes"]["artifacts"] == {"status": "failed", "diagnostics": {"existing": True}}
+    assert row["outcome_axes"]["objective"] == {"status": "not_evaluated", "source": "none"}
+
+
 def test_effective_result_preserves_workspace_patch_kind_with_child_drive(tmp_path):
     from ouroboros.artifacts import copy_file_to_task_artifacts
     from ouroboros.cli import _patch_from_result
@@ -405,6 +430,256 @@ def test_repeated_directory_capture_keeps_its_registered_output_store(tmp_path):
         assert manifest["capture_kind"] == "directory_direct" and manifest["apply_state"] == "already_applied"
         assert any(row["sha256"] == sha256(content).hexdigest() for row in manifest["registered_outputs"])
         assert result["artifact_status"] == result["artifact_bundle"]["status"] == "ready"
+
+
+def test_a_recapture_of_an_unfinished_row_is_a_version_beside_the_published_one(tmp_path):
+    """An unfinished row's published capture is never rewritten in place (a withdrawn closure's, a kill's, a relaunch
+    before its finish, #3248), on every surface: the next capture is a version and the first one's files keep their
+    bytes at their addresses, a genesis listing among them as history. A settled row's repeat stays in place (the test
+    above)."""
+    import hashlib
+    import pathlib
+
+    from ouroboros.headless import current_workspace_manifest
+    from ouroboros.task_results import load_task_result
+
+    def digests(row):
+        return {item["path"]: hashlib.sha256(pathlib.Path(item["path"]).read_bytes()).hexdigest()
+                for item in row["artifacts"] if item.get("path")}
+
+    for surface in ("git", "folder", "genesis"):
+        data, workspace = tmp_path / surface / "data", tmp_path / surface / "workspace"
+        data.mkdir(parents=True)
+        fields = {"workspace_root": str(workspace), "workspace_mode": "external" if surface == "folder" else "self_worktree"}
+        if surface == "folder":
+            workspace.mkdir()
+        else:
+            _init_repo_with_file(workspace)
+        if surface == "genesis":  # an acting surface needs its recorded original Git basis
+            head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=workspace, check=True, capture_output=True, text=True)
+            fields["task_constraint"] = {"mode": "acting_subagent", "surface": "genesis", "write_root": str(workspace),
+                                         "base_sha": head.stdout.strip()}
+        task = {"id": f"recaptured-{surface}", **fields}
+        write_task_result(data, task["id"], "scheduled", **fields)
+        (workspace / "out.txt").write_text("first\n", encoding="utf-8")
+        finalize_task_artifacts(data, task)
+        first = digests(load_task_result(data, task["id"]))
+        assert first and current_workspace_manifest(data, task["id"], load_task_result(data, task["id"])).parent == \
+            task_artifacts_dir(data, task["id"]), surface
+        (workspace / "out.txt").write_text("second\n", encoding="utf-8")
+        finalize_task_artifacts(data, task)
+        row = load_task_result(data, task["id"])
+        assert {path: digests(row).get(path) for path in first} == first, surface  # same bytes, same addresses
+        version = current_workspace_manifest(data, task["id"], row).parent
+        assert version.parent.name == "captures", surface
+        assert row["artifact_status"] in {"ready", "ready_with_changes"}, (surface, row["artifact_status"])
+        listings = [item["path"] for item in row["artifacts"] if item.get("kind") == "deliverable_manifest"]
+        assert listings == ([str(version / "deliverable_manifest.json")] if surface == "genesis" else []), surface
+
+
+def test_a_directory_recapture_hashes_no_earlier_version_again(tmp_path, monkeypatch):
+    """Each directory capture holds its registered outputs in its own version (#3248), and its discovery reads the
+    registrations, never the store's nested files: a later recapture of an unfinished folder task hashes no earlier
+    version again, so its cost under the task's custody does not grow with the history."""
+    from ouroboros import artifacts
+    from ouroboros.artifacts import copy_file_to_task_artifacts
+    from ouroboros.headless import current_workspace_manifest
+    from ouroboros.task_results import load_task_result
+
+    data, folder = tmp_path / "data", tmp_path / "folder"
+    data.mkdir()
+    folder.mkdir()
+    task = {"id": "direct-versions", "workspace_root": str(folder), "workspace_mode": "external"}
+    write_task_result(data, task["id"], "running", workspace_root=str(folder), workspace_mode="external")
+    (folder / "output.txt").write_bytes(b"direct output")
+    assert copy_file_to_task_artifacts(SimpleNamespace(drive_root=data, task_id=task["id"]), folder / "output.txt")
+    real, hashed, counts = artifacts.stream_artifact_file, [], []
+    monkeypatch.setattr(artifacts, "stream_artifact_file", lambda *a, **k: hashed.append(1) or real(*a, **k))
+    for _ in range(3):
+        hashed.clear()
+        finalize_task_artifacts(data, task)
+        counts.append(len(hashed))
+        manifest = current_workspace_manifest(data, task["id"], load_task_result(data, task["id"]))
+        assert [item["name"] for item in json.loads(manifest.read_bytes())["registered_outputs"]] == ["output.txt"]
+    assert manifest.parent.parent.name == "captures" and counts[2] == counts[1], counts
+
+
+def test_a_settled_rows_repeat_after_a_version_never_rewrites_a_published_address(tmp_path):
+    """v1 at the base, an entered execution's reopen and its finish's v2 in ``captures/<id>``, then the row settled and ready:
+    terminal preparation leaves it alone, and a direct repeat of the capture is a version too, so neither the
+    historical v1 at the base nor the current v2 is rewritten or dropped (#3248). The in-place repeat stays only
+    for a row whose capture was never versioned (the directory test above)."""
+    import hashlib
+    import pathlib
+
+    from ouroboros.headless import current_workspace_manifest, prepare_terminal_task_files, reopen_capture_at_entry
+    from ouroboros.task_results import load_task_result
+
+    data, workspace = tmp_path / "data", tmp_path / "workspace"
+    data.mkdir()
+    _init_repo_with_file(workspace)
+    fields = {"workspace_root": str(workspace), "workspace_mode": "self_worktree"}
+    task = {"id": "repeated", **fields}
+
+    def published(row):
+        return {item["path"]: hashlib.sha256(pathlib.Path(item["path"]).read_bytes()).hexdigest()
+                for item in row["artifacts"] if item.get("path")}
+
+    write_task_result(data, task["id"], "scheduled", **fields)
+    (workspace / "tracked.txt").write_text("v1\n", encoding="utf-8")
+    finalize_task_artifacts(data, task)  # the closure's capture of the unfinished row: v1 at the base
+    assert current_workspace_manifest(data, task["id"], load_task_result(data, task["id"])).parent == \
+        task_artifacts_dir(data, task["id"])
+    write_task_result(data, task["id"], "running")  # a resumed execution starts, then enters
+    reopen_capture_at_entry(data, task["id"])
+    assert load_task_result(data, task["id"])["artifact_status"] == "pending"
+    (workspace / "tracked.txt").write_text("v2\n", encoding="utf-8")
+    write_task_result(data, task["id"], "completed", result="done")
+    assert prepare_terminal_task_files(data, task)["error"] == ""  # its finish: v2 in captures/<id>
+    settled = load_task_result(data, task["id"])
+    v2_manifest = current_workspace_manifest(data, task["id"], settled)
+    assert settled["artifact_status"] == "ready_with_changes" and v2_manifest.parent.parent.name == "captures"
+    before = published(settled)
+    (workspace / "tracked.txt").write_text("v3\n", encoding="utf-8")
+    assert prepare_terminal_task_files(data, task)["error"] == ""  # settled and ready: nothing is captured again
+    assert load_task_result(data, task["id"])["artifacts"] == settled["artifacts"]
+    finalize_task_artifacts(data, task)  # a direct repeat over the settled, versioned capture
+    row = load_task_result(data, task["id"])
+    after = published(row)
+    assert {path: after.get(path) for path in before} == before  # every published address keeps its bytes
+    current = current_workspace_manifest(data, task["id"], row)
+    assert current.parent.parent.name == "captures" and current.parent != v2_manifest.parent
+    assert "+v3" in (current.parent / "workspace.patch").read_text(encoding="utf-8")
+
+
+def _entering(tmp_path, task_id):
+    """An unfinished Git task whose ready capture a withdrawn closure took, started again: its row and that manifest."""
+    from ouroboros.headless import current_workspace_manifest
+    from ouroboros.task_results import load_task_result
+
+    data, workspace = tmp_path / "data", tmp_path / "workspace"
+    data.mkdir()
+    _init_repo_with_file(workspace)
+    fields = {"workspace_root": str(workspace), "workspace_mode": "self_worktree"}
+    write_task_result(data, task_id, "scheduled", **fields)
+    (workspace / "tracked.txt").write_text("closed\n", encoding="utf-8")
+    finalize_task_artifacts(data, {"id": task_id, **fields})
+    write_task_result(data, task_id, "running")
+    taken = load_task_result(data, task_id)
+    assert taken["artifact_status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
+    return data, taken, current_workspace_manifest(data, task_id, taken)
+
+
+def _reopened(row, manifest):
+    return row["status"] == "running" and row["artifact_status"] == "pending" and str(manifest) in {
+        item["path"] for item in row["artifacts"] if item.get("kind") == "workspace_capture_history"}
+
+
+def test_an_entry_waits_out_another_publisher_before_it_reopens_the_capture(tmp_path, monkeypatch):
+    """#3248: another publisher holds the task's custody lock when its execution enters. The entry waits, attempt
+    after attempt, neither skipping the reopen nor failing its start; the row keeps its ready capture while the lock
+    is held, and once it is released that capture is history and a new one is owed."""
+    import contextlib
+    import threading
+
+    from ouroboros import headless, task_custody
+    from ouroboros.task_results import load_task_result
+
+    data, taken, manifest = _entering(tmp_path, "contended")
+    real_lock, refused, errors = task_custody.task_custody_lock, [], []
+    holding, release, contended = threading.Event(), threading.Event(), threading.Event()
+
+    @contextlib.contextmanager
+    def observed(*args, **kwargs):  # the entry's attempts; the other publisher holds the real lock
+        with real_lock(*args, **kwargs) as held:
+            if not held:
+                refused.append(True)
+                if len(refused) >= 2:
+                    contended.set()
+            yield held
+
+    def publisher():
+        with real_lock(data, "contended", timeout_sec=5) as held:
+            if held:
+                holding.set()
+                release.wait(30)
+
+    def enter():
+        try:
+            headless.reopen_capture_at_entry(data, "contended")
+        except BaseException as exc:  # reported to the test's thread
+            errors.append(exc)
+
+    monkeypatch.setattr(headless, "PUBLICATION_LOCK_SEC", 0.05)
+    monkeypatch.setattr(task_custody, "task_custody_lock", observed)
+    other, entry = threading.Thread(target=publisher), threading.Thread(target=enter)
+    other.start()
+    try:
+        assert holding.wait(10), "the other publisher never took the lock"
+        entry.start()
+        assert contended.wait(10), "the entry did not keep contending for the held lock"
+        assert entry.is_alive(), "the entry returned while another publisher held the capture"
+        held = load_task_result(data, "contended")
+        assert (held["artifact_status"], held["artifacts"]) == (taken["artifact_status"], taken["artifacts"])
+    finally:
+        release.set()
+        other.join(10)
+        if entry.ident is not None:
+            entry.join(10)
+    assert not entry.is_alive() and not errors, errors
+    assert _reopened(load_task_result(data, "contended"), manifest)
+
+
+def test_an_entry_whose_first_read_fails_lets_the_row_decide_under_the_lock(tmp_path, monkeypatch):
+    """#3248: the entry's first, lock-free read of the row fails. The start neither runs on that unknown nor fails
+    there: the row the write reads under the custody lock decides, so the owed capture is still reopened, and a
+    second entry over the reopened row changes nothing."""
+    import errno
+
+    from ouroboros import headless
+    from ouroboros.task_results import load_task_result
+
+    data, _taken, manifest = _entering(tmp_path, "unread")
+    real_load, reads = headless.load_task_result, []
+
+    def first_read_fails(root, task_id, **kwargs):
+        reads.append(kwargs)
+        if len(reads) == 1:
+            raise OSError(errno.EIO, "the row was not read")
+        return real_load(root, task_id, **kwargs)
+
+    monkeypatch.setattr(headless, "load_task_result", first_read_fails)
+    headless.reopen_capture_at_entry(data, "unread")
+    assert reads[0] == {"strict": True}
+    reopened = load_task_result(data, "unread")
+    assert _reopened(reopened, manifest)
+    reads.clear()
+    headless.reopen_capture_at_entry(data, "unread")  # its first read fails again: the row owes nothing more
+    assert reads[0] == {"strict": True} and load_task_result(data, "unread") == reopened
+
+
+def test_a_queued_stop_after_the_entry_settles_missing_never_the_earlier_capture(tmp_path):
+    """#3248's known residual: only the finish, a running task's Stop or a closure captures the entered tree. A Stop
+    of the row queued again after its entry captures nothing, so the row settles ``missing``; the earlier capture
+    stays history with its bytes and is never offered as the current one."""
+    import pytest
+
+    from ouroboros.headless import current_workspace_manifest, reopen_capture_at_entry
+    from ouroboros.task_results import load_task_result
+    from supervisor.cancel_publication import _cancel_result_fields
+
+    data, _taken, manifest = _entering(tmp_path, "queued-stop")
+    reopen_capture_at_entry(data, "queued-stop")
+    entered = load_task_result(data, "queued-stop")
+    write_task_result(data, "queued-stop", "cancelled", _cancel_observed=True, **_cancel_result_fields(
+        {"id": "queued-stop", "workspace_root": entered["workspace_root"]}, existing=entered, result="Stopped."))
+    row = load_task_result(data, "queued-stop")
+    settled = (row["status"], row["artifact_status"], row["artifact_bundle"]["status"])
+    assert settled == ("cancelled", "missing", "missing")
+    assert manifest.is_file() and str(manifest) in {
+        item["path"] for item in row["artifacts"] if item.get("kind") == "workspace_capture_history"}
+    with pytest.raises(FileNotFoundError, match="current capture has not been published"):
+        current_workspace_manifest(data, "queued-stop", row)
 
 
 def test_task_artifact_endpoint_serves_only_declared_artifacts(tmp_path):

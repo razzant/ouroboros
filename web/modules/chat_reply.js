@@ -14,6 +14,7 @@ import { bindBubbleActions } from './message_actions.js';
 import { revealTimelineNode } from './chat_render_batch.js';
 import { afterMotion } from './motion.js';
 import { readBand } from './project_read_state.js';
+import { createChatSearch } from './chat_search.js';
 
 export const REPLY_ICON = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor"'
     + ' stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
@@ -66,13 +67,34 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     let staged = null;
     let strip = null;
     let targetTimer = 0;
+    let search = null;  // the room's search (below), whose open surface the clearance counts
     const bubbleActions = bindBubbleActions({ feed, registry: actions, onDomWrite });
-    // How much of the feed's top the room's header covers: a placed row lands under it, not behind it.
+    // How much of the feed's top the room's header (and an open search, chat_search.js) covers: a placed row lands
+    // under them, not behind them.
     const headerClearance = () => {
         const header = feed.closest('.project-panel')?.querySelector('.project-panel-bar')
             || feed.closest('.page, .chat-instance-panel')?.querySelector('.chat-page-header, .chat-panel-statusbar');
-        return Math.max(HEADER_CLEARANCE, (header?.getBoundingClientRect().bottom || 0) - feed.getBoundingClientRect().top + 12);
+        const bottom = Math.max(header?.getBoundingClientRect().bottom || 0, search?.cover()?.getBoundingClientRect().bottom || 0);
+        return Math.max(HEADER_CLEARANCE, bottom - feed.getBoundingClientRect().top + 12);
     };
+    /** While the room's search is open the feed's top clears its sheet as it clears the room's bar (style.css
+     * --chat-find-reserve), so a landing places even the room's first message below the sheet; closed, nothing is
+     * reserved. Measured on open, close and each change of the sheet's height (chat_search.js), and before a landing.
+     * True when the reserve changed. */
+    function fitSearch() {
+        const sheet = search?.cover();
+        const prior = parseFloat(feed.style.getPropertyValue('--chat-find-reserve')) || 0;
+        let room = 0;
+        if (sheet && typeof getComputedStyle === 'function') {
+            const scale = feed.getBoundingClientRect().height / feed.offsetHeight || 1;  // a phone drawer scales it
+            const own = parseFloat(getComputedStyle(feed).paddingTop) - prior;  // the feed's top without the reserve
+            room = Math.max(0, Math.ceil(headerClearance() / scale - own));
+        }
+        if (room === prior) return false;
+        if (room) feed.style.setProperty('--chat-find-reserve', `${room}px`);
+        else feed.style.removeProperty('--chat-find-reserve');
+        return true;
+    }
     /** One explicit placement of a row under the header, as a quote's landing is: it claims the reading intent, so the
      * reader's own later gesture supersedes it. `follow` instead returns a reader who was following the newest message
      * to that message. */
@@ -94,6 +116,9 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     // What of the feed a reader sees below: the composer is drawn over the feed's foot.
     const band = () => readBand(feed, null, composerArea);
     const decks = createRelayDecks({ feed, chatId, onDomWrite, reading, clearance: headerClearance, band, place });
+    // The room's search lands through the same reveal, leaving the keyboard in its field (chat_search.js).
+    search = createChatSearch({ chatId, feed, present, onLayout: () => onDomWrite(fitSearch),
+        reveal: (address, isCurrent, locate) => reveal(address, isCurrent, null, { focus: false, locate }) });
     let destroyed = false;
     // `held`: the reader's own live-edge intent while a reveal is pending (a reveal sets stick false itself).
     let revealGeneration = 0, revealing = 0, held = null;
@@ -109,21 +134,24 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
     const rowOf = (address) => (address ? [...feed.querySelectorAll('[data-row-address]')]
         .find((node) => node.dataset.rowAddress === address) : null) || null;
 
-    function markTarget(target) {
+    function markTarget(target, focus = true) {
         clearTimeout(targetTimer);
         feed.querySelectorAll('.is-quote-target').forEach((old) => old.classList.remove('is-quote-target'));
         void target.offsetWidth;
         target.classList.add('is-quote-target');
         if (target.tabIndex < 0) target.tabIndex = -1;
-        target.focus({ preventScroll: true });
+        if (focus) target.focus({ preventScroll: true });
         targetTimer = setTimeout(() => target.classList.remove('is-quote-target'), TARGET_MS);
     }
 
     /** One claim covers the loaded fastpath, bounded read and app-owned room switch. Never sends a message.
      * A reveal that moved nothing (an answer, a failed read, a room it could not open) gives a reader who followed
      * the live edge that edge back, with what arrived meanwhile, while the claim is still theirs: a gesture, a
-     * newer reveal or leaving the room decided instead. A landing or a page drawn around it (`left`) keeps its view. */
-    async function reveal(address, isCurrent = () => true, prepared = null) {
+     * newer reveal or leaving the room decided instead. A landing or a page drawn around it (`left`) keeps its view.
+     * A landing answers `{state: 'found', target}`; `focus: false` (a search stepping through matches) leaves the
+     * keyboard where it is, and a search's `locate(target)` names its first matching words (a Range, or null), placed
+     * in view with the row. */
+    async function reveal(address, isCurrent = () => true, prepared = null, { focus = true, locate = null } = {}) {
         const position = reading();
         const following = held?.claimed() ? held.following : position.stick;
         const claimed = position.claim ? position.claim() : (position.cancel(), () => true);
@@ -131,7 +159,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         const generation = revealing = ++revealGeneration;
         const own = held = { following, claimed };
         position.stick = false;
-        const result = await seek(address, position, wanted, prepared)
+        const result = await seek(address, position, wanted, prepared, focus, locate)
             .catch(error => (wanted() ? { state: 'unknown', error } : null));
         if (generation === revealing) revealing = 0;
         if (held === own) held = null;
@@ -150,7 +178,30 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         return Boolean(node) && node.dataset.portal !== '1';
     };
 
-    async function seek(address, position, wanted, prepared) {
+    /** A search's first matching words, when what the reader sees left them out: first each scrolling box between them
+     * and the feed (a wide code line, table or formula) brings them inside its own clip on the axis it scrolls, then
+     * the feed centres them in the band between the room's header and search and the composer. */
+    function placeWords(words) {
+        const first = () => words?.getClientRects?.()[0];
+        if (!first()) return;
+        // Into [from, to] (screen px) by `scale` screen px per scrolled px: centred, when outside.
+        const shift = (from, to, start, end, scale = 1) => (start < from || end > to ? (start + end - from - to) / 2 / scale : 0);
+        for (let box = words.startContainer.parentElement; box && box !== feed && feed.contains(box); box = box.parentElement) {
+            const style = getComputedStyle(box), edge = box.getBoundingClientRect();
+            const scale = edge.width / box.offsetWidth || 1;  // a phone drawer scales the room
+            const left = edge.left + box.clientLeft * scale, top = edge.top + box.clientTop * scale, word = first();
+            if (/auto|scroll/.test(style.overflowX) && box.scrollWidth > box.clientWidth) {
+                box.scrollLeft += shift(left, left + box.clientWidth * scale, word.left, word.right, scale);
+            }
+            if (/auto|scroll/.test(style.overflowY) && box.scrollHeight > box.clientHeight) {
+                box.scrollTop += shift(top, top + box.clientHeight * scale, word.top, word.bottom, scale);
+            }
+        }
+        const word = first(), top = feed.getBoundingClientRect().top + headerClearance(), { bottom } = band();
+        feed.scrollTop += shift(top, bottom, word.top, word.bottom);
+    }
+
+    async function seek(address, position, wanted, prepared, focus = true, locate = null) {
         let target = !prepared && drawn(address);
         if (!target) {
             const result = await history()?.reference(address, wanted, prepared);
@@ -163,13 +214,16 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         }
         if (!wanted()) return null;
         target = decks.surface(target) || target;  // a tucked note's deck opens, so the row it lands on shows
+        const words = locate?.(target);  // first: what the search then says of the row may change its sheet's height
+        fitSearch();
         revealTimelineNode(target, feed, headerClearance());
+        placeWords(words);
         position.scroll();
         // This explicit placement measured the current column. An ordinary scroll
         // keeps the old-width anchor until reflow; a newly opened room must replace it.
         position.remember(true);
-        markTarget(target);
-        return { state: 'found' };
+        markTarget(target, focus);
+        return { state: 'found', target };
     }
 
     async function jump(ref) {
@@ -410,6 +464,8 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         syncDerivedQuotes,
         reveal,
         draws,
+        /** The room's search of its saved messages (chat_search.js): Cmd+F on a Mac, Ctrl+F elsewhere, and "+". */
+        search,
         get revealing() { return revealing !== 0; },
         /**
          * "Send as a new message" under a delivery doubt: the owner's words join this composer's draft (sent, they are
@@ -429,6 +485,7 @@ export function createChatReplies({ chatId, feed, input, composerArea = null, ke
         destroy() {
             destroyed = true;
             clearTimeout(targetTimer);
+            search.destroy();
             bubbleActions.destroy();
             decks.destroy();
             keyHost?.removeEventListener('keydown', onKeydown);

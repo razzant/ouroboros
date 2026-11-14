@@ -126,3 +126,18 @@ def test_server_navigation_and_chat_static_contracts():
     assert "new CustomEvent('ouro:settings-updated'" in controls and "source: 'settings-row'" in controls
     assert "new CustomEvent('ouro:settings-updated'" not in costs
     assert "source !== 'settings-row' || home !== LIMITS_PAGE" in costs
+
+
+def test_a_page_that_borrows_the_dashboard_shell_keeps_a_bounded_column():
+    """Circles borrows `.dashboard-shell` without the section shell. The section shell bounds the Dashboard's columns;
+    a borrowed shell with no bounded column of its own grows to its content, and the page's body, its only scroller,
+    never scrolls: everything below the first screen is out of reach."""
+    rule = re.search(r"\.dashboard-shell:not\(\.section-shell\)\s*\{([^}]*)\}", _read("web/style.css"))
+    assert rule, "a .dashboard-shell without .section-shell has no rule of its own"
+    for declaration in ("flex: 1", "min-height: 0", "display: flex", "flex-direction: column", "overflow: hidden"):
+        assert declaration in rule.group(1), declaration
+    borrowers = sorted(path.name for path in (ROOT / "web/modules").glob("*.js")
+                       if 'class="dashboard-shell"' in path.read_text(encoding="utf-8"))
+    assert borrowers == ["circles.js"], f"a new page borrows the shell: look at its scroller ({borrowers})"
+    # The Dashboard's own shell is the section shell, which the rule above leaves alone.
+    assert 'class="dashboard-shell section-shell"' in _read("web/modules/dashboard.js")

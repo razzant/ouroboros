@@ -6,6 +6,7 @@ import { forgetProjectPreviews, previewsRefused } from './modules/chat_preview.j
 import { loadVersion } from './modules/utils.js';
 import { bindScrollFade } from './modules/scroll_fade.js';
 import { initChat, createChatInstance } from './modules/chat.js';
+import { bindChatSearchKeys } from './modules/chat_search.js';
 import { createStateSnapshotSequencer, heldProjectChatIds, readStateSnapshot } from './modules/state_snapshots.js';
 import { IDLE_SUMMARY, buildProjectActivityIndex, markWords, reconcileProjectRooms } from './modules/project_activity.js';
 import { markView, paintStatusMark, syncMarkPhases } from './modules/status_mark.js';
@@ -653,6 +654,13 @@ function closeNotificationReaders() {
 mainChat = initChat({ ...ctx, ws: roomSocket(ws) });
 // The start's opening ends at the reader's own first move in Main's feed or its ↓: a key, wheel, touch or press (DESIGN "Unread").
 for (const id of ['chat-messages', 'chat-scroll-bottom']) for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) document.getElementById(id)?.addEventListener(type, () => { mainOpening = false; }, { passive: true });
+// Ctrl+F or Cmd+F searches the room in front (chat_search.js): Main while the focus is in it, else the open Project,
+// else Main while it is the page shown. Any other page, the drawer, a dialog or a menu keeps the key.
+bindChatSearchKeys({ room: () => {
+    const main = state.activePage === 'chat' ? mainChat : null, project = projectInstances.get(navState.activeProjectId);
+    if (navState.mobileDrawerOpen) return null;
+    return main?.page.contains(document.activeElement) && !main.page.closest('[inert]') ? main : project || main;
+} });
 initFiles({ ...ctx, layers });
 
 // Skills' contributions (CLIENT_CONTRACT §11): one store, read now and on every lifecycle change; their message

@@ -91,12 +91,14 @@ class ChronologicalSource(HistorySource):
         time, order, seq = _internal(entry["_chrono_key"])
         self.keys, self._after = {"before": entry["_chrono_key"], "origin": seq}, (time, order, seq + 1)
 
-    def _seek(self, *, below=None, start=None, lower=None, limit):
+    def _seek(self, *, below=None, start=None, lower=None, limit, max_bytes=None):
         """Up to ``limit`` frozen rows of the room as ``(row, key)``: newest first below the exclusive key
         ``below`` (the newest when None) and not below the inclusive key ``lower``, or oldest first from the
         inclusive key ``start`` (keys as the index compares them). The key's own time and order, then its
         time at other orders, then other times: each an index range, so rows sharing a time or an order are
-        read, never stepped through; keys and bodies share one snapshot."""
+        read, never stepped through; keys and bodies share one snapshot. With ``max_bytes`` only the rows up
+        to the one whose stored lengths reach it fetch bodies (``ds.within_bytes``); the rest keep their key,
+        their row ``None``."""
         frozen = self.upper
         with ds.transaction(self.root, write=False) as conn:
             if start is not None:
@@ -126,12 +128,15 @@ class ChronologicalSource(HistorySource):
             keyed = [(record["seq"], (record["time"], record["ord"], record["seq"])) for record in found]
             if lower is not None:
                 keyed = [(seq, key) for seq, key in keyed if key >= lower]
+            wanted = [seq for seq, _key in keyed]
+            if max_bytes is not None:
+                wanted = ds.within_bytes(conn, "chat", wanted, max_bytes)
             records = {}
-            for index in range(0, len(keyed), 900):  # within SQLite's parameter floor
-                batch = [seq for seq, _key in keyed[index:index + 900]]
+            for index in range(0, len(wanted), 900):  # within SQLite's parameter floor
+                batch = wanted[index:index + 900]
                 records.update((record["seq"], record) for record in conn.execute(
                     f"{ds._SELECT} WHERE stream='chat' AND seq IN ({','.join('?' * len(batch))})", batch))
-        return [(ds._row(records[seq]), key) for seq, key in keyed]
+        return [(ds._row(records[seq]) if seq in records else None, key) for seq, key in keyed]
 
     def _entry(self, row, key, coordinate):
         from ouroboros.chat_references import projection_fields
@@ -149,34 +154,39 @@ class ChronologicalSource(HistorySource):
     def recent(self, want, counts):
         return self._page(self.top, None, want, counts, _READ_CEILING_ROWS, window=True)
 
-    def older(self, before, want, counts, ceiling=None):
-        """Rows below the cursor's cut (``None``: the frozen present, where a deferral left the newest row)."""
+    def older(self, before, want, counts, ceiling=None, *, byte_ceiling=None):
+        """Rows below the cursor's cut (``None``: the frozen present, where a deferral left the newest row);
+        ``byte_ceiling`` as ``HistorySource.older``."""
         if not 0 <= before <= self.top:
             raise HistoryCursorError("history_cursor_invalid", 400)
         below = self.keys.get("before")
         if want <= 0 or not before:
             self.top_key = self.lower_key = below
             return [], before, set()
-        return self._page(before, below, want, counts, _READ_CEILING_ROWS if ceiling is None else ceiling)
+        return self._page(before, below, want, counts, _READ_CEILING_ROWS if ceiling is None else ceiling,
+                          byte_ceiling=byte_ceiling)
 
-    def _page(self, top, below, want, counts, ceiling, window=False):
+    def _page(self, top, below, want, counts, ceiling, window=False, *, byte_ceiling=None):
         """Rows below the public key ``below``, newest first, each a step below the one after it from ``top``."""
         selected, counted, read, seen, coordinate = [], 0, 0, 0, top
         self.top_key, self.lower_key = below, below  # an empty page replays nothing
         key = None if below is None else _internal(below)
         while True:
-            batch = self._seek(below=key, limit=_PROBE_ROWS)
-            labelled = [self._entry(row, found, coordinate - step) for step, (row, found) in enumerate(batch, 1)]
+            batch = self._seek(below=key, limit=_PROBE_ROWS,
+                               max_bytes=None if byte_ceiling is None else byte_ceiling - seen)
+            labelled = [self._entry(row, found, coordinate - step) for step, (row, found) in enumerate(batch, 1)
+                        if row is not None]  # a prefix: the page ends at its last row or before
             coordinate -= len(batch)
-            for entry, (row, _key) in zip(self._warmed(labelled), batch):  # newest first
+            for step, (entry, (row, _key)) in enumerate(zip(self._warmed(labelled), batch), 1):  # newest first
                 selected.append(entry)
                 counted += bool(counts(entry))
                 read += 1
                 seen += row.length
                 windowed = not window or read >= _RECENT_WINDOW_ROWS or seen >= _RECENT_WINDOW_BYTES
-                if (counted >= want and windowed) or read >= ceiling:
+                if (counted >= want and windowed) or read >= ceiling or (
+                        byte_ceiling is not None and seen >= byte_ceiling):
                     self.lower_key = entry["_chrono_key"]
-                    if len(batch) < _PROBE_ROWS and entry is labelled[-1]:  # nothing older: the beginning
+                    if len(batch) < _PROBE_ROWS and step == len(batch):  # nothing older: the beginning
                         return list(reversed(selected)), 0, self.gaps(0, top)
                     return list(reversed(selected)), self.coordinate(entry), self.gaps(self.coordinate(entry), top)
             if selected:

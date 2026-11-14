@@ -24,7 +24,7 @@ import threading
 from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 from ouroboros.utils import machine_json
-from ouroboros.work_stop import pause_marker
+from ouroboros.work_stop import held_for_release, pause_marker
 
 log = logging.getLogger(__name__)
 
@@ -211,8 +211,9 @@ def conflicting_writers(q: Any, predecessor: str, *, drive_root: Any = None, own
     the census could tie to no tree (``tree_member_results``), never a writer,
     and only once every link source answered: until then such a row holds too.
     ``owner_pause_fence_id`` is the owner Pause's own census: a queued admitted
-    dispatch that only that exact accepted Pause's latch holds is not running
-    work (its earlier effects are still observed below). Continue never passes
+    dispatch that only that exact accepted Pause's latch holds, or a member its own
+    stop holds for a Resume (``held_for_release``), is not running work (its
+    earlier effects are still observed below). Continue never passes
     it: that row would dispatch again once the Pause is resumed. Callers pass the
     root's closed fence they just read; while its queue latch is not projected
     (``latch_pending``, or a park that could not read it) that durable fence alone
@@ -268,7 +269,7 @@ def conflicting_writers(q: Any, predecessor: str, *, drive_root: Any = None, own
         tid = str(task.get("id") or "")
         if str(task.get("root_task_id") or tid) == predecessor:
             members.add(tid)
-            if owner_latched and queued_admitted_dispatch(task):
+            if owner_latched and (queued_admitted_dispatch(task) or held_for_release(task)):
                 continue
             if budget_pause_fact(task, fences) is None or (task.get("admitted_dispatch") == "possible"
                                                    and not pause_marker(task)):

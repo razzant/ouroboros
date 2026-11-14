@@ -506,6 +506,13 @@ def writer_wait(task: dict | None) -> bool:
     return record_policy(hold_fact(task)).get("wait_for") == "continuation_writers"
 
 
+def held_for_release(task: dict | None) -> bool:
+    """Its own explicit stop that only a Resume or the owner releases; never a wait or a refusal."""
+    hold = hold_fact(task)
+    policy = record_policy(hold)
+    return bool(hold) and policy["cause"] != "wait" and policy["release"] in {"resume", "owner"}
+
+
 _POINTS = ("_budget_pause", "_owner_wait_resume", "_working_recovery", "_budget_pause_resume", SELECTION_KEY)
 
 

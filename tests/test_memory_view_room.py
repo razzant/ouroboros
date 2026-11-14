@@ -10,6 +10,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -110,6 +111,54 @@ def test_the_view_room_matches_own_room_chat_inside_projects(tmp_path):
         ctx = SimpleNamespace(task_id=task["id"], current_chat_id=task["chat_id"],
                               task_metadata={k: v for k, v in task.items() if k.endswith("task_id")})
         assert mv.view_spec_for_task(task, tmp_path).room_id == str(own_room_chat(ctx, tmp_path))
+
+
+def test_this_room_heading_names_its_chat_id_once_and_an_empty_room_keeps_its_caption(tmp_path):
+    """The existing heading carries the chat id every reader of the room's rows names (a label is renamed, a head
+    is a hash, and a ``row:`` address names where a row was written): Main's label gains it -- the id memory_read's
+    own schema gives Main -- a Project's already ends with it and is not spelled twice, and no second line repeats
+    it. So a room with nothing open, retold or noted still says so: the caption a two-line start dropped for a new
+    Project's root and for every child."""
+    from ouroboros.projects_registry import create_project
+    from ouroboros.tools.chronicle import chronicle_tools
+
+    rooms, _rows = _install(tmp_path)
+    alpha = str(rooms["alpha"])
+    store = ChronicleStore(tmp_path)
+    _snap, text = _view(tmp_path, MAIN_TASK)
+    assert text.startswith(f"## This room (Main [chat_id=1]) — head {store.room_head('1')}\n\n### ")
+    reader = next(entry.schema for entry in chronicle_tools() if entry.name == "memory_read")
+    assert "(1 is Main)" in reader["parameters"]["properties"]["room_id"]["description"]
+    _snap, alpha_text = _view(tmp_path, {"id": "ra1", "chat_id": rooms["alpha"]})
+    assert alpha_text.startswith(f"## This room (Project Alpha [chat_id={alpha}]) — head {store.room_head(alpha)}\n\n### ")
+    assert "This room is " not in text + alpha_text and alpha_text.split("\n", 1)[0].count("[chat_id=") == 1
+    gamma = str(create_project(tmp_path, "gamma", name="Gamma")["chat_id"])
+    for spec in (mv.view_spec_for_task({"id": "rg1", "chat_id": int(gamma)}, tmp_path),
+                 dataclasses.replace(mv.ROLE_DEFAULTS["child"], room_id=gamma)):
+        empty = mv.render_room(mv.capture_memory_view(tmp_path, {"id": "rg1", "chat_id": int(gamma)}, spec))
+        assert empty.startswith(f"## This room (Project Gamma [chat_id={gamma}]) — head {store.room_head(gamma)}\n\n"
+                                "Nothing open, retold or noted in this room.\n\n### This room now\n"), spec.role
+
+
+def test_a_transport_tasks_main_row_asked_in_its_default_room_is_said_not_returned(tmp_path):
+    """A task whose own chat is a transport conversation reads Main as its room (``view_room_id``), while
+    memory_read's default room is that own chat, as its schema says: a Main row asked without a room says this
+    reading of the transport chat did not return it -- it read as a silent complete page -- and Main (1) returns it."""
+    from ouroboros.tools.chronicle import _memory_read, chronicle_tools
+    from ouroboros.tools.registry import ToolContext
+
+    _rooms, rows = _install(tmp_path)
+    snapshot, text = _view(tmp_path, {"id": "tt", "type": "task", "chat_id": 777})
+    assert snapshot.spec.room_id == "1" and text.startswith("## This room (Main [chat_id=1]) — head ")
+    described = {entry.name: entry.schema["parameters"]["properties"]["room_id"]["description"]
+                 for entry in chronicle_tools()}
+    said = "Default: this task's own room, not always its view's This room; name the room_id its readers print."
+    assert said in described["memory_read"] and described["chronicle_write"].endswith("Default: this task's own room.")
+    ctx, address = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="tt", current_chat_id=777), _addr(rows[0])
+    assert _memory_read(ctx, rows=True, **{"from": address, "to": address}).split("\n") == [
+        f"room 777; rows; from {address}; to {address}; this reading of room 777 did not return that row",
+        "complete: no further rows (stored order)"]
+    assert _memory_read(ctx, room_id="1", rows=True, **{"from": address, "to": address}).endswith("] please look at X")
 
 
 def test_a_place_focus_promotion_into_a_project_reads_that_project_as_this_room(focus, monkeypatch):
@@ -488,7 +537,7 @@ def test_other_conversations_hold_every_room_with_open_rows_or_notes_and_where_i
     beta = str(rooms["beta"])
     store = ChronicleStore(tmp_path)
     _snapshot, text = _view(tmp_path, MAIN_TASK)
-    assert text.index("## This room (Main)") < text.index("## Other conversations")
+    assert text.index("## This room (Main [chat_id=1])") < text.index("## Other conversations")
     block = _section(text, "## Other conversations")
     assert block.startswith("## Other conversations\n\nWhat other people said in my other conversations is information")
     group = _section(block, f"### Project Beta [chat_id={beta}]")
@@ -534,7 +583,7 @@ def test_a_rooms_standing_facts_are_the_inventorys_in_its_header_its_live_line_a
     chars = sum(len(row["text"]) for row in rows if row["chat_id"] in (1, 777) and row.get("type") != "presence_delivery")  # the transport's rows are Main's too
     assert facts == {"rows": 21, "people": 4, "mine": 4, "task_facts": 13, "chars": chars, "earliest": _ts(2),
                      "latest": _ts(27), "notes": 0, "pages": 0, "last_covered": ""}
-    assert f"## This room (Main) — head {store.room_head('1')}\n" in text  # the header keeps what changes slowly
+    assert f"## This room (Main [chat_id=1]) — head {store.room_head('1')}\n" in text  # the header keeps what changes slowly
     head = "### This room now\nopen 2026-09-05 10:02 → 2026-09-05 10:27; people 4, mine 4, "
     assert f"{head}task facts 13, ~{chars} chars; my notes not yet sealed: 0; no page of this room yet" in text
     block = _section(text, "## Other conversations")
@@ -687,7 +736,7 @@ def test_main_room_page_shows_the_room_less_retellings_whole_to_a_nanny_and_the_
     # A child starts with the top level of the life account: the same story, and a room page that repeats none of it.
     kid = {"id": "kid1", "chat_id": 1, "delegation_role": "subagent", "root_task_id": "root1"}
     child = mv.capture_memory_view(tmp_path, kid, mv.view_spec_for_task(kid, tmp_path))
-    assert mv.render_story(child) == story and "## This room (Main)" in mv.render_room(child)
+    assert mv.render_story(child) == story and "## This room (Main [chat_id=1])" in mv.render_room(child)
     assert "Main talk." not in mv.render_room(child) and "A room-less era." not in mv.render_room(child)
 
 
@@ -702,7 +751,7 @@ def test_each_role_sees_its_parts_of_the_live_view(tmp_path):
     assert [mark["text"] for mark in main.marks] == ["Watch root1", "Watch alpha", "For everyone"]
     wake, wake_text = _view(tmp_path, {"id": "w1", "chat_id": 1, "metadata": {"usage_category": "consciousness"}})
     assert "- [global; Main] For everyone" in wake_text and "Watch alpha" in wake_text  # all marks, as Main's turn
-    assert _section(wake_text, "## This room (Main)") == _section(main_text, "## This room (Main)")  # byte for byte
+    assert _section(wake_text, "## This room (Main [chat_id=1])") == _section(main_text, "## This room (Main [chat_id=1])")  # byte for byte
     assert "please look at X" in _section(wake_text, "### Open conversation since")
     assert "### Main\n" not in wake_text  # Main is this room, not another conversation
     block = _section(wake_text, "## Other conversations")
@@ -713,7 +762,7 @@ def test_each_role_sees_its_parts_of_the_live_view(tmp_path):
     child_task = {"id": "kid9", "chat_id": 1, "delegation_role": "subagent", "root_task_id": "root1",
                   "metadata": words}
     child, child_text = _view(tmp_path, child_task)
-    assert mv.render_story(child).startswith("## My story\n") and "## This room (Main) — head " in child_text
+    assert mv.render_story(child).startswith("## My story\n") and "## This room (Main [chat_id=1]) — head " in child_text
     assert "  Old Main talk." in mv.render_story(child)  # the retold record is in its story, whole, as in Main's
     assert "### Retold before the update" not in child_text and "### Open conversation" not in child_text
     assert "## Other conversations" not in child_text and "Watch alpha" not in child_text and "Watch root1" in child_text
@@ -757,14 +806,20 @@ def test_a_helpers_owner_words_are_indented_so_their_lines_never_become_headings
     assert "\nFind the cause\n## not a heading" in render_owner_words(rows, audience="reviewer")
 
 def test_before_activation_the_room_is_one_line_with_a_reader_that_works_without_the_chronicle(tmp_path, monkeypatch):
-    shared.projects(tmp_path)
+    """The heading an active room has, its chat id once (a Project's label already ends with it), then one line: the
+    reason and a reader that works without the chronicle."""
+    rooms = shared.projects(tmp_path)
     monkeypatch.setattr(ChronicleStore, "ensure_activated",
                         lambda self, **kw: {"kind": "import_pending", "reason": "legacy_memory_lock_busy"})
     snapshot, text = _view(tmp_path, MAIN_TASK)
-    assert text == ("## This room (Main)\n\nOpen conversation unavailable until my memory is activated "
-                    "(legacy_memory_lock_busy); read it: chat_history(count=100) — every room, newest first; this "
-                    "room is chat_id 1.")
+    assert text == ("## This room (Main [chat_id=1])\n\nOpen conversation unavailable until my memory is activated "
+                    "(legacy_memory_lock_busy); read it: chat_history(count=100) — every room, newest first.")
     assert snapshot.conversations == () and snapshot.marks == ()
+    bound, bound_text = _view(tmp_path, {"id": "bound", "type": "task", "chat_id": 1, "delegation_role": "root",
+                                         "root_task_id": "bound"})
+    alpha = rooms["alpha"]
+    assert bound.spec.room_id == str(alpha) and bound_text.count("chat_id=") == 1, bound_text
+    assert f"## This room (Project Alpha [chat_id={alpha}])\n\nOpen conversation unavailable until my " in bound_text
 
 
 def test_private_contact_reads_as_private_with_its_exact_source_in_main_and_its_project(tmp_path):
@@ -935,3 +990,157 @@ def test_this_room_has_no_sealing_invitation_and_a_linked_row_leaves_my_other_co
     room = next(room for group in snapshot.conversations for room in group["rooms"] if room["room_id"] == beta)
     assert [word["text"] if "text" in word else word["line"].rsplit("] ", 1)[-1] for word in room["words"]] == ["one more thing"]
     assert room["tasks"] == []  # the linked terminal row is no task line of the room either
+
+
+def _moved_work(tmp_path):
+    """Main where a work answered, then moved into Alpha by the placement transaction the mind's move and the
+    owner's button share (``project_placement.move_task_to_project``): its replies keep their ``row:1@…``
+    addresses, Alpha shows them and Main no longer does. A registry over the data root reads as a task does."""
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.project_placement import move_task_to_project, placement_basis
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    root, repo = tmp_path / "data", tmp_path / "repo"
+    repo.mkdir(parents=True)
+    rooms = shared.projects(root)
+    origin = shared.msg(_ts(30), "start the moved work", client_message_id="o-mover")
+    lineage = {"delegation_role": "root", "root_task_id": "mover"}  # a root's own speech carries its lineage
+    replies = [shared.msg(_ts(31 + n), f"MOVED REPLY {n}", direction="out", task_id="mover", **lineage) for n in range(3)]
+    done = shared.msg(_ts(35), "", direction="system", type="task_summary", task_id="mover", root_task_id="mover",
+                      summary_kind="terminal_root_projection", status="completed", wake_summary="Moved and answered.")
+    shared.append(root / "logs" / "chat.jsonl", shared.msg(_ts(29), "main question", client_message_id="m-q"), origin,
+                  *replies, shared.msg(_ts(34), "alpha words", chat_id=rooms["alpha"], client_message_id="a-w"), done)
+    shared.import_all(root)
+    assert ChronicleStore(root).ensure_activated()["kind"] == "activation"
+    ref = build_owner_message_ref(chat_id=1, client_message_id="o-mover", ts=origin["ts"], text=origin["text"])
+    moved = move_task_to_project(root, "mover", "alpha", origin={"ref": ref, "text": origin["text"]},
+                                 basis=placement_basis(root, "mover", "alpha"), running={}, pending=[])
+    assert moved["status"] == "delivered" and str(moved["chat_id"]) == str(rooms["alpha"])
+    registry = ToolRegistry(repo_dir=repo, drive_root=root)
+    registry.set_context(ToolContext(repo_dir=repo, drive_root=root, task_id="reader", current_chat_id=1))
+    return root, rooms, [_addr(row) for row in replies], registry
+
+
+_READER = re.compile(r"memory_read\(room_id='(-?\d+)', rows=true, from='([^']+)', to='([^']+)'\)")
+_ROWS = re.compile(r"^\[[^;\n]+; [^\n]*?(row:-?\d+@[^\s;\]]+#[0-9a-f]{12})\]", re.M)
+
+
+def _returned(registry, room, first, last):
+    """The addresses a literal row reader returns, read through the registered memory_read."""
+    text = registry.execute("memory_read", {"room_id": room, "rows": True, "from": first, "to": last})
+    return _ROWS.findall(text), text
+
+
+def test_a_moved_works_rows_read_where_its_project_shows_them_by_the_readers_printed_there(tmp_path):
+    """A work moved from Main into a Project keeps its ``row:1@…`` addresses while the Project, not Main, shows its
+    rows. Each reader a view prints for them names that projection, and executed literally returns exactly the
+    rows it names: the Project root's own room and folded work line (``row_reader``), and in Main's other
+    conversations the Project's line under the shared grammar, which no longer sends the mind to the chat inside
+    the address. That chat, read as asked, returns none of them and says so rather than a silent complete."""
+    from ouroboros import memory_floor as mf
+    from ouroboros import memory_view_conversation_forms as forms
+
+    root, rooms, moved, registry = _moved_work(tmp_path)
+    alpha = str(rooms["alpha"])
+    task = {"id": "mover", "type": "task", "chat_id": 1, "delegation_role": "root", "root_task_id": "mover"}
+    snapshot, whole = _view(root, task)
+    assert snapshot.spec.room_id == alpha and whole.startswith(f"## This room (Project Alpha [chat_id={alpha}]) ")
+    assert all(address in whole for address in moved)
+    folded = mv.render_room(snapshot, mf.level_with(snapshot, mv.FULL_VIEW, ["F2:work:mover:final"]))
+    assert (f"Completed work replies may stand as their gist. Read row addresses with memory_read(room_id='{alpha}', "
+            "rows=true, from=<first>, to=<last>); for a single row use its address for both endpoints.") in folded
+    line = next(line for line in folded.splitlines() if "; work mover]" in line)
+    first, last = line[1:].split(";", 1)[0].split(" → ")
+    assert (first, last) == (moved[0], moved[-1]) and _returned(registry, alpha, first, last)[0] == moved
+    for address in moved:  # a single row: its address for both endpoints, in the room that shows it
+        assert _returned(registry, alpha, address, address)[0] == [address]
+        found, text = _returned(registry, "1", address, address)  # the chat inside the address
+        assert found == [] and "this reading of room 1 did not return that row" in text.split("\n")[0]
+    main, main_text = _view(root, MAIN_TASK)
+    group = next(group for group in main.conversations if group["key"] == f"project:{alpha}")
+    compact = "\n\n".join(forms.pieces([group], {"F6g": {"all:" + group["key"]}}, lambda _key, make: make()))
+    assert ("Read row addresses with memory_read(room_id=<the room showing them, not always the chat in the address>, "
+            "rows=true, from=<first>, to=<last>)") in compact and "<room from address>" not in compact
+    assert f"- Project Alpha [chat_id={alpha}]; " in compact and f"memory_read(room_id='{alpha}', rows=true)" in compact
+    span = next(line for line in compact.splitlines() if line.startswith(f"[{moved[0]} → "))
+    assert span.startswith(f"[{moved[0]} → {moved[-1]}] «Moved and answered.»")
+    assert _returned(registry, alpha, moved[0], moved[-1])[0] == moved  # the room its line names
+    assert _returned(registry, "1", moved[0], moved[-1])[0] == []  # the chat in the address holds none of them
+    for match in _READER.finditer(whole + folded + compact + main_text):  # every whole reader the views print
+        room, first, last = match.groups()
+        found, _text = _returned(registry, room, first, last)
+        assert found and found[0] == first and found[-1] == last, match.group(0)
+
+
+def test_a_moved_works_holding_units_read_where_its_project_shows_it(tmp_path):
+    """The floor note names what holds Main's room by readers. A unit for the moved work's telling in Main's other
+    conversations reads the Project that shows the work's rows, never the chat inside their ``row:1@…`` addresses:
+    each line form's gist reads its replies there, and the whole form's own gist line (no task line carries it here)
+    its terminal row where the capture found it. Every printed reader, executed literally, returns exactly its rows;
+    Main, the chat in the address, returns none of them."""
+    from ouroboros import memory_floor as mf
+    from ouroboros import memory_view_conversation_forms as forms
+    from tests.test_memory_low_start import _room
+
+    root, rooms, moved, registry = _moved_work(tmp_path)
+    alpha = str(rooms["alpha"])
+    main, _text = _view(root, MAIN_TASK)
+    group = next(group for group in main.conversations if group["key"] == f"project:{alpha}")
+    (_work, gist), = forms.source_index(main)[group["key"]]["gists"]
+
+    def printed(snapshot, level):  # the work-gist unit of a Low start's note, memory having lowered it from Max
+        note = mf.floor_note(level, snapshot=snapshot, window_tokens=1_000_000, mode="low", lowered_from="max",
+                             max_room=_room("crowded"))
+        units = [line for line in note.splitlines() if re.match(r"[\d,]+ tokens, work gists, ", line)]
+        assert len(units) == 1 and units[0].count("memory_read(") == 1, note
+        return _READER.search(units[0]).groups()
+
+    for line in (group["key"], "all:" + group["key"], "last:" + group["key"]):
+        reader = printed(main, mv.FloorLevel((("F6g", (line,)),)))
+        assert reader == (alpha, moved[0], moved[-1]) and _returned(registry, *reader)[0] == moved
+    rooms_alone = [{**room, "tasks": []} for room in group["rooms"]]  # no task line carries the telling
+    alone = dataclasses.replace(main, conversations=[{**group, "rooms": rooms_alone}])
+    told = tuple(word["id"] for room in group["rooms"] for word in room["words"] if word.get("gist"))
+    reader = printed(alone, mv.FloorLevel((("F6w", told),)))
+    assert gist["room_id"] == alpha and reader == (alpha, gist["address"], gist["address"])
+    assert _returned(registry, *reader)[0] == [gist["address"]]
+    for first, last in ((moved[0], moved[-1]), (gist["address"], gist["address"])):
+        assert first.startswith("row:1@") and _returned(registry, "1", first, last)[0] == []
+
+
+def test_a_telling_another_room_holds_reads_there_by_the_reader_its_gist_line_prints(tmp_path):
+    """A Main work that spoke into a place room and finished in Main, seen from a Project root: the place's
+    conversation shows its reply, while its telling stands in Main, a room that conversation does not have. Each
+    line form addresses the reply here; once the reply yields, the whole form's own gist line names Main's reader.
+    Executed literally, each returns exactly its row; the place, where a bare ``row:1@…`` under its group would be
+    read, returns none and says so (``memory_view_work.gist_address``)."""
+    from ouroboros import memory_floor as mf
+    from ouroboros import memory_view_conversation_forms as forms
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    rooms, _rows = _install(tmp_path)
+    out = shared.msg(_ts(40), "outward to the place", chat_id=777, direction="out", task_id="wx", transport=TRANSPORT,
+                     delegation_role="root", root_task_id="wx")
+    done = shared.msg(_ts(41), "", direction="system", type="task_summary", task_id="wx", root_task_id="wx",
+                      summary_kind="terminal_root_projection", status="completed", wake_summary="Told the place. More.")
+    shared.append(tmp_path / "logs" / "chat.jsonl", out, done)
+    (tmp_path / "reader-repo").mkdir()
+    registry = ToolRegistry(repo_dir=tmp_path / "reader-repo", drive_root=tmp_path)
+    registry.set_context(ToolContext(repo_dir=tmp_path / "reader-repo", drive_root=tmp_path, task_id="rb1",
+                                     current_chat_id=rooms["beta"]))
+    snapshot, _text = _view(tmp_path, {"id": "rb1", "type": "task", "chat_id": rooms["beta"]})
+    group = next(group for group in snapshot.conversations if [room["room_id"] for room in group["rooms"]] == ["777"])
+    told = [word for word in forms.source_index(snapshot)[group["key"]]["words"] if word.get("work_id") == "wx"]
+    reply, gist = _addr(out), told[0]["gist"]
+    assert [word["address"] for word in told] == [reply] and (gist["room_id"], gist["address"]) == ("1", _addr(done))
+    for line in (group["key"], "all:" + group["key"], "last:" + group["key"]):
+        compact = "\n\n".join(forms.pieces([group], {"F6g": {line}}, lambda _key, make: make()))
+        assert f"\n[{reply}] «Told the place.»" in compact and "memory_read(room_id='777', rows=true)" in compact
+    assert _returned(registry, "777", reply, reply)[0] == [reply]
+    view = mv.render_room(snapshot, mf.level_with(snapshot, mv.FULL_VIEW, ["F6w:" + word["id"] for word in told]))
+    line, = [line for line in view.splitlines() if line.endswith("] «Told the place.»")]
+    own = gist["address"]
+    assert line == f"[memory_read(room_id='1', rows=true, from='{own}', to='{own}')] «Told the place.»"
+    assert _returned(registry, *_READER.search(line).groups())[0] == [gist["address"]]
+    found, text = _returned(registry, "777", gist["address"], gist["address"])
+    assert found == [] and "this reading of room 777 did not return that row" in text.split("\n")[0]

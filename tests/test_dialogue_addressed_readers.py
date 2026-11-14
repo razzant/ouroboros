@@ -299,6 +299,108 @@ def test_routing_recent_text_rows_report_only_missing_parts_of_the_window(tmp_pa
     covered = routing._main_routing_manifest(ctx)
     assert covered["omissions"]["dialogue_gaps"] == []
     assert [row["client_message_id"] for row in covered["recent_canonical_dialogue"]] == [f"recent-{i}" for i in range(20)]
+    # A Reply saved before ``target_home``, to the archived row: while that segment imports, then after it failed, the
+    # room rule cannot read its target. The manifest keeps its Projects and every row, as the Main turn receives it;
+    # that row reads in its written chat (the reader before the rule), and the gap names why.
+    from ouroboros.chat_references import reference_from_row
+    from ouroboros.projects_registry import create_project
+
+    create_project(tmp_path, "alpha", name="Alpha")
+    legacy = {key: value for key, value in reference_from_row(owner("archive")).items() if key != "target_home"}
+    ds.append(tmp_path, "chat", owner("legacy-reply", reply_to=legacy))
+    for gap in ("history is still importing", "a segment could not be imported"):
+        if gap == "a segment could not be imported":
+            [segment] = di.pending_segments(tmp_path)
+            (tmp_path / "archive" / segment["name"]).write_text("changed after cutover\n", encoding="utf-8")
+            di.import_segment(tmp_path, "chat", segment["name"])
+        held = routing._main_routing_manifest(ctx)
+        assert held["omissions"]["dialogue_gaps"] == [gap] and [p["project_id"] for p in held["projects"]] == ["alpha"]
+        assert [row["client_message_id"] for row in held["recent_canonical_dialogue"]] == [
+            *(f"recent-{i}" for i in range(1, 20)), "legacy-reply"]
+        assert held["recent_canonical_dialogue"][-1]["reader"]["arguments"]["room_id"] == "1"
+        assert routing._decision_turn_metadata(ctx, 1, "", {}, routing.RootSnapshot())["main_routing_manifest"] == held
+
+    def failing(error):
+        def row_rooms(*_args):
+            raise error
+        return row_rooms
+
+    # Any other store failure of the rule is no import gap: the manifest fails as before, and its handler logs it.
+    monkeypatch.setattr("ouroboros.room_membership.row_rooms", failing(ds.StoreBusy("contention")))
+    with pytest.raises(ds.StoreBusy):
+        routing._main_routing_manifest(ctx)
+    clean = tmp_path / "clean"
+    ds.append(clean, "chat", owner())  # a stream imported whole: there a plain StoreError is no import gap either
+    monkeypatch.setattr("ouroboros.room_membership.row_rooms", failing(ds.StoreError("dialogue store unavailable")))
+    with pytest.raises(ds.StoreError, match="unavailable"):
+        routing._main_routing_manifest(SimpleNamespace(DRIVE_ROOT=clean))
+
+
+def test_routing_manifest_holds_a_legacy_reply_whose_target_imports_in_progress(tmp_path, monkeypatch):
+    """The room rule also reads a legacy Reply's target from progress: with chat imported whole and that target's
+    progress segment pending, then failed, the manifest keeps its Projects and the row in its written chat, and
+    names the gap."""
+    from types import SimpleNamespace
+    from ouroboros import server_routing_context as routing
+    from ouroboros.chat_references import reference_from_row
+    from ouroboros.projects_registry import create_project
+
+    monkeypatch.setattr(routing, "addressable_roots", lambda *args: routing.RootSnapshot())
+    monkeypatch.setattr(routing, "_recent_root_results", lambda *args: ([], {}))
+    progress = {"chat_id": 1, "ts": "2026-10-16T00:00:00+00:00", "direction": "out", "task_id": "writer",
+                "is_progress": True, "text": "Work in progress"}
+    legacy = {key: value for key, value in reference_from_row(progress).items() if key != "target_home"}
+    seed(tmp_path, archives={"progress_20261016T000000.jsonl": [progress]},
+         live={"chat": [owner("legacy-reply", reply_to=legacy)]})
+    ds.ensure(tmp_path)
+    create_project(tmp_path, "alpha", name="Alpha")
+    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path)
+    for gap in ("history is still importing", "a segment could not be imported"):
+        if gap == "a segment could not be imported":
+            [segment] = di.pending_segments(tmp_path)
+            (tmp_path / "archive" / segment["name"]).write_text("changed after cutover\n", encoding="utf-8")
+            di.import_segment(tmp_path, "progress", segment["name"])
+        assert ds.range_coverage(tmp_path, "chat")["imported"]
+        assert ds.range_coverage(tmp_path, "progress")["mismatch" if "could not" in gap else "pending"] == 1
+        held = routing._main_routing_manifest(ctx)
+        assert held["omissions"]["dialogue_gaps"] == [gap] and [p["project_id"] for p in held["projects"]] == ["alpha"]
+        [row] = held["recent_canonical_dialogue"]
+        assert row["client_message_id"] == "legacy-reply" and row["reader"]["arguments"]["room_id"] == "1"
+        assert routing._decision_turn_metadata(ctx, 1, "", {}, routing.RootSnapshot())["main_routing_manifest"] == held
+
+
+def test_routing_recent_text_readers_name_a_room_that_shows_each_row(tmp_path, monkeypatch):
+    """Each recent row's reader follows the room rule memory_read reads by, and every reader is executed. A work moved
+    from Main into a Project keeps its ``row:1@…`` addresses and ``chat_id`` 1, and its readers name the Project,
+    which returns each row, as it returns that work's reply written to a transport chat; an unmoved row reads in the
+    chat it was written in; a row no room shows (A2A) is read there too, and that reading says it did not return
+    the row, never a silent complete."""
+    from types import SimpleNamespace
+    from ouroboros import server_routing_context as routing
+    from tests.test_memory_view_room import _moved_work, _returned
+
+    monkeypatch.setattr(routing, "addressable_roots", lambda *args: routing.RootSnapshot())
+    monkeypatch.setattr(routing, "_recent_root_results", lambda *args: ([], {}))
+    root, rooms, moved, registry = _moved_work(tmp_path)
+    abroad = {"ts": "2026-09-05T10:36:00+00:00", "chat_id": 777, "direction": "out", "task_id": "mover",
+              "text": "answered on the transport", "transport": {"provider": "telegram", "conversation_id": "c7"}}
+    ds.append(root, "chat", abroad)
+    moved = [*moved, chat_chain.format_address(chat_chain.row_address(abroad))]
+    ds.append(root, "chat", owner("a2a-row", chat_id=-5))
+    rows = routing._main_routing_manifest(SimpleNamespace(DRIVE_ROOT=root))["recent_canonical_dialogue"]
+    by_room = {}
+    for row in rows:
+        args = row["reader"]["arguments"]
+        assert args["from"] == args["to"] and args["rows"] is True
+        by_room.setdefault(args["room_id"], []).append(args["from"])
+        found, text = _returned(registry, args["room_id"], args["from"], args["to"])
+        if row["chat_id"] == -5:
+            assert args["room_id"] == "-5" and found == [] and text.split("\n")[0].endswith("did not return that row")
+        else:
+            assert found == [args["from"]], (row, text)
+            assert args["room_id"] == (str(rooms["alpha"]) if args["from"] in moved else str(row["chat_id"]))
+    assert set(moved) <= set(by_room[str(rooms["alpha"])]) and by_room["1"] and not set(moved) & set(by_room["1"])
+    assert {row["chat_id"] for row in rows if row["reader"]["arguments"]["from"] in moved} == {1, 777}
 
 
 def test_routing_recent_text_discloses_recorded_invalid_intervals(tmp_path, monkeypatch):
