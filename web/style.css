@@ -311,8 +311,9 @@ html[data-layout="stack"] .sidebar-foot-meta { min-height: 44px; margin: var(--s
     --window-chrome-clearance: calc(var(--window-chrome-start) + var(--space-3));
 }
 /* The card stands right under the traffic lights (owner 12.11, the fifth round frames): a step of air under them, so
-   its top reaches into the band's lower part. */
-:root[data-window-chrome="integrated"] .sidebar-head {
+   its top reaches into the band's lower part. The stack layout's drawer has its × there, which clears the band itself
+   (.drawer-head below), so the head under it adds no second clearance. */
+:root[data-window-chrome="integrated"]:not([data-layout="stack"]) .sidebar-head {
     padding-top: max(var(--space-4), calc(var(--window-chrome-top) - var(--space-4)));
 }
 :root[data-window-chrome="integrated"] .onboarding-overlay {
