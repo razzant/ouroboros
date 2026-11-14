@@ -590,7 +590,8 @@ export function outcomeLine(row, outcome) {
     if (!isTyped(row) && outcome.effect === 'now' && !outcome.message) return null;
     const known = outcome.old !== undefined;
     const parts = ['Saved'];
-    if ((known || outcome.withheld) && EFFECT_WORDS[outcome.effect]) parts.push(EFFECT_WORDS[outcome.effect]);
+    // A restart is why the line takes the warning's ink: it says so even without a receipt.
+    if ((known || outcome.withheld || outcome.effect === 'restart') && EFFECT_WORDS[outcome.effect]) parts.push(EFFECT_WORDS[outcome.effect]);
     // A switch has one other value and a restart row says both values in its meta: neither repeats it here.
     if (known && row.control?.kind !== 'switch' && outcome.effect !== 'restart') parts.push(`was ${valueWords(row, outcome.old)}`);
     const undo = known && !outcome.withheld && Boolean(outcome.token) && GUARDED_WRITERS.has(row.writer || 'generic');

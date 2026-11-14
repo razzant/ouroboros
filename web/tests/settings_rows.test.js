@@ -592,3 +592,9 @@ test('a wide control is marked to go under its words sooner; a door, a switch, a
     for (const row of [SWITCH, SECRET, LADDER, testRow('T_DOOR', { kind: 'door', page: 'models' }), testRow('T_N', { kind: 'number' }),
         testRow('T_DEVICE', { kind: 'custom', as: 'switch' })]) assert.ok(!wide(row), row.id);
 });
+
+test('a write that waits for a restart says why its line is yellow, with a receipt or without one', () => {
+    assert.deepEqual(outcomeLine(ACCESS, { state: 'saved', effect: 'restart' }), { text: 'Saved · applies after restart', tone: 'warn', undo: false, note: '', details: '' });
+    assert.deepEqual(outcomeLine(ACCESS, { state: 'saved', effect: 'restart', old: 'light' }).text, 'Saved · applies after restart');
+    assert.equal(outcomeLine(CHECKER, { state: 'saved', effect: 'next_call' }).text, 'Saved', 'a quiet effect without a receipt still says nothing more');
+});

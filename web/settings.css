@@ -1436,6 +1436,7 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
     background: none;
 }
 .settings-row[data-kind="choices"] > .ui-row-actions { display: block; margin-top: var(--space-2); }
+.settings-row[data-kind="choices"] > .settings-row-result { grid-row: 4; }  /* under the options, as every row's */
 .settings-rows > .settings-row[data-kind="choices"]:only-child > .ui-row-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .settings-rows > .settings-row[data-kind="choices"]:only-child > .ui-row-meta { margin-top: calc(-1 * var(--space-3)); font-size: var(--type-body); line-height: var(--line-body); }
 .settings-choices { display: flex; flex-direction: column; gap: var(--space-2); width: 100%; min-width: 0; }
