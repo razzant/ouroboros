@@ -445,8 +445,9 @@ test('two panes land on the first-level page last opened on this device, or on M
         getItem: (key) => (store.has(key) ? store.get(key) : null), setItem: (key, value) => store.set(key, String(value)) } });
     t.after(() => { if (saved) Object.defineProperty(globalThis, 'localStorage', saved); else delete globalThis.localStorage; });
     registerSettingsPage('test-kept', { title: 'Kept', mount() {} });
-    const land = async (sub) => {
+    const land = async (sub, extensions) => {
         const { env, content, state, showPage } = world(sub);
+        if (extensions) env.routes.set('/api/extensions', async () => ({ ok: true, status: 200, json: async () => extensions }));
         const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
         layout(sub, controls, content, { on: true });
         state.activePage = 'settings';
@@ -469,6 +470,29 @@ test('two panes land on the first-level page last opened on this device, or on M
         store.set('ouroboros.settings.last-page', 'no-such-page');
         const { state } = await land(sub);
         assert.equal(state.settingsPath, 'models');
+        assert.equal(store.get('ouroboros.settings.last-page'), 'no-such-page', 'landing does not replace the owner’s choice');
+        await controlsChoice(sub);
+    });
+    async function controlsChoice(sub) {
+        const { controls } = await land(sub);
+        await controls.open('test-kept');
+        assert.equal(store.get('ouroboros.settings.last-page'), 'test-kept');
+    }
+    await t.test('installed skill and then uninstalled skill', async (sub) => {
+        store.set('ouroboros.settings.last-page', 'skill/one');
+        const installed = await land(sub, { skills: [{ name: 'one' }], live: { settings_sections: [
+            { skill: 'one', title: 'One', render: { components: [{ type: 'markdown', text: 'Installed form' }] } },
+        ] } });
+        assert.equal(installed.state.settingsPath, 'skill/one');
+        const removed = await land(sub, { skills: [], live: { settings_sections: [] } });
+        assert.equal(removed.state.settingsPath, 'models');
+        assert.equal(store.get('ouroboros.settings.last-page'), 'skill/one');
+    });
+    await t.test('unreadable skill registry keeps the stored choice', async (sub) => {
+        store.set('ouroboros.settings.last-page', 'skill/one');
+        const { state } = await land(sub, { error: 'unavailable' });
+        assert.equal(state.settingsPath, 'models');
+        assert.equal(store.get('ouroboros.settings.last-page'), 'skill/one');
     });
 });
 
