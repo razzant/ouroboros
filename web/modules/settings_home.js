@@ -555,8 +555,10 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     DEVICE_EVENTS.forEach((type) => globalThis.window?.addEventListener?.(type, onDevice));
     paint();
     return {
-        mark(path) {
-            current = String(path || '').split('/')[0];
+        // The row of the page that is open: of the open levels (top first), the first whose page the list has a row for.
+        mark(paths) {
+            const heads = [paths].flat().map((path) => String(path || '').split('/')[0]);
+            current = heads.find((head) => HOME_ROWS.some((row) => row.to === head)) ?? heads[0] ?? '';
             paintRows();
         },
         search(words) {

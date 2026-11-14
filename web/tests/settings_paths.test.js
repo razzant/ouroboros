@@ -286,6 +286,40 @@ test('the list\'s chosen row returns to its page from a deeper level, and keeps 
     assert.equal(firstEl.hidden, false);
 });
 
+test('a door from one page of the list to another chooses the other\'s row and hands it the door\'s view', async (t) => {
+    const { content, state, showPage } = world(t);
+    const views = [];
+    let doorCtx = null;
+    registerSettingsPage('test-from', { title: 'From', mount(body, { ctx, view }) { views.push(['test-from', view ?? '']); doorCtx = ctx; } });
+    registerSettingsPage('test-to', { title: 'To', mount(body, { view }) { views.push(['test-to', view ?? '']); } });
+    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    layout(t, controls, content, { on: true });
+    const home = content.querySelector('[data-settings-home]');
+    const rows = Object.fromEntries(['test-from', 'test-to'].map((path) => {
+        const row = new Stub('button');
+        row.setAttribute('data-settings-open', path);
+        home.querySelector('[data-settings-list]').appendChild(row);
+        return [path, row];
+    }));
+    const chosen = () => Object.keys(rows).filter((path) => rows[path].getAttribute('aria-current') === 'page');
+    const pages = () => content.querySelectorAll('.settings-page').map((el) => el.dataset.settingsPage).filter(Boolean);
+    await controls.open('test-from');
+    await settle();
+    assert.deepEqual([chosen(), views], [['test-from'], [['test-from', '']]]);
+    // The door opens its page over the one it was pressed on (Back returns there), and the list marks the page that is open.
+    doorCtx.openSettings('test-to', { view: 'reviewers' });
+    await settle();
+    assert.deepEqual([pages(), chosen()], [['test-from', 'test-to'], ['test-to']]);
+    assert.deepEqual(views.at(-1), ['test-to', 'reviewers']);
+    // The chosen row pressed again keeps its page as it stands; the row under it returns to its own page.
+    await home.fire('click', { target: rows['test-to'] });
+    await settle();
+    assert.deepEqual([pages(), chosen(), views.length], [['test-from', 'test-to'], ['test-to'], 2]);
+    await home.fire('click', { target: rows['test-from'] });
+    await settle();
+    assert.deepEqual([pages(), chosen(), views.length], [['test-from'], ['test-from'], 2]);
+});
+
 test('Settings pressed again in the sidebar: two panes keep a first-level page and return from a deeper one; one column shows the list', async (t) => {
     const { env, content, state, showPage } = world(t);
     const drawn = { first: 0, deeper: 0 };

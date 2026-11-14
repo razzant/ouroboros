@@ -87,13 +87,15 @@ export function initSettings(ctx = {}) {
     const beside = () => levels.length > 0 && visible(homeEl);
     const pageCtx = { openSettings: (path, options) => go(path, options), openDashboardTab, showPage, layers, ws, state, readSettings };
     // Landing (owner 13.11, "1. C"): from 40rem the list and an open page always stand together, never an empty pane;
-    // a second press of the chosen row keeps its page when that page is on top, and returns to it from a deeper level.
+    // a second press of the chosen row keeps its page when that page is on top, and returns to it from a deeper level
+    // (the chosen row is the open page's own: a door from one page of the list to another chooses the other).
     let ownChosen = false;   // the owner pressed the list's Ouroboros row: his page stays until another row is pressed
     let lastFirst = readLastFirst();  // the first-level page last opened on this device
     const pressed = (path, options = {}) => {
         ownChosen = !path;
-        if (path && !options.row && beside() && levels[0]?.path === path) {
-            if (levels.length > 1) closeLevels(1);
+        const at = path && !options.row && beside() ? levels.findIndex((level) => level.path === path) : -1;
+        if (at >= 0) {
+            if (levels.length > at + 1) closeLevels(at + 1);
             return true;
         }
         return go(path, { ...options, fresh: true });
@@ -174,7 +176,8 @@ export function initSettings(ctx = {}) {
         return left;
     }
 
-    function go(path = '', { row = '', back = null, fresh = false, opener = null } = {}) {
+    // `view` is what a door asks its page to show first (Permissions' Reviewers: the Agents list on its reviewers).
+    function go(path = '', { row = '', back = null, fresh = false, opener = null, view = '' } = {}) {
         const target = String(path || '');
         if (isDoorId(target)) return leave(target, { row, back: state.settingsPath });
         if (target && !settingsPageFor(target)) {
@@ -185,13 +188,13 @@ export function initSettings(ctx = {}) {
         const at = back || fresh ? -1 : levels.findIndex((level) => level.path === target);
         if (!target) closeLevels(0);
         else if (at >= 0) closeLevels(at + 1, { row });
-        else open(target, { row, back, under: back || fresh ? 0 : levels.length, opener });
+        else open(target, { row, back, under: back || fresh ? 0 : levels.length, opener, view });
         return true;
     }
 
     // `opener` is the control that opened the level, where focus returns: WebKit does not focus a pressed button.
     // A level put aside with unsaved words (`close`) comes back as it was left; any other is drawn anew.
-    function open(path, { row, back, under, opener }) {
+    function open(path, { row, back, under, opener, view = '' }) {
         if (!under && path !== lastFirst) {
             lastFirst = path;
             try { globalThis.localStorage?.setItem(LAST_PAGE_KEY, path); } catch { /* storage blocked: kept for this load */ }
@@ -200,7 +203,7 @@ export function initSettings(ctx = {}) {
         const focused = document.activeElement === document.body ? null : document.activeElement;
         const kept = aside.get(path);
         aside.delete(path);
-        const level = Object.assign(kept || { path, id: `settings-level-${++serial}` }, { back, opener: opener || focused });
+        const level = Object.assign(kept || { path, id: `settings-level-${++serial}`, view }, { back, opener: opener || focused });
         if (!kept) {
             level.el = document.createElement('section');
             level.el.className = 'settings-page scroll-fade-y';
@@ -229,7 +232,7 @@ export function initSettings(ctx = {}) {
             setResult(line, { text: `This page could not be shown: ${err?.message || err}`, tone: 'danger' });
         };
         try {
-            Promise.resolve(found.mount(body, { path: level.path, row, ctx: pageCtx })).then((handle) => {
+            Promise.resolve(found.mount(body, { path: level.path, row, view: level.view || '', ctx: pageCtx })).then((handle) => {
                 if (level.closed) { handle?.unmount?.(); return; }
                 level.handle = handle;
                 // A page that learns its name while it draws (a skill's form) is named again.
@@ -332,7 +335,7 @@ export function initSettings(ctx = {}) {
         column.scrollTop = places.get(column) || 0;
         if (beside() || overview || !level) homeEl.scrollTop = places.get(homeEl) || 0;
         besideBefore = beside();
-        home.mark(levels[0]?.path || '');
+        home.mark(levels.map((each) => each.path).reverse());  // the open page's own row, else the nearest under it
         // The home narrowed into the rail at once: the pressed row is brought into the rail's view.
         if ((opened && beside()) || overview) revealInRail();
         syncLayers();

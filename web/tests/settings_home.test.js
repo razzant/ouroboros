@@ -373,3 +373,23 @@ test('a choice of this device made beside the list is its row\'s answer at once,
     env.window.dispatchEvent({ type: 'click', target: inside('data-theme-control') });
     assert.equal(answer('appearance'), 'System', 'a disposed home hears nothing');
 });
+
+test('the list marks the page that is open: the top level\'s own row, else the nearest level under it that has one', async (t) => {
+    const { content } = world(t);
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws: { isConnected: () => true }, stateSnapshots: { latest: () => ({}) } } });
+    t.after(() => home.dispose());
+    const chosen = () => content.querySelectorAll('[data-settings-open]').filter((row) => row.getAttribute('aria-current') === 'page')
+        .map((row) => row.dataset.settingsOpen);
+    home.mark(['agents', 'permissions']);
+    assert.deepEqual(chosen(), ['agents'], 'Permissions\' Reviewers door opened Agents over it');
+    home.mark(['agents/reviewer', 'agents', 'permissions']);
+    assert.deepEqual(chosen(), ['agents'], 'an agent\'s page is Agents\'');
+    home.mark(['skill/voice-form', 'voice']);
+    assert.deepEqual(chosen(), ['voice'], 'a skill\'s form has no row: the page under it keeps its own');
+    home.mark('models');
+    assert.deepEqual(chosen(), ['models']);
+    home.mark([]);
+    assert.deepEqual(chosen(), []);
+});
