@@ -568,11 +568,12 @@ def _main_routing_manifest(ctx: Any, roots: Optional[RootSnapshot] = None) -> Di
             written, address = _row_chat_id(row), format_address(row_address(row))
             try:
                 shown = row_rooms(written, row, reserved, rule)
-            except ds.StoreError as exc:  # importing or failed (``require_imported``), confirmed for the stream
-                whole = ds.range_coverage(root, "chat")
-                if whole["imported"] or type(exc) not in (ds.StoreError, ds.StoreMigrating):
+            except ds.StoreError as exc:  # importing or failed (``require_imported``) in a stream the rule reads
+                held = [c for c in (ds.range_coverage(root, stream) for stream in ds.STREAMS) if not c["imported"]]
+                if not held or type(exc) not in (ds.StoreError, ds.StoreMigrating):
                     raise
-                gaps.add("a segment could not be imported" if whole["mismatch"] else "history is still importing")
+                gaps.update("a segment could not be imported" if c["mismatch"] else "history is still importing"
+                            for c in held)
                 shown = frozenset()
             room = written if written in shown or not shown else min(shown)
             dialogue_rows.append({

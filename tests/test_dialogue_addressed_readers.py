@@ -336,6 +336,39 @@ def test_routing_recent_text_rows_report_only_missing_parts_of_the_window(tmp_pa
         routing._main_routing_manifest(SimpleNamespace(DRIVE_ROOT=clean))
 
 
+def test_routing_manifest_holds_a_legacy_reply_whose_target_imports_in_progress(tmp_path, monkeypatch):
+    """The room rule also reads a legacy Reply's target from progress: with chat imported whole and that target's
+    progress segment pending, then failed, the manifest keeps its Projects and the row in its written chat, and
+    names the gap."""
+    from types import SimpleNamespace
+    from ouroboros import server_routing_context as routing
+    from ouroboros.chat_references import reference_from_row
+    from ouroboros.projects_registry import create_project
+
+    monkeypatch.setattr(routing, "addressable_roots", lambda *args: routing.RootSnapshot())
+    monkeypatch.setattr(routing, "_recent_root_results", lambda *args: ([], {}))
+    progress = {"chat_id": 1, "ts": "2026-10-16T00:00:00+00:00", "direction": "out", "task_id": "writer",
+                "is_progress": True, "text": "Work in progress"}
+    legacy = {key: value for key, value in reference_from_row(progress).items() if key != "target_home"}
+    seed(tmp_path, archives={"progress_20261016T000000.jsonl": [progress]},
+         live={"chat": [owner("legacy-reply", reply_to=legacy)]})
+    ds.ensure(tmp_path)
+    create_project(tmp_path, "alpha", name="Alpha")
+    ctx = SimpleNamespace(DRIVE_ROOT=tmp_path)
+    for gap in ("history is still importing", "a segment could not be imported"):
+        if gap == "a segment could not be imported":
+            [segment] = di.pending_segments(tmp_path)
+            (tmp_path / "archive" / segment["name"]).write_text("changed after cutover\n", encoding="utf-8")
+            di.import_segment(tmp_path, "progress", segment["name"])
+        assert ds.range_coverage(tmp_path, "chat")["imported"]
+        assert ds.range_coverage(tmp_path, "progress")["mismatch" if "could not" in gap else "pending"] == 1
+        held = routing._main_routing_manifest(ctx)
+        assert held["omissions"]["dialogue_gaps"] == [gap] and [p["project_id"] for p in held["projects"]] == ["alpha"]
+        [row] = held["recent_canonical_dialogue"]
+        assert row["client_message_id"] == "legacy-reply" and row["reader"]["arguments"]["room_id"] == "1"
+        assert routing._decision_turn_metadata(ctx, 1, "", {}, routing.RootSnapshot())["main_routing_manifest"] == held
+
+
 def test_routing_recent_text_readers_name_a_room_that_shows_each_row(tmp_path, monkeypatch):
     """Each recent row's reader follows the room rule memory_read reads by, and every reader is executed. A work moved
     from Main into a Project keeps its ``row:1@…`` addresses and ``chat_id`` 1, and its readers name the Project,
