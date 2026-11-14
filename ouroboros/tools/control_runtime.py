@@ -667,13 +667,11 @@ def _update_identity(ctx: ToolContext, content: str | None = None, expected_revi
 
 
 def _world_notices(mode: str, content: str, publication) -> list[str]:
-    """Facts an update_world receipt adds: edits sent inside the host's block, and the map's size against its budget."""
+    """Facts an update_world receipt adds: the host's block (``world_profiler.publication_notices``), the map's size."""
     from ouroboros.context_budget import WORLD_SECTION_BUDGET_CHARS
-    from ouroboros.world_profiler import measured_block_was_edited
+    from ouroboros.world_profiler import publication_notices
 
-    lines = []
-    if mode == "overwrite" and measured_block_was_edited(content, publication.old_content):
-        lines.append("The measured block is the host's: your edits inside it were not applied; it refreshes at startup.")
+    lines = publication_notices(mode, content, publication.old_content, publication.content)
     size = len(publication.content)
     if size > WORLD_SECTION_BUDGET_CHARS:
         lines.append(f"⚠️ WORLD_SIZE_NOTICE: the map is {size} chars, above the {WORLD_SECTION_BUDGET_CHARS}-char "

@@ -539,3 +539,35 @@ def test_an_unchanged_answer_still_brings_a_stale_fork_copy_to_the_canonical_map
         assert reply.startswith("OK: world map unchanged ("), reply
         assert copy.read_bytes() == current and world.read_bytes() == current, (same, copy.read_bytes())
     assert not (canonical / "memory" / "world_journal.jsonl").exists()
+
+
+def test_a_stray_marker_line_an_overwrite_leaves_is_named_with_the_way_to_remove_it(tmp_path, monkeypatch):
+    """K14: an overwrite may leave a lone marker line outside the host's block (the mind's text, kept as sent); its
+    receipt says so and how it goes, since every edit is refused while it stays. The edit refusal names the line the
+    map already holds and the way to remove it; that way (an edit item with the line before it) lands, and an ordinary
+    edit works again. An overwrite that leaves none says nothing of it."""
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")
+    canonical, world = _map_with_block(tmp_path)
+    ctx = _world_ctx(canonical, canonical)
+    mine = f"{wprof.TITLE}\n\n{_measured('host')}\n\n## What lives here\n- a note\n"
+    clean = _update_world(ctx, mine, expected_revision=_rev(world))
+    assert clean.startswith("OK: world map updated (overwrite") and "marker line" not in clean, clean
+    left = _update_world(ctx, mine + f"{wprof.MEASURED_END}\n", expected_revision=_rev(world))
+    assert left.startswith("OK: world map updated (overwrite") and world.read_text(encoding="utf-8").endswith(
+        f"- a note\n{wprof.MEASURED_END}\n"), left
+    assert ("The map now holds a marker line outside the host's measured block at line 10: every edit is refused while "
+            "it stays. An overwrite without that line, or an edit item that replaces it together with the line before "
+            "it (the marker alone also matches the block's own), removes it.") in left, left
+    refused = _update_world(ctx, mode="edit", old_str="- a note", content="- a newer note", expected_revision=_rev(world))
+    assert refused.startswith("⚠️ TOOL_ERROR: host_block: ") and ("the result has a marker line outside it at line 10 "
+                                                                  "(the current map already holds one, at line 10)") in refused
+    assert refused.rstrip(".").endswith("together with the line before it (the marker alone also matches the block's "
+                                        "own), removes it. Nothing was written; current_revision=" + repr(_rev(world))), refused
+    removed = _update_world(ctx, mode="edit", old_str=f"- a note\n{wprof.MEASURED_END}\n", content="- a note\n",
+                            expected_revision=_rev(world))
+    assert removed.startswith("OK: world map updated (edit") and "marker line" not in removed, removed
+    again = _update_world(ctx, mode="edit", old_str="- a note", content="- a newer note", expected_revision=_rev(world))
+    assert again.startswith("OK: world map updated (edit") and world.read_text(encoding="utf-8") == mine.replace(
+        "- a note", "- a newer note"), again
