@@ -617,3 +617,27 @@ def test_a_reverts_version_is_looked_up_under_the_publication_lock_after_the_che
     assert lookups == [True], lookups
     missing = _update_identity(ctx, mode="revert", version="0" * 64, expected_revision=first)
     assert missing.startswith("⚠️ TOOL_ERROR: version_unavailable: no version") and lookups == [True, True], missing
+
+
+def test_a_stale_revision_on_a_text_that_does_not_exist_says_so_and_creating_it_works(tmp_path, monkeypatch):
+    """C3: a text that does not exist has no revision (absence is not sha256(b"")), so expected_revision=<a revision>
+    names none: the refusal says the text does not exist yet and how to create it (omit expected_revision, or pass
+    ""), never a 0-character text of revision ''; nothing is written. The same write omitting it, or with "", creates."""
+    import types
+
+    from ouroboros.tools.project_journal import _workpad_write
+
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "data")
+    pad = types.SimpleNamespace(project_id="atlas", task_id="t-1", drive_root=tmp_path, task_metadata={})
+    cases = ((lambda **a: _update_identity(_ctx(tmp_path), "I begin.\n", **a), Memory(tmp_path).identity_path(), {}),
+             (lambda **a: _workpad_write(pad, "# Plan\n", **a), tmp_path / "data" / "projects" / "atlas" / "workpad.md",
+              {"expected_revision": ""}))
+    for write, path, create in cases:
+        stale = write(expected_revision="0" * 64)
+        assert stale.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED: revision_conflict; the ") and (
+            f"does not exist yet, so no revision matches expected_revision='{'0' * 64}'. Nothing was written: omit "
+            "expected_revision, or pass \"\", to create it.") in stale, stale
+        assert "0 chars" not in stale and "revision ," not in stale and "current_revision=''" not in stale, stale
+        assert not path.exists()
+        created = write(**create)
+        assert created.startswith("OK: ") and " created (overwrite" in created and path.exists(), created

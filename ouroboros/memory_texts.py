@@ -258,6 +258,12 @@ def _refusal(ctx: Any, source: TextSource, mode: str, publication: Publication, 
     """A refused write's typed answer; ``expected`` is the expected_revision the call sent (an empty one is create-only,
     so its conflict is not a change since the caller read)."""
     reason, current = publication.reason, publication.revision
+    if reason == "revision_conflict" and not publication.existed:  # no text, so no revision; absence is not b""
+        return _answer(ctx, source, (
+            f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: revision_conflict; the {source.noun} does not exist yet, so no revision "
+            f"matches expected_revision={expected!r}. Nothing was written: omit expected_revision, or pass \"\", to "
+            "create it." + (f" {source.where}" if source.where else "")), status="blocked",
+            code="RESOURCE_CONSTRAINT_BLOCKED")
     if reason in ("revision_required", "revision_conflict"):
         head = (f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: {reason}; current_revision={current!r}. Nothing was written. "
                 + ("An existing text is replaced only against the revision you read" if reason == "revision_required"
