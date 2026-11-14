@@ -70,7 +70,8 @@ def recover_terminal_task_files(drive_root, protected):
     (``obligations.DutyRest``) on its row and its drives' store identities, reported as it was found.
     So does a member whose identity the import set aside (``task_results.set_aside``): it has no result
     this recovery could complete from, which is neither an error nor a gap of this start. That fact is
-    one of the rest's own inputs, so an identity no longer set aside is examined again."""
+    one of the rest's own inputs, so an identity no longer set aside is examined again; a rest the store
+    could not take changes nothing of that."""
     from ouroboros import obligations as o
     from ouroboros.cancel_intents import cancel_pending
     from ouroboros.headless import (

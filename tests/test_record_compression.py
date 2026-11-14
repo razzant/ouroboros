@@ -81,13 +81,14 @@ def test_real_apfs_keeps_a_file_while_a_full_clone_lives_and_compresses_it_once_
     source = _write(tmp_path / "source.log")
     assert artifact_storage.clone_file(source, tmp_path / "clone.log")
     assert os.lstat(source).st_nlink == 1, "a clone is invisible to nlink"
-    assert artifact_storage.compression_outcome(source) == "shared"
+    # Before macOS 14 the volume counts no clones: the mark then keeps the file either way, as unknown.
+    counted = artifact_storage._extended_attribute(source, 0x1000, "I")
+    kept, freed = ("shared", "compressed") if counted else ("share_unknown", "share_unknown")
+    assert artifact_storage.compression_outcome(source) == kept
     assert artifact_storage.clone_file(source, tmp_path / "second.log")
     os.unlink(tmp_path / "clone.log")
-    assert artifact_storage.compression_outcome(source) == "shared", "one full clone left is still one"
+    assert artifact_storage.compression_outcome(source) == kept, "one full clone left is still one"
     os.unlink(tmp_path / "second.log")  # APFS leaves the may-share mark on the survivor
-    # Before macOS 14 the volume counts no clones: the mark then keeps the file, as unknown.
-    freed = "compressed" if artifact_storage._extended_attribute(source, 0x1000, "I") else "share_unknown"
     assert artifact_storage.compression_outcome(source) == freed, "a mark without a living clone keeps nothing"
     grown = _write(tmp_path / "grown.log")
     assert artifact_storage.clone_file(grown, tmp_path / "earlier.log")
@@ -940,7 +941,8 @@ def test_real_compression_keeps_what_every_reader_of_a_retained_source_reads(dat
     assert not os.lstat(base / tiny["path"]).st_flags & stat.UF_COMPRESSED, "under the floor"
     assert not os.lstat(base / source["path"]).st_flags & stat.UF_COMPRESSED, "a shared file is never unshared"
     row = maintenance_jobs.job(data, job.JOB)
-    assert row["last"]["skipped"] == {"shared": 1} and row["totals"]["evidence"]["compressed"] == 2
+    kept = "shared" if artifact_storage._extended_attribute(base / source["path"], 0x1000, "I") else "share_unknown"
+    assert row["last"]["skipped"] == {kept: 1} and row["totals"]["evidence"]["compressed"] == 2
 
 
 # ---- in_scope: the places a pass looks, asked by a copier before it clones (#2945) ------------------------------
