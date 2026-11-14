@@ -371,7 +371,8 @@ def _listed(row: Mapping[str, Any]) -> dict[str, Any]:
                                          or row.get("new_sha256") == knowledge_rows.sha256_text("")))
         or (isinstance(row.get("change"), list) and isinstance(row.get("base"), Mapping)))
     return {**{key: row.get(key) for key in ("new_sha256", "old_sha256", "ts", "focus", "mode", "reason", "delta",
-                                             "old_chars", "new_chars", "old_len", "new_len", "reverted_from")},
+                                             "old_chars", "new_chars", "old_len", "new_len", "reverted_from",
+                                             "old_not_text")},
             "text_stored": stored}
 
 
@@ -385,6 +386,8 @@ def delta_parts(row: Mapping[str, Any]) -> list[str]:
         parts.append(f"{delta['removed_chars']} chars removed, {delta['added_chars']} added")
     elif isinstance(delta.get("change_chars"), int):
         parts.append(f"net change {delta['change_chars']:+d} chars")
+    elif delta.get("old_not_text") and isinstance(delta.get("old_bytes"), int):  # the replaced bytes were no text
+        parts.append(f"{delta['old_bytes']} bytes that were not UTF-8 text → {delta.get('new_chars')} chars")
     elif isinstance(row.get("old_chars"), int) and isinstance(row.get("new_chars"), int):
         parts.append(f"{row['old_chars']} → {row['new_chars']} chars")
     elif isinstance(row.get("old_len"), int) and isinstance(row.get("new_len"), int):  # a plain journal's row
@@ -411,6 +414,8 @@ def _replaced(row: Mapping[str, Any], current: str, revert: Callable[[str], str]
         return ["created it: no earlier version to put back"]
     if not isinstance(old, str) or not old:
         return ["replaced: not recorded, so no undo (the version it replaced is unknown)"]
+    if row.get("old_not_text"):
+        return [f"replaced {old}", "undo: none, those bytes were not UTF-8 text and history keeps only their sha256"]
     if old == current:
         undo = "undo: nothing to put back, that version is the current text"
     elif revert is None:

@@ -295,3 +295,48 @@ def test_a_finish_reads_a_blind_overwrites_warning_and_skips_an_ok_receipt(tmp_p
     blind = {"tool": "workpad_write", "tool_result_code": (_workpad_write(other, "theirs\n"), _code(other))[1]}
     assert (own["tool_result_code"], blind["tool_result_code"]) == ("OK", "LEGACY_WARNING")
     assert completion_observation_calls([own, blind]) == [blind]
+
+
+def test_a_page_that_is_not_text_is_replaced_by_an_overwrite_and_refuses_an_edit_or_revert(tmp_path, store):
+    """K11: a page of bytes that are not UTF-8 text (only an outside write leaves one); no UnicodeDecodeError escapes.
+    An edit or a revert is refused typed, page and history untouched; the door's read of the current version and a
+    stale overwrite say the page is not text; an overwrite checked against the page's sha256 replaces it and its row
+    records that the previous bytes were not text (their sha256 and size, no text), with no undo offered; a blind
+    overwrite of such bytes lands with its warning."""
+    from ouroboros.tools.chronicle import _memory_read
+    from ouroboros.tools.project_journal import _workpad_write
+
+    page, journal = store
+    page.parent.mkdir(parents=True)
+    bad, text = b"# Plan\n\n- caf\xe9\n", "# Plan\n\n- café\n"  # Latin-1 bytes, not UTF-8
+    page.write_bytes(bad)
+    ctx, revision = _ctx(tmp_path), _sha(bad)
+    said = f"(revision {revision}) is {len(bad)} bytes that are not UTF-8 text, so it is not shown"
+    for mode, extra in (("edit", {"old_str": "Plan", "content": "Plans"}), ("revert", {"version": "1" * 64})):
+        refused = _workpad_write(ctx, mode=mode, expected_revision=revision, **extra)
+        assert refused.startswith(f"⚠️ TOOL_ERROR: not_text: there is no text to {mode}.") and said in refused, refused
+        assert _code(ctx) == "TOOL_REPORTED_FAILURE" and f"expected_revision={revision!r} replaces it" in refused
+    assert page.read_bytes() == bad and not journal.exists()
+    door = _memory_read(ctx, source="workpad", version=revision)
+    assert door.startswith("⚠️ TOOL_ERROR: not_text: The current workpad") and said in door, door
+    assert _code(ctx) == "TOOL_REPORTED_FAILURE"
+    stale = _workpad_write(ctx, "# Plan\n", expected_revision="0" * 64)
+    assert "revision_conflict" in stale and said in stale and page.read_bytes() == bad, stale
+    checked = _workpad_write(ctx, text, expected_revision=revision)
+    assert checked.startswith("OK: workpad updated (overwrite") and _code(ctx) == "OK" and page.read_bytes() == \
+        text.encode("utf-8"), checked
+    assert f"Changed: {len(bad)} bytes that were not UTF-8 text → {len(text)} chars." in checked, checked
+    assert "cannot be read or put back" in checked and "mode='revert'" not in checked
+    row = _rows(journal)[-1]
+    assert (row["old_sha256"], row["old_not_text"], row["old_bytes"], row["new_content"]) == (revision, True, len(bad),
+                                                                                              text)
+    assert "old_content" not in row and "old_len" not in row and "base" not in row
+    listing = _memory_read(ctx, source="workpad")
+    assert f" · replaced {revision} · undo: none, those bytes were not UTF-8 text" in listing, listing
+    gone = _memory_read(ctx, source="workpad", version=revision)
+    assert gone.startswith("⚠️ TOOL_ERROR: version_unavailable") and "were not UTF-8 text" in gone, gone
+    page.write_bytes(bad)
+    other = _ctx(tmp_path, "t-2")
+    blind = _workpad_write(other, "fresh\n")
+    assert blind.startswith("⚠️ BLIND_OVERWRITE") and _code(other) == "LEGACY_WARNING", blind
+    assert page.read_bytes() == b"fresh\n" and _rows(journal)[-1]["old_not_text"] is True

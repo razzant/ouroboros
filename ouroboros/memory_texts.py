@@ -215,10 +215,19 @@ def _receipt(source: TextSource, mode: str, publication: Publication, version: s
         return lines + ([f"Written: {' · '.join(parts)}."] if parts else [])
     old = publication.previous["revision"]
     lines += [f"Replaced {old}: {knowledge_versions.written_text(publication.previous, source.outside)}.",
-              f"Changed: {' · '.join(parts)}.",
-              f"Read the replaced version: {read_call(source, old)}. Put it back: "
-              f"{write_call(source, mode='revert', version=old, expected_revision=publication.revision)}."]
-    return lines
+              f"Changed: {' · '.join(parts)}."]
+    if publication.not_text:
+        return lines + ["The replaced bytes were not UTF-8 text: history keeps their sha256 and size only, so that "
+                        "version cannot be read or put back."]
+    return lines + [f"Read the replaced version: {read_call(source, old)}. Put it back: "
+                    f"{write_call(source, mode='revert', version=old, expected_revision=publication.revision)}."]
+
+
+def _not_text(source: TextSource, size: int, current: str) -> str:
+    """What answers say of current bytes that are not UTF-8 text: what is there, and the one write that applies."""
+    return (f"The current {source.noun} (revision {current}) is {size} bytes that are not UTF-8 text, so it is not "
+            f"shown and cannot be edited or reverted over; mode=overwrite with expected_revision={current!r} replaces "
+            "it, and its history row records only that those bytes were not text, their sha256 and size.")
 
 
 def _current(source: TextSource, publication: Publication, head: str) -> str:
@@ -226,6 +235,8 @@ def _current(source: TextSource, publication: Publication, head: str) -> str:
     from ouroboros.tool_capabilities import tool_result_limit
 
     limit, current = tool_result_limit(source.tool), publication.revision
+    if publication.not_text:
+        return head + f" {_not_text(source, publication.not_text, current)}"
     if publication.held is not None:
         changes = head + "\n\n" + knowledge_versions.changes_since(
             plain_text(source, publication.content), publication.held,
@@ -258,6 +269,9 @@ def _refusal(ctx: Any, source: TextSource, mode: str, publication: Publication) 
     if reason.endswith("_source_missing"):
         text = (f"⚠️ TOOL_ERROR: {reason}: the {source.noun} does not exist, so there is nothing to {mode}; "
                 f"mode=overwrite creates it. Nothing was written.")
+    elif reason == "not_text":
+        text = (f"⚠️ TOOL_ERROR: not_text: there is no text to {mode}. "
+                f"{_not_text(source, publication.not_text, current)} Nothing was written.")
     elif reason == "replace_failed":
         text = (f"⚠️ TOOL_ERROR: replace_failed ({publication.detail}): the {source.noun} keeps its previous bytes, "
                 f"current_revision={current!r}; its history row names the version that did not land. The same call "
@@ -335,8 +349,8 @@ def write_text(ctx: Any, source: Any, *, content: Any = None, mode: Any = "overw
             and _foreign(ctx, publication)):
         written = knowledge_versions.written_text(publication.previous, source.outside)
         warning = (f"⚠️ BLIND_OVERWRITE: this overwrite replaced a {source.noun} version this task did not write "
-                   f"({written}) without expected_revision. The write landed; what left is below, with the calls "
-                   "that read and put back the replaced version.")
+                   f"({written}) without expected_revision. The write landed; what left is below"
+                   + ("." if publication.not_text else ", with the calls that read and put back the replaced version."))
         return _answer(ctx, source, "\n".join([warning, *lines]), code="LEGACY_WARNING")
     return _answer(ctx, source, "\n".join(lines))
 
@@ -452,7 +466,10 @@ def read_versions(ctx: Any, address: Any, version: Any, start: Any, fingerprint:
         except knowledge_versions.VersionUnavailable as exc:
             if version != current:
                 return failed("TOOL_REPORTED_FAILURE", f"⚠️ TOOL_ERROR: version_unavailable: {exc}")
-            text, row = raw.decode("utf-8"), {}
+            try:
+                text, row = raw.decode("utf-8"), {}
+            except UnicodeDecodeError:
+                return failed("TOOL_REPORTED_FAILURE", f"⚠️ TOOL_ERROR: not_text: {_not_text(source, len(raw), current)}")
         which = "the current text" if version == current else "an earlier version, not the current text"
         written = knowledge_versions.written_text(knowledge_versions.row_facts(row), source.outside)
         head = f"[{source.name} version {version}: {which}; {written}; {shown}; {len(text)} chars]"

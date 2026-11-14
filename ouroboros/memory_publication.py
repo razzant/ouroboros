@@ -34,6 +34,7 @@ class Publication:
     held: dict[str, Any] | None = None  # a stale revision's version and the rows since (knowledge_versions.held_version)
     delta: dict[str, Any] | None = None  # what the write changed, as its row records it
     detail: str = ""  # a refusal's own words
+    not_text: int = 0  # the size of current bytes that are not UTF-8 text (nothing shows, edits or keeps them)
 
 
 class Refused(ValueError):
@@ -151,6 +152,11 @@ def publish_text(source: Any, expected_revision: str | None, prepare: Callable[[
     atomically. A row whose replacement fails names a version that never landed, as a knowledge capture
     does; the file keeps its previous bytes and the same call can be retried. No new durability:
     ``append_jsonl`` does not fsync and the atomic replacement's fsync is not asked for.
+
+    Current bytes that are not UTF-8 text (only an outside write leaves them) are no text to edit, revert over
+    or resend: an edit or revert is refused (``not_text``), an overwrite replaces them, and its row records
+    ``old_not_text`` with their sha256 and byte size and keeps the new text whole; the bytes themselves are not
+    kept, since a row holds text.
     """
     from ouroboros import knowledge_rows, knowledge_versions, text_change
 
@@ -158,45 +164,58 @@ def publish_text(source: Any, expected_revision: str | None, prepare: Callable[[
     with _publication_lock(path):
         raw = path.read_bytes() if path.exists() else None
         revision = sha256(raw).hexdigest() if raw is not None else ""
-        old = raw.decode("utf-8") if raw is not None else ""
+        try:
+            old, not_text = (raw.decode("utf-8") if raw is not None else ""), 0
+        except UnicodeDecodeError:
+            old, not_text = "", len(raw)
+        existed = raw is not None
         if raw is None and mode in ("edit", "revert"):
             return Publication(False, f"{mode}_source_missing", "", "", "", existed=False)
+        if not_text and mode != "overwrite":
+            return Publication(False, "not_text", revision, old, old, not_text=not_text)
         if raw is not None and expected_revision is None and not (source.blind and mode == "overwrite"):
-            return Publication(False, "revision_required", revision, old, old)
+            return Publication(False, "revision_required", revision, old, old, not_text=not_text)
         if expected_revision is not None and expected_revision != revision:
             held = (knowledge_versions.held_version(journal, source, expected_revision, _TAIL_BYTES, old)
-                    if expected_revision and raw is not None else None)
-            return Publication(False, "revision_conflict", revision, old, old, existed=raw is not None, held=held)
+                    if expected_revision and existed and not not_text else None)
+            return Publication(False, "revision_conflict", revision, old, old, existed=existed, held=held,
+                               not_text=not_text)
         try:
             content = prepare(old)
         except Refused as exc:
-            return Publication(False, exc.reason, revision, old, old, existed=raw is not None, detail=str(exc))
+            return Publication(False, exc.reason, revision, old, old, existed=existed, detail=str(exc))
         new_raw = content.encode("utf-8")
         if raw is not None and new_raw == raw:
             return Publication(True, "unchanged", revision, old, old)
-        rows = list(knowledge_versions.tail_rows(journal, source, _TAIL_BYTES)) if raw is not None else []
+        rows = list(knowledge_versions.tail_rows(journal, source, _TAIL_BYTES)) if existed else []
         writer = next((row for _offset, row in rows if row.get("new_sha256") == revision), None)
-        change = text_change.exact_change(old, content)
-        delta = text_delta(old if raw is not None else None, content, change)
-        if source.changes:
-            base = knowledge_rows.verified_base(journal, rows, revision) if raw is not None else None
-            texts = knowledge_rows.encode(old, content, base, change)
-        else:  # identity and the map keep both whole texts, as their journals always did
-            texts = {"old_content": old, "new_content": content, "old_preview": old[:500], "new_preview": content[:500]}
+        if not_text:  # nothing of the replaced bytes is text: their facts, and the new text whole
+            delta = {"old_not_text": True, "old_bytes": not_text, "new_chars": len(content)}
+            sizes = {"old_not_text": True, "old_bytes": not_text}
+            texts = {"new_content": content, **({} if source.changes else {"new_preview": content[:500]})}
+        else:
+            change = text_change.exact_change(old, content)
+            delta, sizes = text_delta(old if existed else None, content, change), {"old_len": len(old)}
+            if source.changes:
+                base = knowledge_rows.verified_base(journal, rows, revision) if existed else None
+                texts = knowledge_rows.encode(old, content, base, change)
+            else:  # identity and the map keep both whole texts, as their journals always did
+                texts = {"old_content": old, "new_content": content, "old_preview": old[:500],
+                         "new_preview": content[:500]}
         new_revision = sha256(new_raw).hexdigest()
         if not append_jsonl(journal, {
             "ts": utc_now_iso(), "task_id": author["task_id"], "source_type": source_type,
             "focus": author["focus"], "route": author["route"], **({"topic": source.topic} if source.topic else {}),
-            "mode": mode, "old_len": len(old), "new_len": len(content), "old_sha256": revision, "new_sha256": new_revision,
+            "mode": mode, **sizes, "new_len": len(content), "old_sha256": revision, "new_sha256": new_revision,
             **texts, "delta": delta, **({"reason": reason} if reason.strip() else {}),
             **({"reverted_from": reverted_from} if reverted_from else {}),
         }, ensure_record_boundary=True, require_lock=True):
-            return Publication(False, "history_unavailable", revision, old, old, existed=raw is not None)
+            return Publication(False, "history_unavailable", revision, old, old, existed=existed)
         try:
             write_bytes_atomic(path, new_raw)
         except OSError as exc:
-            return Publication(False, "replace_failed", revision, old, old, existed=raw is not None,
+            return Publication(False, "replace_failed", revision, old, old, existed=existed,
                                detail=f"{type(exc).__name__}: {exc}")
-        previous = {**knowledge_versions.row_facts(writer or {}), "revision": revision} if raw is not None else None
-        return Publication(True, "saved", new_revision, old, content, existed=raw is not None, previous=previous,
-                           writer=writer, delta=delta)
+        previous = {**knowledge_versions.row_facts(writer or {}), "revision": revision} if existed else None
+        return Publication(True, "saved", new_revision, old, content, existed=existed, previous=previous,
+                           writer=writer, delta=delta, not_text=not_text)
