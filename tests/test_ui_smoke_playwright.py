@@ -2439,6 +2439,26 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         )
         assert len(rendered_ids) == 11, rendered_ids
         facts = page.evaluate(mobile_geometry)
+        compact = [facts["cardFacts"][0]]
+        # A finished helper belongs to its finished parent's Details (owner 09.11 A). Walk all ten depths,
+        # measuring each compact identity BEFORE opening its parent to reach the next; no hidden depth is omitted.
+        for depth in range(1, 11):
+            pid = "layout-root" if depth == 1 else f"layout-child-{depth - 1:02}"
+            cid = f"layout-child-{depth:02}"
+            child = page.locator(f'.chat-live-card[data-task-id="{cid}"]')
+            if not child.is_visible():
+                page.locator(f'.chat-live-card[data-task-id="{pid}"] > [data-live-summary-button] [data-live-disclosure]').click()
+            child.wait_for(state="visible")
+            page.evaluate("() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))")
+            if depth == 1:
+                # Measure its compact identity before Details also names the role among its facts.
+                assert page.get_by_text(long_role, exact=True).count() == 1
+            current = page.evaluate(mobile_geometry)
+            compact.append(next(card for card in current["cardFacts"] if card["id"] == cid))
+        facts["cardFacts"] = compact
+        # Opening the tree can add WebKit's scrollbar: compare both widths in the same settled layout.
+        for key in ("messageWidth", "rootWidth", "deepestWidth"):
+            facts[key] = current[key]
         assert facts["rootWidth"] >= facts["messageWidth"] * 0.95, facts
         assert facts["rootWidth"] - facts["deepestWidth"] <= 40, facts
         # Narrow regime: the side controls share the chip row, the title takes its own
@@ -2459,7 +2479,6 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         # #623: a collapsed child keeps its identity row: title beside chip and controls, whole if short, wrapped
         # if long (child-01). The summary is reading content, no button (#1998): the title holds the whole role
         # as its text, however much shows.
-        assert page.get_by_text(long_role, exact=True).count() == 1
         for card in facts["cardFacts"]:
             if card["collapsedChild"]:
                 assert 0 < card["titleClient"] and card["titleScroll"] <= card["titleClient"] + 1 and (
@@ -2595,10 +2614,18 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                     "cards => cards.map(card => card.dataset.taskId)"
                 )
                 assert len(rendered_ids) == 11, rendered_ids
-                wide_facts = wide.evaluate(
-                    """() => {
+                wide_facts = []
+                for cid, parent in [('layout-root', None), ('layout-child-01', 'layout-root'),
+                                    ('layout-child-02', 'layout-child-01')]:
+                    card = wide.locator(f'.chat-live-card[data-task-id="{cid}"]')
+                    if parent and not card.is_visible():
+                        wide.locator(f'.chat-live-card[data-task-id="{parent}"] > [data-live-summary-button] [data-live-disclosure]').click()
+                    card.wait_for(state="visible")
+                    wide.evaluate("() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))")
+                    wide_facts.extend(wide.evaluate(
+                    """id => {
                         const slot = """ + _ROW_SLOT + """;
-                        const ids = ['layout-root', 'layout-child-01', 'layout-child-02'];
+                        const ids = [id];
                         return ids.map((id) => {
                             const card = document.querySelector(`#page-chat .chat-live-card[data-task-id="${id}"]`);
                             const summary = card.querySelector(':scope > .chat-live-summary-button .chat-live-summary');
@@ -2620,8 +2647,8 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                                 scroll: card.scrollWidth,
                             };
                         });
-                    }"""
-                )
+                    }""", cid
+                    ))
                 assert wide_facts[1]["left"] - wide_facts[0]["left"] >= 30, wide_facts
                 assert wide_facts[2]["left"] - wide_facts[1]["left"] >= 30, wide_facts
                 assert all(card["scroll"] <= card["client"] + 1 for card in wide_facts), wide_facts
