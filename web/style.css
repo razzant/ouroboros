@@ -6971,6 +6971,26 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 .activity-lines { display: grid; gap: 2px; }
 /* A row's one Details (the whole order, a schedule's codes) takes the row's full width under its words. */
 .activity-row > .activity-details { grid-column: 1 / -1; min-width: 0; }
+/* A row with one control (a work's Stop…, a kept service's Stop) keeps it beside its title and meta down to a row of
+   18rem, not the shared row's 28rem: a pane beside the section's list holds a row of about 25rem, and moving Stop…
+   under the meta there doubled every card. Narrower still it goes under the words at the row's end, so the menu Stop…
+   opens (aligned to its right edge) stays over the row instead of reaching over the list or the sidebar beside the
+   page. A row with two controls (a schedule's Disable and Delete) keeps the shared rule: beside its words they would
+   leave a phone's words a column of a few words. */
+@container (max-width: 28rem) {
+    .ui-row.activity-row:has(> .ui-row-actions > :only-child) > .ui-row-title { grid-column: 1; grid-row: 1; }
+    .ui-row.activity-row:has(> .ui-row-actions > :only-child) > .ui-row-meta { grid-column: 1; grid-row: 2; }
+    .ui-row.activity-row > .ui-row-actions:has(> :only-child) { grid-column: 2; grid-row: 1 / span 2; justify-content: flex-end; }
+}
+@container (max-width: 18rem) {
+    .ui-row.activity-row:has(> .ui-row-actions > :only-child) > :is(.ui-row-title, .ui-row-meta) { grid-column: 1 / -1; }
+    .ui-row.activity-row > .ui-row-actions:has(> :only-child) { grid-column: 1 / -1; grid-row: 3; justify-content: flex-end; }
+}
+/* Beside the words the control's reach ends above Details, so under a finger the row needs only a small parting. */
+@media (pointer: coarse) {
+    @container (min-width: 18.01rem) { .ui-row.activity-row:has(> .ui-row-actions > :only-child) > .activity-details { margin-top: var(--space-1); } }
+}
+
 /* Under a finger the row's small actions (each with its reach) and the Details summary under them part by more than
    that reach, so a tap just under Stop… or Delete never opens Details. */
 @media (pointer: coarse) {
