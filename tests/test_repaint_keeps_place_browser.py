@@ -25,8 +25,8 @@ import pytest
 
 from tests import test_design_system_gate_browser as gate_browser
 from tests import test_subscription_setup_browser as setup_browser
-from tests.settings_browser_helpers import open_settings, walk_settings
-from tests.test_design_system_gate_browser import nav_pages, open_nav, rest, save_evidence, seed_page
+from tests.settings_browser_helpers import open_settings
+from tests.test_design_system_gate_browser import nav_pages, open_nav, rest, save_evidence, seed_page, walk_settings
 
 # The gate's page fixture and the one it stands on, by name, so pytest finds both here.
 gate_ui = gate_browser.gate_ui
@@ -119,12 +119,19 @@ def test_a_repaint_keeps_every_scrolled_box_where_the_owner_left_it(gate_ui, tmp
                 page.wait_for_selector('.skills-card')
             if name == 'widgets':
                 page.wait_for_selector('.widgets-card')
-            tabs = page.locator(f'#page-{name} .app-tab-strip [role="tab"]').all()
+            selector = '[data-dashboard-tab]' if name == 'dashboard' else '.app-tab-strip [role="tab"]'
+            tabs = page.locator(f'#page-{name} {selector}').all()
+            if name == 'dashboard':
+                assert [tab.get_attribute('data-dashboard-tab') for tab in tabs] == [
+                    'logs', 'activity', 'consciousness', 'costs', 'updates', 'storage', 'evolution']
             for index in range(max(1, len(tabs))):
                 tab = 'page'
                 if tabs:
+                    if name == 'dashboard' and not tabs[index].is_visible():
+                        page.locator('#page-dashboard [data-dashboard-list-back]').click()
+                        rest(page)
                     tabs[index].click()
-                    tab = tabs[index].inner_text().strip()
+                    tab = tabs[index].get_attribute('data-dashboard-tab') if name == 'dashboard' else tabs[index].inner_text().strip()
                 rest(page)
                 check(page, f'{name}/{tab}', facts, failures)
         assert any(facts.values()), 'no place had a box that scrolls'

@@ -77,6 +77,8 @@ def test_activity_relationship_hold_and_stale_restore(direct_server_with_data, m
                 page.set_viewport_size({'width': width, 'height': 960})
                 if width < 700:
                     wait_drawer_closed(page)
+                    # The one-column Dashboard opens on its list; choose the page before measuring its rows.
+                    page.locator('[data-dashboard-tab="activity"]').click()
                 section.scroll_into_view_if_needed()
                 assert section.locator('.activity-sub').evaluate_all(
                     '(els) => els.length > 0 && els.every((el) => el.scrollWidth <= el.clientWidth + 1)')

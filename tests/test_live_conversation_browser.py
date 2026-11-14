@@ -491,8 +491,11 @@ def open_calls_settings(page):
 
 def navigate(page, name):
     target = page.locator(f'[data-nav-page="{name}"]')
-    if page.viewport_size['width'] < 980 and not page.locator('body').evaluate("node => node.classList.contains('nav-drawer-open')"):
-        page.locator('[data-mobile-nav-toggle]:visible').first.click()
+    if page.locator('html').get_attribute('data-layout') == 'stack' and not page.locator('body').evaluate("node => node.classList.contains('nav-drawer-open')"):
+        toggle = page.locator('[data-mobile-nav-toggle]:visible').first
+        while not toggle.count():
+            page.locator('.page.active .app-page-header .shell-back:visible').first.click()
+        toggle.click()
     target.click()
 
 
@@ -586,10 +589,15 @@ def test_catalog_settings_save_and_client_devices(subscription_ui, monkeypatch, 
     page.wait_for_function('__settingsSignals.length === 1')
     assert subscription_ui['call_saves'][-1]['instructions'] == 'Speak briefly in this synthetic call.'
     assert not any('device' in key or key == 'echoCancellation' for key in subscription_ui['call_saves'][-1])
-    # A device option changed, then Back, then another skill's form drawn (its signal), then Calls again: the form is
+    # A device option changed, then Back (or the wide rail's overview), then another skill's form drawn (its signal),
+    # then Calls again: the form is
     # drawn anew and the skill binds it again, so its device controls and its autosave still work.
     form.locator('[data-call-processing="echoCancellation"]').check()
-    page.locator('#page-settings [data-settings-page="skill/live_conversation"] [data-settings-back]').click()
+    back = page.locator('#page-settings .app-page-header [data-settings-back]')
+    if back.is_visible():
+        back.click()
+    else:
+        page.locator('#page-settings [data-settings-overview-row]').click()
     expect(page.locator('#page-settings [data-settings-page="skill/live_conversation"]')).to_have_count(0)
     page.evaluate("window.dispatchEvent(new CustomEvent('ouro:extension-settings-mounted'))")
     open_calls_settings(page)

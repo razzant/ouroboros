@@ -201,7 +201,9 @@ ROW = """() => {
         rowHeight: rect(row).height, rowRight: rect(row).right, compact: row.dataset.ownerCompact || '',
         hosts: [...row.children].filter((node) => node !== slot && rect(node).width > 0)
             .map((node) => [node.className, Math.round(rect(node).width * 2) / 2]),
-        lines: new Set([...row.children].filter((node) => rect(node).width > 0).map((node) => Math.round(rect(node).top))).size,
+        // Latest is absolute, above the phone's line; it does not add a line of capsules or chips.
+        lines: new Set([...row.children].filter((node) => rect(node).width > 0 && !node.matches('.chat-scroll-bottom-btn'))
+            .map((node) => Math.round(rect(node).top))).size,
         slot: { display: style.display, overflow: style.overflowX, left: rect(slot).left, right: rect(slot).right,
             clips: slot.scrollWidth > slot.clientWidth + 1 },
         chipsWhole: [...slot.children].every((chip) => chip.scrollWidth <= chip.clientWidth + 1),

@@ -121,7 +121,9 @@ FIT = """id => {
     const room = feed.closest('.project-panel') || document.getElementById('page-chat');
     const bar = room.querySelector('.chat-page-header, .project-panel-bar');
     const box = el => el.getBoundingClientRect();
-    const shown = el => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden';
+    // Latest now belongs to the toolbar, but without .visible it has no paint or pointer target.
+    const shown = el => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden'
+        && !el.matches('.chat-scroll-bottom-btn:not(.visible)');
     const reached = el => { const r = box(el), x = (r.left + r.right) / 2, y = (r.top + r.bottom) / 2;
         const hit = y < visualViewport.height ? document.elementFromPoint(x, y) : null;
         return Boolean(hit && el.contains(hit)); };
