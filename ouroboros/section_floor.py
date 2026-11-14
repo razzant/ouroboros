@@ -10,7 +10,6 @@ from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 from ouroboros.context_layout import TIER0_ALWAYS_FULL
-from ouroboros.llm_messages import SHARED_HEAD_KEY
 
 log = logging.getLogger(__name__)
 PROTECTED = TIER0_ALWAYS_FULL
@@ -175,5 +174,7 @@ def _system_blocks(core: Any, governance: Tuple[Any, ...], story: str = "", room
     head = render_sections(core.dynamic_head_sections, core.dynamic_head_text, addressed)
     blocks = [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}} for text in stable if text.strip()]
     if shared.strip() and story.strip():
+        from ouroboros.llm_messages import SHARED_HEAD_KEY  # here, as its sibling key is: no transport at import time
+
         blocks[-1][SHARED_HEAD_KEY] = {"chars": len(shared) + 2, "story_whole": bool(story_whole)}
     return blocks + [{"type": "text", "text": "\n\n".join(part for part in (head, room, dynamic) if part)}]
