@@ -1633,8 +1633,13 @@ textarea.ui-control.settings-rules-text {
 .agent-family-accounts .harness-account-actions { flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 .harness-account-actions > [data-resources] { margin: 0; }
 .harness-account-extra { grid-column: 2 / -1; grid-row: 3; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-1); }
-.harness-account-row:has([data-resources][aria-expanded="false"]) .harness-account-extra > [data-rare],
-.harness-account-row:has([data-resources][aria-expanded="false"]) .harness-account-extra:not(:has(> :not([data-rare]))) { display: none; }
+/* What is rare shows while More is open: the row holds the :has() in its own compound and lends the line its display;
+   closed, the fallback hides it, and a line of nothing else takes no room. */
+.harness-account-row:has([data-resources][aria-expanded="true"]) {
+    --account-rare: flex;
+}
+.harness-account-extra > [data-rare],
+.harness-account-extra:not(:has(> :not([data-rare]))) { display: var(--account-rare, none); }
 .agent-family-accounts .account-resource-panel { margin-top: var(--space-2); }
 .agent-family-accounts .account-resource-head { flex-wrap: wrap; }
 .agent-family-accounts .account-resource-head > h5 { overflow-wrap: normal; }
