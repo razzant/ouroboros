@@ -8,6 +8,7 @@ import {
     MARK_RANK,
     buildProjectActivityIndex,
     markWords,
+    pictureOwner,
     reconcileProjectRooms,
     summarizeRoom,
     waitingModel,
@@ -16,6 +17,8 @@ import { MARK_SHAPES } from '../modules/status_mark.js';
 import { clock } from '../modules/work_status.js';
 import { SERVER_CASES } from './work_fixture.js';
 import { createStateSnapshotSequencer } from '../modules/state_snapshots.js';
+import { rowLine } from '../modules/projects_nav.js';
+import { questionWords } from '../modules/question_presentation.js';
 
 // One server body whose case room is re-keyed to a Project chat id.
 function body(name, chatId = 42, extra = {}) {
@@ -277,6 +280,74 @@ test('the header counts a room the feed shows even when the reserved set the pag
     // Without its row it is not counted by the owner part (no row to reach), as before.
     const unfed = buildProjectActivityIndex(rooms, [41], [{ chat_id: 41 }]);
     assert.deepEqual([unfed.aggregate.owner, unfed.byChat.has('43')], [false, false]);
+});
+
+test('Ouroboros\'s picture says one answer: Main or a Project the feed shows waits for the owner, and nothing else', () => {
+    const [working, waiting] = [summary('held_continue'), summary('spending_limit')];
+    assert.deepEqual([working.owner, waiting.owner], [false, true]);
+    const index = (rooms, rows) => buildProjectActivityIndex(rooms, [42, 43], rows);
+    // A Project waits and the feed holds its row (wherever in the list): the dot, and the words can name a Project.
+    const project = new Map([['1', working], ['42', working], ['43', waiting]]);
+    assert.deepEqual(pictureOwner(project, index(project, [{ chat_id: 42 }, { chat_id: 43 }])),
+        { main: false, projects: true, any: true });
+    // The feed cannot show that room: no dot, as there is no amber row to reach.
+    assert.deepEqual(pictureOwner(project, index(project, [{ chat_id: 42 }])), { main: false, projects: false, any: false });
+    // Main's own wait: the dot (Main's mark says it beside it), without a Project's words.
+    const main = new Map([['1', waiting], ['42', working]]);
+    assert.deepEqual(pictureOwner(main, index(main, [{ chat_id: 42 }])), { main: true, projects: false, any: true });
+    // Work alone, and nothing at all: no dot.
+    const none = new Map([['1', working], ['42', working]]);
+    assert.deepEqual(pictureOwner(none, index(none, [{ chat_id: 42 }])), { main: false, projects: false, any: false });
+    assert.deepEqual(pictureOwner(), { main: false, projects: false, any: false });
+});
+
+test('a waiting Project\'s line says its question in the question\'s own opening words, kept across a gap by its address', () => {
+    const item = { kind: 'open_question', task_id: 't', quiz_id: 'q' };
+    const room = (turn, extra = {}) => ({ activity: 'idle', transition: 'none', call: '', turn, amber: turn.length > 0,
+        mark: 'none', confirmed: true, works: [], ...extra });
+    const body = (rooms, questions, extra = {}) => ({ supervisor_ready: true, works: [], works_complete: true, rooms,
+        current_questions: questions, current_questions_complete: true, ...extra });
+    const row = { task_id: 't', quiz_id: 'q', question: '**The line is up.**\n\nOne step is `yours`:   switch it on.' };
+    const words = 'The line is up. One step is yours: switch it on.';
+    const sentence = 'An unanswered question is here';
+    const line = (rooms) => rowLine(rooms.get('42'));
+
+    let rooms = reconcileProjectRooms(new Map(), body({ 42: room([item]) }, [row])).rooms;
+    assert.deepEqual(rooms.get('42').ask, { key: 't:q', words });
+    assert.deepEqual(line(rooms), { kind: 'ask', text: words });
+    assert.equal(rooms.get('42').label, sentence, 'the state\'s short words stay the label (a row menu says them)');
+    // The next body lists the question without its row (a read with a gap): its words stay while its item stands.
+    const gap = { current_questions_complete: false, current_questions_gaps: [{ task_id: 't' }] };
+    rooms = reconcileProjectRooms(rooms, body({ 42: room([item]) }, [], gap)).rooms;
+    assert.equal(line(rooms).text, words);
+    // A body that does not list the room keeps it unconfirmed with no line; the words return with the question.
+    rooms = reconcileProjectRooms(rooms, { supervisor_ready: true, works: [], works_complete: false, rooms: {} }).rooms;
+    assert.deepEqual([rooms.get('42').owner, line(rooms).text], [false, '']);
+    rooms = reconcileProjectRooms(rooms, body({ 42: room([item]) }, [], gap)).rooms;
+    assert.equal(line(rooms).text, words);
+    // Another question never borrows them, and a row that arrives without words says none: the sentence stands.
+    const other = reconcileProjectRooms(rooms, body({ 42: room([{ ...item, quiz_id: 'other' }]) }, [], gap)).rooms;
+    assert.deepEqual([other.get('42').ask, line(other).text], [undefined, sentence]);
+    const wordless = reconcileProjectRooms(rooms, body({ 42: room([item]) }, [{ ...row, question: '  ' }])).rooms;
+    assert.equal(line(wordless).text, sentence);
+    assert.equal(line(reconcileProjectRooms(new Map(), body({ 42: room([item]) }, [])).rooms).text, sentence, 'never read: the sentence');
+    // What only the owner can do outranks an unanswered question, and an answer whose delivery is unknown is no
+    // question to answer: each keeps its own sentence though the body carries the question's row.
+    const action = reconcileProjectRooms(new Map(), body({ 42: room([{ kind: 'action', code: 'sign_in' }, item]) }, [row])).rooms;
+    assert.deepEqual([action.get('42').ask, line(action).text], [undefined, 'Something here waits for you']);
+    const delivery = reconcileProjectRooms(new Map(),
+        body({ 42: room([{ ...item, code: 'delivery_unknown' }]) }, [row])).rooms;
+    assert.equal(line(delivery).text, 'An answer here was recorded; its delivery is unknown');
+    // A task standing on its question says the question; without its row, the room's own word.
+    const stands = room([{ kind: 'question', task_id: 't', quiz_id: 'q', work_id: 'w' }], { activity: 'waiting', mark: 'still', works: ['w'] });
+    assert.equal(line(reconcileProjectRooms(new Map(), body({ 42: stands }, [row])).rooms).text, words);
+    assert.equal(line(reconcileProjectRooms(new Map(), body({ 42: stands }, [])).rooms).text, 'Waiting for your answer');
+    // The complete read that drops the room drops its words with it.
+    assert.equal(reconcileProjectRooms(rooms, body({}, [])).rooms.has('42'), false);
+    // A long question is cut for a name with a visible ellipsis; the row's own line is cut by its width.
+    const long = questionWords('word '.repeat(80), 160);
+    assert.deepEqual([long.length, long.endsWith('…'), questionWords('word '.repeat(80)).length], [160, true, 399]);
+    assert.equal(questionWords(null), '');
 });
 
 test('a mark\'s words: its place\'s label and new messages, in one phrase', () => {

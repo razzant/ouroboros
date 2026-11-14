@@ -897,7 +897,7 @@ not move them into the migrated set in section 8.
 
 Every surface that says what a work or a room is doing draws one small family of
 marks (`web/modules/status_mark.js`, the `.status-mark` recipe in `web/ui.css`): a
-Project row, Ouroboros's card (Main's), Ouroboros's picture where it opens the drawer, a room's status, a work-list row, a
+Project row, Ouroboros's card (Main's), Ouroboros's picture (on his card and where it opens the drawer), a room's status, a work-list row, a
 task card's chip, a question's head, a skill's job. A mark carries two facts in two
 channels, and nothing else draws a work's or a room's status dot, bar or ring (a
 status sentence's or a composer chip's dot is its tone, §4).
@@ -928,7 +928,9 @@ status sentence's or a composer chip's dot is its tone, §4).
   owner's move comes first, then an outcome beside its word, then new messages,
   then the work's shape in ink. A lone dot in a list is only new messages or the
   owner's move where nothing moves; Ouroboros's picture, which stands for many rooms
-  while the drawer is closed, shows the owner's move as the dot.
+  (Main and the Projects, on his card and where it opens the drawer), shows the owner's
+  move as the dot. His card can so carry two amber marks while Main itself waits: the
+  picture's for the rooms, the trailing one Main's own.
 - **Words carry the meaning.** A mark is decorative (`aria-hidden`); the word
   beside it or the place's accessible name says the same fact ("Working · new
   messages", "Something here waits for you"), so colour is never the only channel.
@@ -958,7 +960,8 @@ across rows whatever the name length and, with a fine pointer, while the ⋯ is
 hovered, focused or open (on touch a focused ⋯ brings back its own column);
 Ouroboros's card puts Main's mark at the same x, its count just before it. A deleting row draws only `Deleting…`, its
 census fact kept in the accessible name. The Projects have no header and no mark of their own: each row
-carries its own. An activity repaint keeps the row and menu
+carries its own, and what waits for the owner in any of them also shows as the amber dot on Ouroboros's
+picture (§10 "Navigation"). An activity repaint keeps the row and menu
 nodes. A mark never carries a counter, percent or text animation.
 
 Enforcement: `web/tests/status_marks.test.js` pins the mapping and that only
@@ -974,8 +977,9 @@ Main's on Ouroboros's card: the standalone messages not read yet (below), shown 
 another destination is (a Project open over Main included, which reads none of Main's
 messages meanwhile), a crimson pill just before the card's mark. A Project row says it
 with its mark's crimson tint (its work's shape, or a dot where nothing works), never a
-count, and the Projects have no total; Ouroboros's picture carries a crimson dot while
-Main or a Project hidden in the drawer has some. Project names keep one ink, read or not. Main's count is kept as a Project's
+count, and the Projects have no total; where it opens the drawer, Ouroboros's picture carries a
+crimson dot while Main or a Project hidden in the drawer has some, and on his card it never does:
+Main's count and each row's own mark say it. Project names keep one ink, read or not. Main's count is kept as a Project's
 is, its room's revision against a shared read cursor read the same way (below), so
 every window and device shows the same number; a cursor no client has set yet starts
 at what Main holds.
@@ -3246,7 +3250,8 @@ and Add"); a destination is a room or a section.
 
 Destinations come from one registry (`web/modules/pages.js`): it renders the navigation rows, names the titles and
 feeds the shell gate, so a new page is a registry row and its module, checked at phone widths with no further work.
-The column reads from the top: Ouroboros's card, which is Main (its picture, its name with a quiet `Main Chat`,
+The column reads from the top: Ouroboros's card, which is Main (its picture, with one 7 px amber dot on its rim
+while Main or a Project in the list waits for the owner, the card's words for readers saying so, its name with a quiet `Main Chat`,
 Main's count and its room's mark in the Project rows' mark column, and under them what Main is doing now, nothing
 while it rests), in the Ouroboros voice and in the strong crimson while Main is where you are; then Find a project,
 with + (New project) at the end of its row; then the Projects, the column's only scroller; then the six sidebar
@@ -3255,9 +3260,12 @@ their names whole (three in a wide sidebar, two at its default width and in the 
 each its glyph and its word, the one where you are the strong crimson capsule; and under them the
 foot, the version and the update, above the safe area. The Projects take all the free room between the field and
 the sections; there is no Projects heading, no collapse and no unread total. A Project row is two lines: the name
-and its time, then its newest line with the row's mark (a name with no such line may take both). The list stands
-beside the room and is never louder than the room's own text: a name is the meta ink at the regular weight, its
-newest line the secondary ink, and only the chosen row is strong. Its menu opens
+and its time, then one line with the row's mark (a name with no such line may take both): the opening words of the
+question that waits for the owner, or the sentence that says what waits where it has no words of its own (an action
+only the owner can take, an answer whose delivery is unknown), else what its work is doing; the row's name for
+readers ends with the same words. The list stands beside the room and is never louder than the room's own text: a
+name is the meta ink at the regular weight, its line the secondary ink, or the primary ink of the room's own text
+while it says what waits for the owner, and only the chosen row is strong. Its menu opens
 from its ⋯ (a fine pointer), a right-click, Shift+F10 or a long press; it first says the row's state as its mark
 and words, then offers Pin or Unpin; pinning neither opens nor reads it. Pins lead the one list, one `--space-2`
 of air before the next shown row their only boundary: no caption, tint, rule or column, and no glyph, so nothing
@@ -3309,7 +3317,8 @@ steps aside with the others while an open capsule has the line alone; at a secti
 (on a section's page Back leads instead). While the drawer is
 closed the picture carries one 7 px dot for Main and the Projects, the room on screen
 included: amber while one of them waits for the owner, else crimson while one has
-unread messages; its accessible name says which. The
+unread messages; its accessible name says which. The picture on his card carries the amber
+dot by the same rule in both layouts, never the crimson one. The
 drawer's × sits in its head, where the picture was. The room's quarter,
 ×, Escape, Back and choosing a place close it. A drag only speeds this up: a
 sideways finger anywhere on the room, from the screen's very edge and over its
