@@ -3,6 +3,7 @@
 import datetime as dt
 import json
 import pathlib
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -172,8 +173,13 @@ def test_cache_writes_line_folds_classes_and_never_reads_an_unshared_cost_as_zer
     assert view._cache_writes_line(mixed) == (
         "13 in the last 24 h, 90,010,000 tokens, $7.08 write share of recorded cost, 7 unsplit; by what they followed: "
         "first_request 2 $5.00, system_changed 3 $2.00, paused 4 $0.08 (3 unsplit), append 4")
-    assert view._cache_writes_line([row("append", 31, 6_200_000, 0.0, 31), row("first_request", 9, 2_000_000, 0.0, 9)]) == (
-        "40 in the last 24 h, 8,200,000 tokens, write share of cost unknown; by what they followed: append 31, first_request 9")
+    # Where no cost is shared the tokens are the whole order (not the names, not the order the rows came in).
+    assert view._cache_writes_line([row("append", 31, 2_000_000, 0.0, 31), row("first_request", 9, 6_200_000, 0.0, 9)]) == (
+        "40 in the last 24 h, 8,200,000 tokens, write share of cost unknown; by what they followed: first_request 9, append 31")
+    nine = ["first_request", "entered_model", "tools_changed", "system_changed", "history_rewritten", "paused",
+            "returned_to_model", "append", "not_recorded"]  # every class the fact can name (transcript_prefix.prefix_class)
+    whole = view._cache_writes_line([row(name, 1, 1_000, float(place)) for place, name in enumerate(nine, 1)])
+    assert [entry.split()[0] for entry in whole.split("followed: ")[1].split(", ")] == nine[::-1]  # all nine, none cut
     assert view._cache_writes_line([row("append", 1, 999, 0.004)]) == (
         "1 in the last 24 h, 999 tokens, $0.00 write share of recorded cost; by what they followed: append 1 $0.00")
     assert view._cache_writes_line([]) == "none recorded in the last 24 h"
@@ -196,6 +202,8 @@ def test_cache_writes_text_reads_the_period_view_itself_and_says_unknown_when_it
     assert view.cache_writes_text(period_root) == (
         "4 in the last 24 h, 380,000 tokens, $2.80 write share of recorded cost, 1 unsplit; "
         "by what they followed: first_request 1 $1.60, system_changed 2 $1.20, append 1")
+    # The view asked for is the last 24 hours before the wake's own clock: 25 hours on, these calls are outside it.
+    assert view.cache_writes_text(period_root, now=time.time() + 90_000) == "none recorded in the last 24 h"
     from ouroboros.gateway import cost_period
     from ouroboros.usage_ledger import UsageLockUnavailable
 
