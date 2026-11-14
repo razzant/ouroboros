@@ -49,6 +49,15 @@ test('rows render from the registry, in order, with the label verbatim and the i
     const files = renderNavRow(pageById('files'));
     assert.doesNotMatch(files, /nav-row-main|status-mark|nav-row-words/, 'a tool has no status of its own');
     assert.match(files, /<span class="nav-row-label">Files<\/span><\/button>$/);
+    // Each tool's row carries its registry glyph once, and no other page's.
+    const glyphs = new Set(pagesInZone('foot').map((page) => PAGE_ICONS[page.icon]));
+    assert.equal(glyphs.size, pagesInZone('foot').length, 'every tool has a glyph of its own');
+    for (const page of pagesInZone('foot')) {
+        const row = renderNavRow(page);
+        assert.equal((row.match(/<svg/g) || []).length, 1, `${page.id}: one glyph`);
+        assert.ok(row.includes(PAGE_ICONS[page.icon]), `${page.id}: the registry's glyph for it`);
+        assert.equal(rows.split(PAGE_ICONS[page.icon]).length - 1, 1, `${page.id}: its glyph once among the rows`);
+    }
     assert.match(renderNavRow({ id: 'x', label: '<b>', icon: 'none', zone: 'foot' }), /title="&lt;b&gt;".*>&lt;b&gt;</);
 });
 

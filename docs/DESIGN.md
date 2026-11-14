@@ -2933,7 +2933,8 @@ the list and an open page stand together, and a page is always open, Models the 
 one. A row opens its page or is a door: what lives elsewhere (a Dashboard page beside its live state, Main's
 composer) shows its value here and leads there with ↗. A list of entries (agents, MCP servers, keys, fallbacks)
 is heads: a press opens the entry's page, Add an unsaved one. The card speaks in Ouroboros's voice: what it has
-read that waits for the owner here, each with its one action, and a neutral Check for what it has not read.
+read that waits for the owner here, each with its one action; a fact it has not read is said by the row it concerns,
+never on the card.
 
 **A current choice is its role and its value.** A role that holds one choice (Main model) is a card whose head
 names the role and what it does, then one door row: the value in the primary ink at the title size, under it the

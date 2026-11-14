@@ -167,7 +167,9 @@ function computerWords(autostart, settings) {
 /**
  * The current answer of every home row, keyed by what the row opens: `{ text, owner }`, `owner` when the next move
  * is the owner's (a stop by the spending limit, a held consciousness, an update that waits, a sign-in). A row whose fact is not
- * read yet has no entry and keeps what it shows; one whose read failed says "Not checked".
+ * read yet has no entry and keeps what it shows; one whose read failed says "Not checked". The Accounts row counts only
+ * what was read: over an accounts roster that was not read, or whose read failed, it says its API keys alone, and it
+ * has no entry when the settings document does not list them either.
  */
 // Main's answer on the home: its model, or what keeps it from sending (a key choice it waits for, a key that cannot
 // send), in the owner's colour.
