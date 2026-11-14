@@ -126,6 +126,55 @@ def test_a_failed_facet_serves_its_last_read_without_refreshing_its_time(monkeyp
         "observed_at": "2026-10-10T10:05:00Z", "stale": True, "error": "malformed_response"}
 
 
+def test_the_catalog_facet_carries_the_time_the_engine_composed_it(monkeypatch, tmp_path):
+    # The engine may answer from a recent composition (dated by generatedAt): through the real
+    # read, the facet keeps that time instead of this read's, and falls back to the read time
+    # when the engine's time has no zone or lies past what UTC can hold.
+    from types import SimpleNamespace
+
+    from ouroboros import claudexor_daemon as owned
+    from ouroboros.gateways import claudexor as wire
+
+    composed = iter(["2026-11-14T17:59:50.250Z", "2026-11-14T17:59:50.250Z", "2026-11-14T18:09:00",
+                     "0001-01-01T00:00:00+14:00"])
+
+    class Gateway:
+        engine_version = "6.1.2"
+
+        def __init__(self, _endpoint): pass
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def handshake(self, **_kw): return {}
+        def operations(self): raise wire.ClaudexorUnavailable("internal", "catalog unreadable")
+        def agent_capabilities(self): return {"harnesses": [], "generatedAt": next(composed)}
+        def harnesses(self): return []
+        def credential_profiles(self): return {"profiles": [], "accountPools": []}
+        def quota_snapshots(self): return []
+
+    monkeypatch.setattr(owned, "get_owned_daemon", lambda: SimpleNamespace(status_dict=lambda: {"state": "running"}))
+    monkeypatch.setattr(owned, "owned_config_dir", lambda: tmp_path / "cfg")
+    monkeypatch.setattr(wire, "discover_daemon_at", lambda _path: object())
+    monkeypatch.setattr(wire, "ClaudexorGateway", Gateway)
+    clock = {"now": ""}
+    monkeypatch.setattr("ouroboros.utils.utc_now_iso", lambda: clock["now"])
+
+    def read(now):
+        clock["now"] = now
+        return accounts._status_payload(False)
+
+    first = read("2026-11-14T18:00:00+00:00")
+    assert first["reads"]["catalog"] == "ok" and "_facet_observed" not in first
+    assert first["facets"]["catalog"] == {"observed_at": "2026-11-14T17:59:50.250000+00:00", "stale": False,
+                                          "error": None}
+    assert first["reads"]["accounts"] == "ok"
+    assert first["facets"]["accounts"]["observed_at"] == first["facets"]["quota"]["observed_at"] == (
+        "2026-11-14T18:00:00+00:00"), "other facets: the read time"
+    held = read("2026-11-14T18:05:00+00:00")  # the same composition, answered again five minutes later
+    assert held["facets"]["catalog"]["observed_at"] == "2026-11-14T17:59:50.250000+00:00", "never stamped as new"
+    assert read("2026-11-14T18:10:00+00:00")["facets"]["catalog"]["observed_at"] == "2026-11-14T18:10:00+00:00"
+    assert read("2026-11-14T18:15:00+00:00")["facets"]["catalog"]["observed_at"] == "2026-11-14T18:15:00+00:00"
+
+
 def test_a_facet_never_read_stays_empty_and_homes_never_share_memory(monkeypatch):
     script = iter([
         _payload(home="/home-a"),
