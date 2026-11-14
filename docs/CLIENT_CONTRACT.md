@@ -822,7 +822,7 @@ The retired hub catalog/preview/install/update/uninstall/publication-clear route
 Connected coding subscriptions use Claudexor. Its API v2 objects (`job`, maintenance operation, reset receipt, quota snapshots) pass through; the engine owns vendor maintenance. Pin: `ouroboros/claudexor_runtime_pin.json`; source: https://github.com/razzant/claudexor. Read published shape keys; treat the rest as data.
 
 **Status:**
-- `GET /api/claudexor/status` (`ClaudexorStatusResponse`) is passive: it never starts the engine. `reads.catalog`, `reads.accounts` and `reads.quota` are each `ok` (authoritative, even when empty), `not_read` (never asked) or `failed`. A facet that was not read freshly serves its last value with `facets.<name>.stale: true`. Never read an empty list without `ok` as "no accounts".
+- `GET /api/claudexor/status` (`ClaudexorStatusResponse`) is passive: it never starts the engine. `reads.catalog`, `reads.accounts` and `reads.quota` are each `ok` (authoritative, even when empty), `not_read` (never asked) or `failed`. A facet that was not read freshly serves its last value with `facets.<name>.stale: true`. `facets.<name>.observed_at` dates that value: the catalog's is the engine's composition time (`generatedAt`; the engine may answer from a composition some minutes old; the read time when the engine sends none or an unreadable one), the others' the read time. Never read an empty list without `ok` as "no accounts".
 - `?view=quota` answers the passive quota view (`ClaudexorQuotaResponse`), described in [`PASSIVE_QUOTA_READ.md`](PASSIVE_QUOTA_READ.md). Check `view: "quota"`: an older core ignores the parameter.
 - `POST /api/claudexor/wake` starts the engine when needed and answers a fresh status.
 

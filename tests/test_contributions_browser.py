@@ -181,6 +181,15 @@ def test_plus_lists_skill_sections_then_host_items_and_each_does_its_verb(subscr
     assert menu.locator(".chat-plus-label").all_inner_texts() == ["Templates", "Lists", "Add to composer"], \
         "each skill under its label, the host's own items last under what they do"
     assert menu.locator("[data-plus-item='templates:simpler'] svg").count() == 1, "a skill's glyph from the host set"
+    glyphs = page.evaluate("""async () => {
+        const { fluentIcon, controlIcon } = await import('/static/modules/page_icons.js');
+        const drawn = (svg) => { const box = document.createElement('span'); box.innerHTML = svg; return box.innerHTML; };
+        const item = (key) => document.querySelector(
+            `.chat-plus-menu:not([data-leaving]) [data-plus-item='${key}'] .chat-plus-icon`)?.innerHTML;
+        return { search: item('search'), magnifier: drawn(fluentIcon('search', 16, 'regular')),
+            cap: drawn(controlIcon('skills', 16)) };
+    }""")
+    assert glyphs["search"] == glyphs["magnifier"] != glyphs["cap"], "Search this chat wears the magnifier, not Skills' cap"
     box = menu.bounding_box()
     assert box["x"] >= 0 and box["x"] + box["width"] <= width + 0.5, box
     assert page.evaluate("document.activeElement.id") == "chat-input", "a pointer leaves the field its focus"

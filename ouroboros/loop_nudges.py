@@ -269,9 +269,8 @@ def _forced_delegation_note(tools_ctx: Any, llm_trace: Dict[str, Any]) -> str:
         return "\nNOTE: this task's delegated run(s) succeeded. " + nanny_burn_fact(tools_ctx) + "."
     if started > settled:
         return (
-            "\nNOTE: this task dispatched delegated run(s) that have not settled "
-            f"yet ({started - settled} of {started} pending); their results are not in "
-            "this transcript."
+            "\nNOTE: collection/accounting has not settled for "
+            f"{started - settled} of {started} delegated run(s)."
         )
     if settled:
         return (
@@ -356,13 +355,12 @@ def _running_children(tools: ToolRegistry, drive_root: Any, task_id: str) -> Lis
 
 
 def _open_delegated_runs(ctx: Any, task_id: str) -> int:
-    """This task's own delegated runs that started and have not settled (durable custody, the writers' root)."""
-    from ouroboros.delegate_custody import custody_root, task_execution_evidence
+    """This task's own delegated runs with no recorded end (durable custody, the writers' root)."""
+    from ouroboros.delegate_custody import TERMINAL_STATES, custody_root
+    from ouroboros.delegate_custody_current import runs
 
-    evidence = task_execution_evidence(custody_root(ctx), str(task_id or ""))
-    if evidence.get("evidence_read_failed"):
-        return 0
-    return max(0, int(evidence.get("delegated_runs_started") or 0) - int(evidence.get("delegated_runs_settled") or 0))
+    return sum(1 for entry in runs(custody_root(ctx), "task_id=?", (str(task_id or ""),)).values()
+               if not entry.review_owned and not entry.settled and entry.terminal_state not in TERMINAL_STATES)
 
 
 def _zero_run_closed(ctx: Any, receipt_rows: List[Dict[str, Any]]) -> bool:
@@ -391,8 +389,8 @@ def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm
     acceptance and quality more precise): the facts the host holds before the first ordinary
     delivery, never a gate. It names what applies: a result nothing examined since it last changed
     (``outcomes.result_unexamined``; not where Required's floor reviews it at delivery), direct children still
-    running, this task's own delegated runs still open. Typed facts only, never parsed prose (P5); a red check,
-    a masking pipe and an agent-defined criterion were said when the check ran and stay on the record."""
+    running, this task's own delegated runs with no recorded end. Typed facts only, never parsed prose (P5); a red
+    check, a masking pipe and an agent-defined criterion were said when the check ran and stay on the record."""
     from ouroboros.config import get_task_review_mode
     from ouroboros.tools.review_result import required_root_wave
 
@@ -436,8 +434,9 @@ def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm
         log.debug("pre-delivery notice: delegated custody unreadable", exc_info=True)
         open_runs = 0
     if open_runs:
-        lines.append(f"Open delegated runs: {open_runs} of this task's runs have not settled; ending this task now "
-                     "cancels them on the next custody pass (delegate_wait shows each run's state).")
+        lines.append(f"Open delegated execution: {open_runs} of this task's runs have no recorded end; "
+                     "ending this task now cancels those still running on the next custody pass "
+                     "(delegate_wait shows each run's state).")
     if not lines:
         return ""
     if not lines[0].startswith("Before delivery"):
