@@ -499,20 +499,20 @@ html[data-layout="stack"] .resize-handle { display: none; }
     font-weight: 600;
     line-height: 20px;
 }
-/* The quiet "Main Chat" shows whole or not at all, never cut inside its two words: it takes the room the name, the
-   count and the mark leave, and where its words do not fit there they wrap past a zero-wide first item one line tall
-   onto a second line its one-line box hides (its words stay in the card's name for a reader). */
+/* The room's name stays readable. A narrow card puts it below Ouroboros's name, leaving the count and mark at the end. */
 .nav-ouro-line1 > .nav-row-label {
-    --label-line: calc(var(--type-meta) * var(--line-meta));
-    flex: 1 1 0;
-    display: flex;
-    flex-wrap: wrap;
-    height: var(--label-line);
+    flex: 1 1 auto;
+    white-space: normal;
+    overflow: visible;
     color: var(--text-meta);
     font-size: var(--type-meta);
     line-height: var(--line-meta);
 }
-.nav-ouro-line1 > .nav-row-label::before { content: ''; height: var(--label-line); }
+@container (max-width: 327px) {
+    .nav-ouro-line1 { flex-wrap: wrap; row-gap: 0; }
+    .nav-ouro-name { flex: 1 1 auto; }
+    .nav-ouro-line1 > .nav-row-label { order: 4; flex-basis: 100%; }
+}
 /* the count stands just before the mark, a step before it, and the mark keeps the rows' own column */
 .nav-ouro-line1 > .unread-badge { order: 2; margin-right: var(--space-1); }
 .nav-ouro-line1 > .nav-mark-slot {

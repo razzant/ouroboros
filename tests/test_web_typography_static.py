@@ -379,26 +379,22 @@ def _declarations(source: str, selector: str) -> dict[str, str]:
     return found
 
 
-def test_the_cards_quiet_label_shows_whole_or_not_at_all() -> None:
-    """`Main Chat` beside Ouroboros's name on the sidebar's card is never cut inside its words (docs/DESIGN.md
-    "Navigation"; the owner's sweep of 14.11 found "Main C…" at the default width, "M…" with Main's count): its box is
-    one line tall and wraps past a zero-wide first item of that height, so words that do not fit go to a second line
-    the box hides. Both heights are lengths: a line token is a unitless factor (`--line-meta: 1.35`), and as a height
-    it is dropped, which lets the box grow to show the wrapped line, cut at its edge."""
+def test_the_cards_quiet_label_keeps_its_words_in_a_narrow_sidebar() -> None:
+    """Main Chat moves below the name in a narrow card; a wide card keeps the existing single row."""
     source = _decommented(_read("web/style.css"))
-    label = _declarations(source, ".nav-ouro-line1 > .nav-row-label")
-    first = _declarations(source, ".nav-ouro-line1 > .nav-row-label::before")
-    assert label.get("display") == "flex" and label.get("flex-wrap") == "wrap", label
-    assert _declarations(source, ".nav-row-label").get("overflow") == "hidden", "the label's box hides what wraps"
-
-    def own(value: str) -> str:  # a custom property the label declares itself, read through once
-        named = re.fullmatch(r"var\((--[\w-]+)\)", value)
-        return label.get(named.group(1), value) if named else value
-
-    height = own(label.get("height", ""))
-    assert first.get("content") in ("''", '""') and own(first.get("height", "")) == height, (first, height)
-    assert not re.fullmatch(r"var\(--line-[\w-]+\)", height), f"{height} is a unitless line factor, not a height"
-    assert re.search(r"--type-[\w-]+|\d(?:px|r?em)\b", height), f"the label's height {height!r} names no length"
+    narrow = re.search(r"@container \(max-width: 327px\)\s*\{(.*?)\n\}", source, re.S)
+    assert narrow, "the card needs its own container rule at the narrow sidebar widths"
+    wide = source[:narrow.start()] + source[narrow.end():]
+    label = _declarations(wide, ".nav-ouro-line1 > .nav-row-label")
+    assert label.get("white-space") == "normal" and label.get("overflow") == "visible", label
+    assert "height" not in label and "--label-line" not in label, "no one-line clipping trap"
+    assert not _declarations(source, ".nav-ouro-line1 > .nav-row-label::before"), "no spacer that hides the room name"
+    assert "order" not in label and "flex-basis" not in label, "wide cards keep the label beside the name"
+    small = narrow.group(1)
+    assert _declarations(small, ".nav-ouro-line1").get("flex-wrap") == "wrap"
+    assert _declarations(small, ".nav-ouro-name").get("flex") == "1 1 auto", "the count and mark keep their column"
+    label = _declarations(small, ".nav-ouro-line1 > .nav-row-label")
+    assert label == {"order": "4", "flex-basis": "100%"}, label
 
 
 # ---------------------------------------------------------------------------
