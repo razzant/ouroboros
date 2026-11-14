@@ -3409,7 +3409,7 @@ export function createChatInstance({
     let wsHasConnectedOnce = false;
 
     onWs('open', (msg) => {
-        const openedVisit = visit;
+        const openedVisit = visit, readOnOpen = recentRequest;
         mainWaiting?.setConnected(true);
         refreshHeaderControlState();
         syncChatStatus();
@@ -3435,9 +3435,11 @@ export function createChatInstance({
             clearReloadParams();
         };
         loadUiPreferences()
-            // Reconnect refetches lost task_done; first open shares idle-gated hydration.
-            .then(() => (destroyed || openedVisit !== visit ? false : isReconnect ? syncHistory({ fromReconnect: true })
-                : waitForHydrationWindow().then(awaitInitialHydration)))
+            // A return's paint receipt may have read the newest page while preferences loaded (even a refused read
+            // counts). Share that work; a real reconnect still owes a read newer than any request it interrupted.
+            .then(() => (destroyed || openedVisit !== visit ? false
+                : msg?.resumed && recentRequest > readOnOpen ? historySyncPromise || historyPager.whenIdle()
+                : isReconnect ? syncHistory({ fromReconnect: true }) : waitForHydrationWindow().then(awaitInitialHydration)))
             .then(settled, settled);
     });
 
