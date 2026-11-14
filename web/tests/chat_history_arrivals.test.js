@@ -653,3 +653,61 @@ test('the saved preview takes the newest page, then merges what arrived by ident
     assert.deepEqual(s.reads, ['newest', 'after', 'after']);
     assert.equal(localStorage.getItem(PREVIEW_KEY), null, 'no fragment stands for the room');
 });
+
+for (const mode of ['after', 'newest']) for (const following of [false, true]) {
+    test(`returning by ${mode} marks unseen progress only for a history reader (following=${following})`, async (t) => {
+        const s = historyServer();
+        s.say(1); s.work(2);
+        const r = openRoom(t, s);
+        // The census confirms this live card; replaying its row adds no liveness warning either.
+        r.instance.hydrateStateSnapshot({ active_chat_activities: [{ activity_id: 'task-1', chat_id: 2,
+            kind: 'managed_task', phase: 'working', status: 'running' }], active_chat_activities_complete: false,
+            supervisor_ready: true });
+        let revision = 0;
+        const read = async () => {
+            if (mode === 'newest') s.refusals.push('history_cursor_gone');
+            await r.instance.refreshHistory({ revision: ++revision });
+            await quiet();
+        };
+        const label = () => globalThis.document.byId.get('chat-scroll-bottom').getAttribute('aria-label');
+        const leave = () => { r.instance.leave(); r.setHidden(true); };
+        const back = async () => { r.setHidden(false); r.instance.stay(); r.instance.resume(false); await read(); };
+        await read();
+        assert.equal(label(), 'Scroll to latest message', 'opening existing history is quiet');
+        if (!following) r.readUp();
+        await read();
+        assert.equal(label(), 'Scroll to latest message', 'an unchanged reread is quiet');
+        // A progress frame seen while following remains the same line when its stored identity arrives.
+        globalThis.document.byId.get('chat-scroll-bottom').click(); await quiet();
+        r.emit('chat', { chat_id: 2, role: 'assistant', is_progress: true, task_id: 'task-1', content: 'step 3', ts: ts(3) });
+        s.work(3);
+        if (!following) r.readUp();
+        await read();
+        assert.equal(label(), 'Scroll to latest message', 'adopting the live row adds no unseen words');
+        for (const kind of ['new task', 'same task', 'answer']) {
+            leave();
+            if (kind === 'new task') s.work(4, 'task-2');
+            else if (kind === 'same task') s.work(5, 'task-2');
+            else s.say(6);
+            await back();
+            assert.equal(label(), following ? 'Scroll to latest message' : 'New activity — scroll to latest message', `${kind}: new history uses the reader\'s activity marker`);
+            globalThis.document.byId.get('chat-scroll-bottom').click(); await quiet();
+            assert.equal(label(), 'Scroll to latest message', 'reaching the newest message clears it');
+            if (!following) r.readUp();
+        }
+    });
+}
+
+
+test('walking into an older page does not mark its existing words as new activity', async (t) => {
+    const s = historyServer({ window: 1 });
+    s.say(1); s.work(2); s.say(3);
+    const r = openRoom(t, s);
+    await r.instance.refreshHistory({ revision: 1 });
+    r.readUp();
+    const older = r.messages.querySelector('.chat-load-older').querySelector('.chat-load-older-btn');
+    older.click();
+    await quiet();
+    assert.ok(s.reads.includes('older'));
+    assert.equal(globalThis.document.byId.get('chat-scroll-bottom').getAttribute('aria-label'), 'Scroll to latest message');
+});

@@ -2245,7 +2245,12 @@ export function createChatInstance({
         }
     }
     function applyHistoryMessages(messages, { fromReconnect = false, archived = false } = {}) {
-        const knownCards = new Set(liveCardRecords.keys());
+        // A returning room reads arrivals instead of receiving socket frames. Only newly drawn content marks ↓:
+        // the first page, older pages and adopting a stored identity for already seen live words stay quiet.
+        const reportActivity = historyLoaded && !archived;
+        const knownRows = reportActivity ? new Set(messagesDiv.children) : null;
+        const knownCards = new Map([...liveCardRecords].map(([id, record]) => [id, reportActivity
+            ? { projection: captureLiveCardProjection(record), items: record.items.length } : null]));
         _historyReplayActive = true;
         _historyAppending = archived;
         liveCardBound.beginReplay();
@@ -2467,8 +2472,11 @@ export function createChatInstance({
                 const dirty = [...liveCardRecords.values()].filter(record => record._timelineDirty);
                 measure(() => { const kept = keepSelection(document); return dirty.map(record => ({ scroll: timelineScroll(record), kept })); },
                     (before) => dirty.forEach((record, index) => renderLiveCardTimeline(record, before[index])));
-                return true;
-            });
+                return reportActivity && ([...messagesDiv.children].some(node => node.classList.contains('chat-bubble') && !knownRows.has(node))
+                    || [...liveCardRecords].some(([id, record]) => record.root?.isConnected
+                        && (liveCardProjectionChanged(knownCards.get(id)?.projection || null, record)
+                            || record.items.length > (knownCards.get(id)?.items || 0))));
+            }, { remoteContent: reportActivity });
         } finally {
             _historyRow = null;
             _historyReplayActive = false;
