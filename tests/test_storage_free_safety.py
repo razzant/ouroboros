@@ -187,6 +187,30 @@ def test_a_copy_kept_for_unheld_work_is_proven_again_only_when_that_path_or_its_
     assert str(path) not in proof._KEPT_UNHELD, "a retired copy keeps no evidence"
 
 
+def test_an_owner_kept_copy_is_never_remembered_so_each_pass_names_the_owners_keep(copies, monkeypatch):
+    """An ordinary keep of unheld work is remembered; a copy the owner keeps is not, even after a proof (a Storage
+    preview) found its unsaved work, so each pass's keep gate goes on naming ``owner_keep``."""
+    from ouroboros import copy_capture_proof as proof, owner_keep
+
+    monkeypatch.setattr(proof, "_KEPT_UNHELD", {})
+    handle = _copy(copies)
+    path = Path(handle.path)
+    (path / "work.txt").write_text("saved\n", encoding="utf-8")
+    assert _capture(copies, handle)["status"] == "ready_with_changes"
+    (path / "late.txt").write_text("no capture holds this\n", encoding="utf-8")
+    record = sw._record_at(handle.path, copies[0])
+    assert proof.plain_copy_verdict(record, copies[0])["reason"] == proof.CAPTURE_UNPROVEN
+    assert str(path) in proof._KEPT_UNHELD, "an ordinary keep of unheld work is remembered"
+    owner_keep.set_owner_keep(copies[0], "finished", keep=True, source={"basis": "test"})
+    assert proof.plain_copy_verdict(record, copies[0])["reason"] == proof.CAPTURE_UNPROVEN
+    assert str(path) not in proof._KEPT_UNHELD, "the owner's keep is not"
+    for _ in range(2):
+        reasons: dict = {}
+        assert sw.prune_orphans(data_dir=copies[0], worktree_root=copies[2], retention_days=0, live=lambda _task: False,
+                                reasons=reasons)["removed"] == 0
+        assert reasons == {handle.path: owner_keep.OWNER_KEEP}, "each pass names the owner's keep"
+
+
 @_NO_EXEC_BIT
 def test_a_mode_changed_after_a_good_capture_stays(copies):
     handle = _copy(copies)

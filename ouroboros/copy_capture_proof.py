@@ -27,10 +27,12 @@ _SYMLINK, _EXECUTABLE, _REGULAR = "120000", "100755", "100644"
 # ``(pid, task_id, rel, stamp, fact)``. A verdict costs the checkout's Git status and ignored listing, the task's result
 # read twice and a replay of the capture in a private index; ``kept_as_before`` keeps such a copy again without them
 # while two facts stand: ``rel``'s lstat (``fact``) and the task result's write signature (``stamp``,
-# ``task_store.signature``: every capture publication writes the result). Nothing else is watched: a HEAD or index
-# change, or a fallback manifest rewritten without a result write, waits for the next fresh proof (that result write, a
-# Storage preview, a restart). A keep needs no proof, so this postpones a removal at most and never causes one; the
-# pass then records no typed hold for the copy, as for any keep of unsaved work. Retirement drops the entry.
+# ``task_store.signature``: every capture publication writes the result; an unreadable signature changes nothing).
+# Nothing else is watched: a HEAD or index change, or a fallback manifest rewritten without a result write, waits for
+# the next fresh proof (that result write, a Storage preview, a restart). A keep needs no proof, so this postpones a
+# removal at most and never causes one. A remembered copy names no typed hold, as any keep of unsaved work, so a
+# passing one (liveness unknown, a busy gate) goes unnamed; an owner's keep is never remembered, its gate names it at
+# each pass. Retirement drops the entry.
 _KEPT_UNHELD: Dict[str, tuple] = {}
 
 
@@ -51,6 +53,7 @@ def plain_copy_verdict(row: Dict[str, Any], data_dir: Optional[Any] = None) -> D
         work = checkout_work(path)
         if not base or work["tip"] != base:
             return keep  # a moved HEAD carries commits no patch of this copy holds
+        result: Dict[str, Any] = {}
         if row.get("task_id"):
             from ouroboros.subagent_worktrees import _data_dir
             from ouroboros.task_results import load_task_result
@@ -66,7 +69,9 @@ def plain_copy_verdict(row: Dict[str, Any], data_dir: Optional[Any] = None) -> D
         loose = {*work["untracked"], *work["ignored"]}  # unique by being there, whatever their bytes
         standing = next(((rel, fact) for rel in unheld if rel in loose and (fact := _stat_of(path / rel)) is not None),
                         None)
-        if stamp is not None and standing is not None:
+        from ouroboros.owner_keep import OWNER_KEEP
+
+        if stamp is not None and standing is not None and not isinstance(result.get(OWNER_KEEP), dict):
             _KEPT_UNHELD[str(path)] = (os.getpid(), str(row.get("task_id") or ""), standing[0], stamp, standing[1])
     except Exception:
         log.debug("Work of copy %s could not be proven saved", path, exc_info=True)
@@ -74,15 +79,15 @@ def plain_copy_verdict(row: Dict[str, Any], data_dir: Optional[Any] = None) -> D
 
 
 def kept_as_before(row: Dict[str, Any], data_dir: Optional[Any] = None) -> bool:
-    """The custody pass's same keep without a new proof: this process kept the copy for a path no capture holds,
-    that path stands as it stood and the task's result is unwritten since (``_KEPT_UNHELD``)."""
+    """A prune pass's (the custody pass's, the owner's Free's) same keep without a new proof: this process kept the
+    copy for a path no capture holds, that path stands as it stood and the task's result is unwritten since."""
     path = str(pathlib.Path(str(row.get("path") or "")))
     seen = _KEPT_UNHELD.get(path)
     if seen is None:
         return False
     try:
-        same = seen[:2] == (os.getpid(), str(row.get("task_id") or "")) and _task_stamp(row, data_dir) == seen[3] \
-            and _stat_of(pathlib.Path(path) / seen[2]) == seen[4]
+        same = seen[:2] == (os.getpid(), str(row.get("task_id") or "")) \
+            and _task_stamp(row, data_dir) in (None, seen[3]) and _stat_of(pathlib.Path(path) / seen[2]) == seen[4]
     except OSError:
         same = False
     if not same:
@@ -342,7 +347,7 @@ def _unsaved(path: pathlib.Path, row: Dict[str, Any], unique: List[str], base: s
     """The unique paths whose bytes and mode equal neither their verified file result nor the saved patch
     replayed onto the base in a private index. A capture of file results alone has no patch to replay.
     ``unheld`` receives those no capture speaks for: every one without a usable manifest, else those it holds no
-    entry for."""
+    entry for (a damaged patch adds none)."""
     from ouroboros import subagent_worktrees as sw
     from ouroboros.artifacts import stream_artifact_file
     from ouroboros.workspace_file_outputs import file_output_changes

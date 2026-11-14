@@ -1508,7 +1508,7 @@ def prune_orphans(
     Each decision is rechecked under that copy's record lock; a checkout that survives removal keeps its first failure
     stamp and pin; a new process or directory identity retries it. ``reasons``, when given, receives by copy path the typed
     answer a kept copy got from this pass (a body verdict's reason, a busy or unreadable record, the keep gate's refusal);
-    a proof that simply no longer holds names none: the caller reads that fresh.
+    a proof that no longer holds or a remembered keep (``kept_as_before``) names none: the caller reads that fresh.
     """
     reasons = {} if reasons is None else reasons
     retention = retention_days if retention_days is not None else get_gc_retention_days()
@@ -1563,10 +1563,8 @@ def prune_orphans(
                         continue
                 else:
                     path_exists = bool(entry.get("path")) and work_domain.exists(Path(entry["path"]))
-                    if path_exists and float(entry.get("created_at") or 0) >= cutoff:
-                        continue  # inside the retention term: the rule's wait, not a hold
-                    if path_exists and kept_as_before(entry, data_dir):
-                        continue  # kept for unsaved work and nothing it was judged on changed: a keep owes no proof
+                    if path_exists and (float(entry.get("created_at") or 0) >= cutoff or kept_as_before(entry, data_dir)):
+                        continue  # the retention term's wait, or a keep this process proved that still stands: no hold
                     if not _task_proven_over(str(entry.get("task_id") or ""), data_dir, live):
                         reasons[path] = "not_proven_over"
                         continue
