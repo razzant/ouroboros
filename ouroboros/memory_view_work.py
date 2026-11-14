@@ -10,14 +10,26 @@ from ouroboros.text_sentences import first_sentence as first_sentence
 
 
 def row_range(first, last):
-    """Source coordinates carry their own room and time; a single row needs one address."""
+    """Source coordinates carry the chat they were written in and their time; a single row needs one address."""
     return first if first == last else f"{first} → {last}"
 
 
 def row_reader(room_id=None):
-    room = f"'{room_id}'" if room_id is not None else "<room from address>"
+    """How a row address reads: in the room that shows it, the projection its membership gives (one room's line
+    names it; a place conversation's several rooms are the chats in their addresses), which is not always the
+    chat the address was written in -- a work moved from Main into a Project keeps its ``row:1@…`` addresses."""
+    room = f"'{room_id}'" if room_id is not None else "<the room showing them, not always the chat in the address>"
     return (f"Read row addresses with memory_read(room_id={room}, rows=true, from=<first>, to=<last>); "
             "for a single row use its address for both endpoints.")
+
+
+def gist_address(gist, rooms):
+    """A telling's address as a block shows it: bare when one of ``rooms`` holds it (or no room was recorded with
+    it), else with the reader of the room the capture read it in."""
+    room = gist.get("room_id")
+    if room is None or str(room) in {str(item) for item in rooms}:
+        return gist["address"]
+    return f"memory_read(room_id='{room}', rows=true, from='{gist['address']}', to='{gist['address']}')"
 
 
 def speech_facts(row, author):
@@ -79,9 +91,9 @@ def task_line(task, *, folded=False):
     return task.get("line_without_gist", task["line"]) if folded else task["line"]
 
 
-def task_gist_line(task):
+def task_gist_line(task, room_id):
     gist = task["gist"]
-    return f"[{gist['address']}; task {task['task']}] — summary: «{gist['summary']}»"
+    return f"[{gist_address(gist, (room_id,))}; task {task['task']}] — summary: «{gist['summary']}»"
 
 
 def task_gists_before_work_lines(room, gone):

@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 import ouroboros.loop as loop_mod
+import ouroboros.loop_llm_call as loop_llm_call
 import ouroboros.loop_transport as loop_transport
 from ouroboros import model_wait, owner_model, route_choice
 from ouroboros import usage_accounting as ua
@@ -66,6 +67,22 @@ class _Routes:
         return {"role": "assistant", "content": f"answer from {model}"}, {"prompt_tokens": 1, "completion_tokens": 1}
 
 
+class _BurstOwnerTime:
+    """``loop_llm_call``'s own ``time`` binding, whose one sleep is the burst's plain pause without a wake; it is
+    recorded instead of slept. Every other attribute and every other module's clock and sleep stay real: a sleep
+    the global ``time.sleep`` sees is not the burst's (on macOS the model-wait owner reads its birth with ``ps``, and
+    the stdlib's subprocess wait may poll with ``time.sleep(0.001)``)."""
+
+    def __init__(self, recorded):
+        self.recorded = recorded
+
+    def sleep(self, seconds):
+        self.recorded.append(seconds)
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     root = tmp_path / "data"
@@ -79,7 +96,7 @@ def env(tmp_path, monkeypatch):
     from ouroboros import fallback_cooldown
     monkeypatch.setattr(fallback_cooldown, "is_cooling_down", lambda *_a: False)
     sleeps = {"burst": [], "episode": []}
-    monkeypatch.setattr(time, "sleep", lambda sec: sleeps["burst"].append(sec))
+    monkeypatch.setattr(loop_llm_call, "time", _BurstOwnerTime(sleeps["burst"]))
     monkeypatch.setattr(loop_transport, "interruptible_wait_sleep",
                         lambda sec, _wake: (sleeps["episode"].append(sec), False)[1])
     return SimpleNamespace(root=root, sleeps=sleeps)
@@ -304,7 +321,9 @@ def _step(tmp_path, episode, usage, notes, deadline_at=None, error_kind="transpo
 def test_periodic_note_words_the_unsent_request_and_the_kept_model(tmp_path, monkeypatch):
     monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda _sec, _wake: False)
     usage, notes = {"_last_llm_error_kind": "transport_unavailable", "_last_llm_failure": _daemon_row()}, []
-    episode = TransportWaitEpisode(started_monotonic=time.monotonic() - 180, engine_unanswered=True, redials=4)
+    now = time.monotonic()  # no defined zero (on a fresh Linux VM, its uptime): the last note lies long before now
+    episode = TransportWaitEpisode(started_monotonic=now - 180, last_note_monotonic=now - 10_000.0,
+                                   engine_unanswered=True, redials=4)
     assert _step(tmp_path, episode, usage, notes) is True
     assert notes == ["🌐 Still waiting for the local Claudexor engine — 3 min elapsed, 4 retries; the latest request "
                      "was not sent; the work keeps its model; will resume automatically."]
@@ -348,7 +367,7 @@ def test_a_later_dispatch_or_refusal_clears_the_engine_words(tmp_path, monkeypat
     if later == "dispatched_unknown":  # the unknown rail's own custody and words
         assert episode.outcome_custody["operation_id"] == "op-1"
         assert notes[-1].startswith("🌐 Provider connection was lost after dispatch.")
-    episode.last_note_monotonic = 0.0
+    episode.last_note_monotonic = time.monotonic() - 10_000.0  # force a periodic note, whatever the host's uptime
     assert _step(tmp_path, episode, usage, notes, error_kind=kind) is True
     waiting_for = "a provider connection" if later == "dispatched_unknown" else "the primary provider"
     assert notes[-1] == f"🌐 Still waiting for {waiting_for} — 0 min elapsed, 0 redials; will resume automatically."

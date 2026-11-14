@@ -603,7 +603,7 @@
     "id": "test_costs_uses_css_classes_not_inline",
     "path": "web/modules/costs.js",
     "kind": "contains",
-    "value": "class=\"dashboard-hero\""
+    "value": "class=\"costs-meters\""
   },
   {
     "id": "test_costs_uses_css_classes_not_inline",

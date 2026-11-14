@@ -131,7 +131,7 @@ html[data-layout="stack"] .shell-icon-control {
     --nav-kebab-w: var(--nav-control-h);  /* the column a Project row's ⋯ takes (none on touch: a long press opens it) */
     --nav-label-x: calc(var(--space-3) + 18px + var(--space-3));  /* the one text column every label starts on */
     --sidebar-pad-bottom: var(--space-3);  /* the foot's inset from the bottom edge; the drawer adds the safe area */
-    width: var(--drag-width, var(--sidebar-width));
+    width: max(var(--sidebar-min-width), var(--drag-width, var(--sidebar-width)));
     height: var(--vvh);
     display: flex;
     flex-direction: column;
@@ -9042,10 +9042,13 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     gap: var(--space-2);
     min-width: 0;
 }
+/* A project's name is quieter than the open room's own text (the owner, 2026-11-14: the names stood out as if they
+   mattered more than the content and the chat): the regular weight, the ink one step under primary. The chosen row
+   keeps its ink on the crimson fill (below). */
 .nav-project-row .nav-row-label {
     flex: 1 1 auto;
-    color: var(--text-primary);
-    font-weight: 500;
+    color: var(--text-meta);
+    font-weight: 400;
     line-height: 18px;
 }
 .nav-project-time {
@@ -9068,7 +9071,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    color: var(--text-meta);
+    color: var(--text-secondary);  /* one step under the name's meta ink, so the two lines stay apart */
     font-size: var(--type-meta);
     line-height: var(--line-meta);
 }
