@@ -258,6 +258,11 @@
     --widget-fault-status-max-width: min(240px, 35vw);
     /* App shell: persistent desktop sidebar + optional project detail pane. */
     --sidebar-width: 280px;
+    /* The narrowest the sidebar is drawn (panel_widths.js stops its handle here and raises a narrower stored width):
+       Ouroboros's card with its name and its mark inside, the search row with New project, two sections to a line
+       with whole names and the foot hold whole down to it, measured on the owner's data (14.11). CSS px, so it
+       follows the Interface size, which zooms the window. */
+    --sidebar-min-width: 270px;
     --project-panel-width: clamp(340px, 36vw, 440px);
     /* One hover fill for an item in a popup menu or a picker list. Six menus
        used five different fills (0.04 / 0.06 / 0.08 / an accent tint / an

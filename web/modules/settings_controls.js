@@ -660,7 +660,7 @@ function controlHtml(row, control, ctx) {
     }
 }
 
-/** One row as HTML: its name, one meta line with the row's result after it, its control at the end, and its More.
+/** One row as HTML: its name, one meta line, its control at the end, the row's result under them, and its More.
  *  `ctx.describedBy(row)` adds ids to the control's description; `ctx.custom(row)` draws a `custom` control. */
 export function settingsRow(row, ctx = {}) {
     const control = controlOf(row);
@@ -675,8 +675,9 @@ export function settingsRow(row, ctx = {}) {
     const labelled = ['number', 'text', 'secret', 'select'].includes(control.kind);
     return `<div ${attrs}>
         ${labelled ? `<label class="ui-row-title" for="${id}">${name}</label>` : `<p class="ui-row-title" id="${id}-name">${name}</p>`}
-        <div class="ui-row-meta">${meta}<span class="ui-result settings-row-result" id="${id}-result" data-setting-result role="status" aria-live="polite"></span></div>
+        <div class="ui-row-meta">${meta}</div>
         <div class="ui-row-actions">${controlHtml(row, control, ctx)}</div>
+        <span class="ui-result settings-row-result" id="${id}-result" data-setting-result role="status" aria-live="polite"></span>
         ${row.more ? `<details class="ui-disclosure settings-row-more"><summary>More</summary><p class="settings-row-copy">${escapeHtmlAttr(row.more)}</p></details>` : ''}
     </div>`;
 }

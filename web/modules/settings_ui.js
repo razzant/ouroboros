@@ -437,14 +437,15 @@ const mountAdvanced = rowsPage('computer/advanced', {
     ids: () => rowsOf('computer/advanced').map((row) => row.id),
     draw: (row) => lead('Most installations never change these.')
         + card({ rows: rowsOf('computer/advanced').map((each) => settingsRow(row(each.id))).join('') }),
-    // What is served now stands in the Interface folder row, after its one line: a fact of the running core, in the
-    // warning's tone when it refused the saved folder.
+    // What is served now stands in the Interface folder row, under its words and control as a row's result does: a
+    // fact of the running core, in the warning's tone when it refused the saved folder.
     bind: (container) => {
         const fact = globalThis.document.createElement('span');
         fact.className = 'ui-result settings-row-result';
         fact.setAttribute('data-served-ui', '');
         fact.setAttribute('role', 'status');
-        rowNode(container, 'OUROBOROS_UI_DIR')?.querySelector('.ui-row-meta')?.append(fact);
+        const row = rowNode(container, 'OUROBOROS_UI_DIR');
+        row?.insertBefore(fact, row.querySelector('.settings-row-more') || null);  // before its More, as a result stands
         return null;
     },
     paint: (container) => setResult(container.querySelector('[data-served-ui]'), servedUiStatus(servedUi) || {}),

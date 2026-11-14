@@ -3253,7 +3253,9 @@ sections, Circles, Files, Skills, Widgets, Dashboard and Settings, at the bottom
 two in the drawer, each its glyph and its word, the one where you are the strong crimson capsule; and under them the
 foot, the version and the update, above the safe area. The Projects take all the free room between the field and
 the sections; there is no Projects heading, no collapse and no unread total. A Project row is two lines: the name
-and its time, then its newest line with the row's mark (a name with no such line may take both). Its menu opens
+and its time, then its newest line with the row's mark (a name with no such line may take both). The list stands
+beside the room and is never louder than the room's own text: a name is the meta ink at the regular weight, its
+newest line the secondary ink, and only the chosen row is strong. Its menu opens
 from its ⋯ (a fine pointer), a right-click, Shift+F10 or a long press; it first says the row's state as its mark
 and words, then offers Pin or Unpin; pinning neither opens nor reads it. Pins lead the one list, one `--space-2`
 of air before the next shown row their only boundary: no caption, tint, rule or column, and no glyph, so nothing

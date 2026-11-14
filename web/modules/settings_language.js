@@ -36,12 +36,12 @@ export function languageBlockHtml({ onboarding = false } = {}) {
                     </div>
                     <div class="ui-row settings-row" data-kind="custom" data-i18n-other hidden>
                         <label class="ui-row-title" for="ui-language-other">Other language</label>
-                        <div class="ui-row-meta"><span id="ui-language-other-help">A code such as pt-BR, a name, or a description of a language to invent.</span>
-                            <span class="ui-result settings-row-result" id="ui-language-note" data-i18n-note data-i18n-skip data-tone="warn" role="status" aria-live="polite"></span></div>
+                        <div class="ui-row-meta"><span id="ui-language-other-help">A code such as pt-BR, a name, or a description of a language to invent.</span></div>
                         <div class="ui-row-actions">
                             <input id="ui-language-other" class="ui-control" type="text" data-i18n-other-input autocomplete="off" placeholder="Deutsch, pt-BR, Quenya" aria-describedby="ui-language-other-help ui-language-note">
                             <button type="button" class="btn btn-default btn-sm" data-i18n-other-apply>Use this language</button>
                         </div>
+                        <span class="ui-result settings-row-result" id="ui-language-note" data-i18n-note data-i18n-skip data-tone="warn" role="status" aria-live="polite"></span>
                     </div>
                 </div>
             </section>
