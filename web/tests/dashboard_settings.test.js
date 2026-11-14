@@ -932,3 +932,44 @@ test('a page explicitly chosen beside the Dashboard list survives narrowing, whi
         } finally { dashboard.destroy(); }
     });
 });
+
+test('a Dashboard deep link keeps one Back entry when it replaces the phone drawer', async () => {
+    const { createLayerStack } = await import('../modules/layers.js');
+    const { runInNewContext } = await import('node:vm');
+    const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+    const door = app.slice(app.indexOf('async function openDashboardTab('), app.indexOf('// A line elsewhere'));
+    for (const drawer of [false, true]) for (const allowed of [false, true]) {
+        const historyCalls = [], shown = [], opened = [];
+        const layers = createLayerStack({ win: null, doc: null, history: {
+            pushState: () => historyCalls.push('push'), back: () => historyCalls.push('back'),
+        } });
+        try {
+            if (drawer) layers.push({ id: 'drawer', focus: false });
+            await Promise.resolve();
+            const open = runInNewContext(`${door}\nopenDashboardTab`, { layers,
+                showPage: async (name, options = {}) => {
+                    shown.push(name);
+                    if (!allowed) return false;
+                    if (options.closeDrawer !== false) layers.remove('drawer');
+                    return true;
+                },
+                dashboardControls: { activateTab: (name, options) => {
+                    opened.push([name, options]); layers.push({ id: 'dashboard-level', page: true, focus: false });
+                } },
+                setMobileDrawerOpen: value => { assert.equal(value, false); layers.remove('drawer'); },
+            });
+            const options = { row: 'updates' };
+            await open('updates', options);
+            await Promise.resolve();
+            assert.deepEqual(shown, ['dashboard']);
+            assert.deepEqual(opened, allowed ? [['updates', options]] : []);
+            assert.deepEqual(historyCalls, allowed || drawer ? ['push'] : [],
+                'the handover never consumes the entry it will still need');
+            if (allowed) {
+                layers.remove('dashboard-level');
+                await Promise.resolve();
+                assert.deepEqual(historyCalls, ['push', 'back'], 'Back consumes exactly the one layer entry');
+            }
+        } finally { layers.destroy(); }
+    }
+});

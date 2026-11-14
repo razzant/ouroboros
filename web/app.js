@@ -235,10 +235,12 @@ async function openSettings(path = '', options = {}) {
 }
 
 async function openDashboardTab(tabName, options = {}) {
-    if (!await showPage('dashboard')) return false;
-    if (dashboardControls && typeof dashboardControls.activateTab === 'function') {
-        dashboardControls.activateTab(tabName, options);
-    }
+    if (!await showPage('dashboard', { closeDrawer: false })) return false;
+    // The chosen page replaces the drawer's layer in one commit, keeping its one browser Back entry.
+    layers.batch(() => {
+        dashboardControls?.activateTab(tabName, options);
+        setMobileDrawerOpen(false);
+    });
 }
 // A line elsewhere that points at a Dashboard tab (a quiet place's sheet at Consciousness) asks for it by this event.
 window.addEventListener('ouro:open-dashboard', (event) => { void openDashboardTab(String(event.detail?.tab || 'activity')); });
