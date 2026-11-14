@@ -201,6 +201,11 @@ def test_an_owner_kept_copy_is_never_remembered_so_each_pass_names_the_owners_ke
     record = sw._record_at(handle.path, copies[0])
     assert proof.plain_copy_verdict(record, copies[0])["reason"] == proof.CAPTURE_UNPROVEN
     assert str(path) in proof._KEPT_UNHELD, "an ordinary keep of unheld work is remembered"
+    with monkeypatch.context() as unreadable:
+        unreadable.setattr(proof, "_task_stamp", lambda _row, _data_dir: None)
+        assert not proof.kept_as_before(record, copies[0]) and str(path) in proof._KEPT_UNHELD, \
+            "an unreadable signature proves as before and keeps the memory"
+    assert proof.kept_as_before(record, copies[0]), "a readable unchanged one keeps as before"
     owner_keep.set_owner_keep(copies[0], "finished", keep=True, source={"basis": "test"})
     assert proof.plain_copy_verdict(record, copies[0])["reason"] == proof.CAPTURE_UNPROVEN
     assert str(path) not in proof._KEPT_UNHELD, "the owner's keep is not"

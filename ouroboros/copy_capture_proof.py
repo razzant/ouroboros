@@ -27,7 +27,7 @@ _SYMLINK, _EXECUTABLE, _REGULAR = "120000", "100755", "100644"
 # ``(pid, task_id, rel, stamp, fact)``. A verdict costs the checkout's Git status and ignored listing, the task's result
 # read twice and a replay of the capture in a private index; ``kept_as_before`` keeps such a copy again without them
 # while two facts stand: ``rel``'s lstat (``fact``) and the task result's write signature (``stamp``,
-# ``task_store.signature``: every capture publication writes the result; an unreadable signature changes nothing).
+# ``task_store.signature``: every capture publication writes the result; an unreadable one proves as before).
 # Nothing else is watched: a HEAD or index change, or a fallback manifest rewritten without a result write, waits for
 # the next fresh proof (that result write, a Storage preview, a restart). A keep needs no proof, so this postpones a
 # removal at most and never causes one. A remembered copy names no typed hold, as any keep of unsaved work, so a
@@ -83,11 +83,12 @@ def kept_as_before(row: Dict[str, Any], data_dir: Optional[Any] = None) -> bool:
     copy for a path no capture holds, that path stands as it stood and the task's result is unwritten since."""
     path = str(pathlib.Path(str(row.get("path") or "")))
     seen = _KEPT_UNHELD.get(path)
-    if seen is None:
-        return False
+    stamp = _task_stamp(row, data_dir) if seen is not None else None
+    if stamp is None:
+        return False  # nothing remembered, or the signature cannot be read now: prove as before, keep the memory
     try:
-        same = seen[:2] == (os.getpid(), str(row.get("task_id") or "")) \
-            and _task_stamp(row, data_dir) in (None, seen[3]) and _stat_of(pathlib.Path(path) / seen[2]) == seen[4]
+        same = seen[:2] == (os.getpid(), str(row.get("task_id") or "")) and stamp == seen[3] \
+            and _stat_of(pathlib.Path(path) / seen[2]) == seen[4]
     except OSError:
         same = False
     if not same:
