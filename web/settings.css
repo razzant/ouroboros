@@ -1352,6 +1352,15 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
    door keep their hands off it (:not([data-lead])), so the mark keeps its own column. */
 .settings-row[data-lead] { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "mark words actions" "mark meta actions"; }
 .settings-row[data-lead] .settings-row-value { white-space: nowrap; }
+/* A door's value is a fact said at the row's end: the words keep at least three fifths of the row and a long value
+   ("No voice on this device") wraps at the end instead of squeezing them into a column of a few words. */
+.settings-row[data-kind="door"]:not([data-lead]) { grid-template-columns: minmax(60%, 1fr) auto; }
+/* A wide control (settings_controls.js marks it `data-wide`) goes under the words below 36rem, while beside it the
+   words would keep only a narrow column (ui.css moves every row's actions only below 28rem). */
+@container (max-width: 36rem) {
+    .settings-row[data-wide] > :is(.ui-row-title, .ui-row-meta, .ui-row-actions) { grid-column: 1 / -1; }
+    .settings-row[data-wide] > .ui-row-actions { grid-row: 3; justify-content: flex-start; }
+}
 /* In a narrow row a door, a switch, a stored key's state and a short number keep their place at the row's end
    (ui.css moves a narrow row's actions under its words; a strip, a list, a longer field and a number with "No limit"
    do go there). A row that leads with a mark says its value as a third line and keeps its sign at the end. */
