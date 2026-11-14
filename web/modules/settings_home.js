@@ -26,7 +26,7 @@ import { fmt, translateString } from './i18n.js';
 import { readNotifyPrefs } from './notifications.js';
 import { PAGE_ICONS, SHELL_ICONS, controlIcon, fluentIcon } from './page_icons.js';
 import { readSkills, skillForms } from './settings_extension_forms.js';
-import { isDoorId, settingsPageFor } from './settings_pages.js';
+import { isDoorId, settingsDoorName, settingsPageFor } from './settings_pages.js';
 import { policyValueLabel } from './settings_policy.js';
 import { HAND_WRITTEN, HOME_ROWS, ROWS, SEARCH_DOORS } from './settings_rows.js';
 import { getSpeech } from './speech_providers.js';
@@ -316,7 +316,7 @@ function liveGlyphs({ settings, device = {} } = {}) {
 }
 
 function doorHtml({ to, name, glyph, answer = '', result = '' }) {
-    return `<button type="button" class="settings-door section-row" data-settings-open="${escapeHtml(to)}"${isDoorId(to) ? ' data-section-out' : ''}${result ? ` data-settings-result="${escapeHtml(result)}"` : ''}>`
+    return `<button type="button" class="settings-door section-row" data-settings-open="${escapeHtml(to)}"${isDoorId(to) ? ` data-section-out aria-label="${escapeHtml(settingsDoorName(name, to))}"` : ''}${result ? ` data-settings-result="${escapeHtml(result)}"` : ''}>`
         + `<span class="settings-door-glyph section-row-glyph" aria-hidden="true" data-settings-glyph>${glyphHtml(glyph)}</span>`
         + `<span class="settings-door-words section-row-words"><span class="settings-door-title section-row-title">${escapeHtml(name)}</span>`
         + `<span class="settings-door-answer section-row-answer" data-settings-answer${result ? '' : ' data-i18n-fmt="settings.answer"'}>${escapeHtml(answer)}</span></span>`

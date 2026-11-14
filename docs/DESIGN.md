@@ -2932,7 +2932,7 @@ and the control waits, and a paragraph waits behind `More`. Settings is a sectio
 list is search, Ouroboros's card and groups of navigation rows (§10), each a page's name over its current answer;
 the list and an open page stand together, and a page is always open, Models the first time and later the last
 one. A row opens its page or is a door: what lives elsewhere (a Dashboard page beside its live state, Main's
-composer) shows its value here and leads there with ↗. A list of entries (agents, MCP servers, keys, fallbacks)
+composer) shows its value here and leads there with ↗; its accessible name names the destination. A list of entries (agents, MCP servers, keys, fallbacks)
 is heads: a press opens the entry's page, Add an unsaved one. The card speaks in Ouroboros's voice: what it has
 read that waits for the owner here, each with its one action; a fact it has not read is said by the row it concerns,
 never on the card.

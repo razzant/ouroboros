@@ -2,7 +2,15 @@
 // facts that were read; a row's answer says its fact or that it was not read; and showing the home starts nothing: no
 // daemon, no model catalogue, no review pool, no tool-server refresh, no status poll. A page reads when it is shown.
 import assert from 'node:assert/strict';
+import { settingsDoorName } from '../modules/settings_pages.js';
 import test from 'node:test';
+
+test('a door names its destination, without adding words to an internal row', () => {
+    assert.equal(settingsDoorName('Costs', 'dashboard:costs'), 'Costs, Dashboard');
+    assert.equal(settingsDoorName('Context', 'main:context'), 'Context, Main');
+    assert.equal(settingsDoorName('Skills', 'page:skills'), 'Skills');
+    assert.equal(settingsDoorName('Models', 'models'), 'Models');
+});
 
 import { createClaudexorStatusStore } from '../modules/claudexor_status_store.js';
 import { getContributions } from '../modules/contributions.js';
