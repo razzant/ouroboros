@@ -63,6 +63,17 @@ test('a reviewed subject opens to one compact line per reviewer in words, the to
     assert.match(html, /<span class="review-check-line">chosen by Ouroboros · 2 of 2 ticked reviewers<\/span>/);
 });
 
+test('a wave of advisers alone (Cyber Pro) tallies its advisers, never a counted 0 of 0', () => {
+    const advisers = panel.actors.map((actor) => ({ ...actor, additional: true }));
+    const alone = open(reviewGroupsFromTaskDetail(detail({ aggregate_signal: 'DEGRADED', actors: advisers,
+        panel_facts: { ...panel.panel_facts, seats: 0 } })));
+    assert.match(alone, /<span class="review-check-meta">[^<]*2 of 3 advisers answered · 1 unavailable<\/span>/);
+    assert.doesNotMatch(visible(alone), /0 of 0|counted answered/);
+    assert.match(seat(alone, 'seat-one'), /<span class="review-seat-role">adviser, not counted<\/span>/);
+    const mixed = open(reviewGroupsFromTaskDetail(detail({ actors: [panel.actors[0], ...advisers.slice(1)] })));
+    assert.match(mixed, /<span class="review-check-meta">[^<]*1 of 1 counted answered<\/span>/);
+});
+
 test('no aggregate or seat token reaches a row: every reduction reads in the shared words', () => {
     const words = { PASS: ['passed', 'ok'], FAIL: ['rejected', 'error'], QUORUM_FAILED: ['no verdict', 'warn'],
         NOT_PERFORMED: ['no verdict', 'warn'], NOT_DISPATCHED: ['not sent', 'warn'], UNKNOWN: ['verdict not recorded', 'warn'] };

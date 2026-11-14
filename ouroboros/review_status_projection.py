@@ -356,6 +356,8 @@ def _review_status_message(projection: Dict[str, Any]) -> str:
             "change_unanswered": (
                 f"Review NOT_PERFORMED: {NOT_PERFORMED_PHRASES['change_unanswered']}. {counts_only}; "
                 "retry the commit — each seat's error is recorded in the attempt."),
+            "no_counted_reviewers": (
+                f"Review NOT_PERFORMED: {NOT_PERFORMED_PHRASES['no_counted_reviewers']}."),
             "review_late_result_pending": (
                 f"Review NOT_PERFORMED: {NOT_PERFORMED_PHRASES['review_late_result_pending']}; no verdict is counted yet. "
                 "The pending result settles into the ledger when it lands; retry the commit afterwards."),

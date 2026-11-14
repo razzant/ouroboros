@@ -82,6 +82,7 @@ def _commit_attempt_from_dict(d: Dict[str, Any]) -> CommitAttemptRecord:
         author_disposition=(dict(d.get("author_disposition"))
                             if isinstance(d.get("author_disposition"), dict) else {}),
         review_input=dict(d.get("review_input") or {}),
+        adviser_selectors=[str(x) for x in (d.get("adviser_selectors") or [])],
         paid=bool(d.get("paid", False)),
         review_owner_pid=_coerce_int(d.get("review_owner_pid", 0)),
         raw_stripped=bool(d.get("raw_stripped", False)),
@@ -265,9 +266,9 @@ def _save_state_unlocked(
     path.parent.mkdir(parents=True, exist_ok=True)
     # Fill missing additive mappings before shallow encoding; keep legacy author/source bindings.
     for attempt in state.attempts:
-        for name in ("author_disposition", "review_input"):
+        for name in ("author_disposition", "review_input", "adviser_selectors"):
             if not hasattr(attempt, name):
-                setattr(attempt, name, {})
+                setattr(attempt, name, [] if name == "adviser_selectors" else {})
     earlier_markers = getattr(state, "earlier_stale_markers", None) or {}
     data: Dict[str, Any] = {
         "state_version": _STATE_SCHEMA_VERSION,

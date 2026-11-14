@@ -327,7 +327,8 @@ def test_a_marked_pool_a_composed_wave_and_a_malformed_catalog_never_take_the_ma
 def test_the_surfaces_read_the_main_seat_from_the_one_builder(clean_env):
     """Plan review and the author's ``review_change`` wave read that same one seat: the wave
     seats it as the frozen whole pool (both parts, counted). An adviser-only request
-    names no counted seat and is refused in every Access, never widened. The
+    names no counted seat: refused outside Cyber Pro, never widened; Cyber Pro hears the adviser
+    alone, Main unseated (no self-review). The
     ``/review`` row and the empty pool's seat are one function, re-exported where it lived."""
     from ouroboros import deep_self_review
     from ouroboros.tools import plan_review_runtime
@@ -344,8 +345,13 @@ def test_the_surfaces_read_the_main_seat_from_the_one_builder(clean_env):
         assert panel.override is True and panel.facts["composition"] == "full_pool"
         assert panel.facts["pool_empty"] is True and panel.facts["main_self_review"] is True
         request = parse_request({"root": "system_repo", "subject": "index", "reviewers": ["scout"]})
-        with pytest.raises(ReviewChangeArgumentError, match="name main"):
-            compose_panel(request, body=True, strictness=strictness)
+        if strictness == "cyber_pro":
+            alone = compose_panel(request, body=True, strictness=strictness)
+            assert (alone.facts["assigned"], alone.additional) == ([], ("scout",))
+            assert (alone.facts["pool_empty"], alone.facts["main_self_review"]) == (True, False)
+        else:
+            with pytest.raises(ReviewChangeArgumentError, match="name main"):
+                compose_panel(request, body=True, strictness=strictness)
         named = compose_panel(parse_request({"root": "system_repo", "subject": "index", "reviewers": ["main", "scout"]}),
                               body=True, strictness=strictness)
         assert named.facts["assigned"] == ["main"] and named.additional == ("scout",)
