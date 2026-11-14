@@ -164,7 +164,7 @@ html[data-layout="stack"] .shell-icon-control {
    them, so a row reached with Tab is never left under either bar, while a bar's own control (Main, a section, the
    update) leaves the column where it is (a scroll padding on the column would count the bars as covered and move
    it). A column too short even for the card, one Project row and the foot (layout.js sets data-bars-crowd; by the
-   bars' heights a desk under 306 px with the macOS title band, 272 px without, a touch screen under 296 px) lets
+   bars' heights and the rows' clearance at both edges) lets
    the card scroll away with the list instead: the sections and the version stay on the edge, the card is the
    list's top, one scroll up, and the rows keep the room between; two pinned bars there would cover every row. */
 @media (max-height: 540px), (pointer: coarse) and (max-height: 600px) {

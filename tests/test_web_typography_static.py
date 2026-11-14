@@ -309,6 +309,10 @@ def test_every_focus_visible_selector_gets_the_canonical_ring() -> None:
     assert per_selector, "no :focus-visible rules found; is the parse broken?"
     stale = sorted(set(FOCUS_REACTIONS) - set(per_selector))
     assert not stale, f"FOCUS_REACTIONS names selectors no sheet holds: {stale}"
+    for reaction in FOCUS_REACTIONS:
+        rel, selector = reaction.split(": ", 1)
+        paint = _declarations(_decommented(_read(rel)), selector)
+        assert paint == {"visibility": "hidden"}, f"a focus reaction must only hide the overlapping content: {reaction}: {paint}"
     unfocused = sorted(s for s, ringed in FOCUS_REACTIONS.items() if not any(per_selector.get(ringed, [])))
     assert not unfocused, f"the element these selectors react to has no ring of its own: {unfocused}"
     unringed = sorted(
