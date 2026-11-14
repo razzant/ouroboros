@@ -1193,7 +1193,7 @@ def test_memory_view_main_names_the_bound_room_and_the_project_task_sees_its_row
                                         "task_id": "task-7", "ts": "2026-09-01T00:01:00+00:00"})
 
     _a, _b, main_ctx, _cap = blocks(env, mem, {"id": "main-turn", "chat_id": 1})
-    assert "] plain-main" in section(main_ctx, "## This room (Main)")
+    assert "] plain-main" in section(main_ctx, "## This room (Main [chat_id=1])")
     assert "bound-task-row" not in main_ctx
     others = section(main_ctx, "## Other conversations")
     assert f"### Project Promoted [chat_id={pchat}]" in others and "; host; task task-7] " in others  # a task line

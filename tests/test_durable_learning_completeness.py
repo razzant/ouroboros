@@ -132,7 +132,7 @@ def test_wake_context_reads_main_beside_a_malformed_chat_line_and_the_reader_dis
         json.dumps({"chat_id": 1, "direction": "in", "text": "complete recent chat"}),
         '{"direction":"in","text":"broken"',
     ])
-    room = context.split("\n## This room (Main) — head ", 1)[1].split("\n## ", 1)[0]  # the heading, not the books' mention
+    room = context.split("\n## This room (Main [chat_id=1]) — head ", 1)[1].split("\n## ", 1)[0]  # the heading, not the books' mention
     assert "people 1, mine 0" in room and "complete recent chat" in room.split("### Open conversation", 1)[1]
     assert "\n## Live rooms" not in context and '"text":"broken"' not in context  # Main is the room, not a live line
     assert "jsonl_malformed" in Memory(drive_root=tmp_path).chat_history(count=20)

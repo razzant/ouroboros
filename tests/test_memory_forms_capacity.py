@@ -2,6 +2,10 @@
 
 Ceilings and reader fingerprints are measured in the detached baseline with
 these exact synthetic bytes, not in the candidate branch. No owner data.
+One text joined every view since 13.11.2026: Main's chat id in its room
+heading, which every reader of its rows names. Where it stands it
+is credited at its own measured price (``identity_price``), never by moving a
+ceiling; every other growth still fails.
 """
 import hashlib
 import re
@@ -40,6 +44,16 @@ def readers(text):
     return sorted(set(re.findall(r"row:\d+@[^\s;'\])]+#[a-f0-9]+|memory_read\([^\n]*?\)", text)))
 
 
+NAMED, BASELINE_HEADING = "## This room (Main [chat_id=1]) ", "## This room (Main) "
+
+
+def identity_price(room):
+    """What Main's chat id in the room heading costs this view (its 12 characters), 0 where it does not stand."""
+    if not ("\n" + room).count("\n" + NAMED):
+        return 0
+    return mf.view_tokens(room) - mf.view_tokens(room.replace(NAMED, BASELINE_HEADING, 1))
+
+
 def fingerprint(items):
     return hashlib.sha256("\n".join(items).encode()).hexdigest()
 
@@ -67,5 +81,6 @@ def test_physical_floor_preserves_baseline_capacity_and_readers(name):
     baseline = BASELINE[name]
     assert hashlib.sha256(mv.snapshot_json(snap).encode()).hexdigest() == baseline["snapshot"]
     shown = mf.render_view_for_mode(snap, **frame, shortest=True)
-    assert mf.view_tokens(shown.story) + mf.view_tokens(shown.room) <= baseline["tokens"]
+    credit = identity_price(shown.room)  # the id's 12 characters when its heading stands, by construction no more
+    assert mf.view_tokens(shown.story) + mf.view_tokens(shown.room) <= baseline["tokens"] + credit
     assert fingerprint(readers(shown.story + "\n" + shown.room)) == baseline["readers"]

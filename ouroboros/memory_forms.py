@@ -131,7 +131,7 @@ class WorkPrices:
         self.tellings = defaultdict(list)
         for task in room.get("lane2", ()):
             if task.get("gist"):
-                self.tellings[task["task"]].append((task["first"], price(task_gist_line(task)),
+                self.tellings[task["task"]].append((task["first"], price(task_gist_line(task, room["room_id"])),
                                                   price(task_line(task)) - price(task_line(task, folded=True))))
 
     def saving(self, ident, selected):
@@ -356,7 +356,7 @@ def list_elements(snapshot):
     work_keys = {key for key, _rows in works(room)}
     steps = {
         "F1": [(r["first"], r["line"], ("" if n else mv._facts_line(room, [r]))
-                + (task_gist_line(r) if r.get("gist") and r.get("task") in work_keys else "")) for n, r in enumerate(lane2)],
+                + (task_gist_line(r, room["room_id"]) if r.get("gist") and r.get("task") in work_keys else "")) for n, r in enumerate(lane2)],
         **{step: block[step] for step in ("F6w", "F6g", "F6a")},
         "F2": work + [(r["address"], r["line"], mv._row_opening(r, "my reply")) for r in mine]
               + [("bare:" + r["address"], mv._row_opening(r, "my reply"), mv._row_pointer(r, "my reply")) for r in mine],
