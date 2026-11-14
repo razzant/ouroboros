@@ -51,7 +51,7 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     skill_review: ['✅ Skill review round ', '⚠️ Skill review round ', '❌ Skill review round ', '⏳ Skill review round '],
     host_progress: ['🌐 Connection restored ', '🌐 The new attempt could not reach the provider ',
         '🌐 Provider connection ', '🌐 The primary provider temporarily refused ', '🌐 No local model slot was free',
-        '🌐 The request did not reach the provider ', '🌐 Primary provider answered after ',
+        '🌐 The local Claudexor engine ', '🌐 The request did not reach the provider ', '🌐 Primary provider answered after ',
         '🌐 Stopped waiting for ', '🌐 Still waiting for ', '⚡ Fallback: ', '📐 Plan: ', '✅ PR #', '⚠️ PR #',
         // web_search legs (`tools/search.py`) and a declared-output baseline (`tools/shell_outputs.py`).
         '🔍 Trying ', '↪ Trying ', '🔍 Searching: ', '🔍 Answer from ', '⚠️ Web search ', '⚠️ Output baseline unavailable: '],
