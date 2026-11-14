@@ -241,7 +241,8 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
     """B and C go over the reason the gate kept on the continued attempt, but a wave it handed back still open stands
     at what its review record holds now (REV6 C1): passed since, it is gone over by nothing; failed since, by its FAIL;
     still open, by no verdict; with no readable record, as open as the gate saw it. A landing names the continued
-    attempt's outcome before this call's own check (REV6 A9)."""
+    attempt's outcome before this call's own check (REV6 A9). An attempt the gate kept no reason on is gone over only
+    when its record dispatched no review (a free replay at the spent paid ceiling): by that refusal, as no verdict."""
     from ouroboros.review_overrides import _went_on_over
 
     ctx = _make_ctx(tmp_path)
@@ -250,7 +251,10 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
     records = {name: {"verdict": {"aggregate": aggregate, "reason": reason}} for name, aggregate, reason in (
         ("pass", "PASS", "pass"), ("fail", "FAIL", "critical_findings"),
         ("open", "NOT_PERFORMED", "review_late_result_pending"),
-        ("gate", "NOT_PERFORMED", "gate_block:tests_preflight_blocked"))} | {"bare": {}}
+        ("gate", "NOT_PERFORMED", "gate_block:tests_preflight_blocked"),
+        ("undispatched", "NOT_DISPATCHED", "nothing_dispatched"))} | {"bare": {}}
+    records["refused"] = {"verdict": {"aggregate": "NOT_DISPATCHED", "reason": "dispatch_refusal"},
+                          "dispatch_refusal": {"kind": "review_cycles_exhausted", "message": "2 of 2 paid rounds spent"}}
     records["open_fail"] = {"rows": [{"seat_id": "s1"}, {"seat_id": "s2"}, {"seat_id": "adv", "additional": True}],
                             "verdict": {"aggregate": "NOT_PERFORMED", "reason": "review_late_result_pending",
                                         "per_row": {"s1": "FAIL", "s2": "pending", "adv": "PASS"}}}
@@ -274,6 +278,8 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
             (open_wave, "corrupt", open_wave), (open_wave, "bare", open_wave), (open_wave, "", open_wave),
             ("critical_findings", "pass", "critical_findings"), ("preflight", "pass", "preflight"),
             ("review_quorum", "", "review_quorum"), ("", "fail", ""), ("", "", ""),
+            ("", "refused", "review_cycles_exhausted"), ("", "undispatched", "nothing_dispatched"),
+            ("", "pass", ""), ("", "open", ""), ("", "corrupt", ""), ("", "missing", ""),
             (open_wave, "open_fail", "critical_findings"), (open_wave, "open_adviser_fail", open_wave),
             ("preflight", "fail", "critical_findings"), ("preflight", "open_fail", "critical_findings"),
             ("tests_preflight_blocked", "open", "tests_preflight_blocked"), ("preflight", "corrupt", "preflight")):
@@ -308,6 +314,18 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
     note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
     fact = _fact(ctx.drive_root, "root-1")
     assert fact["count"] == 2 and fact["continued"]["latest"]["reason"] == "preflight"
+    # The paid rounds were spent: the gate kept no reason and no call counted it, the author's decision does.
+    ctx._author_commit_source, ctx._review_override_this_call = source("", "refused"), ""
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
+    note_override_landing(ctx, "c" * 40)
+    fact = _fact(ctx.drive_root, "root-1")
+    assert (fact["count"], fact["latest"]["reason"], fact["latest"]["record_id"]) == (3, "review_cycles_exhausted", "refused")
+    assert fact["continued"]["latest"]["reason"] == "review_cycles_exhausted" and fact["landed"]["count"] == 2
+    assert landed_outcome(ctx.drive_root, "c" * 40) == "no review verdict: review cycles exhausted"
+    ctx._author_commit_source = source("", "pass")  # a passed record with no kept reason is gone over by nothing
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
+    note_override_landing(ctx, "d" * 40)
+    assert _fact(ctx.drive_root, "root-1") == fact and landed_outcome(ctx.drive_root, "d" * 40) == ""
 
 
 def test_an_open_wave_never_overwrites_a_reason_its_attempt_keeps(tmp_path, monkeypatch):

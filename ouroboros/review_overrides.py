@@ -166,9 +166,11 @@ def _went_on_over(ctx: Any, source: Any) -> str:
     FAIL or no verdict): the reason the gate kept on it, except where that reason was kept before the panel's outcome
     was known (a wave handed back still open, or a failed free check ahead of the panel): then its review record says
     what it holds now. A panel FAIL on the record, or a counted seat's FAIL on a record still open, is gone over as
-    that FAIL; otherwise a failed check stands, and an open wave stands at its record's outcome (nothing once passed)."""
+    that FAIL; otherwise a failed check stands, and an open wave stands at its record's outcome (nothing once passed).
+    An attempt the gate kept no reason on stands at no verdict only when its record dispatched no review (a free replay
+    at a spent paid ceiling or over a pending wave): the refusal's own kind, since no call counts that outcome."""
     kept, record_id = (str(getattr(source, name, "") or "") for name in ("review_override_reason", "review_record_id"))
-    if not record_id or (kept != _OPEN and kept not in _CHECK_REASONS):
+    if not record_id or (kept and kept != _OPEN and kept not in _CHECK_REASONS):
         return kept
     try:
         from ouroboros.review_ledger import ledger_root, load_record
@@ -181,6 +183,10 @@ def _went_on_over(ctx: Any, source: Any) -> str:
     if not (isinstance(verdict, dict) and verdict.get("aggregate")):
         return kept
     reason = str(verdict.get("reason") or "")
+    if not kept:  # every other outcome was counted, or left uncounted, by the call that met it
+        refusal = record.get("dispatch_refusal") if isinstance(record.get("dispatch_refusal"), dict) else {}
+        named = str(refusal.get("kind") or "") or reason or "not_dispatched"
+        return named if verdict["aggregate"] == "NOT_DISPATCHED" else ""
     counted = {str(row.get("seat_id") or "") for row in record.get("rows") or []
                if isinstance(row, Mapping) and not row.get("additional")}
     if reason == _OPEN and any(seat in counted and value == "FAIL"
