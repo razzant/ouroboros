@@ -6103,6 +6103,17 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .logs-inline-clear {
     margin-left: auto;
 }
+/* A pane narrower than the six chips and Clear at their usual spacing draws them closer, so they still keep to one
+   line beside a section's list (owner's window: a 455 px tab body); where even that line does not fit, they stand
+   in two even rows of three, Clear at the end of the first, never one chip alone on a row of its own. */
+@container dashboard (max-width: 34rem) {
+    .logs-filters { gap: var(--space-1); }
+    .logs-filters > .filter-chip { --control-pad-x: var(--space-2); }
+}
+@container dashboard (max-width: 27.75rem) {
+    .logs-filters { display: grid; grid-template-columns: repeat(3, auto) minmax(0, 1fr); justify-items: start; }
+    .logs-filters > .logs-inline-clear { grid-column: 4; grid-row: 1; justify-self: end; }
+}
 
 .logs-card { display: grid; gap: var(--space-2); min-width: 0; }
 .logs-empty { margin: 0; color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
@@ -6169,7 +6180,13 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     color: var(--text-primary);
     font-weight: 600;
     word-break: break-word;
+    flex: 1 1 auto;
+    min-width: 0;
 }
+/* The headline, its count and Raw are one lead (logs.js logMainHtml): it shares the time's line where it fits whole,
+   else it takes the next line, and the headline wraps inside it only when it is longer than a line. Raw stays at the
+   end of the headline's own line instead of dropping to a line of its own. */
+.log-main > .log-lead { display: flex; flex: 1 1 auto; align-items: baseline; gap: 8px; min-width: 0; }
 
 .log-entry .log-repeat {
     margin-left: auto;
@@ -6177,9 +6194,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     font-size: var(--type-meta);
 }
 
-/* Raw is the line's last, quiet control (.btn.btn-ghost.btn-sm); after a count it follows it, else it takes the end. */
-.log-raw-toggle { flex: none; align-self: center; }
-.log-main > .log-repeat[hidden] + .log-raw-toggle { margin-left: auto; }
+/* Raw is the line's last, quiet control (.btn.btn-ghost.btn-sm); after a count it follows it, else it takes the end.
+   Its word stands on the headline's baseline, as the line's other words do. */
+.log-raw-toggle { flex: none; }
+.log-lead > .log-repeat[hidden] + .log-raw-toggle { margin-left: auto; }
 
 .log-meta {
     display: flex;
