@@ -590,7 +590,8 @@ export function outcomeLine(row, outcome) {
     if (!isTyped(row) && outcome.effect === 'now' && !outcome.message) return null;
     const known = outcome.old !== undefined;
     const parts = ['Saved'];
-    if ((known || outcome.withheld) && EFFECT_WORDS[outcome.effect]) parts.push(EFFECT_WORDS[outcome.effect]);
+    // A restart is why the line takes the warning's ink: it says so even without a receipt.
+    if ((known || outcome.withheld || outcome.effect === 'restart') && EFFECT_WORDS[outcome.effect]) parts.push(EFFECT_WORDS[outcome.effect]);
     // A switch has one other value and a restart row says both values in its meta: neither repeats it here.
     if (known && row.control?.kind !== 'switch' && outcome.effect !== 'restart') parts.push(`was ${valueWords(row, outcome.old)}`);
     const undo = known && !outcome.withheld && Boolean(outcome.token) && GUARDED_WRITERS.has(row.writer || 'generic');
@@ -667,7 +668,11 @@ export function settingsRow(row, ctx = {}) {
     const id = rowDomId(row);
     const name = escapeHtmlAttr(row.name);
     const meta = `<span id="${id}-meta" data-setting-meta>${escapeHtmlAttr(row.meta || '')}</span>`;
-    const attrs = `class="ui-row settings-row" data-setting-row="${escapeHtmlAttr(row.id)}" data-kind="${escapeHtmlAttr(control.as || control.kind || 'custom')}"${control.noLimit ? ' data-no-limit' : ''}`;
+    // A wide control (a strip, a list, a longer field, a number that names "No limit", a row's own buttons) goes under
+    // the words sooner than a door, a switch, a key's state or a short number (settings.css `[data-wide]`).
+    const kind = control.as || control.kind || 'custom';
+    const wide = !['door', 'switch', 'secret', 'choices'].includes(kind) && (kind !== 'number' || control.noLimit);
+    const attrs = `class="ui-row settings-row" data-setting-row="${escapeHtmlAttr(row.id)}" data-kind="${escapeHtmlAttr(kind)}"${control.noLimit ? ' data-no-limit' : ''}${wide ? ' data-wide' : ''}`;
     if (control.kind === 'door') {  // the whole row is the press: phrasing content only
         return `<button type="button" ${attrs} data-setting-door><span class="ui-row-title">${name}</span>`
             + `<span class="ui-row-meta">${meta}</span><span class="ui-row-actions">${controlHtml(row, control, ctx)}</span></button>`;

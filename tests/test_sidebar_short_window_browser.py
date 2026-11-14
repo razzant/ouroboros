@@ -3,7 +3,8 @@
 A window too short for the sidebar's zones lets the whole column scroll with Main pinned. The foot, the version
 and the update, used to be that flow's last row, below the fold until the column was scrolled to its end; a chosen
 Interface size reaches that mode from about 130 % in a 680 px desktop window and from about 120 % on an iPhone. The
-owner chose to keep the foot on the bottom edge there too (answer A). Uses the static-server/API fixture
+owner chose to keep the foot on the bottom edge there too (answer A), and the book keeps the six sections there with
+it (DESIGN "Navigation"): the pinned foot is the sections, the version and the update. Uses the static-server/API fixture
 (test_subscription_setup_browser) with the gate's 30 Projects; never starts the runtime or reads live data.
 """
 from __future__ import annotations
@@ -20,10 +21,10 @@ __all__ = ['chromium_ui', 'shell_ui', 'subscription_ui']
 
 SHORT = "matchMedia('(max-height: 540px), (pointer: coarse) and (max-height: 600px)').matches"
 # Where the foot is: its box against the column's bottom edge (0 = on the edge), the version's distance from that edge,
-# whether the foot is what a finger finds at its middle (the rows pass under it), and the tools around it.
+# whether the foot is what a finger finds at its middle (the rows pass under it), and whether Settings is in view.
 FOOT = """() => {
     const side = document.getElementById('primary-sidebar');
-    const meta = side.querySelector('.sidebar-foot-meta');
+    const meta = side.querySelector('.sidebar-foot');
     const box = (e) => e.getBoundingClientRect();
     const edge = box(side).bottom, m = box(meta);
     const under = document.elementFromPoint(m.left + 4, m.top + m.height / 2);
@@ -33,9 +34,8 @@ FOOT = """() => {
             onTop: Boolean(under && meta.contains(under)),
             opaque: getComputedStyle(meta).backgroundColor === getComputedStyle(side).backgroundColor
                 && getComputedStyle(meta).backgroundColor !== 'rgba(0, 0, 0, 0)',
-            toolsClear: m.top >= box(side.querySelector('[data-nav-page="settings"]')).bottom - 0.5,
-            gapToTools: Math.round(box(side.querySelector('.sidebar-foot > [data-nav-page]')).top
-                - box(document.getElementById('nav-projects')).bottom)};
+            settingsInView: box(side.querySelector('[data-nav-page="settings"]')).bottom <= edge + 0.5
+                && box(side.querySelector('[data-nav-page="settings"]')).top >= box(side).top - 0.5};
 }"""
 SCROLL = "f => { const s = document.getElementById('primary-sidebar'); s.scrollTop = f * (s.scrollHeight - s.clientHeight); }"
 
@@ -57,12 +57,6 @@ def test_a_short_window_keeps_the_version_and_the_update_on_the_bottom_edge(shel
             page.evaluate(SCROLL, at)
             settle(page)
             facts[f'at-{at}'] = page.evaluate(FOOT)
-        # Collapsed, the list takes less of the column: the foot stays on the edge and the tools follow the list.
-        page.evaluate(SCROLL, 0)
-        page.locator('#nav-projects-toggle').click()
-        settle(page)
-        facts['collapsed'] = page.evaluate(FOOT)
-        page.locator('#nav-projects-toggle').click()
         # The same page in a tall window: the zones fit, the foot is the tools' box's last row again.
         page.set_viewport_size({'width': width, 'height': tall})
         settle(page)
@@ -74,22 +68,21 @@ def test_a_short_window_keeps_the_version_and_the_update_on_the_bottom_edge(shel
     tall = facts['tall']
     assert facts['short'] is True and facts['scrollers'] == ['primary-sidebar'], facts
     assert facts['at-0']['scrolls'] and facts['at-0']['top'] == 0 < facts['at-0.5']['top'] < facts['at-1']['top'], facts
-    for state in ('at-0', 'at-0.5', 'at-1', 'collapsed'):
+    for state in ('at-0', 'at-0.5', 'at-1'):
         foot = facts[state]
         assert foot['position'] == 'sticky' and abs(foot['metaBottom']) <= 1, ('the foot is on the edge', state, facts)
         assert abs(foot['version'] - tall['version']) <= 1, ('its text sits where a tall window puts it', state, facts)
         assert foot['onTop'] and foot['opaque'], ('the rows pass under an opaque foot', state, facts)
-    assert facts['at-1']['toolsClear'], ('at the end of the scroll the last tool is above the foot', facts)
-    assert abs(facts['collapsed']['gapToTools'] - tall['gapToTools']) <= 1, ('the tools follow the list', facts)
+        assert foot['settingsInView'], ('the sections stay on the edge however far the list scrolls', state, facts)
     # Outside the short-window mode the foot is not pinned: it rests in the tools' box, on the column's padding.
     assert facts['tall_short'] is False and tall['position'] == 'static' and not tall['scrolls'], facts
-    assert tall['toolsClear'] and tall['version'] >= 12, facts
+    assert tall['settingsInView'] and tall['version'] >= 12, facts
 
 
 # The focused element against the two pinned bars: under the head, under the foot, or clear of both.
 FOCUS = """() => {
     const side = document.getElementById('primary-sidebar');
-    const head = side.querySelector('.sidebar-head'), meta = side.querySelector('.sidebar-foot-meta');
+    const head = side.querySelector('.sidebar-head'), meta = side.querySelector('.sidebar-foot');
     const f = document.activeElement;
     if (!f || !side.contains(f) || f === side) return null;
     const r = f.getBoundingClientRect(), h = head.getBoundingClientRect(), m = meta.getBoundingClientRect();
@@ -142,7 +135,7 @@ BARS = """() => {
     const side = document.getElementById('primary-sidebar');
     const css = getComputedStyle(side);
     return {head: side.querySelector('.sidebar-head').getBoundingClientRect().height,
-            foot: side.querySelector('.sidebar-foot-meta').getBoundingClientRect().height,
+            foot: side.querySelector('.sidebar-foot').getBoundingClientRect().height,
             headPad: parseFloat(css.getPropertyValue('--sidebar-head-h')),
             footPad: parseFloat(css.getPropertyValue('--sidebar-foot-h'))};
 }"""
@@ -189,7 +182,7 @@ def test_the_bars_measured_heights_follow_a_band_or_a_safe_area_that_arrives_lat
 FOCUS_MOVES = """async () => {
     const side = document.getElementById('primary-sidebar');
     const frames = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-    const head = side.querySelector('.sidebar-head'), meta = side.querySelector('.sidebar-foot-meta');
+    const head = side.querySelector('.sidebar-head'), meta = side.querySelector('.sidebar-foot');
     const version = document.getElementById('nav-version');
     version.tabIndex = -1;  // the foot's own text stands in for its update capsule, hidden in this fixture
     const bars = {};
@@ -205,7 +198,7 @@ FOCUS_MOVES = """async () => {
     // Every row parked half under the foot, then half under the head, and brought into view from there: only the
     // row's own scroll margin can move it clear (a row inside the scrollport counts as visible without it).
     const hidden = [], parked = {foot: 0, head: 0};
-    const rows = [...side.querySelectorAll('#nav-projects-list [data-project-id], .sidebar-foot > [data-nav-page]')];
+    const rows = [...side.querySelectorAll('#nav-projects-list [data-project-id]')];
     const max = side.scrollHeight - side.clientHeight;
     for (const row of rows) {
         for (const bar of ['foot', 'head']) {
@@ -236,7 +229,7 @@ FOCUS_MOVES = """async () => {
                          ids=['desk', 'phone-drawer'])
 def test_a_pinned_bars_own_control_leaves_the_column_where_it_is(shell_ui, tmp_path, width, height, touch):
     """The rows carry the bars' heights as their scroll margin, not the column as its scroll padding: a row brought
-    into view from half under either bar clears both, the tools included, and focusing Main or the foot does not
+    into view from half under either bar clears both, and focusing Main or the foot (the sections' bar) does not
     count them as covered and scroll the column."""
     page = seed_page(shell_ui, width, height, touch=touch)
     facts = {'engine': shell_ui['engine'], 'size': [width, height]}

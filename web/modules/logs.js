@@ -403,7 +403,8 @@ export function initLogs({ ws, state, mount }) {
 
     // An event's one first line (U027, U028): its time, its type only when the headline does not already say it
     // (a task card's kind always: it changes with the card), its level (the default `info` says nothing, CSS hides
-    // it), the headline, the repeat count and, for an event with a record, Raw at the line's end (logs_raw.js).
+    // it), the headline, the repeat count and, for an event with a record, Raw at the line's end (logs_raw.js). The
+    // headline, its count and Raw are one lead that wraps as a whole, so Raw never stands on a line of its own.
     function logMainHtml({ ts = '', type = '', phase = 'info', headline = 'Event', repeat = '', attrs = {}, hasRaw = false }) {
         const attr = (key) => attrs[key] ? ` ${attrs[key]}` : '';
         const showType = type && (attrs.type || (type.label && type.label !== headline));
@@ -412,9 +413,9 @@ export function initLogs({ ws, state, mount }) {
                 <span class="log-ts"${attr('ts')}>${escapeHtml(ts)}</span>
                 ${showType ? `<span class="log-type ${escapeHtml(type.className || '')}"${attr('type')}>${escapeHtml(type.label || '')}</span>` : ''}
                 <span class="log-phase ${escapeHtml(phase)}"${attr('phase')}>${escapeHtml(phase)}</span>
-                <span class="log-headline"${attr('headline')}>${escapeHtml(headline)}</span>
+                <span class="log-lead"><span class="log-headline"${attr('headline')}>${escapeHtml(headline)}</span>
                 <span class="log-repeat"${attr('repeat')}${repeat ? '' : ' hidden'}>${escapeHtml(repeat)}</span>
-                ${hasRaw ? LOG_RAW_TOGGLE_HTML : ''}
+                ${hasRaw ? LOG_RAW_TOGGLE_HTML : ''}</span>
             </div>
         `;
     }

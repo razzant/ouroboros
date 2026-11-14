@@ -17,7 +17,7 @@ test('a whole-dollar limit: the spend rounds up, what is left rounds down, and t
     const card = costDashboardPresentation({ total_calls: 1, accounting: {
         settled_usd: 42087.2, confirmed_usd: 42087.2, estimated_usd: 0, reserved_usd: 0,
         unresolved_upper_bound_usd: 0, unknown_unmetered: 0, limit_usd: 42500 } });
-    assert.equal(card.figure, '$42,088 of $42,500');
+    assert.deepEqual([card.spent, card.of], ['$42,088', 'of $42,500']);
     assert.equal(card.left, '$412 left');
 });
 

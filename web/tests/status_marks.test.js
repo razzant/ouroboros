@@ -103,10 +103,11 @@ const PAINTS = [
     /class=\\?["']status-mark\b/, /className\s*=\s*['"`]status-mark\b/, /classList\.add\(\s*['"`]status-mark['"`]/,
 ];
 const MARK_PAINT = /(?:^|;|\{)\s*(color|background(?:-color|-image)?|border-color|fill|stroke|opacity|animation(?:-name)?|box-shadow)\s*:/g;
-// The one mark a sheet may ring: the ☰'s dot on Ouroboros's picture on a phone, cut out of the picture by a ring in the
-// page's own background (79fac1cf4/aa7528dcd style.css "html[data-layout=stack] .mobile-nav-toggle > .status-mark").
-// Only that box-shadow, only on that exact rule: any other property it sets, or a ring elsewhere, is still a paint.
-const CUTOUTS = { 'style.css': ['html[data-layout="stack"] .mobile-nav-toggle > .status-mark'] };
+// The one mark a sheet may ring: on a phone the places control's dot stands on Ouroboros's picture, and a ring in the
+// page's own background cuts the dot out of the picture (79fac1cf4/aa7528dcd, style.css
+// "html[data-layout=stack] .mobile-nav-toggle > .status-mark"). Only that exact declaration, only on that exact rule:
+// another shadow there, any other property it sets, or a ring elsewhere is still a paint.
+const CUTOUTS = { 'style.css': { 'html[data-layout="stack"] .mobile-nav-toggle > .status-mark': '0 0 0 2px var(--bg-primary)' } };
 
 /** The source without its comments, which may name what was retired and why. */
 function code(source) {
@@ -148,7 +149,10 @@ function violations({ scripts, sheets, pages }) {
         if (name === 'ui.css') continue;
         for (const rule of text.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
             if (!marked.test(rule[1])) continue;
-            const cutout = (CUTOUTS[name] || []).includes(rule[1].trim());
+            const ring = CUTOUTS[name]?.[rule[1].trim()];
+            const shadows = rule[2].split(';').map((part) => part.split(':')).filter(([key]) => key.trim() === 'box-shadow')
+                .map(([, ...value]) => value.join(':').trim());
+            const cutout = Boolean(ring) && shadows.every((value) => value === ring);
             const property = [...rule[2].matchAll(MARK_PAINT)].find((m) => !(cutout && m[1] === 'box-shadow'));
             if (property) found.push(`${name}: "${rule[1].trim()}" sets ${property[1]} on a mark`);
         }
@@ -174,7 +178,8 @@ test('the ownership check sees a second painter, a painted mark and a retired na
             ['old.css', css('/* .chat-live-typing was here */ .nav-unread-dot { color: red }')],
             ['quiz.css', css('.card[data-busy] .quiz-mark { color: gray } .card .quiz-mark { --mark-ink: gray }')],
             ['style.css', css('html[data-layout="stack"] .mobile-nav-toggle > .status-mark { top: 4px; box-shadow: 0 0 0 2px var(--bg-primary); }\n'
-                + 'html[data-layout="stack"] .mobile-nav-toggle.composer-menu > .status-mark { box-shadow: 0 0 0 2px red }')],
+                + 'html[data-layout="stack"] .mobile-nav-toggle.composer-menu > .status-mark { box-shadow: 0 0 0 2px red }\n'
+                + 'html[data-layout="stack"] .mobile-nav-toggle > .status-mark { box-shadow: 0 0 12px 4px red }')],
             ['room2.css', css('html[data-layout="stack"] .mobile-nav-toggle > .status-mark { box-shadow: 0 0 0 2px red; color: red }')],
         ],
         pages: [],
@@ -186,6 +191,7 @@ test('the ownership check sees a second painter, a painted mark and a retired na
         'room.css: ".x .status-mark i" sets background on a mark',
         'quiz.css: ".card[data-busy] .quiz-mark" sets color on a mark',
         'style.css: "html[data-layout="stack"] .mobile-nav-toggle.composer-menu > .status-mark" sets box-shadow on a mark',
+        'style.css: "html[data-layout="stack"] .mobile-nav-toggle > .status-mark" sets box-shadow on a mark',
         'room2.css: "html[data-layout="stack"] .mobile-nav-toggle > .status-mark" sets box-shadow on a mark',
     ]);
 });
