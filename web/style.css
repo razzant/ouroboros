@@ -6339,8 +6339,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     border-bottom: 1px solid rgba(var(--neutral-rgb), 0.04);
     color: var(--text-secondary);
 }
-.cost-table tbody tr:hover td {
-    background: rgba(var(--neutral-rgb), 0.03);
+/* Only a pointer that hovers paints a row (a finger's tap would leave it painted), and the row is painted whole, so a
+   row a narrow card stacks shows no seams between its cells. */
+@media (hover: hover) {
+    .cost-table tbody tr:hover { background: rgba(var(--neutral-rgb), 0.03); }
 }
 
 /* Dashboard Evolution (evolution.js): the campaign object, then one time line of versions with the chosen version
