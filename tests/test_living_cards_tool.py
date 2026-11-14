@@ -220,6 +220,10 @@ def test_an_image_file_does_not_count_against_the_body_bound_and_has_its_own(tmp
     ({"type": "group", "target": "preview", "components": [{"type": "image", "path": "shot", "src": PNG_URI}]}, {"shot": "x"}),
     ({"type": "gallery", "path": "shots"}, {"shots": [{"src": PNG_URI}, {"type": "markdown", "text": "x"}]}),  # items read from data
     ({"type": "gallery", "items_key": "shots", "condition_key": "has"}, {"shots": ["a.png"]}),
+    ({"type": "group", "condition_key": "has", "components": [{"type": "gallery", "path": "shots"}, {"type": "image", "path": "shot"}]},
+     {"has": False, "shots": [{"src": "missing.png"}]}),                           # a hidden section hides its media
+    ({"type": "tabs", "condition_key": "has", "tabs": [{"label": "A", "components": [{"type": "video", "src": "clip.mp4"}]}]}, {}),
+    ({"type": "gallery", "path": "shots"}, {"shots": [{"src": [PNG_URI]}]}),
 ])
 def test_media_the_renderer_draws_or_may_lawfully_hide_is_shown(tmp_path, component, data):
     shown = json.loads(_show_card(_ctx(tmp_path), title="T", fallback_text="plain", components=[component],
@@ -234,6 +238,8 @@ def test_media_the_renderer_draws_or_may_lawfully_hide_is_shown(tmp_path, compon
     ({"type": "image", "src": "https://example.com/a.png"}, None, "components[0]: this image has no source a card can draw. Give it file:"),
     ({"type": "image", "path": "shot"}, {"shot": "shots/dock.png"}, "components[0]: this image has no source"),
     ({"type": "video", "src": "clip.mp4"}, None, "components[0]: this video has no source a card can draw. Give it src: an inline data: URI"),
+    ({"type": "group", "components": [{"type": "gallery", "path": "shots"}]}, {"shots": [{"src": "missing.png"}]},
+     "components[0].components[0]: item 0 of data 'shots' has no source"),
     ({"type": "group", "components": [{"type": "gallery", "items": [{"src": "a.png"}]}]}, None,
      "components[0].components[0].items[0]: this image has no source"),
     ({"type": "image", "path": "shots.00", "src": "x"}, {"shots": [PNG_URI]}, "components[0]: this image has no source"),

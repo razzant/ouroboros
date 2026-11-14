@@ -122,13 +122,13 @@ def _nodes(components: Any, where: str = "components",
     """``(path, node, type, plain)`` of every component of the tree.
 
     ``plain`` is False for a component the card may lawfully not draw from its own ``data``: one that names a
-    ``target`` (or sits under a component that does) or is shown on a ``condition_key``.
+    ``target`` or is shown on a ``condition_key``, or sits under a component that does.
     """
     for idx, node in enumerate(components if isinstance(components, list) else []):
         if not isinstance(node, dict):
             continue
-        here, aimed = f"{where}[{idx}]", targeted or bool(node.get("target"))
-        yield here, node, str(node.get("type") or ""), not aimed and not node.get("condition_key")
+        here, aimed = f"{where}[{idx}]", targeted or bool(node.get("target")) or bool(node.get("condition_key"))
+        yield here, node, str(node.get("type") or ""), not aimed
         yield from _nodes(node.get("components"), f"{here}.components", aimed)
         for tab_idx, tab in enumerate(node.get("tabs") if isinstance(node.get("tabs"), list) else []):
             if isinstance(tab, dict):
@@ -221,8 +221,7 @@ def _draws(node: Dict[str, Any], data: Dict[str, Any]) -> bool:
     """Whether the card renderer finds a source for this media component (``safeMediaSrc``)."""
     path = node.get("path") if isinstance(node.get("path"), str) else ""
     value = _data_value(data, path) if path else None
-    src = node.get("src") if isinstance(node.get("src"), str) else ""
-    return _DRAWABLE_MEDIA.fullmatch(_js_text(src if value is None else value).strip(_JS_SPACE)) is not None
+    return _DRAWABLE_MEDIA.fullmatch(_js_text((node.get("src") or "") if value is None else value).strip(_JS_SPACE)) is not None
 
 
 def _undrawable_media(components: Any, data: Any) -> str:
