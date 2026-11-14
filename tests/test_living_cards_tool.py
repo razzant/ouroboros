@@ -204,7 +204,27 @@ def test_an_image_file_does_not_count_against_the_body_bound_and_has_its_own(tmp
     (tmp_path / "work" / "half.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * (cards._MAX_CARD_IMAGE_BYTES // 2))
     two = _show_card(ctx, title="T", fallback_text="p", components=[{"type": "image", "file": "half.png"}, {"type": "image", "file": "half.png"}])
     assert "components[1].file is" in two and "at most 2097152 bytes together" in two and "send_photo" in two
+    wordy = _show_card(ctx, title="T", fallback_text="p", components=[
+        {"type": "image", "file": "big.png"}, {"type": "markdown", "text": "x" * (cards._MAX_BODY_BYTES + 1)}])
+    assert "the components body exceeds 262144 bytes as JSON" in wordy, "a file image does not lift the bound on the rest"
     assert len(_cards(tmp_path)) == 1
+
+
+@pytest.mark.parametrize(("component", "data"), [
+    ({"type": "image", "path": "missing", "src": PNG_URI}, {}),                    # a path that reads nothing falls back to src
+    ({"type": "image", "path": "shots.0"}, {"shots": [PNG_URI]}),
+    ({"type": "image", "path": "shot"}, {"shot": [" " + PNG_URI + "\ufeff"]}),     # the renderer's own text and trim
+    ({"type": "image", "src": "DATA:IMAGE/PNG;BASE64," + PNG_URI.split(",", 1)[1]}, None),
+    ({"type": "image", "path": "shot", "condition_key": "has_shot"}, {}),          # shown only on a condition
+    ({"type": "image", "target": "preview", "path": "shot", "src": PNG_URI}, {"shot": "x"}),  # reads another state
+    ({"type": "group", "target": "preview", "components": [{"type": "image", "path": "shot", "src": PNG_URI}]}, {"shot": "x"}),
+    ({"type": "gallery", "path": "shots"}, {"shots": [{"src": PNG_URI}, {"type": "markdown", "text": "x"}]}),  # items read from data
+    ({"type": "gallery", "items_key": "shots", "condition_key": "has"}, {"shots": ["a.png"]}),
+])
+def test_media_the_renderer_draws_or_may_lawfully_hide_is_shown(tmp_path, component, data):
+    shown = json.loads(_show_card(_ctx(tmp_path), title="T", fallback_text="plain", components=[component],
+                                  **({"data": data} if data is not None else {})))
+    assert load_card(tmp_path, shown["card_id"])["components"] == [component]
 
 
 @pytest.mark.parametrize(("component", "data", "fragment"), [
@@ -216,7 +236,14 @@ def test_an_image_file_does_not_count_against_the_body_bound_and_has_its_own(tmp
     ({"type": "video", "src": "clip.mp4"}, None, "components[0]: this video has no source a card can draw. Give it src: an inline data: URI"),
     ({"type": "group", "components": [{"type": "gallery", "items": [{"src": "a.png"}]}]}, None,
      "components[0].components[0].items[0]: this image has no source"),
-    ({"type": "image", "file": "missing.png"}, None, "components[0].file not found: missing.png"),
+    ({"type": "image", "path": "shots.00", "src": "x"}, {"shots": [PNG_URI]}, "components[0]: this image has no source"),
+    ({"type": "image", "path": "shot", "src": PNG_URI}, {"shot": "x.png"}, "components[0]: this image has no source"),
+    ({"type": "gallery", "path": "shots"}, {"shots": [{"src": PNG_URI}, {"file": "notes.png"}]},
+     "components[0]: item 1 of data 'shots' has no source a card can draw. Give each item src:"),
+    ({"type": "gallery", "items_key": "shots"}, {"shots": [PNG_URI]}, "components[0]: item 0 of data 'shots' has no source"),
+    ({"type": "image", "file": PNG_URI}, None, "components[0].file takes a file path; an inline data: URI goes in components[0].src"),
+    ({"type": "image", "path": " ", "src": PNG_URI}, {" ": "not-media"}, "components[0]: this image has no source"),
+    ({"type": "image", "file": "missing.png"}, None, "components[0].file not found: missing.png (looked for "),
     ({"type": "image", "file": "notes.png"}, None, "components[0].file is not a PNG, JPEG, GIF or WebP image: notes.png"),
     ({"type": "image", "file": ""}, None, "components[0].file must be the path of an image file"),
     ({"type": "audio", "file": "notes.png"}, None, "components[0].file: only an image is read from a file; give audio as src"),

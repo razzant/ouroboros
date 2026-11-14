@@ -178,9 +178,9 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # its wait clause names work that cannot go on without the answer, and "with an explanation" leaves
     # the closing sentence; nothing else changed (76a2871b... before).
     # Rolled for card images: show_card's description says an image takes file (a PNG, JPEG, GIF or WebP the
-    # host copies into the card) and other media an inline data: URI; nothing else changed (4da8992f... before).
+    # host copies into the card) or, like audio and video, an inline data: URI; nothing else changed (4da8992f... before).
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "521d2ffd7b5f57c9581683bf6b337aa10d0715e256d4a9e81ccee1afaf065454"
+        "7a1e368b63165124e58b8b117dc4a1fc843701a9a96ee7700d5cd29a717037b5"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

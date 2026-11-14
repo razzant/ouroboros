@@ -46,7 +46,7 @@ SHOW_CARD_TOOL_SCHEMA: Dict[str, Any] = {
         "audio, video, gallery, action, form; no routes); each action and form binds submit: {id, once?} "
         "and data fills the path-reading components. An image takes file: the path of a PNG, JPEG, GIF or "
         "WebP you wrote (absolute, or relative to your workspace; a card's images at most 2 MiB together), "
-        "which the host copies into the card; other media is src: an inline data: URI. widget: {skill, tab_id, input?} shows an installed "
+        "which the host copies into the card, or src: an inline data: URI, as audio and video do. widget: {skill, tab_id, input?} shows an installed "
         "live skill's widget inline. app: {path} or {html} of a self-contained HTML page (at most 512 KiB) "
         "that runs sandboxed: it cannot fetch or load resources, and loading another page closes it. On most "
         "devices it shares the owner's page thread: keep heavy computation in a blob: Worker, never a long "
@@ -117,31 +117,43 @@ def _live_widget_problem(skill: str, tab_id: str) -> str:
     return ""
 
 
-def _media_nodes(components: Any, where: str = "components") -> Iterator[Tuple[str, Dict[str, Any], str]]:
-    """``(path, node, type)`` of every image, audio and video in the tree, a gallery's listed items included."""
+def _nodes(components: Any, where: str = "components",
+           targeted: bool = False) -> Iterator[Tuple[str, Dict[str, Any], str, bool]]:
+    """``(path, node, type, plain)`` of every component of the tree.
+
+    ``plain`` is False for a component the card may lawfully not draw from its own ``data``: one that names a
+    ``target`` (or sits under a component that does) or is shown on a ``condition_key``.
+    """
     for idx, node in enumerate(components if isinstance(components, list) else []):
         if not isinstance(node, dict):
             continue
-        here, kind = f"{where}[{idx}]", str(node.get("type") or "")
-        if kind in ("image", "audio", "video"):
-            yield here, node, kind
-        for item_idx, item in enumerate(node.get("items") if kind == "gallery" and isinstance(node.get("items"), list) else []):
-            if isinstance(item, dict):
-                yield f"{here}.items[{item_idx}]", item, str(item.get("type") or "image")
-        yield from _media_nodes(node.get("components"), f"{here}.components")
+        here, aimed = f"{where}[{idx}]", targeted or bool(node.get("target"))
+        yield here, node, str(node.get("type") or ""), not aimed and not node.get("condition_key")
+        yield from _nodes(node.get("components"), f"{here}.components", aimed)
         for tab_idx, tab in enumerate(node.get("tabs") if isinstance(node.get("tabs"), list) else []):
             if isinstance(tab, dict):
-                yield from _media_nodes(tab.get("components"), f"{here}.tabs[{tab_idx}].components")
+                yield from _nodes(tab.get("components"), f"{here}.tabs[{tab_idx}].components", aimed)
+
+
+def _media_nodes(components: Any) -> Iterator[Tuple[str, Dict[str, Any], str, bool]]:
+    """``_nodes`` narrowed to every image, audio and video, a gallery's listed items included."""
+    for here, node, kind, plain in _nodes(components):
+        if kind in ("image", "audio", "video"):
+            yield here, node, kind, plain
+        for item_idx, item in enumerate(node.get("items") if kind == "gallery" and isinstance(node.get("items"), list) else []):
+            if isinstance(item, dict):
+                yield (f"{here}.items[{item_idx}]", item, str(item.get("type") or "image"),
+                       plain and not item.get("target") and not item.get("condition_key"))
 
 
 def _inline_image_files(ctx: ToolContext, components: Any) -> Tuple[Any, int]:
     """The tree with each image's ``file`` read into its inline ``src``, and how many characters that added."""
     from ouroboros.tools.core_artifacts import _detect_image_mime
 
-    if not any("file" in node for _, node, _ in _media_nodes(components)):
+    if not any("file" in node for _, node, _, _ in _media_nodes(components)):
         return components, 0
     tree, left, added = copy.deepcopy(components), _MAX_CARD_IMAGE_BYTES, 0
-    for where, node, kind in _media_nodes(tree):
+    for where, node, kind, _ in _media_nodes(tree):
         if "file" not in node:
             continue
         name = node.pop("file")
@@ -149,14 +161,20 @@ def _inline_image_files(ctx: ToolContext, components: Any) -> Tuple[Any, int]:
             raise ValueError(f"{where}.file: only an image is read from a file; give {kind} as src, an inline data: URI")
         if not isinstance(name, str) or not name.strip():
             raise ValueError(f"{where}.file must be the path of an image file")
+        if name.lstrip().lower().startswith("data:"):
+            raise ValueError(f"{where}.file takes a file path; an inline data: URI goes in {where}.src")
         file = pathlib.Path(name).expanduser()
         file = file if file.is_absolute() else pathlib.Path(ctx.active_repo_dir()) / file
-        if not file.is_file():
-            raise ValueError(f"{where}.file not found: {name}")
-        if file.stat().st_size > left:
-            raise ValueError(f"{where}.file is {file.stat().st_size} bytes; a card's images take at most "
-                             f"{_MAX_CARD_IMAGE_BYTES} bytes together (send_photo sends a larger image)")
-        data = file.read_bytes()
+        try:
+            if not file.is_file():
+                looked = "" if pathlib.Path(name).expanduser().is_absolute() else f" (looked for {file})"
+                raise ValueError(f"{where}.file not found: {name}{looked}")
+            if file.stat().st_size > left:
+                raise ValueError(f"{where}.file is {file.stat().st_size} bytes; a card's images take at most "
+                                 f"{_MAX_CARD_IMAGE_BYTES} bytes together (send_photo sends a larger image)")
+            data = file.read_bytes()
+        except OSError as exc:
+            raise ValueError(f"{where}.file could not be read: {exc}") from None
         mime = _detect_image_mime(data)
         if not mime.startswith("image/"):
             raise ValueError(f"{where}.file is not a PNG, JPEG, GIF or WebP image: {name}")
@@ -167,31 +185,69 @@ def _inline_image_files(ctx: ToolContext, components: Any) -> Tuple[Any, int]:
     return tree, added
 
 
+# The renderer's own reading of a source, mirrored: `getPath` (web/modules/widget_chart.js), then
+# `String(value || '').trim()` (`safeMediaSrc`). Where the two could disagree the card is not refused.
+_JS_SPACE = "\t\n\x0b\x0c\r \xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+
+
 def _data_value(data: Any, path: str) -> Any:
-    """What a component's ``path`` reads from the card's ``data`` (``getPath`` in web/modules/widget_chart.js)."""
+    """What a component's ``path`` reads from the card's ``data``; None where the renderer falls back to ``src``."""
     current = data
     for part in (part for part in path.split(".") if part):
         if isinstance(current, dict):
             current = current.get(part)
-        elif isinstance(current, list) and part.isdigit() and int(part) < len(current):
-            current = current[int(part)]
+        elif isinstance(current, list):
+            index = int(part) if part.isascii() and part.isdigit() and str(int(part)) == part else -1
+            current = len(current) if part == "length" else current[index] if 0 <= index < len(current) else None
         else:
             return None
     return current
 
 
+def _js_text(value: Any) -> str:
+    """JavaScript's ``String(value)`` for what JSON holds (a list joins its items with commas, null as nothing)."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(int(value)) if float(value).is_integer() else repr(value)
+    if isinstance(value, list):
+        return ",".join("" if item is None else _js_text(item) for item in value)
+    return "" if value is None else "[object Object]"
+
+
+def _draws(node: Dict[str, Any], data: Dict[str, Any]) -> bool:
+    """Whether the card renderer finds a source for this media component (``safeMediaSrc``)."""
+    path = node.get("path") if isinstance(node.get("path"), str) else ""
+    value = _data_value(data, path) if path else None
+    src = node.get("src") if isinstance(node.get("src"), str) else ""
+    return _DRAWABLE_MEDIA.fullmatch(_js_text(src if value is None else value).strip(_JS_SPACE)) is not None
+
+
 def _undrawable_media(components: Any, data: Any) -> str:
-    """The first image, audio or video the card could not draw, worded for its author; empty when all draw."""
-    for where, node, kind in _media_nodes(components):
-        path = node.get("path") if isinstance(node.get("path"), str) else ""
-        value = _data_value(data if isinstance(data, dict) else {}, path) if path.strip() else None
-        value = node.get("src") if value is None else value
-        if isinstance(value, str) and _DRAWABLE_MEDIA.fullmatch(value.strip()):
+    """The first always-shown image, audio or video the card could not draw, worded for its author; else empty."""
+    data = data if isinstance(data, dict) else {}
+    for where, node, kind, plain in _media_nodes(components):
+        if not plain or _draws(node, data):
             continue
+        path = node.get("path") if isinstance(node.get("path"), str) else ""
         way = "file: the path of a PNG, JPEG, GIF or WebP you wrote, or src: an inline data: URI" if kind == "image" \
             else "src: an inline data: URI (audio mpeg, wav or ogg; video mp4, webm or ogg)"
-        note = f"; path {path!r} reads a value of data, not a file" if path.strip() else ""
+        note = f"; path {path!r} reads a value of data, not a file" if path else ""
         return f"{where}: this {kind} has no source a card can draw{note}. Give it {way}"
+    for where, node, kind, plain in _nodes(components):
+        # A gallery without listed items draws the list its path reads from data, each item as a component.
+        if kind != "gallery" or not plain or node.get("items") or isinstance(node.get("items"), list):
+            continue
+        key = next((node[k] for k in ("path", "items_key") if isinstance(node.get(k), str) and node[k]), "")
+        read = _data_value(data, key) if key else data
+        for idx, item in enumerate(read if isinstance(read, list) else []):
+            kind = str(item.get("type") or "image") if isinstance(item, dict) else "image"
+            if kind in ("image", "audio", "video") and not (
+                    isinstance(item, dict) and (item.get("target") or item.get("condition_key") or _draws(item, data))):
+                return (f"{where}: item {idx} of data {key!r} has no source a card can draw. Give each item src: an "
+                        f"inline data: URI, or list the images in the gallery's items, where an image takes file")
     return ""
 
 

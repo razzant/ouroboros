@@ -2605,7 +2605,9 @@ catalog without routes: their `action`/`form` controls bind
 A card draws only inline `data:` media, so the tool copies an image named
 by `file` (a PNG, JPEG, GIF or WebP; a card's images at most 2 MiB
 together) into the card as its `src`, and refuses a card whose image,
-audio or video has no such source instead of showing it without one.
+audio or video has no such source instead of showing it without one
+(media shown on a `condition_key` or aimed at a `target` is left to the
+renderer).
 
 ### Async job error contract
 

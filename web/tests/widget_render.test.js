@@ -48,6 +48,14 @@ test('a component\'s own inline src draws where the state is an object; a path i
     assert.equal(image({ path: 'shot', src: 'shots/dock.png' }, { result: { shot: DATA_PNG } }), DATA_PNG);
     assert.equal(image({ path: 'missing', src: DATA_PNG }, { result: {} }), DATA_PNG, 'a path that reads nothing falls back to src');
     assert.equal(image({ src: 'shots/dock.png' }, { result: DATA_PNG }), DATA_PNG, 'a state that is the media itself');
+    assert.equal(image({ src: 'shots/dock.png' }, { result: [DATA_PNG] }), DATA_PNG, 'a one-item list reads as its item, as before');
+    const own = renderComponent(widgetsPage('weather'), { type: 'image', src: 'placeholder.png' },
+        view({ result: ['/api/extensions/weather/radar.png'] }), 'components.0');
+    assert.equal(imageSrc(own), '/api/extensions/weather/radar.png', 'a skill\'s result that is its own route still draws');
+    assert.equal(image({ path: 'shot', src: DATA_PNG }, { result: { shot: 'not-media' } }), null, 'a path that reads a value does not fall back');
+    const figure = (spec) => renderComponent(noSkillRoute, { type: 'image', src: DATA_PNG, ...spec }, view({ result: {} }), 'components.0');
+    assert.match(figure({ alt: 'The dock' }), /alt="The dock"><figcaption>The dock<\/figcaption>/);
+    assert.match(figure({}), /alt="image"><\/figure>$/, 'an image with no label or alt text has no caption');
 }));
 
 test('every rendered root carries its identity and the view learns which components are visible', () => withOrigin(() => {
