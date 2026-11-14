@@ -570,7 +570,8 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
     // names and open strips keep full words. The closed names never flicker between fits. Contributed chips take
     // only the room the capsules leave (composer_chips.js), so their slot is never part of the fit.
     const shownKids = () => Array.from(row.children || [])
-        .filter((kid) => widthOf(kid) > 0 && !kid.hasAttribute?.('data-composer-chips'));
+        .filter((kid) => widthOf(kid) > 0 && !kid.hasAttribute?.('data-composer-chips')
+            && !kid.classList?.contains?.('chat-scroll-bottom-btn'));  // absolute; its room is already in the row's padding
     // A phone's ☰ leads the line and never wraps, so it is not what the line is read by: while the row folds it goes
     // down beside the field (composer_fold.js) and the line it left still holds the capsules.
     function wraps() {
