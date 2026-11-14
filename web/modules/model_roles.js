@@ -594,7 +594,12 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             if (fallback && !soleRow()) rows.push(Object.assign(rowState(fallback, '', rows.length), { account: '', context: 0, processing_preference: '' }));
             const at = kept ? rows.indexOf(soleRow()) : -1;
             if (at >= 0) rows[at] = Object.assign(kept, { slot: rows[at].slot });
-            loaded = true; render();
+            loaded = true;
+            // A kept draft includes the browser's unfinished number, selection and open Details, not just row values.
+            if (at >= 0 && host()?.querySelector(`[data-model-role="${kept.id}"]`)) {
+                updateCatalogViews();
+                void refreshRow(kept);
+            } else render();
         },
         mount() {
             getDoc()?.addEventListener?.('harness-maintenance:settled', onMaintenanceSettled);
