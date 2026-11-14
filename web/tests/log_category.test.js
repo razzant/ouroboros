@@ -118,8 +118,8 @@ test('a provider content refusal reads as the filter stopping the request, with 
 
 // The owner saw a delegated run's progress as its machine text in a bold headline: an emoji, the run's id and seq, a
 // `source:` trailer with a storage path and a 64-character hash. Its typed observation (delegated_activity.js) holds
-// the words: what the executor said is the event's words, who said it a fact, and the run and its source stay in the
-// event's record. A host note keeps its text; only the opening its producer marks it with goes (host_notice_text.js).
+// the words: what the executor said is the event's words, and who said it (an attempt's id), the run and its source
+// stay in the event's record. A host note keeps its text; only the opening its producer marks it with goes (host_notice_text.js).
 test('a delegated run\'s progress reads from its typed words; its run, path and hash stay in the record', () => {
     const hash = 'f8d21e8a1ba14dd716312f5f107b074cc293f75f146e5ebe5f512290f8772aba';
     const path = `source_handles/delegated_activity/run-3771bc6bc76d-194-194-${hash}.jsonl`;
@@ -132,7 +132,7 @@ test('a delegated run\'s progress reads from its typed words; its run, path and 
     const view = summarizeLogEvent(evt);
     assert.equal(view.phase, 'progress');
     assert.equal(view.headline, 'The execution root matches.');
-    assert.deepEqual(view.meta, ['claude · a01']);
+    assert.deepEqual(view.meta, [], 'no attempt id and no category word among its facts');
     assert.doesNotMatch(JSON.stringify(view), /run-3771bc6bc76d|artifact_store|source:|@seq|🛰|💬|f8d21e8a/);
     assert.equal(categorizeLogEvent(evt, view), 'tasks');
     // Without the typed field the text is the host's, shown as it is; a host note loses only its marked opening.

@@ -22,7 +22,8 @@ test('a written task-authored message shows in the sender timeline with its targ
     const view = summarizeLogEvent(evt);
     assert.equal(view.headline, 'Message sent to task receiver-1');
     assert.equal(view.phase, 'info');
-    assert.ok(view.meta.includes('target=receiver-1'));
+    assert.match(view.headline, /receiver-1/, 'the headline names the target');
+    assert.ok(!view.meta.some((fact) => fact.includes('receiver-1')), 'the facts do not repeat its id');
     assert.equal(getLogTaskGroupId(evt), 'sender-9');
 });
 

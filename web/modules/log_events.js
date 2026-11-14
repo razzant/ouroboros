@@ -1,5 +1,6 @@
 import { accountedUpperBound, accountedUpperBoundWithChildren, isoMicros, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
 import { formatUsd } from './storage_format.js';
+import { compactTokens } from './cost_period.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
 import { DETAIL_ONLY_WARNINGS, TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
     failedStepHeadline, heldCallPhrase, heldCallsLine } from './task_reason_words.js';
@@ -321,23 +322,26 @@ export function formatLogDuration(sec) {
     return `${num < 10 ? num.toFixed(1) : Math.round(num)}s`;
 }
 
+// A token flow, input → output, in the Costs page's counts (cost_period.js compactTokens): "545k → 391 tokens".
+const tokenFlow = (prompt, completion) => `${prompt} \u2192 ${completion} tokens`;
+
 // task_done ledger totals: a sum no row reported (null) is '?', never 0.
 function formatLogTokens(evt) {
     const count = (n) => (n === null ? '?' : Number(n || 0));
     const prompt = count(evt.prompt_tokens), completion = count(evt.completion_tokens);
     if (![prompt, completion].some((n) => n !== '?' && n)) return '';
-    return `${prompt}\u2192${completion} tok`;
+    return tokenFlow(...[prompt, completion].map((n) => (n === '?' ? n : compactTokens(n))));
 }
 
 // Usage rows only (#1578): v2 null = not reported, 0 = a reported zero; an unstamped/v1 zero stays ambiguous (LEGACY_RULE).
 // A session's input_token_usage total is its whole input, as a direct call's prompt_tokens; its harness's own
 // prompt_tokens may count only the uncached rest, so a split without a total shows the input as unknown.
 function formatUsageTokens(evt) {
-    const count = (n) => (!Number.isSafeInteger(n) || n < 0 ? '?' : n === 0 && evt.record_contract_version !== 2 ? '0?' : String(n));
+    const count = (n) => (!Number.isSafeInteger(n) || n < 0 ? '?' : n === 0 && evt.record_contract_version !== 2 ? '0?' : compactTokens(n));
     const split = evt.input_token_usage && typeof evt.input_token_usage === 'object' ? evt.input_token_usage : null;
     const prompt = count(split ? split.total_tokens : evt.prompt_tokens), completion = count(evt.completion_tokens);
     if (prompt === '?' && completion === '?') return 'tokens not reported';
-    return `${prompt}\u2192${completion} tok${[prompt, completion].includes('0?') ? ' (legacy 0 may be unreported)' : ''}`;
+    return `${tokenFlow(prompt, completion)}${[prompt, completion].includes('0?') ? ' (legacy 0 may be unreported)' : ''}`;
 }
 
 function compactJson(value, maxLen = 220) {
@@ -737,13 +741,11 @@ export function summarizeLogEvent(evt) {
 
     if (evt.is_progress || t === 'send_message') {
         // A delegated run's observation reads from its typed fields (delegated_activity.js), never from its text: what
-        // its executor said (or its count of technical events) is the words, who said it a fact; the run, its range
-        // and its source stay in its record.
+        // its executor said (or its count of technical events) is the words; who said it (an attempt's id), the run,
+        // its range and its source stay in its record.
         const delegated = delegatedActivityView(evt);
         if (delegated) {
-            const run = ` · ${delegated.activity.run_id}`;
-            const who = delegated.headline.endsWith(run) ? delegated.headline.slice(0, -run.length) : delegated.headline;
-            return view('progress', delegated.body || 'Progress update', { meta: [who],
+            return view('progress', delegated.body || 'Progress update', {
                 full: delegated.fullBody === delegated.body ? '' : delegated.fullBody });
         }
         // A host note loses only the opening its producer marks it with (host_notice_text.js), as in a chat's timeline.
@@ -772,12 +774,12 @@ export function summarizeLogEvent(evt) {
         const task = evt.task || {};
         return view('queued', `Received ${task.type || 'task'}`, {
             body: shortText(task.text, 220),
-            meta: [task.id ? `task=${task.id}` : '', task.text_len ? `${task.text_len} chars` : ''],
+            meta: [task.text_len ? `${task.text_len} chars` : ''],
         });
     }
 
     if (t === 'context_building_started') {
-        return view('context', 'Building context', { meta: [evt.task_type || ''] });
+        return view('context', 'Building context');
     }
 
     if (t === 'context_building_finished') {
@@ -790,9 +792,7 @@ export function summarizeLogEvent(evt) {
     }
 
     if (t === 'task_heartbeat') {
-        return view(evt.phase || 'alive', 'Still working', {
-            meta: [evt.task_type || '', formatLogDuration(evt.runtime_sec)],
-        });
+        return view(evt.phase || 'alive', 'Still working', { meta: [formatLogDuration(evt.runtime_sec)] });
     }
 
     if (t === 'llm_round_started') {
@@ -841,7 +841,6 @@ export function summarizeLogEvent(evt) {
                 evt.model || '',
                 formatUsageTokens(evt),
                 formatLogMoney(accountedUpperBound(evt) ?? evt.cost),
-                evt.category || '',
             ],
         });
     }
@@ -897,12 +896,7 @@ export function summarizeLogEvent(evt) {
         const proj = ownerHurryProjection(evt);
         return view('info', proj.label, {
             body: shortText(evt.detail, 220),
-            meta: [
-                evt.request_id ? `request=${evt.request_id}` : '',
-                evt.attempt_key != null ? `attempt=${evt.attempt_key}` : '',
-                evt.effect ? `effect=${evt.effect}` : '',
-                evt.status ? `status=${evt.status}` : '',
-            ],
+            meta: [evt.effect ? `effect ${evt.effect}` : '', evt.status || ''],
         });
     }
 
@@ -914,10 +908,7 @@ export function summarizeLogEvent(evt) {
         const source = evt.source_task_id ? String(evt.source_task_id) : 'another task';
         return view('info', hostTaskMessage(evt) ? 'System message' : `Message from task ${source}`, {
             body: shortText(evt.text_preview, 200),
-            meta: [
-                evt.provenance ? `provenance=${evt.provenance}` : '',
-                evt.relayed_from_task_id ? `relayed=${evt.relayed_from_task_id}` : '',
-            ],
+            meta: [evt.provenance ? `provenance=${evt.provenance}` : ''],
         });
     }
 
@@ -928,14 +919,13 @@ export function summarizeLogEvent(evt) {
         const written = String(evt.status || '') === 'written';
         return view(written ? 'info' : 'warn', written ? `Message sent to task ${target}` : `Message to task ${target} refused`, {
             body: written ? '' : shortText(evt.reason, 160),
-            meta: [`target=${target}`, evt.status ? String(evt.status) : ''],
+            meta: [evt.status ? String(evt.status) : ''],
         });
     }
 
     if (t === 'task_metrics_event' || t === 'task_eval') {
         return view('metrics', 'Task metrics', {
             meta: [
-                evt.task_type || '',
                 ...taskOutcomeMeta(evt),
                 modelExecutionLabel(evt.model_execution),
                 evt.reason_code || '',
@@ -1048,7 +1038,6 @@ export function summarizeLogEvent(evt) {
             : `swarm fan-out: ${n} subagent(s) requested`;
         return view('info', headline, {
             meta: [
-                evt.task_group_id ? `group=${evt.task_group_id}` : '',
                 evt.role ? `role=${evt.role}` : '',
                 evt.requested_model_lane ? `lane=${evt.requested_model_lane}` : '',
                 evt.depth != null ? `depth=${evt.depth}` : '',
