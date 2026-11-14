@@ -85,6 +85,22 @@ def test_note_restoration_honours_explicit_fit_callback_verdict(tmp_path, monkey
         assert result == messages
 
 
+def test_a_selection_declares_whether_the_story_it_shows_is_whole():
+    """``select_view`` writes B's declaration from the level it selected (``llm_messages.SHARED_HEAD_KEY``): a folded
+    page narrows my story for this work alone, a folded room note leaves the story every work shares. The declared
+    head ends exactly where the selected story begins."""
+    from ouroboros.llm_messages import SHARED_HEAD_KEY
+
+    p, snap = note_plan()
+    for address, whole in (('F5:page-000', False), ('F8:' + snap.room['notes'][0]['id'], True)):
+        selected = floor.select_view(p, 'max', [address])
+        block = json.loads(selected.max_projection.system_content_json)[-2]
+        declared = block[SHARED_HEAD_KEY]
+        assert declared['story_whole'] is whole, address
+        story = mv.render_story(snap, floor.kept_level(snap, selected.max_projection.memory_facts))
+        assert block['text'][declared['chars']:] == story and (story == mv.render_story(snap)) is whole, address
+
+
 def test_aggregate_lever_preserves_element_addresses_and_requires_uncovered_note():
     p, snap = plan()
     owner = 'F7:' + snap.room['lane1'][0]['address']

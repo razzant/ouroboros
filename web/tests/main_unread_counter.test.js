@@ -9,6 +9,8 @@ import vm from 'node:vm';
 
 import * as readAhead from '../modules/read_ahead.js';
 import { forgetProjectPreviews } from '../modules/chat_preview.js';
+import { IDLE_SUMMARY } from '../modules/project_activity.js';
+import { markView, paintStatusMark } from '../modules/status_mark.js';
 
 const source = readFileSync(new URL('../app.js', import.meta.url), 'utf8').replace(/\r\n?/g, '\n');
 
@@ -33,11 +35,9 @@ function liftLine(start) {
     return source.slice(from + 1, source.indexOf('\n', from + 1) + 1);
 }
 
-// What the Projects list says of the rows it holds (projects_nav.js `unreadRows`): here the feed's, or those a case adds.
-const heldRows = (feed, beyond = []) => ({ unreadRows: () => [...(feed() || []).filter((row) => row._unread), ...beyond] });
-
-// What a Project row counts unread: app.js's `isUnread` (createProjectsNav, pinned below) is this number above zero.
-const rowUnread = (row, seen) => readAhead.unreadCount(row.visible_revision, seen?.[row.id], readAhead.readAheadFor(row.chat_id));
+// The unread fact app.js hands the Projects list (createProjectsNav `isUnread`) for a row the list reads itself, such as
+// a room beyond the feed: pinned verbatim below and run here as the list runs it.
+const IS_UNREAD = '(row) => unreadCount(row.visible_revision, state.projectSeenRevision?.[row.id], readAheadFor(row.chat_id)) > 0';
 
 function harness({ revision = null, seen = null, loaded = true, page = 'files', project = null, answer = () => ({}) } = {}) {
     const posts = [], badges = [], acks = [], landings = [];
@@ -220,22 +220,87 @@ test('a failed write changes nothing', async () => {
     assert.equal(h.context.state.mainSeenRevision, 6);
 });
 
+// A Project row's unread fact is the list's own (renderProjectsNav sets `_unread`, mergeProjectSeenRevisions clears
+// it); a row it does not hold unread (one going away) is never revived. The ☰'s dot on Ouroboros's picture (the phone's
+// places control, paintNavToggles) is now the one place that sums the Projects' unread: it is lit while any row the
+// list counts is unread. The list module's own reads (`paint`, `unreadRows`) are stubbed at their seam; the rest is
+// lifted from app.js and runs against this module state.
+function listHarness({ host = {}, beyond = [], seen = {}, main = [90, 90] } = {}) {
+    const answers = [], paints = [];
+    const mark = { dataset: { shape: 'none', hue: 'ink' }, hidden: true };
+    const toggle = { attrs: {}, querySelector: (selector) => (selector === '.status-mark' ? mark : null),
+        setAttribute(name, value) { this.attrs[name] = value; } };
+    const context = vm.createContext({
+        ...readAhead, markView, paintStatusMark, IDLE_SUMMARY, forgetProjectPreviews, beyond, paints,
+        navState: { activeProjectId: null },
+        state: { mainVisibleRevision: main[0], mainSeenRevision: main[1], mainSeenLoaded: true, activePage: 'files',
+            projectSeenRevision: seen },
+        navProjects: { hidden: true },
+        document: { querySelectorAll: (selector) => (selector === '[data-mobile-nav-toggle]' ? [toggle] : []) },
+        closeProjectPanel() {}, syncNavigationState() {}, acknowledgeProjectAfterPaint() {}, acknowledgeMainAfterPaint() {},
+        updateUnreadBadge() {}, rooms: { forget() {} },  // every read names the projects going away (room_retire.js)
+        fetchJson: (url, init = {}) => new Promise((resolve) => {
+            assert.equal(url, '/api/ui/preferences');
+            assert.equal(init.method || 'GET', 'GET');
+            answers.push(resolve);
+        }),
+    });
+    vm.runInContext(liftLine('let mainOpening') + ['mainOnScreen', 'mainUnreadCount', 'observeMainRevision', 'enterMain',
+        'renderProjectsNav', 'mergeMainSeenRevision', 'mergeProjectSeenRevisions', 'refreshSharedProjectSeen',
+        'paintProjectsNav', 'paintNavToggles'].map(lift).join('\n') + `
+let sharedSeenRead = null, knownProjectsJson = null, lastProjectRows = [];
+const projectRooms = new Map(), projectActivityIndex = { aggregate: { owner: false } }, navToggleNames = new WeakMap();
+const isUnread = ${IS_UNREAD};
+const projectsNav = { paint: () => paints.push('list'),
+    unreadRows: () => [...lastProjectRows.filter((row) => row._unread), ...beyond.filter(isUnread)] };
+function patchProjectActivityMarkers() { paints.push('marks'); paintNavToggles(); }
+globalThis.api = { renderProjectsNav, observeMainRevision, mainUnreadCount, rows: () => lastProjectRows };`, context);
+    return {
+        context, answers, paints, toggle, api: context.api,
+        // Each row the list holds, by id: whether the list holds it unread.
+        flags: () => Object.fromEntries(context.api.rows().map((row) => [row.id, row._unread])),
+        // The dot on Ouroboros's picture, as painted.
+        dot: () => (mark.hidden ? 'none' : `${mark.dataset.shape} ${mark.dataset.hue}`),
+        // The host answers this client's oldest open read: as it stands now, or as an earlier read saw it.
+        reply: (prefs = host) => answers.shift()(JSON.parse(JSON.stringify(prefs))),
+    };
+}
+
 test("a Project row is unread by the same count as Main's number: its revision, its cursor, what was read ahead", () => {
-    assert.ok(source.includes('isUnread: (row) => unreadCount(row.visible_revision, state.projectSeenRevision?.[row.id], readAheadFor(row.chat_id)) > 0,'));
-    const seen = { a: 1, b: 4, c: 0 };
-    assert.deepEqual([{ id: 'a', visible_revision: 4 }, { id: 'b', visible_revision: 4 }, { id: 'c', visible_revision: 2 }]
-        .map((row) => rowUnread(row, seen)), [3, 0, 2]);
+    assert.ok(source.includes(`isUnread: ${IS_UNREAD},`));
+    // The mark patch repaints the ☰ (its stub here does that alone).
+    assert.match(lift('patchProjectActivityMarkers'), /\n {4}paintNavToggles\(\);\n/);
+    const h = listHarness({ seen: { a: 1, b: 4, c: 0 } });
+    h.api.renderProjectsNav([{ id: 'a', chat_id: 7311, visible_revision: 4 }, { id: 'b', chat_id: 7312, visible_revision: 4 },
+        { id: 'c', chat_id: 7313, visible_revision: 2 }, { id: 'd', chat_id: 7314, visible_revision: 3, lifecycle: 'deleting' }],
+    [7311, 7312, 7313, 7314]);
+    assert.deepEqual(h.flags(), { a: true, b: false, c: true, d: false },
+        'a and c pass their cursors, b is read, d is going away and is never held unread');
+    assert.deepEqual(h.paints, ['list', 'marks']);
+    assert.equal(h.dot(), 'dot unread', "an unread Project lights the dot on Ouroboros's picture");
+    assert.equal(h.toggle.attrs['aria-label'], 'Open navigation · new messages');
+    const read = listHarness({ seen: { b: 4 } });
+    read.api.renderProjectsNav([{ id: 'b', chat_id: 7312, visible_revision: 4 },
+        { id: 'd', chat_id: 7314, visible_revision: 3, lifecycle: 'deleting' }], [7312, 7314]);
+    assert.deepEqual(read.flags(), { b: false, d: false });
+    assert.equal(read.dot(), 'none', 'no Project unread, Main read: no dot');
+    assert.equal(read.toggle.attrs['aria-label'], 'Open navigation');
+    assert.equal(read.answers.length, 0, 'nothing unread asks after no other client');
 });
 
 test('a message read in full in another room leaves the counts without moving a cursor', () => {
-    readAhead.noteReadAhead({ read_ahead_revisions: { 1: [[42, 42]], 5551: [[4, 4]] } });
+    readAhead.noteReadAhead({ read_ahead_revisions: { 1: [[42, 42]], 5551: [[4, 4]], 5552: [[4, 4]] } });
     try {
         const main = harness({ revision: 42, seen: 40 });
         assert.equal(main.api.mainUnreadCount(), 1);  // 41 still unread; 42 was read in its Project
         assert.equal(main.context.state.mainSeenRevision, 40);
-        const seen = { nova: 1 };
-        assert.equal(rowUnread({ id: 'nova', chat_id: 5551, visible_revision: 4 }, seen), 2);  // p1 and p2 unread; m3 read in Main
-        assert.deepEqual(seen, { nova: 1 });
+        const seen = { nova: 1, mira: 3 };
+        const h = listHarness({ seen });
+        h.api.renderProjectsNav([{ id: 'nova', chat_id: 5551, visible_revision: 4 },
+            { id: 'mira', chat_id: 5552, visible_revision: 4 }], [5551, 5552]);
+        assert.deepEqual(h.flags(), { nova: true, mira: false }, "Nova's p1 and p2 stay unread, its m3 read in Main; "
+            + "Mira's one new message was read there too");
+        assert.deepEqual(seen, { nova: 1, mira: 3 }, 'no cursor moved');
     } finally {
         readAhead.noteReadAhead({ read_ahead_revisions: {} });  // answers join (read_ahead.js): this resets nothing, later cases use other revisions
     }
@@ -243,84 +308,63 @@ test('a message read in full in another room leaves the counts without moving a 
 
 test("another client's read reaches this one at its next state snapshot, a late older answer taking nothing back", async () => {
     // The host as both clients share it: one client posts its shared read there; this client only polls state.
-    const host = { main_seen_revision: 70, project_seen_revision: { nova: 1 }, read_ahead_revisions: {} };
-    const answers = [];  // this client's preferences reads, answered when the test says (the network's order)
-    const nova = { id: 'nova', chat_id: 7302, visible_revision: 4, _unread: true };
-    const context = vm.createContext({
-        ...readAhead,
-        projectsNav: heldRows(() => context.lastProjectRows),
-        state: { mainVisibleRevision: 72, mainSeenRevision: 70, mainSeenLoaded: true, activePage: 'files',
-            projectSeenRevision: { nova: 1 } },
-        navState: { activeProjectId: null },
-        lastProjectRows: [nova],
-        updateUnreadBadge() {}, paintProjectsNav() {}, patchProjectActivityMarkers() {}, acknowledgeMainAfterPaint() {},
-        fetchJson: (url, init = {}) => new Promise((resolve) => {
-            assert.equal(url, '/api/ui/preferences');
-            assert.equal(init.method || 'GET', 'GET');
-            answers.push(() => resolve(JSON.parse(JSON.stringify(host))));  // the host's state when it answers
-        }),
-    });
-    vm.runInContext(liftLine('let mainOpening') + ['mainOnScreen', 'mainUnreadCount', 'observeMainRevision', 'enterMain',
-        'mergeMainSeenRevision', 'mergeProjectSeenRevisions', 'refreshSharedProjectSeen'].map(lift).join('\n')
-        + '\nlet sharedSeenRead = null;\nglobalThis.api = { observeMainRevision, mainUnreadCount };', context);
-    const counts = () => [context.api.mainUnreadCount(), rowUnread(nova, context.state.projectSeenRevision)];
-    assert.deepEqual(counts(), [2, 3]);
-    const stale = JSON.parse(JSON.stringify(host));  // what an earlier read saw, before the other client read m3
-    host.read_ahead_revisions = { 1: [[72, 72]], 7302: [[4, 4]] };  // the other client read m3 (Main 72, Nova 4)
-    context.api.observeMainRevision(72);  // an ordinary snapshot: nothing new, Main still shows unread
-    assert.equal(answers.length, 1, 'a snapshot that still shows unread reads the shared cursors again');
-    answers.shift()();
+    const host = { main_seen_revision: 70, project_seen_revision: { nova: 1, mira: 3 }, read_ahead_revisions: {} };
+    const h = listHarness({ host, seen: { nova: 1, mira: 3 }, main: [72, 70] });
+    h.api.renderProjectsNav([{ id: 'nova', chat_id: 7302, visible_revision: 4 },
+        { id: 'mira', chat_id: 7305, visible_revision: 4 },
+        { id: 'gone', chat_id: 7306, visible_revision: 3, lifecycle: 'deleting' }], [7302, 7305, 7306]);
+    assert.deepEqual([h.api.mainUnreadCount(), h.flags()], [2, { nova: true, mira: true, gone: false }]);
+    const stale = JSON.parse(JSON.stringify(host));  // what an earlier read saw, before the other client read
+    h.reply();  // the list's own read, answered before the other client read: nothing moves
     await flush();
-    assert.deepEqual(counts(), [1, 2], 'm3 read once; p1, p2 and 71 stay');
-    readAhead.noteReadAhead({ ...stale, read_ahead_revisions: {} });  // an older answer arriving last
-    assert.deepEqual(counts(), [1, 2]);
+    assert.deepEqual(h.flags(), { nova: true, mira: true, gone: false });
+    h.paints.length = 0;
+    // The other client read m3 (Main 72, Nova 4) and all of Mira.
+    Object.assign(host, { read_ahead_revisions: { 1: [[72, 72]], 7302: [[4, 4]] }, project_seen_revision: { nova: 1, mira: 4 } });
+    h.api.observeMainRevision(72);  // an ordinary snapshot: nothing new, Main still shows unread
+    assert.equal(h.answers.length, 1, 'a snapshot that still shows unread reads the shared cursors again');
+    h.reply();
+    await flush();
+    assert.deepEqual([h.api.mainUnreadCount(), h.flags()], [1, { nova: true, mira: false, gone: false }],
+        'm3 read once and Mira read whole; p1, p2 and 71 stay; the row going away is not revived');
+    assert.deepEqual(h.paints, ['list', 'marks'], 'a row read elsewhere repaints the list');
+    h.paints.length = 0;
+    h.api.observeMainRevision(72);
+    h.reply(stale);  // an older answer arriving last
+    await flush();
+    assert.deepEqual([h.api.mainUnreadCount(), h.flags(), h.context.state.projectSeenRevision],
+        [1, { nova: true, mira: false, gone: false }, { nova: 1, mira: 4 }], 'it takes nothing back');
 });
 
-function snapshotHarness({ host, beyond = [], seen }) {
-    const answers = [];
-    const context = vm.createContext({
-        ...readAhead,
-        heldRows, beyond, forgetProjectPreviews,
-        navState: { activeProjectId: null },
-        state: { mainVisibleRevision: 90, mainSeenRevision: 90, mainSeenLoaded: true, activePage: 'files',
-            projectSeenRevision: seen },
-        closeProjectPanel() {}, patchProjectActivityMarkers() {}, syncNavigationState() {}, acknowledgeProjectAfterPaint() {},
-        updateUnreadBadge() {}, rooms: { forget() {} },  // every read names the projects going away (room_retire.js)
-        fetchJson: () => new Promise((resolve) => { answers.push(() => resolve(JSON.parse(JSON.stringify(host)))); }),
-    });
-    vm.runInContext(['renderProjectsNav', 'mergeMainSeenRevision', 'mergeProjectSeenRevisions', 'refreshSharedProjectSeen']
-        .map(lift).join('\n')
-        + '\nlet sharedSeenRead = null, knownProjectsJson = null, lastProjectRows = null, projectActivityIndex = {};'
-        + '\nconst projectsNav = heldRows(() => lastProjectRows, beyond);'
-        + '\nfunction paintProjectsNav() {}\nglobalThis.api = { renderProjectsNav, unreadRows: () => projectsNav.unreadRows() };', context);
-    // What each row the list holds unread counts, by id (an empty list: nothing unread).
-    const unread = () => Object.fromEntries(context.api.unreadRows()
-        .map((row) => [row.id, rowUnread(row, context.state.projectSeenRevision)]));
-    return { context, unread, answers };
-}
-
 test("a snapshot showing only a Project unread reads another client's record as well", async () => {
-    const host = { main_seen_revision: 90, project_seen_revision: { vega: 2 }, read_ahead_revisions: { 7303: [[5, 5]] } };
-    const { context, unread, answers } = snapshotHarness({ host, seen: { vega: 2 } });
-    context.api.renderProjectsNav([{ id: 'vega', chat_id: 7303, visible_revision: 5, lifecycle: 'active' }], [7303]);
-    assert.deepEqual(unread(), { vega: 3 });  // 3, 4 and 5: the other client read 5 in Main, this one does not know yet
-    assert.equal(answers.length, 1, 'Main shows nothing unread: the Project row alone reads the shared cursors again');
-    answers.shift()();
+    const host = { main_seen_revision: 90, project_seen_revision: { vega: 2 }, read_ahead_revisions: { 7303: [[3, 5]] } };
+    const h = listHarness({ host, seen: { vega: 2 } });
+    h.api.renderProjectsNav([{ id: 'vega', chat_id: 7303, visible_revision: 5, lifecycle: 'active' }], [7303]);
+    assert.deepEqual([h.flags(), h.dot()], [{ vega: true }, 'dot unread']);  // 3, 4 and 5, as this client knows
+    assert.equal(h.answers.length, 1, 'Main shows nothing unread: the Project row alone reads the shared cursors again');
+    h.paints.length = 0;
+    h.reply();  // the other client read 3 to 5 in Main
     await flush();
-    assert.deepEqual(unread(), { vega: 2 });
+    assert.deepEqual(h.flags(), { vega: false }, 'the row is read');
+    assert.deepEqual(h.paints, ['list', 'marks'], 'and the list is painted again');
+    assert.equal(h.dot(), 'none', "the dot on Ouroboros's picture goes with the last unread Project");
+    assert.equal(h.toggle.attrs['aria-label'], 'Open navigation');
 });
 
 test("a room beyond the feed counts and asks after another client's read though the feed shows nothing unread", async () => {
     const host = { main_seen_revision: 90, project_seen_revision: { old: 3 }, read_ahead_revisions: {} };
     const old = { id: 'old', chat_id: 7304, visible_revision: 3 };
-    const { context, unread, answers } = snapshotHarness({ host, beyond: [old], seen: { old: 1 } });
-    context.api.renderProjectsNav([{ id: 'vega', chat_id: 7303, visible_revision: 0, lifecycle: 'active' }], [7303, 7304]);
-    assert.deepEqual(unread(), { old: 2 }, 'revisions 2 and 3 of the room a complete list showed');
-    assert.equal(answers.length, 1, 'that room alone reads the shared cursors again');
-    context.beyond.length = 0;  // the room reads as read once its cursor has moved, as the list module would say
-    answers.shift()();
+    const h = listHarness({ host, beyond: [old], seen: { old: 1 } });
+    h.api.renderProjectsNav([{ id: 'vega', chat_id: 7303, visible_revision: 0, lifecycle: 'active' }], [7303, 7304]);
+    assert.deepEqual([h.flags(), h.dot()], [{ vega: false }, 'dot unread'],
+        'revisions 2 and 3 of the room a complete list showed light the dot');
+    assert.equal(h.answers.length, 1, 'that room alone reads the shared cursors again');
+    h.paints.length = 0;
+    h.reply();
     await flush();
-    assert.deepEqual(unread(), {});
+    assert.equal(h.context.state.projectSeenRevision.old, 3, "the other client's cursor is this one's");
+    assert.deepEqual(h.paints, ['marks'], 'no held row changed: the marks alone are painted again');
+    assert.equal(h.dot(), 'none', 'and the room beyond the feed reads as read');
 });
 
 // Main shown from elsewhere, or pressed again (DESIGN "Unread"; #2911 composed with the return rule of 3 Nov 2026).
