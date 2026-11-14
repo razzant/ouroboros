@@ -4,6 +4,7 @@ import contextlib
 from datetime import datetime
 import json
 import logging
+import pathlib
 import time
 from typing import Any
 
@@ -356,6 +357,46 @@ def spend_text(rows) -> str:
         return "unknown"
     return "; ".join(f'{row["label"]}: {"at least " if row["unmetered_calls"] else ""}'
                      f'${row["usd"]:.2f} ({row["unmetered_calls"]} unmetered calls)' for row in rows) or "none"
+
+
+def cache_writes_text(drive_root, now: float = 0.0) -> str:
+    """The install's cache writes of the last 24 hours as one wake fact (``gateway.cost_period``, the Costs page's own
+    view, read once per wake). A view that cannot be read is said as unknown, never as none, and the wake goes on."""
+    try:
+        from ouroboros.gateway.cost_period import cost_period
+
+        return _cache_writes_line(cost_period(pathlib.Path(drive_root), "24h", now=now or None)["cache_writes"])
+    except Exception:
+        log.warning("The last day's cache writes could not be read for this wake", exc_info=True)
+        return "unknown (could not be read)"
+
+
+def _cache_writes_line(rows) -> str:
+    """``cost_period``'s cache-write rows as one line: the calls that wrote, their tokens, the writes' share of recorded
+    cost, and the three classes that wrote most. A class goes without its detail (route and block names); a call whose
+    cost no tariff could share is counted as unsplit, and a cost nobody could share is unknown, never zero."""
+    classes: dict[str, dict] = {}
+    for row in rows:
+        held = classes.setdefault(row["class"], {"calls": 0, "tokens": 0, "usd": 0.0, "unsplit": 0})
+        held["calls"] += row["calls"]
+        held["tokens"] += row["write_tokens"]
+        held["usd"] += row["write_cost"]
+        held["unsplit"] += row["unshared_calls"]
+    if not classes:
+        return "none in the last 24 h"
+    calls, tokens, usd, unsplit = (sum(held[key] for held in classes.values()) for key in ("calls", "tokens", "usd", "unsplit"))
+
+    def compact(count) -> str:  # the Costs page's own form (web/modules/cost_period.js ``compactTokens``)
+        for unit, word in ((1e9, "B"), (1e6, "M")):
+            if count >= unit:
+                return (f"{count / unit:.0f}" if count / unit >= 100 else f"{count / unit:.1f}".removesuffix(".0")) + word
+        return f"{int(count / 1e3 + 0.5)}k" if count >= 1e3 else str(int(count))
+
+    money = ("cost unknown" if unsplit >= calls else
+             f"${usd:.2f} write share of recorded cost" + (f", {unsplit} unsplit" if unsplit else ""))
+    most = sorted(classes.items(), key=lambda item: (-item[1]["usd"], -item[1]["tokens"], item[0]))[:3]
+    return (f"{calls} in the last 24 h, {compact(tokens)} tokens, {money}; most: " + ", ".join(
+        f'{name} {held["calls"]}' + (f' ${held["usd"]:.2f}' if held["unsplit"] < held["calls"] else "") for name, held in most))
 
 
 def roots_text(rows) -> str:

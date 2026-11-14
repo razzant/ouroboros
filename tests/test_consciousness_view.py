@@ -11,6 +11,9 @@ from ouroboros import consciousness_view as view, places, usage_accounting as ua
 from ouroboros.consciousness_wake import PLACEHOLDERS, render_wake_message
 from tests._store_shared import seed_result
 from tests.fixtures_usage_store import _request, _settle
+from tests.test_cost_period import UNLISTED, _call as _period_call, root as _period_root
+
+period_root = _period_root  # the period view's own ledger fixture: a real usage store and a priced catalogue
 
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "wake_document_214a31b6.json"
@@ -140,6 +143,82 @@ def test_prompt_carries_labels_counts_and_one_allowance(tmp_path):
     assert "root: Study queue (started work)" in text
     assert "places: Inbox [mail]: active; open turns: 0" in text
     assert "allowance known spend (last 24 h): at least 2.50 / 20.00 USD" in text
+    assert "\n- install cache writes: unknown\n" in text  # a caller that read nothing says so, never "none"
+
+
+def test_cache_writes_line_folds_classes_and_never_reads_an_unshared_cost_as_zero():
+    """The row a wake carries: calls, tokens, the writes' share of recorded cost, the three classes that wrote most.
+    A class is one row whatever its details were, and no detail (a route's or a block's name) is printed; a call no
+    tariff could share is unsplit, a class with none shared shows no dollars, and a day with none shared is "cost
+    unknown", never $0.00."""
+    def row(name, calls, tokens, usd, unsplit=0, detail=""):
+        return {"class": name, "detail": detail, "calls": calls, "write_tokens": tokens, "write_cost": usd,
+                "unshared_calls": unsplit, "shared_write_tokens": tokens if unsplit < calls else 0}
+
+    costly = [row("entered_model", 20, 30_000_000, 120.0, detail="anthropic/claude-opus-5.5"),
+              row("entered_model", 10, 15_000_000, 62.25, 2, detail="openrouter@named::anthropic/claude-opus-5.5"),
+              row("system_changed", 21, 20_000_000, 108.4, detail="my story and identity"),
+              row("append", 15, 5_000_000, 70.95), row("first_request", 18, 1_400_000, 51.2),
+              row("not_recorded", 10, 400, 0.0, 10)]
+    assert view._cache_writes_line(costly) == (
+        "94 in the last 24 h, 71.4M tokens, $412.80 write share of recorded cost, 12 unsplit; "
+        "most: entered_model 30 $182.25, system_changed 21 $108.40, append 15 $70.95")
+    assert view._cache_writes_line([row("first_request", 2, 150_300, 0.42), row("append", 5, 125_000, 0.0, 5)]) == (
+        "7 in the last 24 h, 275k tokens, $0.42 write share of recorded cost, 5 unsplit; most: first_request 2 $0.42, append 5")
+    assert view._cache_writes_line([row("append", 31, 6_200_000, 0.0, 31), row("first_request", 9, 2_000_000, 0.0, 9)]) == (
+        "40 in the last 24 h, 8.2M tokens, cost unknown; most: append 31, first_request 9")
+    assert view._cache_writes_line([row("append", 1, 999, 0.004)]) == (
+        "1 in the last 24 h, 999 tokens, $0.00 write share of recorded cost; most: append 1 $0.00")
+    assert view._cache_writes_line([]) == "none in the last 24 h"
+
+
+def test_cache_writes_text_reads_the_period_view_itself_and_says_unknown_when_it_cannot(period_root, monkeypatch):
+    """Through the real ledger and ``cost_period``: its row keys are the ones the line reads. A view that raises, or
+    whose rows the line cannot read, is "unknown" and never "none"; the wake that asked goes on."""
+    assert view.cache_writes_text(period_root) == "none in the last 24 h"
+    _period_call(period_root, prompt=200_000, write=200_000, cost=1.60, prefix={"departs": "first"})
+    _period_call(period_root, prompt=100_000, write=100_000, cost=0.80,
+                 prefix={"departs": "system", "index": 1, "of": 3, "block": "my story and identity"})
+    _period_call(period_root, prompt=50_000, write=50_000, cost=0.40,
+                 prefix={"departs": "system", "index": 2, "of": 3, "block": "runtime facts"})
+    _period_call(period_root, model=UNLISTED, prompt=30_000, write=30_000, cost=0.25, prefix={"departs": "append"})
+    _period_call(period_root, prompt=100, read=100, cost=0.1, prefix={"departs": "append"})  # wrote nothing
+    assert view.cache_writes_text(period_root) == (
+        "4 in the last 24 h, 380k tokens, $2.80 write share of recorded cost, 1 unsplit; "
+        "most: first_request 1 $1.60, system_changed 2 $1.20, append 1")
+    from ouroboros.gateway import cost_period
+    from ouroboros.usage_ledger import UsageLockUnavailable
+
+    def busy(*_args, **_kwargs):
+        raise UsageLockUnavailable("the ledger is busy")
+
+    for reader in (busy, lambda *_a, **_kw: {"cache_writes": [{"class": "append"}]}):
+        monkeypatch.setattr(cost_period, "cost_period", reader)
+        assert view.cache_writes_text(period_root) == "unknown (could not be read)"
+
+
+def test_a_wake_reads_its_cache_writes_once_and_carries_them_in_every_form(monkeypatch, tmp_path):
+    """``prepare_wake`` asks once, in the carrier, and the row rides the complete observation and both stored forms
+    (``bind_wake_observation`` renders them from the same context)."""
+    from ouroboros import consciousness_wake
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    reads, forms = [], []
+    line = "3 in the last 24 h, 9k tokens, cost unknown; most: append 3"
+    monkeypatch.setattr(view, "cache_writes_text", lambda root, now: reads.append((root, now)) or line)
+    monkeypatch.setattr(view, "place_views", lambda root, window: None)
+    monkeypatch.setattr(consciousness_wake, "observe_wake", lambda root, **kw: SimpleNamespace(full_text=lambda: "EVENTS"))
+    monkeypatch.setattr(consciousness_wake, "previous_wake_text", lambda *a, **kw: "none")
+    monkeypatch.setattr(consciousness_wake, "bind_wake_observation",
+                        lambda root, task, observation, render: forms.extend([render("OVERVIEW"), render("POINTER")]))
+    task = {"id": "w1", "chat_id": 1, "text": "[Wake-up · heartbeat]", "metadata": {}, "_wake_prepare": {
+        "boundary": None, "since": 10.0, "now": 20.0, "reason": "heartbeat", "level": "act", "repo_dir": str(repo),
+        "last_wake_at": 5.0, "last_wake_task_id": "", "disabled_tools": [], "counted_roots": [], "max_tasks": 2,
+        "interval": 600, "window": {"settled_usd": 1.0, "unknown_unmetered": 0, "limit_usd": 5.0, "spend_by_cause": None}}}
+    consciousness_wake.prepare_wake(task, tmp_path)
+    assert reads == [(tmp_path, 20.0)]
+    row = f"\n- install cache writes: {line}\n- counted roots: "
+    assert row in task["text"] and len(forms) == 2 and all(row in form for form in forms)
 
 
 def test_real_terminal_wake_uses_terminal_fact_and_card_phase(tmp_path, wake):
