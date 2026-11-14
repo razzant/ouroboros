@@ -7,6 +7,8 @@ import pathlib
 from dataclasses import replace
 from types import SimpleNamespace
 
+import pytest
+
 from ouroboros import context_compaction as cc
 from ouroboros.artifacts import read_actor_source_bytes
 from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND, bound_host_row
@@ -25,8 +27,9 @@ LEGACY_FACTS = {"role": "user", HOST_CONTEXT_KIND_KEY: CONTEXT_FACTS_NAME,  # wr
 PROSE_CALL = {"role": "assistant", "content": "Checking the flag parser next.", "tool_calls": [{
     "id": "four", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\": \"cli.py\"}"}}]}
 # A repetition loop cut at the output limit: arguments nesting past the JSON decoder's depth chose no read.
+# Python 3.14 bounds the decoder by its C stack (about 115k levels on macOS), not the 1000-frame limit.
 DEEP_CALL = [{"role": "assistant", "content": "", "tool_calls": [{"id": "deep", "type": "function", "function": {
-    "name": "read_file", "arguments": '{"path": ' + "[" * 100_000}}]},
+    "name": "read_file", "arguments": '{"path": ' + "[" * 1_000_000}}]},
     {"role": "tool", "tool_call_id": "deep", "content": "⚠️ TOOL_ARG_ERROR: Could not parse arguments for 'read_file'"}]
 
 
@@ -50,6 +53,8 @@ def _noted(tmp_path):
 
 
 def test_the_seed_keeps_people_notes_and_recent_reasoning_and_addresses_the_rest(tmp_path):
+    with pytest.raises(RecursionError):  # the fixture witnesses the decoder's depth refusal, not a truncation error
+        json.loads(DEEP_CALL[0]["tool_calls"][0]["function"]["arguments"])
     messages = _noted(tmp_path)
     seed, left = renewal_seed(messages)
     texts = [json.dumps(row.get("content"), ensure_ascii=False) for row in seed]
