@@ -267,6 +267,9 @@ def test_a_presence_workpad_read_is_a_pure_read_not_possible_speech():
     assert may_speak(ctx, {"function": {"name": "workpad_read", "arguments": "{}"}}) is False
     assert "workpad_read" in PURE_READ_TOOLS and "workpad_read" not in READ_ONLY_PARALLEL_TOOLS  # no new parallelism
     assert may_speak(ctx, {"function": {"name": "workpad_write", "arguments": "{}"}}) is False  # a receipt write, as before
+    # K17: the other half: a call that may put words in the place still counts as speech.
+    for name, arguments in (("send_message", '{"text": "hello"}'), ("run_shell", '{"cmd": "echo hello"}')):
+        assert may_speak(ctx, {"function": {"name": name, "arguments": arguments}}) is True, name
 
 
 def test_scope_refusals_carry_the_resolvers_own_code(tmp_path, store):
@@ -340,3 +343,72 @@ def test_a_page_that_is_not_text_is_replaced_by_an_overwrite_and_refuses_an_edit
     blind = _workpad_write(other, "fresh\n")
     assert blind.startswith("⚠️ BLIND_OVERWRITE") and _code(other) == "LEGACY_WARNING", blind
     assert page.read_bytes() == b"fresh\n" and _rows(journal)[-1]["old_not_text"] is True
+
+
+def test_an_edit_or_revert_needs_the_revision_it_was_written_against(tmp_path, store):
+    """K17: the workpad's blind overwrite is its only blind write. An edit or a revert without expected_revision is
+    refused (revision_required), page and journal untouched; with the revision each lands."""
+    from ouroboros.tools.project_journal import _workpad_write
+
+    page, journal = store
+    ctx = _ctx(tmp_path)
+    _workpad_write(ctx, PLAN)
+    v1 = _sha(page.read_bytes())
+    _workpad_write(ctx, mode="edit", old_str="- paint", content="- paint red", expected_revision=v1)
+    before, rows = page.read_bytes(), len(_rows(journal))
+    for mode, extra in (("edit", {"old_str": "- wheels", "content": "- new wheels"}), ("revert", {"version": v1})):
+        refused = _workpad_write(ctx, mode=mode, **extra)
+        assert refused.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED: revision_required") and _code(ctx) == \
+            "RESOURCE_CONSTRAINT_BLOCKED", refused
+        assert page.read_bytes() == before and len(_rows(journal)) == rows
+    edited = _workpad_write(ctx, mode="edit", old_str="- wheels", content="- new wheels", expected_revision=_sha(before))
+    reverted = _workpad_write(ctx, mode="revert", version=v1, expected_revision=_sha(page.read_bytes()))
+    assert edited.startswith("OK: workpad updated (edit") and reverted.startswith("OK: workpad updated (revert"), reverted
+    assert page.read_bytes() == PLAN.encode("utf-8") and [row["mode"] for row in _rows(journal)][-2:] == ["edit", "revert"]
+
+
+def test_an_empty_expected_revision_conflicts_on_an_existing_page_and_creates_a_missing_one(tmp_path, store):
+    """K17 (A1): expected_revision="" is create-only on the workpad's overwrite too: on a missing page it creates it,
+    on an existing one it is a conflict that writes nothing (never a blind overwrite)."""
+    from ouroboros.tools.project_journal import _workpad_write
+
+    page, journal = store
+    ctx = _ctx(tmp_path)
+    created = _workpad_write(ctx, PLAN, expected_revision="")
+    assert created.startswith("OK: workpad created (overwrite") and page.read_bytes() == PLAN.encode("utf-8"), created
+    conflict = _workpad_write(ctx, "# Replaced\n", expected_revision="")
+    assert conflict.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED: revision_conflict") and _code(ctx) == \
+        "RESOURCE_CONSTRAINT_BLOCKED", conflict
+    assert page.read_bytes() == PLAN.encode("utf-8") and len(_rows(journal)) == 1
+
+
+def test_an_observe_wake_may_use_every_workpad_mode_and_no_gate_reads_the_mode(tmp_path, store, monkeypatch):
+    """K17 (A12): Observe keeps workpad_write (its own project's page) and its argument narrowing has no branch for
+    the workpad's modes: overwrite, edit and revert each land through the real dispatch under an Observe wake. The
+    project scope, not the level, still refuses another project's page."""
+    from ouroboros import consciousness_authority as authority
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+    from tests.test_consciousness_authority import _wake_task
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    page, journal = store
+    meta = _wake_task("observe")["metadata"]
+    assert authority.is_observe_origin(meta)
+    for mode in ("overwrite", "edit", "revert"):
+        assert authority.observe_argument_refusal(meta, "workpad_write", {"mode": mode, "content": "x"}) == ""
+    (tmp_path / "repo").mkdir()
+    registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "drive")
+    registry.set_context(ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path / "drive", task_id="turn-1",
+                                     is_direct_chat=True, task_metadata=dict(meta), project_id=PID))
+    assert registry.get_schema_by_name("workpad_write") is not None
+    created = registry.execute("workpad_write", {"content": PLAN})
+    v1 = _sha(page.read_bytes())
+    edited = registry.execute("workpad_write", {"mode": "edit", "old_str": "- paint", "content": "- paint red",
+                                                "expected_revision": v1})
+    reverted = registry.execute("workpad_write", {"mode": "revert", "version": v1,
+                                                  "expected_revision": _sha(page.read_bytes())})
+    assert all(reply.startswith("OK: workpad") for reply in (created, edited, reverted)), (created, edited, reverted)
+    assert page.read_bytes() == PLAN.encode("utf-8") and [row["mode"] for row in _rows(journal)] == [
+        "overwrite", "edit", "revert"]
+    foreign = registry.execute("workpad_write", {"content": "x", "project_id": "other"})
+    assert foreign.startswith("⚠️ TOOL_FORBIDDEN") and page.read_bytes() == PLAN.encode("utf-8"), foreign
