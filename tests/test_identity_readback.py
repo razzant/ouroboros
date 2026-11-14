@@ -103,10 +103,10 @@ def test_empty_missing_denied_and_unreadable_identity_keep_their_meaning(identit
     from ouroboros import store
     original_read = store.read_file_bytes
 
-    def read(path):
+    def read(path, **kwargs):  # the tool reads through work_domain.read_bytes, which passes limit=
         if path == canonical:
             raise PermissionError("fixture unreadable identity")
-        return original_read(path)
+        return original_read(path, **kwargs)
 
     monkeypatch.setattr(store, "read_file_bytes", read)
     unreadable = reg.execute_result("read_file", {"root": "runtime_data", "path": str(canonical)})
