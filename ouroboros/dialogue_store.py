@@ -1151,6 +1151,17 @@ def rows_by_client_id(root: Any, client_message_id: str, *, stream: str = "chat"
     return [_row(record) for record in records]
 
 
+def carried_ids(root: Any, client_message_ids: Iterable[str], *, stream: str = "chat") -> set:
+    """The ids among ``client_message_ids`` some row of ``stream`` carries (``rows_by_client_id`` non-empty), in ONE
+    step: one ``dialogue_named`` seek an id inside one statement, never a transaction an id (each releases the GIL)."""
+    wanted = list(dict.fromkeys(str(value) for value in client_message_ids if value))
+    with transaction(root, write=False) as conn:
+        found = conn.execute("SELECT json_group_array(key) FROM json_each(?) WHERE EXISTS (SELECT 1 FROM dialogue "
+                             "INDEXED BY dialogue_named WHERE stream=? AND client_message_id=+value)",
+                             (json.dumps(wanted, ensure_ascii=False), stream)).fetchone()[0]
+    return {wanted[index] for index in json.loads(found or "[]")}
+
+
 def rows_by_identity(root: Any, chat_id: Optional[int], ts: str, *, stream: str = "chat") -> List[Row]:
     """The rows of one chat stamped ``ts`` (a ``chat_chain`` row address's chat and time), in order."""
     with transaction(root, write=False) as conn:
