@@ -1422,8 +1422,8 @@ html[data-layout="docked"] .app-page-header[data-empty] {
 .app-page-lead:empty,
 .app-page-tabs:not(:has(> *)) { display: none; }
 /* The Back slot (page_header.js placePageBack): one control, never part of a lead that scrolls. On a desk it stands
-   before the lead in the bar's start; in the stack layout it starts the row under ☰: the page's tab strip when it
-   has one, else a row of the header's own. */
+   before the lead in the bar's start; in the stack layout it is the header's one leading control, where ☰ stood
+   (below). */
 .app-page-back { display: flex; flex: none; align-items: center; }
 .app-page-back:empty { display: none; }
 html[data-layout="docked"] .app-page-title-block:has(> .app-page-back:not(:empty)) {
@@ -1451,12 +1451,6 @@ html[data-layout="stack"] .app-page-header[data-back] > .app-page-leading:has(~ 
 html[data-layout="stack"] .app-page-header[data-back] > .app-page-title-block:has(> .app-page-back:not(:empty)) { display: contents; }
 html[data-layout="stack"] .app-page-header[data-back] .app-page-title-row { grid-area: title; }
 html[data-layout="stack"] .app-page-header[data-back] .app-page-back { grid-area: back; }
-.app-page-tabs[data-back] { display: flex; align-items: center; gap: var(--space-1); }
-.app-page-tabs[data-back] > :not(.app-page-back) { flex: 1 1 auto; min-width: 0; }
-/* Back starts the tabs' row at ☰'s inset and is centred on the tabs, not on the strip, which lends its tabs their
-   shadow room below them (.app-tab-strip: var(--space-2) above, var(--space-5) below). */
-.app-page-tabs[data-back] { padding-inline-start: var(--space-3); }
-.app-page-tabs[data-back] > .app-page-back { margin-bottom: calc(var(--space-5) - var(--space-2)); }
 /* A narrow content column gives the existing toolbar its own wrapping row; navigation lives below it. */
 html[data-layout="docked"] .app-page-header[data-narrow] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "toolbar"; }
 html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-leading { display: none; }
@@ -9104,9 +9098,10 @@ html .nav-projects-list[data-finding] .nav-project-row[data-solo] { padding-bloc
     overflow-wrap: anywhere;
 }
 
-/* The list's own commands (Show more, Clear search, Show all projects, Try again) and its one sentence take a
-   Project row's geometry in the meta ink, their words on the label column (Show more's chevron in the icon column),
-   so none reads as one more Project. */
+/* The list's own commands (Show more, Clear search, Show all projects, Try again) stand on the rows' words' column,
+   semibold at the meta size in the primary ink, a command's glyph leading there and its words after it (the chevron
+   of Show more and Show all projects, Clear search's ×), and its one sentence in the meta ink on the same column, so
+   none reads as one more Project. */
 .nav-projects-more {
     display: flex;
     align-items: center;

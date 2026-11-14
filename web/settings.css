@@ -1284,8 +1284,8 @@ html[data-layout="stack"] .settings-search { height: 44px; }
 
 /* settings rows */
 /* A row that saves itself (settings_controls.js settingsRow) stands on the shared .ui-row, at least 52 px tall: its
-   name, one meta line with the row's result after it, its control at the end. The result is words in the meta line,
-   so an empty one takes no line, and Undo is a link in that sentence. A number is typed in a short field with its
+   name, one meta line and its control at the end, and the row's result on a line of its own under them (below): an
+   empty one takes no line, and Undo is a link in that sentence. A number is typed in a short field with its
    unit beside it ("No limit" next to a bound that may be unlimited) and a choice of many is a list, both as tall as
    a button with the value in the semibold weight; a path or an address has a longer field. */
 .settings-row,
