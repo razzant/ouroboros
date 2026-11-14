@@ -15,14 +15,14 @@ RELEASE_ROW = re.compile(r"^\| \d+\.\d+\.\d+\S* \| \d{4}-\d{2}-\d{2} \|")
 # Exact (file, line) exceptions only: blocked bundled-skill releases.
 # Each entry must explain the debt; new addresses elsewhere in these files still fail.
 PROTECTED_KNOWN = {
-    ('skills/telegram/lib/telegram_api.py', 1002): "wording only; changes at the skill's next release",
-    ('skills/telegram/lib/telegram_api.py', 1007): "wording only; changes at the skill's next release",
+    ('skills/telegram/lib/telegram_api.py', 1027): "wording only; changes at the skill's next release",
+    ('skills/telegram/lib/telegram_api.py', 1032): "wording only; changes at the skill's next release",
     ('skills/telegram/lib/telegram_connection.py', 1): "wording only; changes at the skill's next release",
     ('skills/telegram/lib/telegram_connection.py', 137): "wording only; changes at the skill's next release",
     ('skills/telegram/lib/telegram_connection.py', 190): "wording only; changes at the skill's next release",
     ('skills/telegram/lib/telegram_connection.py', 211): "wording only; changes at the skill's next release",
     ('skills/telegram/lib/telegram_token.py', 210): "wording only; changes at the skill's next release",
-    ('skills/telegram/plugin.py', 1451): "wording only; changes at the skill's next release",
+    ('skills/telegram/plugin.py', 1469): "wording only; changes at the skill's next release",
     ('skills/telegram/scripts/companion.py', 496): "wording only; changes at the skill's next release",
 }
 ADDRESS = re.compile(r"\bSettings\s*(?:→|›|->|>)\s*(?=[A-Za-z])")
