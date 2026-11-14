@@ -316,3 +316,37 @@ def test_a_stale_revision_held_only_on_a_rows_old_side_gets_the_changes_since(tm
     assert "earlier version of this identity; no history row wrote it (an outside edit" in stale
     assert "Written since that version, oldest first:\n- " in stale and "focus root task_id=other" in stale
     assert "\n- Keep what I learn.\n+ Keep what I learn, dated.\n" in stale and "Mine." not in identity.read_text("utf-8")
+
+
+def test_each_listed_write_prints_its_own_undo_with_the_project_and_running_it_restores_that_version(
+        tmp_path, monkeypatch):
+    """K8 through the door: each row of a workpad's list prints the workpad_write call (project_id included) that puts
+    back the version ITS write replaced over the current revision, never the line below's; the printed call of a write
+    over an outside edit restores the outside bytes exactly; the creating row has no earlier version; while the page
+    does not exist no revert is offered (a revert needs the page)."""
+    import types
+
+    from ouroboros.tools.project_journal import _workpad_write
+    from tests._knowledge_history_shared import printed_call
+
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "data")
+    own = types.SimpleNamespace(project_id="atlas", task_id="t-1", drive_root=tmp_path, task_metadata={})
+    _workpad_write(own, "# Plan\n\n- one\n")
+    page = tmp_path / "data" / "projects" / "atlas" / "workpad.md"
+    first = _sha(page.read_bytes())
+    page.write_bytes(b"# Plan\r\n\r\n- outside\r\n")  # no row writes this version
+    outside = _sha(page.read_bytes())
+    _workpad_write(own, "# Plan\n\n- two\n", expected_revision=outside)
+    current = _sha(page.read_bytes())
+    rows = [line for line in _read(own, source="workpad").splitlines() if line.startswith("- ")]
+    calls = [re.search(r" · undo: (workpad_write\(.*?\)) · ", row) for row in rows]
+    assert printed_call(calls[0][1]) == ("workpad_write", {"project_id": "atlas", "mode": "revert", "version": outside,
+                                                            "expected_revision": current}), rows[0]
+    assert first not in rows[0] and calls[1] is None and " · created it: no earlier version to put back · " in rows[1]
+    tool, arguments = printed_call(calls[0][1])
+    undone = _workpad_write(own, **arguments)
+    assert undone.startswith("OK: workpad updated (revert") and page.read_bytes() == b"# Plan\r\n\r\n- outside\r\n", undone
+    page.unlink()
+    gone = _read(own, source="workpad")
+    assert "mode='revert'" not in gone and " · undo: the workpad does not exist now, so read that version" in gone, gone
+    assert "Put one back: the workpad does not exist now, so mode=revert cannot run" in gone

@@ -13,7 +13,7 @@ from ouroboros import markdown_source
 from ouroboros import text_change
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext, ToolRegistry
-from tests._knowledge_history_shared import applied_blocks, changed_rows
+from tests._knowledge_history_shared import applied_blocks, changed_rows, printed_call
 
 TOPIC = "notes/река"
 RIVER = ("---\ntype: note\nsummary: When the river matters.\n---\n# Река\n\nБерег 🌊.\n\n## Мост\n\nСтарый мост.\n\n"
@@ -122,12 +122,12 @@ def test_history_lists_versions_newest_first_marks_the_current_one_and_names_gap
     assert "reason: not recorded" in rows[3] and "focus unknown" in rows[3]
     assert f"1 journal line(s) naming this note are not JSON and were skipped (the first at byte offset {torn_at})" in listing
     assert f"expected_revision={third.revision!r}" in listing
-    assert listing.endswith(f"expected_revision={third.revision!r}). Each line is the note after its write; undoing a "
-                            "write puts back the version it replaced, the one after 'replaced' on its line.\n"), listing
+    assert listing.endswith(f"expected_revision={third.revision!r}). Each line is the note after its write; its undo "
+                            "puts back the version that write replaced, which is not always the line below.\n"), listing
     # Each line names the version its write actually replaced: the capture that never landed replaced `second` too.
-    assert [re.search(r" · (replaced [0-9a-f]{64}|created it \(nothing before it\)) · ", row)[1] for row in rows] == [
-        f"replaced {second.revision}", f"replaced {second.revision}", f"replaced {first.revision}",
-        "created it (nothing before it)"]
+    assert [re.search(r" · (replaced [0-9a-f]{64}|created it: no earlier version to put back) · ", row)[1]
+            for row in rows] == [f"replaced {second.revision}", f"replaced {second.revision}",
+                                 f"replaced {first.revision}", "created it: no earlier version to put back"]
     fingerprint = re.search(r'"fingerprint": "([0-9a-f]{16})"', listing)[1]
     page = tools._knowledge_read(ctx, TOPIC, view="history", start_char=10, end_char=60, fingerprint=fingerprint)
     assert body(page) == body(listing)[10:60] and '"complete_chars": ' in page
@@ -501,3 +501,33 @@ def test_a_history_continuation_is_bound_to_the_list_its_first_page_read(tmp_pat
     moved = tools._knowledge_read(ctx, TOPIC, view="history", start_char=120, fingerprint=fingerprint)
     assert moved.startswith("⚠️ TOOL_ERROR: position_mismatch") and "Two." not in moved, moved
     assert "fingerprint continues a list of versions" in tools._knowledge_read(ctx, TOPIC, fingerprint=fingerprint)
+
+
+def test_each_history_row_prints_the_call_that_undoes_its_own_write(tmp_path):
+    """K8: every row prints the revert call to the version ITS write replaced (that old_sha256, the current revision,
+    the note's address), never the line below's; running the printed call of a write over an outside edit puts that
+    outside text back exactly; a creating row says there is no earlier version; a row whose replaced version is the
+    current text says there is nothing to put back."""
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(context(tmp_path))
+    target = address(tmp_path)
+    first = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    target.path.write_bytes(first.raw.replace(b"One.", b"Outside."))  # no row writes this version
+    outside = store.read_knowledge_note(target)
+    second = store.write_knowledge_note(target, "# Река\n\nTwo.\n", expected_revision=outside.revision).current
+    third = store.write_knowledge_note(target, "# Река\n\nThree.\n", expected_revision=second.revision).current
+    rows = [line for line in versions.render_history(third).splitlines() if line.startswith("- ")]
+    assert [row.split(" · ")[0][2:] for row in rows] == [third.revision, second.revision, first.revision]
+    calls = [re.search(r" · undo: (knowledge_write\(.*?\)) · ", row) for row in rows]
+    where = {"topic": TOPIC, "scope": "global", "mode": "revert", "expected_revision": third.revision}
+    assert printed_call(calls[0][1]) == ("knowledge_write", {**where, "version": second.revision}), rows[0]
+    assert printed_call(calls[1][1]) == ("knowledge_write", {**where, "version": outside.revision}), rows[1]
+    assert first.revision not in rows[1] and calls[2] is None  # never the adjacent row; a creation has no undo
+    assert " · created it: no earlier version to put back · " in rows[2] and "undo" not in rows[2], rows[2]
+    tool, arguments = printed_call(calls[1][1])
+    undone = registry.execute(tool, arguments)
+    assert undone.startswith("✅") and target.path.read_bytes() == outside.raw, undone
+    after = [line for line in versions.render_history(store.read_knowledge_note(target)).splitlines()
+             if line.startswith("- ")]
+    assert f"version={third.revision!r}, expected_revision={outside.revision!r})" in after[0], after[0]
+    assert " · undo: nothing to put back, that version is the current text · " in after[2], after[2]

@@ -23,7 +23,7 @@ import json
 import os
 from collections import Counter
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from ouroboros import knowledge_rows, text_change
 from ouroboros.utils import jsonl_window
@@ -399,17 +399,28 @@ def delta_parts(row: Mapping[str, Any]) -> list[str]:
     return parts
 
 
-def _replaced(row: Mapping[str, Any]) -> str:
-    """The version a write replaced, its actual undo target: an empty ``old_sha256`` is a text that did not exist."""
+def _replaced(row: Mapping[str, Any], current: str, revert: Callable[[str], str] | None, what: str) -> list[str]:
+    """The version a write replaced, its actual undo target, and the call that puts it back over the current text
+    (``revert``; ``None`` while no text exists, which a revert needs). An empty ``old_sha256`` is a text that did not
+    exist: no earlier version. A row that names no replaced version has no undo; never the line below's."""
     old = row.get("old_sha256")
-    return ("created it (nothing before it)" if old == "" else f"replaced {old}" if isinstance(old, str) and old
-            else "replaced: not recorded")
+    if old == "":
+        return ["created it: no earlier version to put back"]
+    if not isinstance(old, str) or not old:
+        return ["replaced: not recorded, so no undo (the version it replaced is unknown)"]
+    if old == current:
+        undo = "undo: nothing to put back, that version is the current text"
+    elif revert is None:
+        undo = f"undo: the {what} does not exist now, so read that version and write it with mode=overwrite"
+    else:
+        undo = "undo: " + revert(old)
+    return [f"replaced {old}", undo]
 
 
-def _row_line(row: Mapping[str, Any], marks: list[str]) -> str:
+def _row_line(row: Mapping[str, Any], marks: list[str], replaced: list[str]) -> str:
     parts = [str(row.get("new_sha256") or "(no revision recorded)"), str(row.get("ts") or "time unknown"),
              "focus " + focus_text(row.get("focus")), str(row.get("mode") or "mode unknown"),
-             "reason: " + (str(row["reason"]) if row.get("reason") else "not recorded"), _replaced(row)]
+             "reason: " + (str(row["reason"]) if row.get("reason") else "not recorded"), *replaced]
     parts += delta_parts(row)
     if row.get("reverted_from"):
         parts.append(f"reverted_from {row['reverted_from']}")
@@ -418,10 +429,12 @@ def _row_line(row: Mapping[str, Any], marks: list[str]) -> str:
     return "- " + " · ".join(parts + marks)
 
 
-def render_listing(source: Any, current: str, title: str, read: str, revert: str) -> str:
+def render_listing(source: Any, current: str, title: str, read: str, revert: Callable[[str], str] | None) -> str:
     """A text's versions, newest first, one line each: who wrote it, when, in which mode, why, the version it replaced
     (its actual undo target, also where no line above wrote it: a first write, an outside change, a write that did not
-    land), what it changed, with the current one marked; then the calls that read and put back a version."""
+    land) and the call that puts that version back, what it changed, with the current one marked; then the calls that
+    read and put back a version. ``revert(version)`` is the exact call that puts ``version`` back over the current text
+    (expected_revision, address and project included); ``None`` while the text does not exist, which revert needs."""
     history = NoteHistory(source)
     rows = [_listed(row) for _offset, row in history]
     what = noun(source)
@@ -439,11 +452,13 @@ def render_listing(source: Any, current: str, title: str, read: str, revert: str
             marks.append("not the base of the next write (it did not land, or the file changed outside)")
         elif newer is None and revision != current:
             marks.append("not the current text (it did not land, or the file changed outside)")
-        lines.append(_row_line(row, marks))
+        lines.append(_row_line(row, marks, _replaced(row, current, revert, what)))
     if not rows:
         lines.append(f"(no rows: this {what} was written before the journal recorded it, or outside the writer)")
-    lines.append(f"Read one: {read}. Put one back: {revert}. Each line is the {what} after its write; undoing a write "
-                 "puts back the version it replaced, the one after 'replaced' on its line.")
+    put_back = (revert("<revision>").replace("'<revision>'", "<revision>") if revert is not None else
+                f"the {what} does not exist now, so mode=revert cannot run: read a version and write it with mode=overwrite")
+    lines.append(f"Read one: {read}. Put one back: {put_back}. Each line is the {what} after its write; its undo puts "
+                 "back the version that write replaced, which is not always the line below.")
     return "\n".join(lines) + "\n"
 
 
@@ -453,8 +468,8 @@ def render_history(note: Any) -> str:
     arguments = f"topic={address.topic!r}, scope={address.scope!r}"
     return render_listing(address, note.revision, f"History of {address.topic!r} ({address.scope})",
                           f"knowledge_read({arguments}, version=<revision>)",
-                          f"knowledge_write({arguments}, mode='revert', version=<revision>, "
-                          f"expected_revision={note.revision!r})")
+                          lambda version: f"knowledge_write({arguments}, mode='revert', version={version!r}, "
+                                          f"expected_revision={note.revision!r})")
 
 
 def _lines(raw: bytes, start: int, end: int, sign: str) -> tuple[int, list[str]]:

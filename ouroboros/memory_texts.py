@@ -410,9 +410,10 @@ def read_versions(ctx: Any, address: Any, version: Any, start: Any, fingerprint:
 
     With ``version``: that version's exact text, verified by its sha256 (the current bytes read even when no row
     names them; an earlier one reads even when the file is gone), paged by ``start``. Without: the versions newest
-    first (``knowledge_versions.render_listing``: who, when, mode, reason, what changed and the version each write
-    replaced), paged by ``start`` with the ``fingerprint`` of the list a page continues; a list that changed between
-    pages is refused, never joined. Any other selector beside ``source`` is refused, never silently resolved."""
+    first (``knowledge_versions.render_listing``: who, when, mode, reason, what changed, the version each write
+    replaced and the call that puts it back), paged by ``start`` with the ``fingerprint`` of the list a page
+    continues; a list that changed between pages is refused, never joined. Any other selector beside ``source`` is
+    refused, never silently resolved."""
 
     def failed(code: str, text: str, status: str = "error") -> str:
         return _publish_tool_result(ctx, ToolResult(status=status, code=code, text=text,
@@ -461,8 +462,7 @@ def read_versions(ctx: Any, address: Any, version: Any, start: Any, fingerprint:
     listing = knowledge_versions.render_listing(
         source, current or "none (the text does not exist now)", f"History of {source.name} ({source.noun})",
         read_call(source, "<revision>").replace("'<revision>'", "<revision>"),
-        write_call(source, mode="revert", version="<revision>", expected_revision=current or "<revision>")
-        .replace("'<revision>'", "<revision>"))
+        (lambda old: write_call(source, mode="revert", version=old, expected_revision=current)) if current else None)
     digest = sha256(listing.encode("utf-8")).hexdigest()[:16]
     if (start or fingerprint) and fingerprint != digest:
         return failed("TOOL_REPORTED_FAILURE", "⚠️ TOOL_ERROR: position_mismatch: that page belongs to another list of "
