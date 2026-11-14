@@ -6,8 +6,10 @@ fenced measured block in place, under the same per-file publication lock ``updat
 takes, and never touches the text outside it: a stock first-boot profile is fenced once
 (its pre-image journaled), anything else is kept byte for byte with the block inserted
 after the title. ``with_measured_block`` keeps the host's block when the mind publishes
-the file. The measured facts are a probe at startup, not a census of the environment:
-what lives here is the mind's to record.
+the file. A marker line the mind's own text holds outside the block is kept as sent, and
+refuses every edit until it goes: the overwrite's receipt and the edit's refusal say where
+it stands and how it goes (``publication_notices``, ``edited_map``). The measured facts are
+a probe at startup, not a census of the environment: what lives here is the mind's to record.
 """
 import os
 import platform
@@ -221,6 +223,81 @@ def measured_block_was_edited(content: str, old: str) -> bool:
     """True when the mind's publication carried a measured block that differs from the host's."""
     sent, kept = _FENCE_RE.search(content), _FENCE_RE.search(old)
     return bool(sent and kept and sent.group(0) != kept.group(0))
+
+
+# A line a fence could begin or end with, exactly as ``_FENCE_RE`` recognises its markers (a mention inside a
+# sentence is no marker). The regex sees complete pairs only, so a lone marker line is counted separately.
+_MARKER_LINE_RE = re.compile(r"^(?:" + re.escape(MEASURED_START) + r"[ \t\r]*|" + re.escape(MEASURED_END)
+                             + r"[ \t]*\r?)$", re.M)
+# How a marker line outside the host's block goes: the marker alone also matches the block's own lines, so an edit
+# anchors it with a line beside it.
+_STRAY_REMEDY = ("An overwrite without that line, or an edit item that replaces it together with a line beside it "
+                 "(the marker alone also matches the block's own), removes it.")
+
+
+def _stray_lines(text: str, fence: "re.Match | None") -> list:
+    """The line numbers of ``text``'s marker lines outside ``fence`` (a ``_FENCE_RE`` match; ``None``: every one)."""
+    inside = (fence.start(), fence.end()) if fence is not None else (0, 0)
+    return [text[:match.start()].count("\n") + 1 for match in _MARKER_LINE_RE.finditer(text)
+            if not inside[0] <= match.start() < inside[1]]
+
+
+def publication_notices(mode: str, sent: str, old: str, published: str) -> list:
+    """What a map publication's receipt says of the host's block: edits an overwrite sent inside it (not applied),
+    and a marker line the published map holds outside it, for which every later edit is refused until it goes."""
+    notices = []
+    if mode == "overwrite" and measured_block_was_edited(sent, old):
+        notices.append("The measured block is the host's: your edits inside it were not applied; it refreshes at "
+                       "startup.")
+    strays = _stray_lines(published, _FENCE_RE.search(published))
+    if strays:
+        notices.append("The map now holds a marker line outside the host's measured block at line "
+                       f"{', '.join(map(str, strays))}: every edit is refused while it stays. {_STRAY_REMEDY}")
+    return notices
+
+
+def edited_map(edited: str, old: str, items: list, repo_dir: str = "", data_dir: str = "") -> str:
+    """An edit of the map (``old`` with exact ``items`` applied, ``edited``), published with the host's block.
+
+    The result must hold the current measured block byte for byte as its fence and no marker line
+    outside it (an unfenced legacy map: no marker line at all), else ``ValueError`` names the items that,
+    applied alone, change the block or add a marker line, and where the stray marker stands; the whole
+    edit is refused. An unchanged block used as an anchor's context (an item on its edge that keeps it byte
+    for byte), an item beside it, or a marker mentioned inside a sentence is fine and never named. Then
+    today's overwrite rule (``with_measured_block``): an unfenced legacy map gets its block."""
+    kept, found = _FENCE_RE.search(old), _FENCE_RE.search(edited)
+    allowed = len(_MARKER_LINE_RE.findall(kept.group(0))) if kept else 0
+    if (found is None or kept is None or found.group(0) == kept.group(0)) and (kept is None or found is not None) \
+            and len(_MARKER_LINE_RE.findall(edited)) == allowed:
+        return with_measured_block(edited, old, repo_dir, data_dir)
+    problems, markers = [], len(_MARKER_LINE_RE.findall(old))
+    for number, (gone, new) in enumerate(items, 1):  # each item alone, found once in ``old``: only its own fault
+        alone, at = old.replace(gone, new, 1), old.find(gone)
+        if kept is not None and at < kept.end() and at + len(gone) > kept.start():
+            still = _FENCE_RE.search(alone)
+            if still is None or still.group(0) != kept.group(0):
+                problems.append(f"item {number} overlaps it")
+        if len(_MARKER_LINE_RE.findall(alone)) > markers:
+            problems.append(f"item {number}'s new_str brings a marker")
+    strays, before = _stray_lines(edited, found if kept is not None else None), _stray_lines(old, kept)
+    if strays:
+        problems.append("the result has a marker line outside it at line " + ", ".join(map(str, strays)) + (
+            f" (the current map already holds one, at line {', '.join(map(str, before))})" if before else ""))
+    where = (f"the host's measured block (lines {old[:kept.start()].count(chr(10)) + 1}-"
+             f"{old[:kept.end()].count(chr(10)) + 1} of the current map)" if kept else
+             "the measured block (the host adds it to this map; a marker line of the mind's would become a fence)")
+    raise ValueError(f"{where} stays the host's, byte for byte and the only fence: {'; '.join(problems) or 'the edit changes it'}. "
+                     "Edit outside it; the unchanged block may serve as an anchor's context." + (
+                         f" {_STRAY_REMEDY}" if strays else ""))
+
+
+def reverted_map(version: str, old: str, repo_dir: str = "", data_dir: str = "") -> str:
+    """The mind's part of an earlier version with the host's current block (or a fresh one when the map has none).
+
+    ``_splice``: a fenced version gets the current block in its fence; a STOCK first-boot profile's generated lines
+    leave with the block taking their place; any other unfenced text is kept whole, the block after its title."""
+    kept = _FENCE_RE.search(old)
+    return _splice(version, kept.group(0) if kept else measured_block(repo_dir, data_dir))
 
 
 def generate_world_profile(output_path: str, repo_dir: str = "", data_dir: str = ""):

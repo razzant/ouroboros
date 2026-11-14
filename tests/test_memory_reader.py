@@ -689,3 +689,36 @@ def test_refusals_are_typed_and_unknown_parameters_are_not_ignored(memory):
         with pytest.raises(MemoryReadError) as refused:
             read_memory(root, operation, params)
         assert refused.value.code == code, (operation, params)
+
+
+def test_a_workpads_history_is_its_journal_and_its_change_rows_read_whole(tmp_path, monkeypatch):
+    """The workpad's file entry links its history (``workpad:<id>``); a change row lists its two texts by address and
+    each reads back verified, the page closing the newest segment; the stored row reads as stored."""
+    import json
+    import types
+
+    from ouroboros.tools.project_journal import _workpad_write
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    ctx = types.SimpleNamespace(project_id=PROJECT, task_id="t1", drive_root=tmp_path, task_metadata={})
+    texts = ["# Pad\n\nOne.\n", "# Pad\n\nOne, two.\n", "# Pad\n\nOne, two, three.\n"]
+    for old, new in zip([None, *texts], texts):
+        page = tmp_path / "projects" / PROJECT / "workpad.md"
+        revision = hashlib.sha256(page.read_bytes()).hexdigest() if old is not None else None
+        assert _workpad_write(ctx, new, expected_revision=revision).startswith("OK:")
+    keyed = {entry["key"]: entry for entry in every(tmp_path, "documents")[0]}
+    assert keyed[f"1:{PROJECT}:workpad"]["journal"] == {"kind": "journal", "journal": f"workpad:{PROJECT}"}
+    entries, _ = every(tmp_path, "history", address={"kind": "file", "source": f"workpad:{PROJECT}"})
+    assert len(entries) == 3 and entries[0]["fields"]["new_content"] == texts[0]
+    journal = tmp_path / "projects" / PROJECT / "workpad_history.jsonl"
+    raw = journal.read_bytes()
+    stored = [json.loads(line) for line in raw.splitlines()]
+    assert all("change" in row and "new_content" not in row for row in stored[1:])
+    at = {"kind": "entry", "journal": f"workpad:{PROJECT}", "offset": entries[2]["offset"]}
+    assert entries[2]["fields"]["old_content"] == {"ref": "text", "address": {**at, "field": ["old_content"]}}
+    assert document(tmp_path, {**at, "field": ["new_content"]})["text"] == texts[2]
+    assert document(tmp_path, {**at, "field": ["old_content"]})["text"] == texts[1]
+    assert json.loads(document(tmp_path, {**at, "field": []})["text"]) == stored[2]  # the row as stored stays distinct
+    offsets = [0] + [index + 1 for index, byte in enumerate(raw[:-1]) if byte == 0x0A]
+    journal.write_bytes(raw[:offsets[1]] + b"#" * (offsets[2] - 1 - offsets[1]) + raw[offsets[2] - 1:])
+    assert document(tmp_path, {**at, "field": ["old_content"]})["text"] == texts[1]  # back from the live page

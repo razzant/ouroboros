@@ -1011,8 +1011,9 @@ def test_memory_provenance_records_old_and_new_content(tmp_path):
     from ouroboros.memory import Memory
     Memory(tmp_path).ensure_files()
     identity = tmp_path / "memory/identity.md"
-    _update_identity(ctx, "I am v1 with enough detail to satisfy the identity update length gate.", sha256(identity.read_bytes()).hexdigest())
-    _update_identity(ctx, "I am v2 with enough detail to satisfy the identity update length gate.", sha256(identity.read_bytes()).hexdigest())
+    # No length floor: a short identity is written and journaled like any other (owner 12.11, 2A).
+    assert _update_identity(ctx, "I am v1.", sha256(identity.read_bytes()).hexdigest()).startswith("OK:")
+    assert _update_identity(ctx, "I am v2.", sha256(identity.read_bytes()).hexdigest()).startswith("OK:")
     identity_history = [
         json.loads(line)
         for line in (tmp_path / "memory" / "identity_journal.jsonl").read_text(encoding="utf-8").splitlines()

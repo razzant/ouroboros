@@ -87,3 +87,11 @@ def applied_blocks(held, reply):
         assert lines[start:start + count] == block["old"], (block, lines[start:start + count])
         lines[start:start + count] = block["new"]
     return "".join(lines)
+
+
+def printed_call(text):
+    """A call a listing prints, as the tool it names and its arguments (Python literals, as the listing writes them)."""
+    import ast
+
+    node = ast.parse(text, mode="eval").body
+    return node.func.id, {keyword.arg: ast.literal_eval(keyword.value) for keyword in node.keywords}
