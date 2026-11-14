@@ -265,7 +265,7 @@ def raise_gc_threshold() -> None:
     them a collection ran while holding the interpreter: on the owner's live server collections held it 7-19 % of the
     time, about 80 % of them started inside JSON decoding. On a stand with nine million long-lived objects, 300 decodes
     of a 1.5 MB body (about 7,000 containers) ran 2,751 young and 250 middle collections, 15 % of the decoding time;
-    with 20,000, none. A body above 20,000 containers still collects, in fewer and longer pauses: with eight 10 MB
+    with 20,000, one. A body above 20,000 containers still collects, in fewer and longer pauses: with eight 10 MB
     bodies alive, middle collections took about 120 ms each instead of under 1 ms. Objects still die by reference
     counting at once; cyclic garbage, and whatever only it holds, waits for a later collection: a count of objects, not
     a bound on bytes (some thousands of small cycles' payloads can wait), and an idle interpreter collects nothing. The
