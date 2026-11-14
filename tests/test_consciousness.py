@@ -172,13 +172,16 @@ def test_status_details_and_launch_use_only_stored_places(clock, monkeypatch):
         pytest.fail("status and launch must not discover connectors or reread the allowance")
 
     for target in ("ouroboros.skill_loader.discover_skills", "ouroboros.place_projection.place_declarations",
-                   "ouroboros.place_arrivals.account_candidates", "ouroboros.place_projection.migration_problems",
-                   "ouroboros.consciousness_allowance.allowance_window", "ouroboros.place_projection.place_activity"):
+                   "ouroboros.place_projection.migration_problems", "ouroboros.consciousness_allowance.allowance_window"):
         monkeypatch.setattr(target, forbidden)
-    # One index pass per place: open turns and the newest arrival come from the room index.
-    monkeypatch.setattr(places, "place_room_index", lambda root, place_id: [
-        {"room_chat_id": 123, "unanswered_count": 1, "last_at": "2027-01-15T11:00:00Z"},
-        {"room_chat_id": 124, "unanswered_count": 2, "last_at": "2027-01-15T12:00:00Z"}])
+
+    # One brief read of the stores for the places: open turns and the newest arrival come from the room index.
+    def brief_facts(root, rows, full=True):
+        assert full is False, "status and launch must not read activity"
+        return {place.place_id: {"rooms": [
+            {"room_chat_id": 123, "unanswered_count": 1, "last_at": "2027-01-15T11:00:00Z"},
+            {"room_chat_id": 124, "unanswered_count": 2, "last_at": "2027-01-15T12:00:00Z"}]} for place in rows}
+    monkeypatch.setattr("ouroboros.place_arrivals.place_facts", brief_facts)
     original = view.place_views
 
     def project(*args, **kwargs):
