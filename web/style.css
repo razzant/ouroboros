@@ -243,6 +243,7 @@ html[data-layout="stack"] .shell-icon-control {
 .nav-tools > .nav-row {
     width: auto;
     min-width: 0;
+    max-width: 100%;  /* bound an unhyphenatable word so its last-resort break can fit the cell */
     min-height: 32px;
     gap: 6px;
     padding: 0 var(--space-3);

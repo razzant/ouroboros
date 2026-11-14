@@ -79,6 +79,7 @@ test('section names wrap whole in the existing one, two and three column steps',
     assert.match(css, /\.nav-tools\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/);
     assert.match(css, /@container \(min-width: 226px\)\s*\{\s*\.nav-tools\s*\{\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
     assert.match(css, /@container \(min-width: 328px\)\s*\{\s*html:not\(\[data-layout="stack"\]\) \.nav-tools\s*\{\s*grid-template-columns: repeat\(3, minmax\(0, max-content\)\)/);
+    assert.match(css, /\.nav-tools > \.nav-row\s*\{[^}]*max-width: 100%/);
     const label = css.match(/\.nav-tools > \.nav-row > \.nav-row-label\s*\{([^}]+)\}/)?.[1];
     for (const declaration of ['white-space: normal', 'hyphens: auto', 'overflow-wrap: break-word', 'overflow: visible', 'text-overflow: clip']) {
         assert.ok(label?.includes(declaration), declaration);
