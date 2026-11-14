@@ -3250,8 +3250,9 @@ The column reads from the top: Ouroboros's card, which is Main (its picture, its
 Main's count and its room's mark in the Project rows' mark column, and under them what Main is doing now, nothing
 while it rests), in the Ouroboros voice and in the strong crimson while Main is where you are; then Find a project,
 with + (New project) at the end of its row; then the Projects, the column's only scroller; then the six sidebar
-sections, Circles, Files, Skills, Widgets, Dashboard and Settings, at the bottom edge, three to a line on a desk and
-two in the drawer, each its glyph and its word, the one where you are the strong crimson capsule; and under them the
+sections, Circles, Files, Skills, Widgets, Dashboard and Settings, at the bottom edge, as many to a line as hold
+their names whole (three in a wide sidebar, two at its default width and in the drawer, one where two do not fit),
+each its glyph and its word, the one where you are the strong crimson capsule; and under them the
 foot, the version and the update, above the safe area. The Projects take all the free room between the field and
 the sections; there is no Projects heading, no collapse and no unread total. A Project row is two lines: the name
 and its time, then its newest line with the row's mark (a name with no such line may take both). The list stands
