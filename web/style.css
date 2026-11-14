@@ -6547,8 +6547,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .cost-empty-cell { color: var(--text-muted); text-align: center; }
 /* A narrow card reads a row as its name on its own line, then its calls and its amount (the header reads the same
    way): three columns there cut a name to its first letters and push the tab sideways. A name longer than its line
-   still ends in an ellipsis in place. */
-@container dashboard (max-width: 480px) {
+   still ends in an ellipsis in place. A breakdown keeps its three columns down to a 26rem tab body, where its name
+   keeps about 7.5rem beside the calls and the amount with its one-line note (the pane beside the section's list is
+   wider; a phone's tab body is narrower); the period's writes, four figures wide, stack from 480px. */
+@container dashboard (max-width: 26rem) {
     .cost-table, .cost-table :is(thead, tbody, th, td) { display: block; }
     .cost-table tr {
         display: grid;
@@ -6560,11 +6562,22 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     .cost-table :is(th, td) { border-bottom: 0; }
     .cost-table tr > :first-child { grid-column: 1 / -1; }
     .cost-table tr > :nth-child(2) { text-align: left; }
-    /* Its three figures share one line, in columns every row shares; a figure wraps between words, never inside one. */
-    .costs-period-writes tr { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.5fr); }
-    .cost-table.costs-period-writes :is(th, td) { white-space: normal; }
     .cost-table .cost-cell-name { width: auto; max-width: none; padding-bottom: 0; }
     .cost-table .cost-cell-note { white-space: normal; }
+}
+@container dashboard (max-width: 480px) {
+    .costs-period-writes, .costs-period-writes :is(thead, tbody, th, td) { display: block; }
+    /* Its three figures share one line, in columns every row shares; a figure wraps between words, never inside one. */
+    .costs-period-writes tr {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.5fr);
+        column-gap: var(--space-3);
+        border-bottom: 1px solid rgba(var(--neutral-rgb), 0.04);
+    }
+    .costs-period-writes thead tr { border-bottom-color: var(--divider); }
+    .cost-table.costs-period-writes :is(th, td) { border-bottom: 0; white-space: normal; }
+    .costs-period-writes tr > :first-child { grid-column: 1 / -1; }
+    .costs-period-writes tr > :nth-child(2) { text-align: left; }
 }
 
 /* Dashboard Storage (the owner-started count and the free-space tray): shared card, type, spacing
