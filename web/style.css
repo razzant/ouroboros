@@ -7024,19 +7024,28 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
    under the meta there doubled every card. Narrower still it goes under the words at the row's end, so the menu Stop…
    opens (aligned to its right edge) stays over the row instead of reaching over the list or the sidebar beside the
    page. A row with two controls (a schedule's Disable and Delete) keeps the shared rule: beside its words they would
-   leave a phone's words a column of a few words. */
+   leave a phone's words a column of a few words. The row says it holds one control in its own compound, and its words
+   and its Details read the answer from it: a :has() left of a combinator would cost WebKit a re-check of the document
+   on every write (test_design_system_css_static.py). */
+.ui-row.activity-row {
+    --activity-words-column: 1 / -1;
+    --activity-details-step: var(--space-3);
+}
+.ui-row.activity-row:has(> .ui-row-actions > :only-child) {
+    --activity-words-column: 1;
+    --activity-details-step: var(--space-1);
+}
 @container (max-width: 28rem) {
-    .ui-row.activity-row:has(> .ui-row-actions > :only-child) > .ui-row-title { grid-column: 1; grid-row: 1; }
-    .ui-row.activity-row:has(> .ui-row-actions > :only-child) > .ui-row-meta { grid-column: 1; grid-row: 2; }
+    .ui-row.activity-row > :is(.ui-row-title, .ui-row-meta) { grid-column: var(--activity-words-column); }
     .ui-row.activity-row > .ui-row-actions:has(> :only-child) { grid-column: 2; grid-row: 1 / span 2; justify-content: flex-end; }
 }
 @container (max-width: 18rem) {
-    .ui-row.activity-row:has(> .ui-row-actions > :only-child) > :is(.ui-row-title, .ui-row-meta) { grid-column: 1 / -1; }
+    .ui-row.activity-row > :is(.ui-row-title, .ui-row-meta) { grid-column: 1 / -1; }
     .ui-row.activity-row > .ui-row-actions:has(> :only-child) { grid-column: 1 / -1; grid-row: 3; justify-content: flex-end; }
 }
 /* Beside the words the control's reach ends above Details, so under a finger the row needs only a small parting. */
 @media (pointer: coarse) {
-    @container (min-width: 18.01rem) { .ui-row.activity-row:has(> .ui-row-actions > :only-child) > .activity-details { margin-top: var(--space-1); } }
+    @container (min-width: 18.01rem) { .ui-row.activity-row > .activity-details { margin-top: var(--activity-details-step); } }
 }
 
 /* Under a finger the row's small actions (each with its reach) and the Details summary under them part by more than
