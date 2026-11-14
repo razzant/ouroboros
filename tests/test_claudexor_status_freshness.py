@@ -148,9 +148,8 @@ def test_the_catalog_facet_carries_the_time_the_engine_composed_it(monkeypatch, 
         def operations(self): raise wire.ClaudexorUnavailable("internal", "catalog unreadable")
         def agent_capabilities(self): return {"harnesses": [], "generatedAt": next(composed)}
         def harnesses(self): return []
-        def credential_profiles(self): return {"profiles": [], "harnessAccounts": []}
+        def credential_profiles(self): return {"profiles": [], "accountPools": []}
         def quota_snapshots(self): return []
-        def _request(self, _method, _path, **_kw): return {"capabilities": []}
 
     monkeypatch.setattr(owned, "get_owned_daemon", lambda: SimpleNamespace(status_dict=lambda: {"state": "running"}))
     monkeypatch.setattr(owned, "owned_config_dir", lambda: tmp_path / "cfg")
@@ -167,7 +166,9 @@ def test_the_catalog_facet_carries_the_time_the_engine_composed_it(monkeypatch, 
     assert first["reads"]["catalog"] == "ok" and "_facet_observed" not in first
     assert first["facets"]["catalog"] == {"observed_at": "2026-11-14T17:59:50.250000+00:00", "stale": False,
                                           "error": None}
-    assert first["facets"]["quota"]["observed_at"] == "2026-11-14T18:00:00+00:00", "other facets: the read time"
+    assert first["reads"]["accounts"] == "ok"
+    assert first["facets"]["accounts"]["observed_at"] == first["facets"]["quota"]["observed_at"] == (
+        "2026-11-14T18:00:00+00:00"), "other facets: the read time"
     held = read("2026-11-14T18:05:00+00:00")  # the same composition, answered again five minutes later
     assert held["facets"]["catalog"]["observed_at"] == "2026-11-14T17:59:50.250000+00:00", "never stamped as new"
     assert read("2026-11-14T18:10:00+00:00")["facets"]["catalog"]["observed_at"] == "2026-11-14T18:10:00+00:00"
