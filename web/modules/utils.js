@@ -85,10 +85,12 @@ function msgTimeOf(date, now) {
     yesterday.setDate(now.getDate() - 1);
     const short = date.toDateString() === yesterday.toDateString()
         ? `${tr('time.yesterday', 'Yesterday')}, ${hhmm(date)}` : clockOf(date, now);
-    return { short, full: `${monthName(date)} ${date.getDate()}, ${date.getFullYear()} ${tr('time.at', 'at')} ${hhmm(date)}` };
+    const full = `${monthName(date)} ${date.getDate()}, ${date.getFullYear()} ${tr('time.at', 'at')} ${hhmm(date)}`;
+    return { short, full, exact: `${full}:${String(date.getSeconds()).padStart(2, '0')}` };
 }
 
-/** {short, full} presentation of a message timestamp, or null when unreadable. */
+/** {short, full, exact} presentation of a message timestamp (`exact`: the full form to the second), or null when
+ *  unreadable. */
 export function formatMsgTime(isoStr) {
     if (!isoStr) return null;
     try {

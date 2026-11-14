@@ -34,9 +34,9 @@ import { createLogRaw, LOG_RAW_HTML } from './logs_raw.js';
 // The kinds of damaged record a compact read skips (`gaps`, ouroboros/gateway/logs.py); an unknown kind is shown as named.
 const GAP_WORDS = { malformed_jsonl: 'malformed line', incomplete_live_line: 'unfinished live line', torn_archive_line: 'torn archive line' };
 
-// The exact moment an opened event names among its facts; its head says it in Main's clock (utils.js formatMsgTime).
-const exactTime = (ts) => (Number.isNaN(Date.parse(ts)) ? ''
-    : new Date(ts).toLocaleString([], { dateStyle: 'medium', timeStyle: 'medium', hour12: false }));
+// An event's time, said by this one function: Main's clock at its head's end (utils.js formatMsgTime), its tooltip the
+// exact moment to the second, as a Main message's time carries its date (chat_text_bubble.js), which leads its facts.
+const timeOf = (ts) => formatMsgTime(ts) || { short: '', exact: '' };
 // A task's id said short: its first eight characters, past the `presence-` its live turns' ids begin with.
 const shortTaskId = (id) => String(id || '').replace(/^presence-/, '').slice(0, 8);
 // Words an author wrote (narration, an executor's message) read as text, without Markdown's marks (chat_activity.js).
@@ -281,11 +281,8 @@ export function initLogs({ ws, state, mount }) {
 
     function createStandaloneEntry(evt) {
         const dedupeKey = duplicateLogEventKey(evt);
-        const now = (() => {
-            const parsed = evt.ts ? Date.parse(evt.ts) : NaN;
-            return Number.isFinite(parsed) ? parsed : Date.now();
-        })();
         const ts = evt.ts || evt.timestamp || '';
+        const now = Date.parse(ts) || Date.now();  // its own time, as a card's (updateTaskGroupCard), else now
 
         if (dedupeKey) {
             let last = duplicateState.get(dedupeKey);
@@ -392,14 +389,15 @@ export function initLogs({ ws, state, mount }) {
     // ---- The panel (DOM): only while shown ------------------------------------------------------------------------
 
     // One anatomy for every event, a task card and a timeline row alike (U027, U028): one shared fold
-    // (details.ui-disclosure) whose summary is the event's head: its time in Main's clock, its name in words (a task's
-    // card adds its short id), a failure's chip, at the line's end its count and the task it belongs to, then its words,
-    // at most three lines. Opening it un-clamps the words in place (their whole text where the view cut them) and shows
-    // its facts and its record, or a task's timeline. A head without a name says its words after its time (style.css).
-    const HEAD_HTML = '<summary class="log-head"><time class="log-ts"></time><span class="log-title"><span class="log-name"></span>'
+    // (details.ui-disclosure) whose summary is the event's head: its name in words right after the caret (a task's card
+    // adds its short id), a failure's chip and its count, and at the line's end its time, as a sidebar row ends in its
+    // time; then its words, at most three lines, from the name's edge. Opening it un-clamps the words in place (their
+    // whole text where the view cut them) and shows its facts and its record, or a task's timeline. A head without a
+    // name says its words in the name's place (style.css).
+    const HEAD_HTML = '<summary class="log-head"><span class="log-title"><span class="log-name"></span>'
         + '<span class="log-task" hidden></span><span class="chat-live-phase log-failure" data-chip-tone="failed" hidden>'
-        + `${statusMarkHtml('', markView({ outcome: 'error' }))}<span class="log-failure-word"></span></span></span>`
-        + '<span class="log-count" hidden></span><span class="log-words" hidden></span></summary>'
+        + `${statusMarkHtml('', markView({ outcome: 'error' }))}<span class="log-failure-word"></span></span>`
+        + '<span class="log-count" hidden></span></span><time class="log-ts"></time><span class="log-words" hidden></span></summary>'
         + '<div class="log-facts" hidden></div><div class="log-note log-executor-detail" hidden></div>';
     const RECORD_HTML = `<div class="log-note" data-log-omitted hidden></div>${LOG_RAW_HTML}`;
     const TIMELINE_HTML = '<div class="log-note log-task-review" hidden></div><div class="log-note" data-log-gone hidden></div>'
@@ -419,6 +417,7 @@ export function initLogs({ ws, state, mount }) {
     }
 
     const setText = (el, text) => { if (el && el.textContent !== text) el.textContent = text; };
+    const setAttr = (el, key, value) => { if (el.getAttribute(key) !== value) el.setAttribute(key, value); };
     const setData = (el, key, value) => { if (el.dataset[key] !== value) el.dataset[key] = value; };
     const shownHtml = new WeakMap();  // markup a node was last given, so an unchanged one is not rewritten
     const setHtml = (el, html) => { if (el && shownHtml.get(el) !== html) { el.innerHTML = html; shownHtml.set(el, html); } };
@@ -427,23 +426,24 @@ export function initLogs({ ws, state, mount }) {
     // An event's own head and fold: its name, a failure's chip (the outcome family's word), its words, and its facts
     // after the exact moment.
     const eventParts = (view, ts) => ({ ts, name: view.headline, failure: FAILED_PHASES.has(view.phase) ? taskPresentation(view.phase).headline : '',
-        words: wordsOf(view, view.body), whole: wordsOf(view, view.full), facts: [exactTime(ts), ...view.meta] });
+        words: wordsOf(view, view.body), whole: wordsOf(view, view.full), facts: [timeOf(ts).exact, ...view.meta] });
 
     // An event's parts, each written only when it changed. A delegated executor is a quiet chip among its facts, and its
     // detail sentence is text in the fold (#360 A).
     function paintEvent(node, { ts = '', name = '', task = '', failure = '', count = '', words = '', whole = '', facts = [],
         execution = null, omitted = '' }) {
-        const parts = partsOf.get(node);
-        setText(parts.ts, formatMsgTime(ts)?.short || '');
-        if (parts.ts.getAttribute('datetime') !== ts) parts.ts.setAttribute('datetime', ts);
+        const parts = partsOf.get(node), time = timeOf(ts);
+        setText(parts.ts, time.short);
+        setAttr(parts.ts, 'datetime', ts);
+        setAttr(parts.ts, 'title', time.exact);
         setText(parts.name, name);
         setText(parts.task, task);
         parts.task.hidden = !task;
         setText(parts.failureWord, failure);
         parts.failure.hidden = !failure;
-        parts.title.hidden = !name && !task && !failure;
         setText(parts.count, count);
         parts.count.hidden = !count;
+        parts.title.hidden = !name && !task && !failure && !count;
         wordsOfNode.set(node, { words, whole });
         showWords(node);
         parts.words.hidden = !words;
@@ -508,7 +508,7 @@ export function initLogs({ ws, state, mount }) {
     function renderTaskTimeline(entry) {
         const { rows, failure } = entry;
         const gone = Boolean(failure) && entry.recent[0].at > failure.at;  // the rows kept are in time order
-        setText(entry.dom.gone, gone ? `The newest failure (${exactTime(failure.ts)}) is older than the ${MAX_TASK_EVENTS} latest`
+        setText(entry.dom.gone, gone ? `The newest failure (${timeOf(failure.ts).exact}) is older than the ${MAX_TASK_EVENTS} latest`
             + ' events this card keeps, so its row is not below.' : '');
         entry.dom.gone.hidden = !gone;
         for (const [item, row] of rows) {
@@ -755,7 +755,7 @@ export function initLogs({ ws, state, mount }) {
         duplicateState.clear();
         taskGroups.clear();
         logEntries.innerHTML = '';
-        clearedAt = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+        clearedAt = timeOf(new Date().toISOString()).short;
         updateEmptyState();
         follow();
     });

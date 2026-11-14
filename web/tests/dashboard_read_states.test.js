@@ -548,16 +548,19 @@ test('Logs reads oldest to newest, gives every event one anatomy, and shows the 
     const entries = mount.querySelector('#log-entries');
     // History that arrives after a live event takes its place by its own time (U035).
     assert.deepEqual(entries.children.map((entry) => entry.dataset.logTime), [String(Date.parse(earlier.ts)), String(Date.parse(live.ts))]);
-    // One anatomy (U027, U028): the event is the shared fold, and its summary is its head: the time in Main's clock, its
-    // name in words (an unknown event's type), the count, then its words in body text; opened, its facts and record.
+    // One anatomy (U027, U028): the event is the shared fold, and its summary is its head: its name in words right after
+    // the caret (an unknown event's type) and, at the line's end, its time in Main's clock, as a sidebar row ends in its
+    // time, the exact moment to the second its tooltip; then its words in body text; opened, its facts and record.
     const [first] = entries.children;
     const head = first.children[0];
     assert.equal(first.tagName, 'details');
     assert.equal(first.className, 'ui-disclosure log-fold log-entry');
     assert.equal(head.tagName, 'summary');
-    assert.deepEqual(head.children.map((part) => part.className), ['log-ts', 'log-title', 'log-count', 'log-words']);
-    assert.match(head.querySelector('.log-ts').textContent, /^(Yesterday, |[A-Z][a-z]{2} \d+, )?\d\d:\d\d$/, 'Main\'s clock');
-    assert.equal(head.querySelector('.log-ts').getAttribute('datetime'), earlier.ts, 'the exact moment stays with it');
+    assert.deepEqual(head.children.map((part) => part.className), ['log-title', 'log-ts', 'log-words'], 'the head ends in its time');
+    const time = head.querySelector('.log-ts');
+    assert.match(time.textContent, /^(Yesterday, |[A-Z][a-z]{2} \d+, )?\d\d:\d\d$/, 'Main\'s clock');
+    assert.equal(time.getAttribute('datetime'), earlier.ts, 'the exact moment stays with it');
+    assert.match(time.getAttribute('title'), /^Sep 9, 2026 at \d\d:59:00$/, 'and is its tooltip, to the second, as a Main message\'s');
     assert.equal(head.querySelector('.log-name').textContent, 'Test earlier event');
     assert.equal(head.querySelector('.log-words').textContent, 'earlier');
     assert.equal(first.querySelectorAll('details').length, 0, 'one fold: no Record or Timeline fold inside it');
@@ -566,7 +569,7 @@ test('Logs reads oldest to newest, gives every event one anatomy, and shows the 
     first.open = true;
     entries.dispatchEvent({ type: 'toggle', target: first });
     assert.equal(first.querySelector('.log-raw').hidden, false);
-    assert.match(first.querySelector('.log-facts').textContent, /\d\d:\d\d:\d\d/, 'its facts say the moment to the second');
+    assert.ok(first.querySelector('.log-facts').textContent.startsWith(time.getAttribute('title')), 'the same moment leads its facts');
     // The filter is the shared chips with one state model (U031), Skills' strip: All leads and is lit at rest, when every
     // kind shows; a kind pressed is lit beside the others chosen and All goes out; All pressed clears the choice. The
     // strip has no Clear of its own: its last item is the list's own action, Clear list.
