@@ -465,6 +465,8 @@ def read_versions(ctx: Any, address: Any, version: Any, start: Any, fingerprint:
                              "record's revision is revision= with node_id")
         if type(start) is not int or start < 0:
             raise ValueError("start is a non-negative integer")
+        if fingerprint is not None and not isinstance(fingerprint, str):  # named before any list is compared
+            raise ValueError(f"fingerprint must be the text a list's header names, not {type(fingerprint).__name__}")
         if version is not None and (not isinstance(version, str) or fingerprint):
             raise ValueError("version is a revision text; fingerprint continues the list of versions, read without one"
                              if fingerprint else "version is a revision text (the sha256 of that version)")

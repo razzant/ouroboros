@@ -641,3 +641,19 @@ def test_a_stale_revision_on_a_text_that_does_not_exist_says_so_and_creating_it_
         assert not path.exists()
         created = write(**create)
         assert created.startswith("OK: ") and " created (overwrite" in created and path.exists(), created
+
+
+def test_the_doors_bad_start_or_fingerprint_is_an_argument_error_before_the_list_is_compared(tmp_path, identity):
+    """C4: memory_read(source=...) names a start that is not a non-negative integer, or a fingerprint that is not text,
+    as an argument error before any fingerprint comparison: never position_mismatch. Another list's fingerprint at a
+    valid start is still position_mismatch."""
+    ctx = _ctx(tmp_path)
+    _update_identity(ctx, IDENTITY + "\nMore.\n", _sha(identity.read_bytes()))
+    for arguments, named in (({"start": -1}, "start is a non-negative integer"),
+                             ({"start": "5"}, "start is a non-negative integer"),
+                             ({"fingerprint": 123}, "fingerprint must be the text a list's header names, not int"),
+                             ({"start": 5, "fingerprint": ["x"]}, "fingerprint must be the text a list's header names")):
+        reply = _read(ctx, source="identity", **arguments)
+        assert reply.startswith("⚠️ TOOL_ARG_ERROR: ") and named in reply and "position_mismatch" not in reply, (
+            arguments, reply)
+    assert "position_mismatch" in _read(ctx, source="identity", start=5, fingerprint="0" * 16)

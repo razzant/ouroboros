@@ -531,3 +531,26 @@ def test_each_history_row_prints_the_call_that_undoes_its_own_write(tmp_path):
              if line.startswith("- ")]
     assert f"version={third.revision!r}, expected_revision={outside.revision!r})" in after[0], after[0]
     assert " · undo: nothing to put back, that version is the current text · " in after[2], after[2]
+
+
+def test_a_bad_position_or_fingerprint_is_an_argument_error_before_the_list_is_compared(tmp_path):
+    """C4: a start_char or end_char that is negative or not an integer, and a fingerprint that is not text, are argument
+    errors naming the argument (TOOL_ARG_ERROR), before the list's fingerprint is compared: never position_mismatch. A
+    valid position with another list's fingerprint is still position_mismatch, and the right one still continues."""
+    ctx, target = context(tmp_path), address(tmp_path)
+    a = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    store.write_knowledge_note(target, "# Река\n\nTwo.\n", expected_revision=a.revision)
+    first = tools._knowledge_read(ctx, TOPIC, view="history", end_char=120)
+    fingerprint = re.search(r'"fingerprint": "([0-9a-f]{16})"', first)[1]
+    for arguments, named in (({"start_char": -1}, "start_char=-1 is not a position"),
+                             ({"start_char": "120"}, "start_char='120' is not a position"),
+                             ({"start_char": 1.5}, "start_char=1.5 is not a position"),
+                             ({"start_char": 10, "end_char": -5}, "end_char=-5 is not a position"),
+                             ({"start_char": 120, "fingerprint": 123}, "fingerprint is the text")):
+        reply = tools._knowledge_read(ctx, TOPIC, view="history", **arguments)
+        assert reply.startswith("⚠️ TOOL_ARG_ERROR: ") and named in reply and "position_mismatch" not in reply, (
+            arguments, reply)
+    assert "position_mismatch" in tools._knowledge_read(ctx, TOPIC, view="history", start_char=120, fingerprint="0" * 16)
+    later = tools._knowledge_read(ctx, TOPIC, view="history", start_char=120, fingerprint=fingerprint)
+    assert later.startswith("[Knowledge history]") and body(first) + body(later) == body(
+        tools._knowledge_read(ctx, TOPIC, view="history")), later

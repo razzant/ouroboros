@@ -135,6 +135,9 @@ def _note_view(note: knowledge_store.KnowledgeNote, view: str, version: str | No
     facts = {"topic": note.address.topic, "scope": note.address.scope, "revision": shown.revision,
              **({"current_revision": note.revision, "earlier_version": earlier} if earlier else {})}
     if view == "history":  # newest first: a later page continues the list its first page read, by its fingerprint
+        for name, bound in (("start_char", start_char), ("end_char", end_char)):  # an argument error, not a list's
+            if bound is not None and (type(bound) is not int or bound < 0):
+                raise ValueError(f"{name}={bound!r} is not a position in the list: a non-negative integer")
         listing = knowledge_versions.render_history(note)
         digest = hashlib.sha256(listing.encode("utf-8")).hexdigest()[:16]
         if (start_char or fingerprint) and fingerprint != digest:
