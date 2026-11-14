@@ -4,8 +4,8 @@
  * (`agents` serves `agents`, `agents/<id>` and `agents/new`), `title` a string or `(path) => string`, and
  * `mount(container, { path, row, ctx })` renders the body for that path and may return `{ unmount() }`. The shell
  * imports the page modules; a path no page serves opens the home with the path's last word searched.
- * `exists(path)` may verify a dynamic address before restoring it from device memory. Without it only the exact
- * registered page is known at landing; an unknown child keeps its stored address while the shell shows Models. */
+ * `exists(path)` may verify a dynamic address before restoring it from device memory. Without it the registered
+ * page and its children are trusted at landing. */
 
 const PAGES = new Map();
 

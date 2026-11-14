@@ -478,6 +478,17 @@ test('two panes land on the first-level page last opened on this device, or on M
         await controls.open('test-kept');
         assert.equal(store.get('ouroboros.settings.last-page'), 'test-kept');
     }
+    await t.test('remembered agent child without an existence check', async (sub) => {
+        const agents = settingsPageFor('agents');
+        const mounted = [];
+        registerSettingsPage('agents', { ...agents, mount(_body, { path }) { mounted.push(path); } });
+        sub.after(() => registerSettingsPage('agents', agents));
+        store.set('ouroboros.settings.last-page', 'agents/reviewer');
+        const { state } = await land(sub);
+        assert.equal(state.settingsPath, 'agents/reviewer');
+        assert.deepEqual(mounted, ['agents/reviewer'], 'the remembered child reaches its registered renderer');
+        assert.equal(store.get('ouroboros.settings.last-page'), 'agents/reviewer');
+    });
     await t.test('installed skill and then uninstalled skill', async (sub) => {
         store.set('ouroboros.settings.last-page', 'skill/one');
         const installed = await land(sub, { skills: [{ name: 'one' }], live: { settings_sections: [

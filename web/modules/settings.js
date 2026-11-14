@@ -137,7 +137,7 @@ export function initSettings(ctx = {}) {
         let target = 'models';
         try {
             const registered = !isDoorId(saved) && settingsPageFor(saved);
-            if (registered && (registered.exists ? await registered.exists(saved) : saved === registered.prefix)) target = saved;
+            if (registered && (!registered.exists || await registered.exists(saved))) target = saved;
         } catch { /* An unread registry cannot establish that the stored page still exists. */ }
         landing = false;
         if (!panes() || levels.length || ownChosen || opening || !shown() || saved !== lastFirst) return;
