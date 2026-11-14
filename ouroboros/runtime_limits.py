@@ -57,6 +57,9 @@ STOP_ADMISSION_DRAIN_SEC = 2.0
 # A direct Restart's spawned successor (Windows, POSIX exec fallback) starts while its parent still
 # holds the data root: admission waits the same handoff the old port gets (find_free_port), no longer.
 SERVER_ADMISSION_WAIT_SEC = 10.0
+# The server's interpreter switch interval (CPython's default 0.005 s): a computing thread is asked to hand the lock
+# over after this long when another thread waits (owner, 14.11.2026, #3399; ``server_entrypoint``). No setting.
+SERVER_SWITCH_INTERVAL_SEC = 0.001
 NESTED_SETTLEMENT_MARGIN_SEC = 30  # Structural ordering margin, not a cognition timeout.
 # Owner-note cadence while a task waits out a provider-connection outage; the effective interval is min(this, idle_timeout/2) so the notes also keep the idle rail alive.
 NETWORK_WAIT_NOTE_INTERVAL_SEC = 300
