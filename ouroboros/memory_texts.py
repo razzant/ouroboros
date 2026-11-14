@@ -29,9 +29,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ouroboros import knowledge_versions
-from ouroboros.knowledge_edits import EditRefused, check_arguments, compile_edit_items, edit_items, normalize_arguments
+from ouroboros.knowledge_edits import (EditRefused, check_arguments, compile_edit_items, edit_items, mode_received,
+                                       normalize_arguments)
 from ouroboros.memory_publication import Publication, Refused, publish_text
-from ouroboros.tools.tool_result import ToolResult, _publish_tool_result
+from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, publish_no_effect
 
 MODES = ("overwrite", "edit", "revert")
 
@@ -250,11 +251,14 @@ def _current(source: TextSource, publication: Publication, head: str) -> str:
                   f"with {read_call(source, current)}."
 
 
-def _refusal(ctx: Any, source: TextSource, mode: str, publication: Publication) -> str:
+def _refusal(ctx: Any, source: TextSource, mode: str, publication: Publication, expected: Any = None) -> str:
+    """A refused write's typed answer; ``expected`` is the expected_revision the call sent (an empty one is create-only,
+    so its conflict is not a change since the caller read)."""
     reason, current = publication.reason, publication.revision
     if reason in ("revision_required", "revision_conflict"):
         head = (f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: {reason}; current_revision={current!r}. Nothing was written. "
                 + ("An existing text is replaced only against the revision you read" if reason == "revision_required"
+                   else "An empty expected_revision creates a missing text only; this one exists" if expected == ""
                    else "Reconcile your change with what came since") + f": pass expected_revision={current!r}."
                 + (f" {source.where}" if source.where else ""))
         return _answer(ctx, source, _current(source, publication, head), status="blocked",
@@ -307,7 +311,15 @@ def write_text(ctx: Any, source: Any, *, content: Any = None, mode: Any = "overw
     """One write of a plain memory text, parsed, published and answered (the tool handlers delegate here).
 
     ``source`` is a ``TextSource`` or a ``Deferred`` one, located after the arguments parse.
-    ``notices(mode, content, publication)`` adds the source's own lines to a receipt (the map's)."""
+    ``notices(mode, content, publication)`` adds the source's own lines to a receipt (the map's).
+    Only an OMITTED ``mode`` is overwrite (the handlers' default: older callers send content alone); a null, blank
+    or unknown one is refused before anything else, never taken as the default: a filled-in empty mode may have
+    meant an edit, and an overwrite would replace the whole text instead."""
+    if not isinstance(mode, str) or mode not in MODES:
+        return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
+            f"⚠️ TOOL_ARG_ERROR: {mode_received(mode, 'null')}. Pass mode as exactly one of overwrite (content "
+            f"replaces the whole {source.noun}), edit (old_str with content, or edits, replaces exact text of the "
+            "revision you read) or revert (puts back the earlier version named by version). Nothing was written.")))
     notes: list[str] = []
     version, edits, old_str, reason = normalize_arguments(mode, version, expected_revision, edits, old_str, reason, notes)
     try:
@@ -338,7 +350,7 @@ def write_text(ctx: Any, source: Any, *, content: Any = None, mode: Any = "overw
                                author=focus_signature(ctx), source_type=source_type, mode=mode, reason=reason,
                                reverted_from=version if mode == "revert" else None)
     if not publication.ok:
-        return _refusal(ctx, source, mode, publication)
+        return _refusal(ctx, source, mode, publication, expected_revision)
     lines = _receipt(source, mode, publication, version)
     if notices is not None:
         lines += notices(mode, content, publication)

@@ -14,7 +14,7 @@ from ouroboros.tool_capabilities import tool_result_limit
 from ouroboros.tool_access_paths import canonical_data_root
 from ouroboros.knowledge import INDEX_FILE as INDEX_FILE, OVERVIEW_TOPIC as OVERVIEW_TOPIC
 from ouroboros.knowledge import sanitize_topic as _sanitize_topic
-from ouroboros.knowledge_edits import check_arguments, normalize_arguments
+from ouroboros.knowledge_edits import check_arguments, mode_received, normalize_arguments
 from ouroboros.tools.arg_feedback import ignored_argument_note
 from ouroboros.tools.registry import ToolEntry, ToolContext
 from ouroboros.tools.tool_result import ToolResult, _MAX_META_BYTES, _publish_tool_result, completed_local_read
@@ -299,19 +299,8 @@ def _mode_refusal(ctx: ToolContext, mode: object) -> str:
     Null and blank text say what omission says (``tools/arg_feedback``), now refused like it; any other
     value is refused as received, never trimmed, case-folded or matched to the nearest operation.
     """
-    if mode is None:
-        received = "mode is missing or null"
-    elif not isinstance(mode, str):
-        received = f"mode={mode!r} is not text"
-    elif not mode.strip():
-        # Reuse the canonical blank-value representation; keep the established
-        # refusal wording for non-blank invalid values.
-        received = ignored_argument_note("mode", mode, "is not an operation").replace(
-            " ignored: is not an operation", " is not an operation")
-    else:
-        received = f"mode={mode!r} is not an operation"
     return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
-        f"⚠️ TOOL_ARG_ERROR: {received}. knowledge_write has no default operation: pass mode as exactly one of "
+        f"⚠️ TOOL_ARG_ERROR: {mode_received(mode)}. knowledge_write has no default operation: pass mode as exactly one of "
         "overwrite (content replaces the whole body), append (content goes at the end), edit (old_str with "
         "content, or edits, replaces exact text; summary may go alone), revert (puts back the earlier version "
         "named by version), archive or restore (the archive state only; archive requires reason). version names "

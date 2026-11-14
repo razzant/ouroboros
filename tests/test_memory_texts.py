@@ -169,7 +169,8 @@ def test_a_stale_revision_no_row_holds_gets_the_whole_text_or_its_read(tmp_path,
     ({"mode": "edit", "edits": []}, "mode=edit requires edits, or a non-empty old_str ("),
     ({"mode": "revert"}, "mode=revert requires version"),
     ({}, "mode=overwrite requires content"),
-    ({"mode": "append", "content": "x"}, "mode must be overwrite, edit, revert"),
+    ({"mode": "append", "content": "x"}, "mode='append' is not an operation. Pass mode as exactly one of overwrite"),
+    ({"content": ["x"]}, "content must be Markdown text, not list"),
     ({"content": "x", "version": "abc"}, "version is used only with mode=revert; memory_read(source='identity'"),
 ])
 def test_the_argument_rules_are_knowledge_writes(tmp_path, identity, arguments, said):
@@ -369,3 +370,74 @@ def test_a_legacy_row_lists_the_sizes_it_recorded_and_a_new_row_its_delta(tmp_pa
     assert f" · {len(IDENTITY)} → {len(IDENTITY) + 15} chars" in rows[1], rows[1]
     assert "removed" not in rows[1] and "added" not in rows[1], rows[1]  # nothing invented beside what it recorded
     assert re.search(r" · \d+ chars removed, \d+ added · ", rows[0]) and "→" not in rows[0], rows[0]
+
+
+def _model_call(registry, tool, arguments):
+    """One tool call as a model sends it: JSON arguments through the loop's own dispatch."""
+    from ouroboros.loop_tool_execution import _execute_single_tool
+
+    call = {"id": "mode-call", "function": {"name": tool, "arguments": json.dumps(arguments)}}
+    return _execute_single_tool(registry, call, registry._ctx.drive_root / "logs", registry._ctx.task_id)
+
+
+def test_a_null_blank_or_unknown_mode_is_refused_and_only_an_omitted_one_overwrites(tmp_path, monkeypatch):
+    """K13: a filled-in null or blank mode may have meant an edit, so it is refused, never taken as overwrite; the
+    refusal names mode as received and its three values, and nothing is read or written. An OMITTED mode keeps the
+    writers' default, overwrite, as their older callers send content alone. Through the loop's dispatch, all three."""
+    from ouroboros import world_profiler as wprof
+
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "data")
+    registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path)
+    registry.set_context(ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path, task_id="modes", project_id="atlas"))
+    block = f"{wprof.MEASURED_START}\n## System (measured)\n{wprof.MEASURED_END}"
+    files = {"update_identity": (tmp_path / "memory" / "identity.md", IDENTITY),
+             "update_world": (tmp_path / "memory" / "WORLD.md", f"{wprof.TITLE}\n\n{block}\n\n- a note\n"),
+             "workpad_write": (tmp_path / "data" / "projects" / "atlas" / "workpad.md", "# Plan\n\n- one\n")}
+    for path, text in files.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(text.encode("utf-8"))
+    received = {"null": (None, "mode is null"), "empty": ("", "mode='' is not an operation"),
+                "space": (" ", "mode=' ' is not an operation"), "capitalized": ("Edit", "mode='Edit' is not an operation"),
+                "unknown": ("append", "mode='append' is not an operation"), "number": (1, "mode=1 is not text")}
+    journals = [path.with_name(name) for (path, _text), name in zip(files.values(), (
+        "identity_journal.jsonl", "world_journal.jsonl", "workpad_history.jsonl"))]
+    before = {path: path.read_bytes() for path, _text in files.values()}
+    for tool, (path, text) in files.items():
+        call = {"content": text.replace("one", "two").replace("a note", "a newer note").replace("Keep", "Hold"),
+                "expected_revision": _sha(path.read_bytes())}
+        for name, (mode, said) in received.items():
+            executed = _model_call(registry, tool, {**call, "mode": mode})
+            result, reply = executed["tool_result"], executed["result"]
+            assert (result.status, result.code) == ("error", "TOOL_ARG_ERROR"), (tool, name, reply)
+            assert result.meta.get("operation_outcome") == "completed_no_effect", (tool, name, result.meta)
+            assert reply.startswith(f"⚠️ TOOL_ARG_ERROR: {said}. Pass mode as exactly one of overwrite (content "
+                                    "replaces the whole ") and "edit (old_str with content, or edits," in reply, reply
+            assert "or revert (puts back the earlier version named by version). Nothing was written." in reply, reply
+    assert {path: path.read_bytes() for path, _text in files.values()} == before
+    assert not any(journal.exists() for journal in journals)  # nothing was written, not even a row
+    nouns = {"update_identity": "identity", "update_world": "world map", "workpad_write": "workpad"}
+    for tool, (path, text) in files.items():  # omitted: today's default, the whole text replaced
+        new = text.replace("one", "two").replace("a note", "a newer note").replace("Keep", "Hold")
+        executed = _model_call(registry, tool, {"content": new, "expected_revision": _sha(path.read_bytes())})
+        assert executed["result"].startswith(f"OK: {nouns[tool]} updated (overwrite"), executed["result"]
+        assert path.read_bytes() == new.encode("utf-8"), tool
+    assert all(journal.exists() for journal in journals)
+
+
+def test_an_empty_expected_revision_on_an_existing_page_says_it_creates_only(tmp_path, monkeypatch):
+    """K13: expected_revision="" is create-only. On an existing page the conflict says so (nothing came since the
+    caller read; it read nothing) and the page stays; a stale non-empty revision keeps its own wording."""
+    import types
+
+    from ouroboros.tools.project_journal import _workpad_write
+
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "data")
+    own = types.SimpleNamespace(project_id="atlas", task_id="t-1", drive_root=tmp_path, task_metadata={})
+    _workpad_write(own, "# Plan\n")
+    page = tmp_path / "data" / "projects" / "atlas" / "workpad.md"
+    empty = _workpad_write(own, "# Mine\n", expected_revision="")
+    assert "revision_conflict" in empty and "An empty expected_revision creates a missing text only; this one exists: " \
+        f"pass expected_revision='{_sha(page.read_bytes())}'." in empty and page.read_bytes() == b"# Plan\n", empty
+    assert "Reconcile your change" not in empty
+    stale = _workpad_write(own, "# Mine\n", expected_revision="0" * 64)
+    assert "Reconcile your change with what came since" in stale and "creates a missing text only" not in stale

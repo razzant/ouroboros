@@ -10,7 +10,8 @@ refusal applies nothing. Pure: no I/O; ``knowledge.write_knowledge_note`` and
 exact editor shares (``mode``, ``content``, ``old_str`` with ``content`` or its alias ``new_str``,
 ``edits``, ``version``, ``reason``): one parser for the note writer and the writers of identity,
 the world map and a project's workpad. A value that asks for nothing takes the omitted path and is
-named in the result (``tools/arg_feedback``); each field keeps its own meaning (an empty
+named in the result (``tools/arg_feedback``), except ``mode``: a null, blank or unknown mode is
+refused as received (``mode_received``), never taken as a default; each field keeps its own meaning (an empty
 ``content``/``new_str`` deletes, a whitespace ``old_str`` is an exact anchor, an empty
 ``expected_revision`` is create-only and is the caller's). The note writer's summary, archive and
 lifecycle rules stay its own: a caller names its modes, the modes that take no content, the modes
@@ -19,6 +20,22 @@ that require a reason and what an edit may revise beside the text (``alone``).
 from __future__ import annotations
 
 from typing import Any, Mapping
+
+
+def mode_received(mode: Any, null: str = "missing or null") -> str:
+    """A ``mode`` that is not exactly an operation, as a refusal names it: as received, never trimmed, case-folded or
+    matched to the nearest operation. ``null`` is what a ``None`` is to the caller: knowledge_write has no default, so
+    a missing mode is the same refusal; the plain texts' writers keep overwrite for an OMITTED mode, so theirs is a null."""
+    from ouroboros.tools.arg_feedback import ignored_argument_note
+
+    if mode is None:
+        return f"mode is {null}"
+    if not isinstance(mode, str):
+        return f"mode={mode!r} is not text"
+    if not mode.strip():  # the canonical blank-value representation (tools/arg_feedback), in the refusal's words
+        return ignored_argument_note("mode", mode, "is not an operation").replace(" ignored: is not an operation",
+                                                                                  " is not an operation")
+    return f"mode={mode!r} is not an operation"
 
 
 def normalize_arguments(mode: Any, version: Any, expected_revision: Any, edits: Any, old_str: Any, reason: Any,
@@ -61,8 +78,10 @@ def check_arguments(mode: Any, content: Any, old_str: Any, new_str: Any, edits: 
     them. ``version_reader`` is the read a refusal of a stray ``version`` names."""
     from ouroboros.tools.arg_feedback import ignored_argument_note
 
-    if mode not in modes or not isinstance(content, (str, type(None))):
-        raise ValueError("content must be Markdown; mode must be " + ", ".join(modes))
+    if not isinstance(mode, str) or mode not in modes:  # each refusal names the one argument that is wrong
+        raise ValueError(f"{mode_received(mode, 'null')}: mode is exactly one of " + ", ".join(modes))
+    if not isinstance(content, (str, type(None))):
+        raise ValueError(f"content must be Markdown text, not {type(content).__name__}")
     if new_str is not None:  # the one-pair edit's replacement as other editors spell it: content
         if not isinstance(new_str, str):
             raise ValueError("new_str must be text, the replacement of old_str (empty text deletes it)")
