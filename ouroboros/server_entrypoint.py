@@ -243,11 +243,15 @@ def bound_service_socket(drive_root: pathlib.Path, service: str, host: str, port
 
 
 def shorten_switch_interval() -> None:
-    """The server's interpreter hands over between threads every 1 ms instead of CPython's 5 ms (owner, 14.11.2026,
-    #3399). A hundred threads share one interpreter, and a read takes the interpreter lock back after each SQLite step
-    or file call only when the thread holding it yields, which a computing thread does once per switch interval: beside
-    one busy thread the extensions index took 4.7 s at 5 ms and 1.9 s at 1 ms (0.1 s alone). A thread nobody waits for
-    is never asked to yield, so an idle server pays nothing; a busy one hands over more often (beside a thread making
-    file calls it ran about 15 % slower while those calls ran 2.8 times faster). No setting."""
+    """A computing thread of the server is asked to hand the interpreter over after 1 ms instead of CPython's 5 ms when
+    another thread waits for it (owner, 14.11.2026, #3399). A hundred threads share one interpreter, and a read takes
+    the lock back after each SQLite step or file call only when its holder yields: beside one busy thread the
+    extensions index took 4.7 s at 5 ms and 1.9 s at 1 ms (0.1 s alone). It is a requested interval, not a bound: a
+    long C call that holds the lock (a large JSON decode, a fork), other waiters and the OS scheduler can stretch a
+    wait; on Windows the wait rounds to the timer tick, so the gain there is small. A thread nobody waits for is never
+    asked, so an uncontended interpreter pays nothing; a contended computing thread hands over more often, at a cost
+    that grows with the waiters (beside one thread making file calls it ran about 14 % slower while those calls ran 2.8
+    times faster; beside twelve, about 25 %). Children started by spawn, forkserver or exec keep CPython's default; a
+    forked one inherits this. No setting."""
     sys.setswitchinterval(SERVER_SWITCH_INTERVAL_SEC)
     log.info("Interpreter switch interval %.1f ms", sys.getswitchinterval() * 1000)
