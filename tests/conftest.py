@@ -1016,14 +1016,16 @@ def _act_as_the_installs_a_browser_or_e2e_test_launched(request, monkeypatch, tm
 
 
 @pytest.fixture(autouse=True)
-def _keep_the_pytest_switch_interval():
-    """``server.main()`` run in this process sets the server's interpreter switch interval
-    (``server_entrypoint.shorten_switch_interval``); the pytest process keeps its own for the next test."""
+def _keep_the_pytest_interpreter_tuning():
+    """``server.main()`` run in this process sets the server's interpreter switch interval and garbage-collector
+    threshold (``server_entrypoint``); the pytest process keeps its own for the next test."""
+    import gc
     import sys
 
-    interval = sys.getswitchinterval()
+    interval, thresholds = sys.getswitchinterval(), gc.get_threshold()
     yield
     sys.setswitchinterval(interval)
+    gc.set_threshold(*thresholds)
 
 
 @pytest.fixture(autouse=True)

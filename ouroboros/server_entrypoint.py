@@ -1,10 +1,11 @@
-"""CLI, data-root admission, port-binding and interpreter switch-interval helpers extracted from server.py."""
+"""CLI, data-root admission, port-binding and interpreter-tuning helpers extracted from server.py."""
 
 from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
 import errno
+import gc
 import logging
 import os
 import pathlib
@@ -19,6 +20,7 @@ SERVER_LOCK_NAME = "server.lock"
 _admission: dict = {}  # {"root": realpath, "fd": descriptor} of the one data root this process serves
 _admission_lock = threading.Lock()
 SERVER_SWITCH_INTERVAL_SEC = 0.001  # CPython's default is 0.005
+SERVER_GC_THRESHOLD0 = 20_000  # CPython's default is 700
 
 
 class ServerAdmissionRefused(RuntimeError):
@@ -255,3 +257,16 @@ def shorten_switch_interval() -> None:
     forked one inherits this. No setting."""
     sys.setswitchinterval(SERVER_SWITCH_INTERVAL_SEC)
     log.info("Interpreter switch interval %.1f ms", sys.getswitchinterval() * 1000)
+
+
+def raise_gc_threshold() -> None:
+    """The server collects its young generation after 20,000 new container objects instead of CPython's 700 (owner,
+    15.11.2026, #3399). Decoding a large task body creates tens of thousands of dicts and lists, and every 700 of them
+    a collection ran while holding the interpreter: on the owner's live server collections held it 7-19 % of the time,
+    nearly all started inside JSON decoding. On a stand with nine million long-lived objects, 300 decodes of a 1.5 MB
+    body ran 2,751 young and 250 middle collections, 15 % of the decoding time; with 20,000, one collection. Objects
+    still die by reference counting at once; only cyclic garbage waits longer for its collection (at most about 20,000
+    young objects, a few MB). The older generations keep CPython's thresholds; children keep CPython's default. No
+    setting."""
+    gc.set_threshold(SERVER_GC_THRESHOLD0, *gc.get_threshold()[1:])
+    log.info("Garbage collector thresholds %s", gc.get_threshold())

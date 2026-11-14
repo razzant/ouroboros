@@ -1,6 +1,7 @@
 """What the server sets for its own process at start. The open-file limit rises (pool-capacity WP3/WP6): the body
 follows each live delegated run on its own transport, and a GUI-launched macOS process starts at 256 files, so hundreds
-of followed runs would meet EMFILE. The interpreter's switch interval shortens (#3399)."""
+of followed runs would meet EMFILE. The interpreter's switch interval shortens and its young-generation collection
+threshold rises (#3399)."""
 
 from __future__ import annotations
 
@@ -46,3 +47,22 @@ def test_the_server_shortens_the_interpreters_switch_interval_at_start():
     finally:
         sys.setswitchinterval(before)
     assert "shorten_switch_interval()" in inspect.getsource(server.main)
+
+
+def test_the_server_raises_its_young_generation_collection_threshold_at_start():
+    """Decoding a large task body ran a collection under the interpreter lock every 700 new objects: the server
+    collects its young generation after 20,000, keeps the older generations' thresholds, once, at start (#3399)."""
+    import gc
+    import inspect
+
+    import server
+    from ouroboros import server_entrypoint
+
+    before = gc.get_threshold()
+    try:
+        gc.set_threshold(700, 10, 10)
+        server_entrypoint.raise_gc_threshold()
+        assert gc.get_threshold() == (20_000, 10, 10)
+    finally:
+        gc.set_threshold(*before)
+    assert "raise_gc_threshold()" in inspect.getsource(server.main)
