@@ -2364,7 +2364,8 @@ tool of unknown kind that ran and failed (MCP and extension tools included), a c
 failed read named in `PURE_READ_TOOLS`, a command that ran and failed or timed out, and a call the tool refused for
 its arguments or because it named no tool stay in the details, in the evidence row below. The clause names the first loud failure in plain words (a noun for the step and
 what happened, never a tool name, its result text or a path) and counts the rest of those (`tool_error_words`); a record written before the
-flags keeps its stored word. Successful tool calls are not rows: they fold
+flags keeps its stored word. A check that did not pass is said in the words of its "Check did not pass" row and with how many
+checks passed after it, never by its command or a path; a record without that fact keeps its stored sentence. Successful tool calls are not rows: they fold
 into ONE evidence row per block (`N tool calls`, `N tool calls · M errors` once
 a call failed) at the first call's position and time, patched in place; Expand
 shows per-tool counts (`read_file ×3 · web_search`), and the phase (`calling`
