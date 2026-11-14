@@ -207,3 +207,41 @@ test('apiClient.state keeps fetchJson\'s contract for a refusal, an unparsable b
     route = () => reply(CENSUS);
     assert.deepEqual((await api.apiClient.state()).served_ui, { source: 'builtin' });
 });
+
+test('a reader of other fields names the bindings revision the page last saw and still reads fresh; the map\'s reader keeps its own path', async (t) => {
+    const asked = [];
+    const map = { t1: { project_id: 'alpha', chat_id: 7 } };
+    let body = { ...CENSUS, github_token_configured: false, task_bindings: map, task_bindings_revision: 'rev a' };
+    withFetch(t, (url) => { asked.push(url); return reply(body); });
+    const ask = async (read) => { asked.length = 0; const answer = await read(); return [asked[0], answer]; };
+    // The page's first read names nothing and receives the map with its revision.
+    assert.equal((await ask(api.apiClient.state))[0], '/api/state');
+    // The next reader names that revision; what it reads is the server's answer to this request, not a kept one.
+    body = { ...CENSUS, github_token_configured: true, task_bindings: null, task_bindings_unchanged: true,
+        task_bindings_revision: 'rev a' };
+    const [named, fresh] = await ask(api.apiClient.state);
+    assert.deepEqual([named, fresh.github_token_configured, fresh.task_bindings], ['/api/state?bindings_since=rev%20a', true, null]);
+    assert.equal((await ask(() => api.readState()))[0], '/api/state?bindings_since=rev%20a', 'the bounded read without a path');
+    // A reader of the map passes its own path: the page's token never hides the map from it.
+    assert.equal((await ask(() => api.readState('/api/state')))[0], '/api/state');
+    // The token follows the newest body: a new revision, then none after a failed bindings read ('') ...
+    body = { ...CENSUS, task_bindings: map, task_bindings_revision: 'rev-b' };
+    await api.apiClient.state();
+    assert.equal((await ask(api.apiClient.state))[0], '/api/state?bindings_since=rev-b');
+    body = { ...CENSUS, task_bindings: {}, task_bindings_revision: '' };
+    await api.apiClient.state();
+    assert.equal((await ask(api.apiClient.state))[0], '/api/state');
+    // ... and none for a server that sends no revision, and a refusal leaves the token as it was.
+    body = { ...CENSUS, task_bindings: map, task_bindings_revision: 'rev-c' };
+    await api.apiClient.state();
+    const answer = body;
+    body = { error: 'store busy', reason_code: 'migrating' };
+    globalThis.fetch = async (url) => { asked.push(String(url)); return reply(body, 503); };
+    await api.apiClient.state().catch(() => {});
+    globalThis.fetch = async (url) => { asked.push(String(url)); return reply(body); };
+    body = answer;
+    assert.equal((await ask(api.apiClient.state))[0], '/api/state?bindings_since=rev-c');
+    body = { ...CENSUS };
+    await api.apiClient.state();
+    assert.equal((await ask(api.apiClient.state))[0], '/api/state');
+});
