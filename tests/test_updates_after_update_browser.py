@@ -131,7 +131,9 @@ FACTS = """() => {
         strayBlocks: document.querySelectorAll('#updates-generation-facts, #updates-status-card h4:not([class])').length,
         cardOverflow: card.scrollWidth - card.clientWidth,
         pageOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-        card: box(card), foot: box(foot), summary: box(details.querySelector('summary')), details: box(details),
+        card: box(card), foot: box(foot), rootEm: parseFloat(getComputedStyle(document.documentElement).fontSize),
+        paneWidth: (() => { const pane = card.closest(".dashboard-body"), s = getComputedStyle(pane);
+            return pane.clientWidth - parseFloat(s.paddingLeft) - parseFloat(s.paddingRight); })(), summary: box(details.querySelector('summary')), details: box(details),
         restore: control('#updates-attempt-restore'),
         meta: box(document.querySelector('#updates-meta')), status: box(document.querySelector('#updates-summary')),
         contrast: {label: of(labels[0]), value: of(labels[0]?.nextElementSibling), head: of(heads[0]), raw: of(pre),
@@ -245,11 +247,12 @@ def restore_keeps_its_side(current, width):
     restore, foot, summary = current["restore"], current["foot"], current["summary"]
     if not restore:
         return False
-    side = abs(restore["right"] - foot["right"]) < 1 if width >= 640 else abs(restore["x"] - foot["x"]) < 1
+    wide = foot["right"] - foot["x"] > 34 * current["rootEm"]
+    side = abs(restore["right"] - foot["right"]) < 1 if wide else abs(restore["x"] - foot["x"]) < 1
     if current["open"]:
         row = restore["y"] >= current["details"]["bottom"]
     else:
-        row = abs(restore["y"] - summary["y"]) < 12 if width >= 640 else summary["bottom"] <= restore["y"]
+        row = abs(restore["y"] - summary["y"]) < 12 if wide else summary["bottom"] <= restore["y"]
     return side and row and restore["y"] >= current["meta"]["bottom"]
 
 
@@ -298,7 +301,7 @@ def test_samples_are_rows_of_their_last_attempt_and_survive_refreshes(updates_ui
     assert restore_keeps_its_side(opened, width) and opened["restore"]["right"] <= opened["card"]["right"], opened
     for pair in opened["pairs"]:
         assert pair["valueOverflow"] <= 1, pair
-        assert (abs(pair["valueBox"]["x"] - pair["labelBox"]["x"]) < 1) == (width < 640), (width, pair)
+        assert (abs(pair["valueBox"]["x"] - pair["labelBox"]["x"]) < 1) == (opened["paneWidth"] <= 480), (width, pair)
 
     toggle(page, "#updates-attempt-raw > summary", "Enter")
     shown = facts(page)
