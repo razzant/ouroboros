@@ -320,6 +320,49 @@ def test_every_focus_visible_selector_gets_the_canonical_ring() -> None:
     )
 
 
+# The chosen sidebar row is the solid crimson, where the room's focus ring and unread crimson vanish; it restates both
+# tokens as the fill's ink (one vocabulary: the ring still reads --focus-accent-border, the mark --mark-unread).
+CHOSEN_ROW_INKS = {"--focus-accent-border": "var(--tone-crimson-ink)", "--mark-unread": "var(--tone-crimson-ink)"}
+
+
+def _specificity(selector: str) -> tuple[int, int, int]:
+    ids = len(re.findall(r"#[\w-]+", selector))
+    classes = len(re.findall(r"\.[\w-]+|\[[^\]]*\]", selector))
+    pseudo = len(re.findall(r"(?<!:):(?!:|not\(|is\(|where\(|has\()[\w-]+", selector))
+    return ids, classes + pseudo, 0
+
+
+def test_the_chosen_sidebar_row_rings_and_marks_in_its_fills_ink() -> None:
+    """On `.nav-row.active` (solid `--tone-crimson`) the focus ring and an unread mark take `--tone-crimson-ink`, and
+    no rule restates them so for a row that is not chosen. The restatement outranks the card's dark-voice one (it
+    restates the same two tokens for `.nav-ouro`), so the chosen card reads the fill's ink too."""
+    source = _decommented(_read("web/style.css"))
+    chosen: list[tuple[int, str]] = []
+    unchosen: list[str] = []
+    card_voice: list[tuple[int, str]] = []
+    for match in RULE.finditer(source):
+        selector_list, body = match.group(1), match.group(2)
+        decls = {name: value.strip() for name, value in re.findall(r"(--[\w-]+)\s*:\s*([^;]+)", body)}
+        inks = any(decls.get(name) == value for name, value in CHOSEN_ROW_INKS.items())
+        for selector in (" ".join(s.split()) for s in selector_list.split(",")):
+            if selector.endswith(".nav-ouro") and decls.get("--focus-accent-border"):
+                card_voice.append((match.start(), selector))
+            if not inks or not re.search(r"\.nav-(row|ouro|project)", selector):
+                continue
+            if selector.endswith(".nav-row.active") and all(
+                    decls.get(name) == value for name, value in CHOSEN_ROW_INKS.items()):
+                chosen.append((match.start(), selector))
+            elif ".active" not in selector:
+                unchosen.append(selector)
+    assert chosen, "no rule restates the chosen sidebar row's focus ring and unread mark as --tone-crimson-ink"
+    assert not unchosen, f"a row that is not chosen takes the chosen fill's ink for its ring and mark: {unchosen}"
+    assert card_voice, "the card's dark voice no longer restates the focus token; re-read this witness"
+    position, selector = chosen[-1]
+    for card_position, card_selector in card_voice:
+        assert (_specificity(selector), position) > (_specificity(card_selector), card_position), (
+            f"{selector!r} does not outrank {card_selector!r}, so the chosen card keeps the voice's ring")
+
+
 # ---------------------------------------------------------------------------
 # Horizontal overflow: the red scrollbar on Settings -> Advanced
 # ---------------------------------------------------------------------------

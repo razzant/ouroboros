@@ -119,8 +119,8 @@ html[data-layout="stack"] .shell-icon-control {
 
 /* The sidebar's zones (docs/DESIGN.md "Shell"; owner 12.11, the fifth round "Карточка и тихие разделы"): a pinned
    head (this Ouroboros's card, the Main Chat place), the Projects list as the ONE scroller, then at the bottom edge
-   the tools, three to a line, and the foot (the version and the update); free room, when the list is short or
-   folded, lies between the list and the tools. Row
+   the sections, three to a line on a desk, and the foot (the version and the update); free room, when the list is
+   short, lies between the list and the sections. Row
    heights follow the pointer: a finger gets the touch minimum, a mouse a quieter row, and a short window with a
    mouse compacts the rows first. A window too short even for that falls back to the whole column scrolling with
    the head sticky and the foot still on the bottom edge. */
@@ -129,7 +129,6 @@ html[data-layout="stack"] .shell-icon-control {
     --nav-item-h: 32px;      /* a Project row */
     --nav-control-h: 28px;   /* a row's ⋯ and the header's + */
     --nav-kebab-w: var(--nav-control-h);  /* the column a Project row's ⋯ takes (none on touch: a long press opens it) */
-    --nav-label-x: calc(var(--space-3) + 18px + var(--space-3));  /* the one text column every label starts on */
     --sidebar-pad-bottom: var(--space-3);  /* the foot's inset from the bottom edge; the drawer adds the safe area */
     width: max(var(--sidebar-min-width), var(--drag-width, var(--sidebar-width)));
     height: var(--vvh);
@@ -202,15 +201,19 @@ html[data-layout="stack"] .shell-icon-control {
     flex-direction: column;
 }
 
-/* The tools, quiet items three to a line in three columns, each as wide as its widest item: the first column starts
-   where the Project names start, the last ends where the column ends, and within a column the items start on one
-   line, so the glyphs of the two rows stand under each other. A narrow column and the phone drawer stand them two to
-   a line, a finger high there. The chosen one is the crimson capsule. */
+/* The sections, quiet items three to a line on a desk in three columns, each as wide as its widest item: the first
+   column starts where the Project names start, the last ends where the column ends, and within a column the items start
+   on one line, so the glyphs of the two rows stand under each other. A name is never cut: a column is never narrower
+   than its widest name, and where three columns do not fit the column stands them two to a line, the phone drawer
+   always (a finger high there), and a column too narrow even for two stands them one to a line. An engine without
+   container queries keeps the one-to-a-line base. The steps are the English names' widths at the body size (328 px
+   holds three, 226 px two); a longer translation that passes a step's width overflows instead of being cut. The chosen
+   one is the crimson capsule. */
 .nav-tools {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, auto));
+    grid-template-columns: minmax(max-content, 1fr);
     justify-content: space-between;
-    gap: var(--space-1) 2px;
+    gap: var(--space-1) 0;
     padding-top: var(--space-3);
 }
 .nav-tools > .nav-row {
@@ -224,28 +227,44 @@ html[data-layout="stack"] .shell-icon-control {
     font-size: var(--type-body);
     font-weight: 400;
 }
+.nav-tools > .nav-row > .nav-row-label { overflow: visible; text-overflow: clip; }
 .nav-tools > .nav-row:not(.active) > svg { color: var(--text-meta); }
 .nav-tools > .nav-row { justify-self: start; }
-@container (max-width: 318px) {
-    .nav-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .nav-tools > .nav-row:nth-child(n) { justify-self: start; }
+@container (min-width: 226px) {
+    .nav-tools { grid-template-columns: repeat(2, minmax(max-content, 1fr)); }
 }
-html[data-layout="stack"] .nav-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); padding-top: var(--space-3); }
+@container (min-width: 328px) {
+    html:not([data-layout="stack"]) .nav-tools { grid-template-columns: repeat(3, max-content); }
+}
+/* A finger's target in the docked layout too (a tablet, a touch laptop): the row is the touch minimum tall; a mouse
+   keeps the quieter row. */
+@media (pointer: coarse) {
+    .nav-tools > .nav-row { min-height: var(--touch-target-min); }
+}
 html[data-layout="stack"] .nav-tools > .nav-row { min-height: 44px; }
-html[data-layout="stack"] .nav-tools > .nav-row:nth-child(n) { justify-self: start; }
 
-/* The foot: the version and the update capsule on one line. It keeps its height with no update, so nothing above it
-   moves when one arrives. */
+/* The foot: the version and the update capsule on one line where both fit; a capsule too long for the line beside the
+   version (a long outcome, a translation, a narrow column) takes a line of its own, and grows a line rather than
+   clipping its words. It keeps its height with no update, so nothing above it moves when one arrives. */
 .sidebar-foot-meta {
     display: flex;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
     align-items: center;
-    gap: var(--space-2);
+    gap: var(--space-1) var(--space-2);
     min-height: 40px;
     margin: var(--space-3) 0 var(--space-2);
     padding: 0 var(--space-2) 0 calc(var(--space-3) + 1px);
 }
 .sidebar-foot-meta .update-notice { margin: 0; }
+.sidebar-foot-meta .update-notice > .update-pill {
+    --control-h: auto;
+    --control-pad-y: 5px;
+    min-height: var(--control-h-sm);
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 16px;
+    text-align: start;
+}
 html[data-layout="stack"] .sidebar-foot-meta { min-height: 44px; margin: var(--space-2) 0 0; }
 
 /* An older desktop page can also survive a source update with the pre-three-zone .sidebar-scroll wrapping the
@@ -332,8 +351,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
     white-space: nowrap;
 }
 
-.nav-row,
-.nav-section-toggle {
+.nav-row {
     display: flex;
     flex-direction: row;
     align-items: center;
@@ -353,20 +371,10 @@ html[data-layout="stack"] .resize-handle { display: none; }
     position: relative;
 }
 
-.nav-row svg,
-.nav-section-toggle svg {
+.nav-row svg {
     flex: 0 0 auto;
     width: 18px;
     height: 18px;
-}
-
-.nav-row-icon {
-    flex: 0 0 18px;
-    width: 18px;
-    height: 18px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
 }
 
 .nav-row-label {
@@ -378,19 +386,11 @@ html[data-layout="stack"] .resize-handle { display: none; }
 }
 
 /* The sidebar's marks are the shared status marks (ui.css "Status marks", status_mark.js): one per place, in the
-   place's own ink (hover and the chosen row's ink included), the owner's amber and the unread crimson its only hues.
-   The Projects header carries the Projects' one mark in the rows' mark column; its chevron follows its word. */
-#nav-projects-toggle > .nav-row-label { flex: 0 1 auto; }
-
-.nav-row-meta {
-    flex: 0 0 auto;
-    color: var(--text-meta);
-    font-size: var(--type-meta);
-}
+   place's own ink (hover and the chosen row's ink included), the owner's amber and the unread crimson its only hues. */
 
 /* The chosen place is one crimson fill with its ink, on the rest shadow like every chosen capsule, for the card, a
-   Project row and a tool alike; no left stripe (owner 12.11). A Project's hue stays in its mark. One row at a time;
-   the Projects header is never chosen (a Project row is). The fill itself is .nav-row.active below. */
+   Project row and a section alike; no left stripe (owner 12.11). A Project's hue stays in its mark. One row at a
+   time. The fill itself is .nav-row.active below. */
 
 /* Unread counts and badges are the crimson accent (a live fact for you), never red and never a glow (owner Q6=A);
    a Project row's own new messages are the crimson hue of its status mark. */
@@ -513,11 +513,15 @@ html[data-layout="stack"] .resize-handle { display: none; }
 
 @media (hover: hover) {
     .nav-row:hover,
-    .nav-section-toggle:hover,
     .nav-project-pin:hover + .nav-project-row:not(.active) {  /* a row's Pin lies over it */
         background: var(--tone-quiet-hover);
         border-color: transparent;
         color: var(--text-primary);
+    }
+    /* A hovered card keeps its own material: the hover tint lies over the voice instead of replacing it (on dark the
+       voice restates the tint as its opaque lighter step, so it reads as before). */
+    .nav-ouro:not(.active):hover {
+        background: linear-gradient(var(--tone-quiet-hover), var(--tone-quiet-hover)), var(--voice-ouroboros);
     }
 }
 .nav-row.active {
@@ -526,9 +530,15 @@ html[data-layout="stack"] .resize-handle { display: none; }
     color: var(--tone-crimson-ink);
     box-shadow: var(--elev-rest);
 }
+/* On the solid crimson the room's focus ring and unread crimson would vanish (1.1:1 and 1.04:1 in the light theme), so
+   the chosen row restates both as the fill's ink: still the one focus token and the one unread token, as the card
+   restates them for its own voice above (:root keeps this over that restatement). */
+:root .nav-row.active {
+    --focus-accent-border: var(--tone-crimson-ink);
+    --mark-unread: var(--tone-crimson-ink);
+}
 
 .nav-row:focus,
-.nav-section-toggle:focus,
 .app-tab:focus,
 .chat-header-btn:focus {
     outline: none;
@@ -537,7 +547,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
 /* Inset: these sit flush inside the sidebar / header strip, which clips an
    outer ring (docs/DESIGN.md "Focus"). */
 .nav-row:focus-visible,
-.nav-section-toggle:focus-visible,
 .app-tab:focus-visible,
 .chat-header-btn:focus-visible {
     outline: 2px solid var(--focus-accent-border);
@@ -849,12 +858,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
     flex-direction: column;
     gap: var(--space-1);
     margin-top: var(--space-2);
-}
-
-.nav-chevron {
-    flex: 0 0 auto;
-    color: var(--text-muted);
-    transition: transform 0.15s ease;
 }
 
 /* Main content in the shell grid. */
@@ -1396,8 +1399,13 @@ html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title-
 html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) {
     margin-inline-start: calc(var(--space-2) - var(--page-header-padding-x));
 }
+/* A phone page that leads back (Circles or Skills opened from Settings): Back stands where the places control stood,
+   in the header's one row, as on a Settings page (DESIGN "Page header": one leading control, no second header row). */
 html[data-layout="stack"] .app-page-header[data-back]:has(> .app-page-title-block > .app-page-back:not(:empty)) {
-    grid-template-areas: "leading title toolbar" "back back back";
+    grid-template-areas: "back title toolbar";
+}
+html[data-layout="stack"] .app-page-header[data-back] > .app-page-leading:has(~ .app-page-title-block > .app-page-back:not(:empty)) {
+    display: none;
 }
 html[data-layout="stack"] .app-page-header[data-back] > .app-page-title-block:has(> .app-page-back:not(:empty)) { display: contents; }
 html[data-layout="stack"] .app-page-header[data-back] .app-page-title-row { grid-area: title; }
@@ -1443,8 +1451,13 @@ html[data-layout="docked"] .app-page-header[data-lead] > .app-page-toolbar butto
     min-height: var(--control-h-float);
     padding-block: 0;
 }
+/* In the bar the tabs wrap and never scroll (DESIGN "Page header"): a strip longer than the bar's start takes a second
+   line of tabs, which grows the bar, instead of hiding tabs behind a fade. */
 html[data-layout="docked"] .app-page-lead .app-tab-strip {
     flex: 1 1 auto;
+    flex-wrap: wrap;
+    row-gap: var(--space-1);
+    overflow-x: visible;
     padding: 10px var(--space-1) 26px;
     margin: 0 0 -16px calc(-1 * var(--space-1));
     scroll-padding-inline: var(--space-1);
@@ -2105,7 +2118,7 @@ html[data-layout="stack"] .chat-find {
    stands above the composer's end. */
 .chat-scroll-bottom-btn {
     position: absolute;
-    right: var(--space-2);
+    inset-inline-end: var(--space-2);
     bottom: calc(100% + var(--space-2));
     z-index: 6;
     width: var(--control-h-float);
@@ -2135,7 +2148,7 @@ html[data-layout="stack"] .chat-find {
 }
 /* In the pad, centred on the line's last row of capsules. */
 .chat-toolbar-row > .chat-scroll-bottom-btn {
-    right: var(--space-2);
+    inset-inline-end: var(--space-2);
     bottom: calc((var(--composer-control-height) - var(--control-h-float)) / 2);
 }
 @container composer (max-width: 460px) {
@@ -2144,7 +2157,7 @@ html[data-layout="stack"] .chat-find {
 /* A phone folds the capsule line into the field's row (it has no height of its own): there ↓ keeps its place above the
    composer's end. */
 html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
-    right: var(--space-2);
+    inset-inline-end: var(--space-2);
     bottom: calc(100% + var(--space-2));
 }
 .chat-scroll-bottom-btn:hover { color: var(--text-primary); }
@@ -4639,12 +4652,10 @@ html[data-layout="stack"] #primary-sidebar:not(.open):not(.dragging) {
 }
 /* A tap on a drawer row answers with its colour at once (a press is colour, never a sink): without a hover the rows
    had only iOS's grey flash. */
-.nav-row,
-.nav-section-toggle {
+.nav-row {
     -webkit-tap-highlight-color: transparent;
 }
-.nav-row:not(.active):active,
-.nav-section-toggle:active {
+.nav-row:not(.active):active {
     background: var(--tone-quiet-hover);
 }
 html[data-layout="stack"] .unread-badge {
@@ -6421,6 +6432,17 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     cursor: pointer;
     transition: var(--motion-tone);
 }
+/* Under a finger the action is the touch minimum on every side, its extra box drawn into the head's air by equal
+   negative margins, so nothing moves and a mouse keeps the small capsule (DESIGN "Touch and containment"). */
+@media (pointer: coarse) {
+    .costs-meter-action {
+        --costs-action-reach: calc((var(--control-h-sm) - var(--touch-target-min)) / 2);
+        width: var(--touch-target-min);
+        height: var(--touch-target-min);
+        margin-block: var(--costs-action-reach);
+        margin-inline: var(--costs-action-reach) calc(var(--costs-action-reach) - var(--space-1));
+    }
+}
 @media (hover: hover) { .costs-meter-action:hover { background: var(--tone-quiet-hover); color: var(--text-primary); } }
 .costs-meter-action:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
 .costs-meter-action:active { filter: var(--press); }
@@ -6446,7 +6468,8 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     background: var(--accent-18);
     overflow: hidden;
 }
-.costs-spend-bar > i { display: block; width: var(--spend-share, 0%); min-width: 8px; height: 100%; border-radius: inherit; background: var(--meter-fill); transition: width var(--motion-fade, 180ms) var(--ease-sheet, ease); }
+/* Any spend shows at least a sliver of fill; a zero share (as the figure rounds it) draws none. */
+.costs-spend-bar > i { display: block; width: var(--spend-share, 0%); min-width: min(8px, calc(var(--spend-share, 0%) * 1000)); height: 100%; border-radius: inherit; background: var(--meter-fill); transition: width var(--motion-fade, 180ms) var(--ease-sheet, ease); }
 .costs-spend-bar[data-reached="1"] > i { background: var(--amber); }
 .costs-budget, .costs-table-card { display: flex; flex-direction: column; gap: var(--space-3); min-width: 0; }
 /* A table's one-line scope note under its title: what it groups by (costs.js TABLES). */
@@ -6455,8 +6478,6 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 /* The consciousness allowance under its field (costs.js allowancePresentation): the clock's own spend in its words, what
    that leaves out in the meta ink and the door to Consciousness; then up to three status sentences (.ui-status), each
    its fact in the line's tone and what follows from it in the meta ink, a held wake's ending in its card's door. */
-.costs-allowance-spend { margin: 0; }
-.costs-allowance-spend .cost-cell-note { display: inline; }
 .costs-allowance-state { display: grid; gap: var(--space-2); }
 .costs-allowance-state:empty { display: none; }
 .costs-allowance-line { margin: 0; max-width: 72ch; min-width: 0; overflow-wrap: anywhere; }
@@ -7414,7 +7435,6 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     align-items: center;
     gap: var(--space-1);
     line-height: var(--line-title);
-    color: var(--text-secondary);
     white-space: nowrap;
 }
 .skills-category-count { color: var(--text-meta); font-weight: 500; }
@@ -8820,7 +8840,7 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
    Multi-project sidebar + right thread panel (v6.32.0)
    =========================================================================== */
 
-/* The middle zone: the Projects header pinned at its top, the list below it the sidebar's ONE scroller. A window
+/* The middle zone: Find a project and + pinned at its top, the list below it the sidebar's ONE scroller. A window
    too short for it scrolls the whole column instead (the head stays sticky). */
 .nav-projects {
     display: flex;
@@ -8829,8 +8849,8 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
     width: 100%;
     align-items: stretch;
     margin: var(--space-1) 0 0;
-    /* The zone takes the column's free room, so the tools and the foot stand at the bottom edge (owner 12.11); the
-       list in it is as tall as its rows, so a short or folded list leaves that room under its last row. */
+    /* The zone takes the column's free room, so the sections and the foot stand at the bottom edge (owner 12.11);
+       the list in it is as tall as its rows, so a short list leaves that room under its last row. */
     flex: 1 1 auto;
     min-height: 0;
 }
@@ -8856,9 +8876,8 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
 /* Find a project (owner 4.11, A1 refined; projects_nav.js): one floating capsule a Project row high (32 on the desk,
    44 on touch) in the header pills' material, --chip-float standing on --elev-rest. It is built as the composer's
    field is (DESIGN "The composer field"): the capsule is the object, the words' row has no surface, and focus is a
-   ring drawn as shadows, so no border adds to its height. The magnifier takes the rows' icon column at the house
-   glyph size, the words start on the rows' label column, and × (while there is a query) closes the row in the +
-   column. --space-1 after the header row, --space-2 before the first row: the step the pins keep before the rest. */
+   ring drawn as shadows, so no border adds to its height. The magnifier leads at the house glyph size, the words
+   follow it, and × (while there is a query) closes the field before +. --space-1 after the header row, --space-2 before the first row: the step the pins keep before the rest. */
 .nav-projects-find {
     display: flex;
     align-items: center;
@@ -8929,15 +8948,16 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
 .nav-projects-list { overflow-anchor: none; }
 
 /* While finding, a found name may take three lines, so the words that matched are not cut off behind the ellipsis
-   (the resting list keeps one line). The row grows; its mark keeps its column, centred on the row. */
-.nav-projects-list[data-finding] .nav-project-row { padding-block: 5px; }
-.nav-projects-list[data-finding] .nav-project-row > .nav-row-label {
+   (the resting list keeps the rows' two lines). The row grows past its fixed height; its time keeps the name's first
+   line and its newest line and mark stay under the name. */
+html .nav-projects-list[data-finding] .nav-project-row { height: auto; }
+.nav-projects-list[data-finding] .nav-project-row .nav-project-line1 { align-items: flex-start; }
+.nav-projects-list[data-finding] .nav-project-row .nav-row-label {
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 3;
     white-space: normal;
     overflow-wrap: anywhere;
-    line-height: 1.35;
 }
 
 /* The list's own commands (Show more, Clear search, Show all projects, Try again) and its one sentence take a
@@ -8988,9 +9008,8 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
     overflow-wrap: anywhere;
 }
 
-/* Project rows read as a compact list nested under the "Projects" header (no
-   glyph/dot, label indented to align under the parent label, shorter rows and
-   no left active bar) — a dropdown list, not standalone tabs. */
+/* A Project row's item: the row and, over its end, its ⋯ (and its Pin over the time); no glyph and no stripe. A
+   deleting item keeps the grid that gives `Deleting…` its column. */
 .nav-project-item {
     display: grid;
     grid-template-columns: minmax(0, 1fr) var(--nav-kebab-w);
@@ -9100,9 +9119,9 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 .nav-project-row[data-solo] .nav-project-says { display: none; }
 .nav-project-row.active :is(.nav-row-label, .nav-project-time, .nav-project-says) { color: inherit; }
 
-/* A deleting row states one trailing fact, `Deleting…`, in its wider sibling column. Its census mark stays in the
-   accessible name but is not drawn (app.js): motion on a row the owner cannot open would read as work to look at. */
-.nav-project-item.is-deleting .nav-project-row { grid-template-columns: minmax(0, 1fr); }
+/* A deleting row states one trailing fact, `Deleting…`, in its wider sibling column (the item's grid below). Its
+   census mark stays in the accessible name but is not drawn (app.js): motion on a row the owner cannot open would read
+   as work to look at. */
 
 @media (hover: hover) {
     .nav-project-row:not(.active):hover {
@@ -9129,48 +9148,13 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     white-space: nowrap;
 }
 
-/* The Projects header: the toggle, the unread count, its status mark, then "+" (New project). */
-/* The Projects header keeps Main's columns (owner 19.10, Q1 = B): the toggle (icon, word, chevron), then its facts,
-   the count and the mark in the number and mark columns of Main and the rows, and + in the ⋯ column. On touch, where
-   rows have no ⋯ column, + follows the chevron so the facts keep those columns. A press on the facts toggles too. */
 .nav-projects-header {
     display: flex;
     align-items: center;
     width: 100%;
 }
 
-.nav-projects-header > .nav-section-toggle {
-    flex: 0 1 auto;
-    width: auto;
-    min-width: 0;
-    padding-right: var(--space-2);
-    border-radius: var(--radius-inner) 0 0 var(--radius-inner);
-}
-
-.nav-projects-facts {
-    order: 1;
-    flex: 1 0 auto;
-    align-self: stretch;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: var(--space-3);
-    /* A Project row ends its mark column one border and --space-1 before its edge; the facts end where it does. */
-    padding-right: calc(var(--space-1) + 1px);
-    border-radius: 0 var(--radius-inner) var(--radius-inner) 0;
-    color: var(--text-secondary);
-    cursor: pointer;
-    transition: var(--motion-tone);
-}
-
-.nav-projects-facts > .nav-mark-slot {
-    flex: 0 0 18px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.nav-projects-add { order: 2; flex-shrink: 0; }  /* the ⋯ column keeps its width in a narrow sidebar */
+.nav-projects-add { order: 2; flex-shrink: 0; }  /* + keeps its width in a narrow sidebar */
 
 /* The Projects list starts with its search; no "Projects" word and no collapse. The row is the find
    capsule and, at its end, New project: a round capsule of the same material and height, as a messenger's compose
@@ -9189,45 +9173,6 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 }
 @media (hover: hover) {
     .nav-projects-header > .nav-projects-add:hover { background: var(--chip-float-hover); color: var(--text-primary); }
-}
-
-@media (pointer: coarse) {
-    .nav-projects-add { order: 0; }
-}
-
-@media (hover: hover) {
-    .nav-projects-facts:hover,
-    .nav-projects-header > .nav-section-toggle:has(~ .nav-projects-facts:hover),
-    .nav-projects-header > .nav-section-toggle:hover ~ .nav-projects-facts {
-        background: var(--tone-quiet-hover);
-        color: var(--text-primary);
-    }
-}
-
-.nav-projects-header .nav-chevron {
-    display: inline-flex;
-    width: 16px;
-    height: 16px;
-    transform: rotate(90deg);
-    transition: transform 0.15s ease;
-}
-.nav-projects-header .nav-chevron > svg { width: 16px; height: 16px; }
-
-.nav-projects-header .nav-section-toggle[aria-expanded="false"] .nav-chevron {
-    transform: rotate(0deg);
-}
-
-.nav-projects-header .nav-row-meta:not(:empty) {
-    min-width: 18px;
-    height: 18px;
-    padding: 0 5px;
-    border-radius: var(--pill-radius);
-    background: var(--tone-crimson);
-    color: var(--tone-crimson-ink);
-    font-size: var(--type-meta);
-    font-weight: 600;
-    line-height: 18px;
-    text-align: center;
 }
 
 .nav-projects-add {
@@ -9307,13 +9252,12 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     outline-offset: -2px;
 }
 
-/* A row's Pin or Unpin: the ⋯'s quiet control over the row's icon column, left of the name, in no column of its own.
-   It is drawn while a pointer hovers the row or the keyboard is on it, and is a target only while drawn, so a finger
-   (no hover) presses the row there and keeps the long press's menu. Over the chosen row it takes the row's ink, and
+/* A row's Pin or Unpin: the ⋯'s quiet control over the time on the name's line, in no column of its own. It is drawn
+   while a pointer hovers the row or the keyboard is on it, and is a target only while drawn, so a finger (no hover)
+   presses the row there and keeps the long press's menu. Over the chosen row it takes the row's ink, and
    the row keeps its hover under it (the rows' hover rule). */
 .nav-project-pin {
-    /* Rows have no icon column since the fifth round: the Pin stands over the time on the name's line, which gives
-       way to it while it is drawn. */
+    /* The time gives way to it while it is drawn. */
     position: absolute;
     z-index: 1;  /* over the row, which follows it */
     top: 3px;
@@ -9354,9 +9298,6 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
         overflow: hidden;
         opacity: 0;
         pointer-events: none;
-    }
-    .nav-project-item:has(> .nav-project-kebab:is(:focus, [aria-expanded="true"])) {
-        grid-template-columns: minmax(0, 1fr) var(--nav-control-h);
     }
     .nav-project-item {
         -webkit-touch-callout: none;

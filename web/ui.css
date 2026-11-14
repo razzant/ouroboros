@@ -1155,9 +1155,11 @@ html[data-layout="stack"] .section-rail { padding-inline: 12px; }
         background: none;
         box-shadow: none;
     }
+    /* A row is as tall with its answer as without it (the name's line, the answer's line, their 2px and the 5px
+       insets), so rows do not move as answers arrive. */
     .section-shell[data-section-view="page"] .section-row {
         column-gap: 0;
-        min-height: 44px;
+        min-height: calc(var(--type-body) * var(--line-title) + 2px + var(--type-meta) * var(--line-meta) + 10px);
         padding: 5px var(--space-2);
         border-radius: var(--radius-inner);
     }

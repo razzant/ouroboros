@@ -39,18 +39,12 @@ html[data-layout="stack"] .settings-page { padding-inline: 12px; }
    over the home alone, stands its search field; over a page, `(‹) <page>` in the header's one title style. */
 .settings-lead .settings-search { flex: 1 1 auto; min-width: 0; }
 
-/* Two panes: the home is the rail beside the page. Its card says only who and how many; the count opens the list.
-   Until a row is pressed the home stands alone, its column in the middle of the box and as wide as at a desk (no page
-   is opened for it: a page reads when it is shown), so the window has no empty half; the field over it stands over
-   that column. */
+/* Two panes: the home is the rail beside the page, and a page is always open (settings.js: the last one opened, Models
+   the first time; the list's Ouroboros row opens Ouroboros's card in the page's pane). */
 @container sectionplace (min-width: 40rem) {
-    .settings-shell[data-section-view="home"] .settings-home-column { margin-inline: auto; }
     .settings-shell[data-section-view="page"] .settings-page { padding-inline-start: var(--space-4); }
-    .settings-shell[data-section-view="page"] > .settings-home .settings-needs:not([data-all]) { display: none; }
-    .settings-shell[data-section-view="page"] > .settings-home .settings-being-count { color: var(--text-primary); font-weight: 600; }
     .settings-shell[data-section-view="page"] > .settings-home .settings-overview { margin-block-end: var(--space-3); }
     .settings-shell[data-section-view="page"] .settings-door-glyph.settings-overview-glyph { width: 20px; height: 20px; margin-inline-end: var(--space-2); }
-    #page-settings[data-section-view="home"] .settings-lead { justify-content: center; }
 }
 
 /* A phone: the band is `☰ Settings`, and the row under it holds the field over the home, or `(‹) <page>` over a page,
