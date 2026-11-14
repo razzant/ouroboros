@@ -22,16 +22,13 @@ def safety_configuration(settings: dict) -> tuple:
 def _resolved_safety_configuration(values: dict) -> tuple:
     from ouroboros.configured_subagents import parse_configured_subagents
     from ouroboros.deployment_policy import checker
-    from ouroboros.settings_defaults import SETTINGS_DEFAULTS
     from ouroboros.settings_scales import normalize_safety_mode
     from ouroboros.model_slots import (model_role_option, MODEL_ACCOUNTS_KEY,
                                      MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY)
-    slot = "safety" if str(values.get("OUROBOROS_MODEL_SAFETY") or "").strip() else "light"
-    if slot == "light" and not str(values.get("OUROBOROS_MODEL_LIGHT") or "").strip():
-        slot = "main"
-    model = str(values.get({"safety": "OUROBOROS_MODEL_SAFETY", "light": "OUROBOROS_MODEL_LIGHT",
-                           "main": "OUROBOROS_MODEL"}[slot]) or SETTINGS_DEFAULTS["OUROBOROS_MODEL"]).strip()
-    local = model.endswith(" (local)") or str(values.get(f"USE_LOCAL_{slot.upper()}") or "").lower() in {"true", "1", "yes", "on"}
+    from ouroboros.route_choice import following_route
+
+    model, local = following_route("safety", read=values.get)  # the checker's route as the runtime resolves it
+    local = local or model.endswith(" (local)")
     model = model.removesuffix(" (local)")
     options = tuple(model_role_option(key, "safety", settings=values)
                     for key in (MODEL_ACCOUNTS_KEY, MODEL_CONTEXT_WINDOWS_KEY, MODEL_PROCESSING_PREFERENCES_KEY))

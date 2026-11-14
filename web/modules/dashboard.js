@@ -58,7 +58,8 @@ function rowHtml({ value, label }, active) {
  * when the tab is shown, painted after a save on any page and read again after one of their own. `custom(row)` draws a
  * custom control, `openDoor(row)` takes a door's press, `onSaved(rowId)` hears this tab's own saves, and
  * `words(settings)` says what a row adds from the last read: `{ [rowId]: { caption, value } }`, the caption in its meta
- * line and a door's value before its chevron. Answers `{ dispose }`.
+ * line and a door's value before its chevron. Answers `{ paint, dispose }`: `paint` says the words again from the
+ * last settings read (a tab whose words also draw on its own read calls it after that read).
  */
 export function mountTabSettings(host, tab, { state, cards = null, custom = null, openDoor = null, words = null, onPaint = null, onSaved = null } = {}) {
     const page = `dashboard:${tab}`;
@@ -122,6 +123,7 @@ export function mountTabSettings(host, tab, { state, cards = null, custom = null
     paint();
     if (shown()) void read();
     return {
+        paint,
         dispose() {
             rows.dispose();
             window.removeEventListener('ouro:dashboard-subtab-shown', onShown);

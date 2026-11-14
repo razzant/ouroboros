@@ -11,7 +11,9 @@ to keep folding it, part by part. The per-call ceiling went the other way: the
 owner retired it on every install, a configured value included, so each install
 with a settings document hears once what bounds a command, an in-slot wait and the
 silence before attention now. Blocking reviews went that way too: an install that had them
-hears once that the setting is gone and what still holds. (Which reviewers run is no longer a notice
+hears once that the setting is gone and what still holds. An empty Light model follows its local box
+for every call since the owner's decision of 15 Nov 2026: an install whose box is ticked under a cloud
+Main hears once which calls moved to its local model. (Which reviewers run is no longer a notice
 of this module: the review lanes became rows of the subagent catalog, and the
 migration's own one-time report — ``server_maintenance._startup_review_pool_notice``
 — says which rows run now.)
@@ -39,6 +41,7 @@ OPTIONAL_BOUNDS_NOTICE_KEY = "optional_bounds_notified"
 LEGACY_MEMORY_NOTICE_KEY = "legacy_memory_notified"
 COMMAND_TIMEOUT_NOTICE_KEY = "command_timeout_notified"
 REVIEW_ENFORCEMENT_NOTICE_KEY = "review_enforcement_notified"
+LIGHT_LOCAL_NOTICE_KEY = "light_local_box_notified"
 _CALL_CEILING_KEY = "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC"
 _REVIEW_ENFORCEMENT_KEY = "OUROBOROS_REVIEW_ENFORCEMENT"
 # The old dialogue writer's retelling; its cursor file alone holds no retelling to tell about.
@@ -150,6 +153,39 @@ def review_enforcement_notice(document: Optional[Mapping[str, Any]], environ: Ma
             "message and the update description name it.")
 
 
+def light_local_notice(settings: Mapping[str, Any]) -> str:
+    """The owner-facing sentences that an empty Light model now follows its local box for every call (owner,
+    2026-11-15), owed once to an install this moves: a cloud Main, an empty Light and its box ticked. Before, only
+    some Light calls read the box; memory consolidation, the light helpers and an inheriting Safety Supervisor ran
+    on Main. The Safety sentences are said only where a check is asked and inherits Light (its own model, a
+    deployment's checker and Safety off in both modes do not move); the last one only while no local model is
+    configured. Judged once, on the first start that can tell the owner: a box ticked later is the owner's own
+    act under the rule, never news."""
+    from ouroboros.deployment_policy import checker
+    from ouroboros.route_choice import _checked
+    from ouroboros.settings_scales import normalize_safety_mode
+
+    def text(key: str) -> str:
+        return str(settings.get(key) or "").strip()
+
+    if text("OUROBOROS_MODEL_LIGHT") or not _checked(settings.get("USE_LOCAL_LIGHT")) or _checked(settings.get("USE_LOCAL_MAIN")):
+        return ""
+    checks = checker() is None and not text("OUROBOROS_MODEL_SAFETY") and any(
+        normalize_safety_mode(settings.get(key)) != "off"
+        for key in ("OUROBOROS_SAFETY_MODE", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"))
+    main = text("OUROBOROS_MODEL")
+    moved = "Safety checks, memory consolidation and other Light calls" if checks else "memory consolidation and other Light calls"
+    said = ("⚙️ An empty Light model now follows its “Use the local model” box everywhere. Here the box is ticked and "
+            f"Main is a cloud model, so {moved} now run on the local model instead of {main or 'Main'}.")
+    if checks:
+        said += " A Safety check the local model does not answer goes to your Fallback models and holds the action if none answers."
+    if not text("LOCAL_MODEL_SOURCE"):
+        said += (" No local model is configured: until you add one or untick the box, "
+                 + ("every Safety check goes that way and the other Light calls get no answer." if checks
+                    else "these calls get no answer."))
+    return said + " Untick the box under Light in Settings › Models to keep them on Main."
+
+
 def legacy_memory_facts(root: Any) -> Optional[Dict[str, Any]]:
     """How much memory the old dialogue writer left, as the chronicle imported it; ``None`` = unknown.
 
@@ -252,10 +288,12 @@ def startup_upgrade_notices(settings: Mapping[str, Any]) -> None:
                 text = ""
             if text:
                 owed.append((LEGACY_MEMORY_NOTICE_KEY, text, "legacy_memory_notice"))
+        if not state.get(LIGHT_LOCAL_NOTICE_KEY):  # judged once: an install it does not move is marked unsent
+            owed.append((LIGHT_LOCAL_NOTICE_KEY, light_local_notice(settings or {}), "light_local_box_notice"))
         for key, text, system_type in owed:
             # require_write: a chat row that could not be written raises, so the
             # notice stays owed instead of being marked as published.
-            if not recorded(message_bus.DATA_DIR, owner_chat, system_type):
+            if text and not recorded(message_bus.DATA_DIR, owner_chat, system_type):
                 message_bus.send_with_budget(owner_chat, text, role="system", system_type=system_type,
                                              require_write=True, ensure_record_boundary=True)
 

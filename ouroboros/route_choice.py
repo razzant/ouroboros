@@ -39,7 +39,7 @@ import copy
 import json
 import os
 import threading
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Callable, Mapping, Optional, Tuple
 
 from ouroboros import provider_models
 from ouroboros.model_slots import (
@@ -215,51 +215,68 @@ def follows(choice: Any) -> str:
     return str(choice.get("role") or "main") if isinstance(choice, dict) and choice.get("kind") == "following" else ""
 
 
-def model_role_slot_override(task_metadata: Mapping) -> Optional[Tuple[str, bool]]:
+def _checked(value: Any) -> bool:
+    """A local box as this module and the Safety routing read it: a stored ``True`` or ``true``/``1``."""
+    return str(value or "").strip().lower() in ("true", "1")
+
+
+def _runtime(key: str) -> Any:
+    return runtime_setting(key, "")
+
+
+def model_role_slot_override(task_metadata: Mapping, read: Callable[[str], Any] = _runtime) -> Optional[Tuple[str, bool]]:
     """The ``(model, use_local)`` pinned by a task's ``metadata.model_role``; ``None`` = Main.
 
-    A consciousness wake-up carries ``model_role="consciousness"`` (owner decision
-    В25=B): when the consciousness model slot is set, the turn runs on that model
-    with that slot's local flag; an empty slot means Main — the same model, the
-    same prefix, the same prompt cache. Roles without a single-model slot (Main
-    itself, the fallback chain) and unknown roles resolve to Main here; their
-    effort and account binding still follow the role (``_initial_effort_for``,
-    ``task_model_binding``).
+    The one rule of a role's slot, for the runtime (``read`` = the live settings) and for a settings document
+    (``read`` = its ``get``: what Dashboard › Costs and the Safety snapshot ask). A slot naming its model runs it
+    on its own local box. An empty slot is Main's route (the same model, prefix and prompt cache), and only its
+    own box, checked under a cloud Main, decides otherwise: Main's model on the local runtime (owner, В25=B for
+    Consciousness; 2026-11-15 for Light, one rule for every Light call, the Safety Supervisor's included: its
+    empty slot is Light's route). An unchecked box is the row's resting
+    state and the shipped default ("Uses Main." on the Models page), so it never takes the role off a local Main
+    (owner, 12.11, #3272); a local call never sends the model name (``llm.py``). Roles without a single-model
+    slot (Main itself, the fallback chain) and unknown roles resolve to Main here; their effort and account
+    binding still follow the role (``_initial_effort_for``, ``task_model_binding``).
     """
     metadata = task_metadata if isinstance(task_metadata, Mapping) else {}
     role = str(metadata.get("model_role") or "").strip().lower()
     key = MODEL_ROLE_SETTINGS.get(role)
     if not key or role in ("main", "fallback"):
         return None
-    model = str(runtime_setting(key, "") or "").strip()
-    use_local = str(runtime_setting(f"USE_LOCAL_{role.upper()}", "") or "").strip().lower() in ("true", "1")
+    if role == "safety" and not str(read(key) or "").strip():
+        role, key = "light", MODEL_ROLE_SETTINGS["light"]  # the Supervisor has no box: an empty slot checks on Light's route
+    model = str(read(key) or "").strip()
+    box = f"USE_LOCAL_{role.upper()}"  # Vision, the Supervisor's own slot and the helper roles have none
+    use_local = box in SETTINGS_DEFAULTS and _checked(read(box))
     if not model:
-        # An empty model slot means Main's route. Only the role's own local box, checked under a cloud
-        # Main, decides otherwise (В25=B): Main's model on the local runtime. An unchecked box is the row's
-        # resting state and the shipped default ("Uses Main." on the Models page), so it never takes the
-        # role off a local Main (owner, 12.11, #3272); a local call never sends the model name (``llm.py``).
-        main_local = str(runtime_setting("USE_LOCAL_MAIN", "") or "").strip().lower() in ("true", "1")
-        main_model = str(runtime_setting("OUROBOROS_MODEL", "") or "").strip()
-        if not use_local or main_local or not main_model:
+        if not use_local or _checked(read("USE_LOCAL_MAIN")):
             return None
-        return main_model, True
+        return _main_of(read), True
     return model, use_local
 
 
-def following_route(role: str, llm: Any = None) -> Tuple[str, bool]:
+def _main_of(read: Callable[[str], Any]) -> str:
+    """Main's model as ``read`` holds it; a blank Main runs the shipped one, as ``model_slots._main_model``
+    answers for the live settings."""
+    if read is _runtime:
+        from ouroboros.model_slots import _main_model
+
+        return _main_model()
+    return str(read("OUROBOROS_MODEL") or "").strip() or str(SETTINGS_DEFAULTS["OUROBOROS_MODEL"])
+
+
+def following_route(role: str, llm: Any = None, read: Callable[[str], Any] = _runtime) -> Tuple[str, bool]:
     """The binding a following route uses NOW: the role's own slot (an empty one is Main's model, local when its
-    own box is checked under a cloud Main), else Main and its local flag; ``llm`` is the loop's client if any."""
-    slot = model_role_slot_override({"model_role": role})
+    own box is checked under a cloud Main), else Main and its local flag; ``llm`` is the loop's client if any,
+    ``read`` the settings asked (the live ones, or a document's ``get``)."""
+    slot = model_role_slot_override({"model_role": role}, read)
     if slot is not None:
         return slot
-    from ouroboros.model_slots import _main_model
-
-    model = str(llm.default_model() if llm is not None else _main_model())
-    return model, str(runtime_setting("USE_LOCAL_MAIN", "") or "").strip().lower() in ("true", "1")
+    return str(llm.default_model() if llm is not None else _main_of(read)), _checked(read("USE_LOCAL_MAIN"))
 
 
 def _local_flag(key: str) -> bool:
-    return str(runtime_setting(key, "") or "").strip().lower() in ("true", "1")
+    return _checked(runtime_setting(key, ""))
 
 
 def configured_references() -> dict:

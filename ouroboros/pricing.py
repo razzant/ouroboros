@@ -520,41 +520,16 @@ _SPEND_ROLES = (("main", "Main"), ("light", "Light"), ("safety", "Safety Supervi
 
 
 def _role_routes(settings: Mapping[str, Any], role: str) -> List[Tuple[str, bool]]:
-    """The ``(model, local)`` routes a role's calls may take by this document, as the runtime resolves them (a model
-    labelled `` (local)`` parses as the local lane). A slot naming its own model takes its own flag
-    (route_choice.model_role_slot_override). An empty one runs Main's model: Consciousness on its own flag when set,
-    Vision on Main's (slot_lane_label), Light on both (its helpers keep Main's flag: the runtime splits). Safety runs
-    its own slot, else a set Light, else Main, on that slot's flag (safety_config)."""
-    from ouroboros.model_slots import MODEL_ROLE_SETTINGS
+    """The ``(model, local)`` routes a role's calls may take by this document, as the runtime resolves them: the
+    one rule of a role's slot asked over the document (``route_choice.following_route``; a model labelled
+    `` (local)`` parses as the local lane). The fallback chain runs its entries on its own box."""
+    from ouroboros.route_choice import _checked, following_route
 
-    def flag(key: str, words: Tuple[str, ...] = ("true", "1")) -> Optional[bool]:
-        # A stored False is set, as ``runtime_setting`` reads it ('False'); only an absent or blank key is unset.
-        raw = settings.get(key)
-        if raw is None or not str(raw).strip():
-            return None
-        return str(raw).strip().lower() in words
-
-    def route(model: Any, local: Optional[bool]) -> Tuple[str, bool]:
-        return str(model or "").strip(), bool(local)
-
-    def own(slot: str) -> str:
-        return str(settings.get(MODEL_ROLE_SETTINGS[slot]) or "").strip()
-
-    main = route(own("main"), flag("USE_LOCAL_MAIN"))
-    if role == "main":
-        return [main]
+    read = settings.get
     if role == "fallback":
-        local = flag("USE_LOCAL_FALLBACK")
-        return [route(entry, local) for entry in own("fallback").split(",") if entry.strip()]
-    if role == "safety":
-        slot = "safety" if own("safety") else "light" if own("light") else "main"
-        return [route(own(slot), flag(f"USE_LOCAL_{slot.upper()}", ("true", "1", "yes", "on")))]
-    local = flag(f"USE_LOCAL_{role.upper()}")
-    if own(role):
-        return [route(own(role), local)]
-    if local is None or role == "vision":
-        return [main]
-    return list(dict.fromkeys([route(own("main"), local)] + ([main] if role == "light" else [])))
+        local = _checked(read("USE_LOCAL_FALLBACK"))
+        return [(entry.strip(), local) for entry in str(read("OUROBOROS_MODEL_FALLBACKS") or "").split(",") if entry.strip()]
+    return [following_route(role, read=read)]
 
 
 def _subagent_rows(value: Any) -> List[Mapping[str, Any]]:
@@ -571,12 +546,17 @@ def _subagent_rows(value: Any) -> List[Mapping[str, Any]]:
 
 def known_spend_gaps(settings: Mapping[str, Any], subagents: Any = None) -> List[str]:
     """What spends money the limits cannot count, as Dashboard › Costs names it under them: a role whose route has
-    no known price (``all model roles`` when none of the configured ones has), the first leg of built-in web
-    search, and enabled API helpers (``Agents``; ``subagents`` is the resolved list, else the document's)."""
+    no known price (``all model roles`` when none of the configured ones has; the Safety Supervisor only while a
+    Safety mode asks it), a leg of built-in web search (a later one runs when the earlier fails, as a fallback
+    model does), and enabled API helpers (``Agents``; ``subagents`` is the resolved list, else the document's)."""
+    from ouroboros.settings_scales import normalize_safety_mode
+
     def unpriced(model: str, local: bool) -> bool:
         return bool(model) and price_source("local" if local else parse_model_route(model).kind, settings) == "unknown"
 
-    routed = [(label, _role_routes(settings, role)) for role, label in _SPEND_ROLES]
+    checks = any(normalize_safety_mode(settings.get(key)) != "off"
+                 for key in ("OUROBOROS_SAFETY_MODE", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"))
+    routed = [(label, _role_routes(settings, role)) for role, label in _SPEND_ROLES if role != "safety" or checks]
     routed = [(label, routes) for label, routes in routed if any(model for model, _ in routes)]
     roles = [label for label, routes in routed if any(unpriced(model, local) for model, local in routes)]
     gaps = ["all model roles"] if len(roles) > 1 and len(roles) == len(routed) else roles
@@ -586,8 +566,8 @@ def known_spend_gaps(settings: Mapping[str, Any], subagents: Any = None) -> List
     except Exception:
         log.debug("Could not resolve the web search route for the spend gaps", exc_info=True)
         legs = []
-    first = str((legs[0] if legs else {}).get("source") or "")
-    if first and first != "ddgs" and price_source(first, settings) == "unknown":
+    sources = {str(leg.get("source") or "") for leg in legs} - {"", "ddgs"}
+    if any(price_source(source, settings) == "unknown" for source in sources):
         gaps.append("Web search")
     for row in _subagent_rows(subagents if subagents is not None else settings.get("OUROBOROS_SUBAGENTS")):
         route = row.get("route") if isinstance(row.get("route"), Mapping) else {}

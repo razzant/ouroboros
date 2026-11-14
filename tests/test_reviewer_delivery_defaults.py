@@ -252,6 +252,43 @@ def notice_world(monkeypatch, tmp_path):
     return SimpleNamespace(state=state, sent=sent, notices=upgrade_notices)
 
 
+LIGHT_BOX = ("⚙️ An empty Light model now follows its “Use the local model” box everywhere. Here the box is ticked and "
+             "Main is a cloud model, so {moved} now run on the local model instead of openai/main.{safety}{absent} "
+             "Untick the box under Light in Settings › Models to keep them on Main.")
+_SAFETY_WALK = " A Safety check the local model does not answer goes to your Fallback models and holds the action if none answers."
+_ALL_MOVED, _LIGHT_MOVED = "Safety checks, memory consolidation and other Light calls", "memory consolidation and other Light calls"
+
+
+@pytest.mark.parametrize("changes, said", [
+    # The install the 15.11 rule moves: a cloud Main, an empty Light, its box ticked, a local model configured.
+    ({}, LIGHT_BOX.format(moved=_ALL_MOVED, safety=_SAFETY_WALK, absent="")),
+    # A Supervisor with its own model, or asked by no Safety mode, does not move: its sentences are left out.
+    ({"OUROBOROS_MODEL_SAFETY": "openai/checker"}, LIGHT_BOX.format(moved=_LIGHT_MOVED, safety="", absent="")),
+    ({"OUROBOROS_SAFETY_MODE": "off", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "off"},
+     LIGHT_BOX.format(moved=_LIGHT_MOVED, safety="", absent="")),
+    ({"LOCAL_MODEL_SOURCE": ""}, LIGHT_BOX.format(
+        moved=_ALL_MOVED, safety=_SAFETY_WALK, absent=" No local model is configured: until you add one or untick the "
+        "box, every Safety check goes that way and the other Light calls get no answer.")),
+    # Nothing moves, nothing is said: the box unticked, a Light model of its own, a local Main.
+    ({"USE_LOCAL_LIGHT": False}, ""), ({"OUROBOROS_MODEL_LIGHT": "openai/light"}, ""), ({"USE_LOCAL_MAIN": True}, ""),
+])
+def test_an_install_whose_light_box_now_decides_hears_once_which_calls_moved(notice_world, changes, said):
+    """Owner, 15.11: an empty Light model follows its own local box for every call. An install with that box ticked
+    under a cloud Main hears once what moved; every other install is judged once and hears nothing, also when the
+    box is ticked later: that is its owner's act under the rule, never news of an update."""
+    settings = {"OUROBOROS_MODEL": "openai/main", "OUROBOROS_MODEL_LIGHT": "", "OUROBOROS_MODEL_SAFETY": "",
+                "USE_LOCAL_MAIN": False, "USE_LOCAL_LIGHT": True, "LOCAL_MODEL_SOURCE": "org/model",
+                "OUROBOROS_SAFETY_MODE": "full", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "full", **changes}
+    assert notice_world.notices.light_local_notice(settings) == said
+    notice_world.state.update(optional_bounds_notified="already", command_timeout_notified="already")
+    notice_world.notices.startup_upgrade_notices(settings)
+    moved_later = {**settings, "OUROBOROS_MODEL_LIGHT": "", "USE_LOCAL_LIGHT": True, "USE_LOCAL_MAIN": False}
+    notice_world.notices.startup_upgrade_notices(moved_later)
+    assert [(text, kw["system_type"]) for _chat, text, kw in notice_world.sent] == (
+        [(said, "light_local_box_notice")] if said else [])
+    assert notice_world.state["light_local_box_notified"]
+
+
 def test_an_upgraded_untouched_install_hears_each_notice_once(notice_world):
     # Which reviewers run is the review-pool migration's own report
     # (server_maintenance._startup_review_pool_notice), not an upgrade notice.

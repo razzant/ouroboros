@@ -222,12 +222,12 @@ def _extract_verdict_via_light_model(
     array_validator: Optional[Callable[[list], bool]] = None,
 ) -> tuple[Optional[str], Dict[str, Any]]:
     """One bounded light-model call canonicalizing narrative to the contract."""
-    from ouroboros.config import get_light_model
+    from ouroboros.route_choice import following_route
     from ouroboros.usage_accounting import physical_attempt_limit
 
     if not str(raw_text or "").strip():
         return None, {}
-    model = get_light_model()
+    model, use_local = following_route("light")
     if owner_deadline_exhausted(deadline_at=deadline_at, reserve_sec=get_finalization_grace_sec()):
         return None, {"model": model, "reason_code": "deadline_exhausted", "dispatch": "not_dispatched"}
     from ouroboros.budget_pause import dispatch_fenced
@@ -265,7 +265,7 @@ def _extract_verdict_via_light_model(
         _scope = _replace(current_usage_scope() or UsageScope(), source="review_substrate.extraction")
         chat_kwargs = dict(
             messages=[{"role": "user", "content": prompt}], model=model,
-            model_role="light",
+            model_role="light", use_local=use_local,
             max_tokens=8192, reasoning_effort="low", no_proxy=True,
         )
         transport = review_transport_timeout(model, transport_timeout_sec, deadline_at)

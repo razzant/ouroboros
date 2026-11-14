@@ -449,11 +449,18 @@ class Txn:
         physical attempt — its turns and its verdict-extraction calls, whatever model served each —
         with the distinct models seen (``models``, comma-joined), newest wave first, at most ``limit``.
 
-        ``priced`` is false when any attempt of the seat had no known price; the category/time
-        index addresses only this category. No payload fields."""
+        ``priced`` asks every attempt of the seat for what its bill says: released unsent; settled with a
+        recorded sum that is not a partial one (the accounting's own «priced» of a closed row,
+        ``_usage_rows.summary_delta``); or a subscription call settled without a sum (a delegated session, or a
+        model call through the subscription engine), which spends a seat and time and no API money (owner,
+        2026-11-15). An attempt still open, or a paid one settled without a sum, leaves the seat unmeasured; what
+        the catalog knew before the send (``pricing_known``) is the reservation's fact, not the bill's. The
+        category/time index addresses only this category. No payload fields."""
         return [dict(record) for record in self.conn.execute(
             "SELECT review_wave_id AS wave_id, review_slot_id AS row_id, GROUP_CONCAT(DISTINCT model) AS models, "
-            "SUM(CAST(cost_usd AS REAL)) AS usd, MIN(COALESCE(pricing_known, 0)) AS priced, "
+            "SUM(CAST(cost_usd AS REAL)) AS usd, MIN(CASE WHEN state='released' THEN 1 WHEN state!='settled' THEN 0 "
+            "WHEN cost_usd IS NULL THEN kind='subscription_session' OR COALESCE(provider, '')='claudexor' "
+            "ELSE COALESCE(json_extract(extra, '$.cost_partial'), 0)=0 END) AS priced, "
             "MAX(ts_last_epoch) AS last_epoch FROM attempts INDEXED BY attempts_category_time "
             "WHERE category=? AND COALESCE(review_wave_id, '') != '' AND COALESCE(review_slot_id, '') != '' "
             "GROUP BY review_wave_id, review_slot_id ORDER BY last_epoch DESC LIMIT ?",

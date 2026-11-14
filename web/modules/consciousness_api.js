@@ -94,11 +94,11 @@ export function normalizePlace(raw) {
             actorId: text(account?.platform_actor_id), label: text(account?.label || account?.display_name),
         })).filter((account) => account.actorId),
         workingFolder: text(place.working_folder),
-        // Its own model (empty inherits), and what it thinks with now with the scope that chose it: `place`, `circle`
-        // or `consciousness`; null from a server that does not say.
+        // Its own model (empty inherits), and what it thinks with now with the scope that chose it (`place`, `circle`
+        // or `consciousness`) and whether that route is the local runtime; null from a server that does not say.
         model: text(place.model),
         modelRoute: object(place.model_route) && MODEL_LAYERS.includes(place.model_route.layer)
-            ? { value: text(place.model_route.value), layer: place.model_route.layer } : null,
+            ? { value: text(place.model_route.value), layer: place.model_route.layer, local: place.model_route.local === true } : null,
         readiness: placeReadiness(place.readiness),
         safetyMode: text(place.safety_mode),
         labels: placeLabels(place.labels),
