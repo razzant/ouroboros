@@ -7,9 +7,10 @@ import test from 'node:test';
 import { createClaudexorStatusStore } from '../modules/claudexor_status_store.js';
 import { renderPageHeader } from '../modules/page_header.js';
 import { initSettings } from '../modules/settings.js';
-import { readSettings } from '../modules/settings_controls.js';
+import { readSettings, writeEntry } from '../modules/settings_controls.js';
 import { askOuroboros, beingState, homeAnswers, mountSettingsHome, needRows } from '../modules/settings_home.js';
-import { settingsPageFor } from '../modules/settings_pages.js';
+import { registerSettingsPage, settingsPageFor } from '../modules/settings_pages.js';
+import { createStateSnapshotSequencer } from '../modules/state_snapshots.js';
 import { ANSWERS, STARTS, Stub, settle, world } from './helpers/settings_dom.js';
 
 const account = (harness, id, verification, enabled = true) => ({
@@ -429,4 +430,154 @@ test('the Accounts row counts the accounts beside every page: the home\'s passiv
     await home.refresh();
     await settle();
     assert.deepEqual([answer(), passive()], ['4 accounts, 2 API keys', before]);
+});
+
+// The list's reads (settings.js shows it, settings_home.js reads): its sources are read when it comes on screen, one
+// read of a source at a time, dropped when it leaves the screen, and again for the row of a page that is left.
+const reply = (data, status = 200) => ({ ok: status < 400, status, json: async () => structuredClone(data) });
+const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
+const LIST = ['/api/mcp/status', '/api/extensions', '/api/places', '/api/update/status', '/api/storage', '/api/desktop/autostart',
+    '/api/claudexor/status?view=quota'];
+function listHome(t, content, ctx = {}) {
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws: { isConnected: () => true }, stateSnapshots: { latest: () => ({}) }, ...ctx } });
+    t.after(() => home.dispose());
+    return { home, answer: (to) => content.querySelector(`[data-settings-open="${to}"]`).querySelector('[data-settings-answer]').textContent };
+}
+
+test('the list reads when it comes on screen: never at a press beside it, again once Settings was left, as one column returns to it', async (t) => {
+    const { env, content, state, showPage } = world(t);
+    let pageCtx = null;
+    registerSettingsPage('test-list-a', { title: 'A', mount(body, { ctx }) { pageCtx = ctx; } });
+    registerSettingsPage('test-list-b', { title: 'B', mount() {} });
+    const observers = [];
+    const kept = { observer: globalThis.ResizeObserver };
+    globalThis.ResizeObserver = class { constructor(fn) { this.fn = fn; observers.push(this); } observe() {} disconnect() {} };
+    const proto = Object.getPrototypeOf(Stub.prototype);
+    Object.assign(kept, { box: proto.getBoundingClientRect, prepend: proto.prepend });
+    proto.getBoundingClientRect = () => ({ top: 0, bottom: 10, width: 0 });
+    proto.prepend = function prepend(node) { this.insertBefore(node, this.children[0] || null); };
+    t.after(() => { globalThis.ResizeObserver = kept.observer; Object.assign(proto, { getBoundingClientRect: kept.box, prepend: kept.prepend }); });
+    const controls = initSettings({ state, ws: env.ws, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    // The sheets: two panes show the list beside the page; one column shows the list alone, or a page alone.
+    const wide = { on: true };
+    const shell = content.querySelector('.settings-shell');
+    controls.page.getBoundingClientRect = () => ({ top: 0, bottom: 10, width: wide.on ? 1000 : 300 });
+    content.querySelector('[data-settings-home]').getClientRects = () => (wide.on || shell.dataset.settingsView === 'home' ? [{ width: 1, height: 1 }] : []);
+    const reads = () => env.calls.filter((call) => LIST.includes(call)).length;
+    const resized = async () => { observers.forEach((observer) => observer.fn([{ target: shell }])); await settle(); };
+    await controls.open('test-list-a');
+    await settle();
+    assert.equal(reads(), LIST.length, 'Settings shown: each of the list\'s sources read once');
+    pageCtx.openSettings('test-list-b');
+    await settle();
+    assert.equal(reads(), LIST.length, 'a page pressed beside the list reads none of them');
+    // The socket's first open changes nothing (it waits for the app's first state read); a reconnect may follow a restart.
+    env.ws.emit('open', { previouslyConnected: false });
+    await settle();
+    assert.equal(reads(), LIST.length, 'the socket\'s first open reads nothing again');
+    env.ws.emit('open', { previouslyConnected: true });
+    await settle();
+    assert.equal(reads(), 2 * LIST.length, 'a reconnect reads again');
+    // Leaving Settings takes the list off screen; shown again, it reads again.
+    state.activePage = 'chat';
+    env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'chat' } }));
+    await controls.open('test-list-b');
+    await settle();
+    assert.equal(reads(), 3 * LIST.length, 'Settings shown again: read again');
+    // One column: the page hides the list, which reads when the column returns to it.
+    wide.on = false;
+    await resized();
+    assert.equal(reads(), 3 * LIST.length, 'a width that takes the list away reads nothing');
+    controls.pressedAgain();
+    await settle();
+    assert.equal(reads(), 4 * LIST.length, 'one column back on the list: read');
+    // A width that brings the list beside an open page reads it as it comes.
+    await controls.open('test-list-a');
+    await settle();
+    assert.equal(reads(), 4 * LIST.length, 'one column, a page over the list: nothing');
+    wide.on = true;
+    await resized();
+    assert.equal(reads(), 5 * LIST.length, 'the list beside the page again: read');
+});
+
+test('one read of a source at a time: asked again in flight it starts no second request and runs once more after; off screen it is dropped', async (t) => {
+    const { env, content } = world(t);
+    const signals = [];
+    const gates = [deferred(), deferred(), deferred()];
+    env.routes.set('/api/places', async (_url, init = {}) => { signals.push(init.signal); return gates[signals.length - 1].promise; });
+    const { home, answer } = listHome(t, content);
+    const first = home.refresh(['places']);
+    void home.refresh(['places']);
+    void home.refresh(['places']);
+    await settle();
+    assert.equal(signals.length, 1, 'asked twice more while it runs: no second request');
+    gates[0].resolve(reply({ places: [{}] }));
+    await settle();
+    assert.deepEqual([signals.length, answer('page:circles')], [2, '1 place'], 'its answer is painted, then one more read for the asks it heard');
+    gates[1].resolve(reply({ places: [{}, {}] }));
+    await first;
+    assert.deepEqual([signals.length, answer('page:circles')], [2, '2 places']);
+    // Off screen: the read in flight is aborted, freeing its connection, and its late answer paints nothing.
+    void home.refresh(['places']);
+    await settle();
+    home.hide();
+    assert.equal(signals[2].aborted, true);
+    gates[2].resolve(reply({ places: [] }));
+    await settle();
+    assert.equal(answer('page:circles'), '2 places');
+});
+
+test('an answer is painted though another source was read meanwhile: a slow source, and the state snapshot by its sequencer', async (t) => {
+    const { env, content } = world(t);
+    const places = deferred();
+    const state = deferred();
+    env.routes.set('/api/places', async () => places.promise);
+    env.routes.set('/api/state', async () => state.promise);
+    const snapshots = createStateSnapshotSequencer(() => {});
+    snapshots.apply(snapshots.begin(), { evolution_enabled: false });
+    const { home, answer } = listHome(t, content, { stateSnapshots: snapshots });
+    const held = home.refresh(['places', 'state']);
+    await home.refresh(['settings']);
+    assert.deepEqual([answer('page:circles'), answer('dashboard:evolution'), answer('models')], ['', 'Off', 'glm-5.3']);
+    places.resolve(reply({ places: [{}, {}] }));
+    state.resolve(reply({ evolution_enabled: true }));
+    await held;
+    await settle();
+    assert.deepEqual([answer('page:circles'), answer('dashboard:evolution')], ['2 places', 'On']);
+});
+
+test('the row of a page that is left reads its sources again, a setting\'s row and one that is not; a save reads its page\'s row', async (t) => {
+    const { env, content } = world(t);
+    const now = { model: 'openrouter::z-ai/glm-5.3', places: [], servers: [] };
+    env.routes.set('/api/settings', async () => reply({ ...ANSWERS['/api/settings'], OUROBOROS_MODEL: now.model }));
+    env.routes.set('/api/places', async () => reply({ places: now.places }));
+    env.routes.set('/api/mcp/status', async () => reply({ enabled: true, servers: now.servers }));
+    const { home, answer } = listHome(t, content);
+    await home.refresh();
+    const go = async (type, detail) => { env.window.dispatchEvent(new CustomEvent(type, { detail })); await settle(); };
+    const count = (url) => env.calls.filter((call) => call === url).length;
+    await go('ouro:settings-page-shown', { path: 'models' });
+    const before = Object.fromEntries([...LIST, '/api/settings'].map((url) => [url, count(url)]));
+    const since = () => Object.entries(before).filter(([url, n]) => count(url) > n).map(([url, n]) => `${url} ${count(url) - n}`);
+    now.model = 'openrouter::openai/gpt-5';
+    await go('ouro:settings-page-shown', { path: 'models/role/main' });
+    assert.deepEqual([answer('models'), since()], ['glm-5.3', []], 'a page of the same row: nothing is left, nothing read');
+    await go('ouro:settings-page-shown', { path: 'agents' });
+    assert.deepEqual([answer('models'), since()], ['gpt-5', ['/api/settings 1']], 'Models left: its one source, nothing else of the list');
+    // Circles is a section, not a setting: leaving it reads its places.
+    await go('ouro:page-shown', { page: 'circles' });
+    now.places = [{}];
+    await go('ouro:page-shown', { page: 'chat' });
+    assert.equal(answer('page:circles'), '1 place');
+    // A server switched on the Tools page is one entry of MCP_SERVERS written; its event names the row, not the page.
+    // The document and the servers' status are read again: the row's two sources.
+    env.routes.set('/api/settings', async (_url, init = {}) => (init.method === 'POST'
+        ? reply({ status: 'saved', changes: { MCP_SERVERS: { withheld: 'structure', token: 'servers@2' } } })
+        : reply({ ...ANSWERS['/api/settings'], MCP_SERVERS: [{ id: 'docs', enabled: false }], _meta: { tokens: { MCP_SERVERS: 'servers@1' } } })));
+    now.servers = [{ id: 'docs', enabled: true, tool_count: 2 }];
+    assert.equal((await writeEntry('MCP_SERVERS', 'docs', (before) => ({ ...before, enabled: true }))).state, 'saved');
+    await settle();
+    assert.equal(answer('tools'), '1 of 1 server on');
 });
