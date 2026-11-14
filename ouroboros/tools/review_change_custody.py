@@ -24,7 +24,7 @@ from __future__ import annotations
 import copy
 import logging
 import pathlib
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Iterable, Optional
 
 from ouroboros.utils import utc_now_iso
 
@@ -118,6 +118,15 @@ def attempt_record(wave: Any, ctx: Any, **fields: Any) -> Any:
     from ouroboros.review_owner_custody import stamp_paid_review_owner
     from ouroboros.review_state import CommitAttemptRecord, make_repo_key
 
+    request = getattr(wave, "request", None)
+    selectors = []
+    if request is not None:
+        selectors = list(dict.fromkeys([
+            *list(getattr(request, "reviewers", ()) or ()),
+            *list(getattr(request, "coupling_only", ()) or ()),
+        ]))
+    review_input = dict(fields.pop("review_input", {}) or {})
+
     attempt = CommitAttemptRecord(
         ts=utc_now_iso(), commit_message=wave.label, task_id=str(getattr(ctx, "task_id", "") or ""),
         root_task_id=wave.root_task_id, repo_key=make_repo_key(wave.root), tool_name=_tool_name(wave),
@@ -125,7 +134,8 @@ def attempt_record(wave: Any, ctx: Any, **fields: Any) -> Any:
                                 or paid_repo_key(ctx, wave.root)),
         pre_review_fingerprint=str(wave.frozen.diff_sha), review_retry_key=wave.retry_key,
         rebuttal_sha256=wave.rebuttal_sha, review_contract_fingerprint=wave.contract_fp,
-        review_record_id=wave.record_id, **fields)
+        review_record_id=wave.record_id, review_input=review_input,
+        adviser_selectors=selectors, **fields)
     # A reserved roster row is owned by this process before it is paid (startup reconciliation).
     stamp_paid_review_owner(attempt, paid=bool(getattr(attempt, "paid", False)) or attempt.status == "reviewing")
     return attempt
@@ -149,6 +159,44 @@ def pending_round_attempt(ctx: Any, *, root: pathlib.Path, retry_key: str, tool_
         expired = state.expire_stale_attempts(now_ts=_utc_now())
         rows = [item for item in state.get_active_attempts(repo_key=repo_key)
                 if item.tool_name == tool_name and item.task_id == task_id and item.review_retry_key == retry_key]
+        return ReviewStateMutation(rows, changed=bool(expired))
+
+    rows = update_state(drive, _active)
+    return rows[-1] if rows else None
+
+
+def pending_round_attempt_prefix(ctx: Any, *, root: pathlib.Path, retry_key_prefix: str,
+                                 selectors: Iterable[str] = (), tool_name: str = TOOL_NAME) -> Optional[Any]:
+    """Return the newest open round whose retry key starts with a stable prefix.
+
+    This recovers an already-paid adviser round after its roster row became
+    unavailable; the persisted attempt owns the canonical seat identity.
+    """
+    from ouroboros.review_state import (
+        _STATE_RELPATH, ReviewStateMutation, _attempt_review_roster_rows, _utc_now, make_repo_key, update_state,
+    )
+
+    drive = review_state_root(ctx)
+    if not (drive / _STATE_RELPATH).exists():
+        return None
+    repo_key, task_id = make_repo_key(root), str(getattr(ctx, "task_id", "") or "")
+
+    wanted = frozenset(str(item) for item in selectors if str(item))
+
+    def _matches(item: Any) -> bool:
+        saved_selectors = getattr(item, "adviser_selectors", None)
+        if isinstance(saved_selectors, list) and saved_selectors:
+            return frozenset(str(value) for value in saved_selectors if str(value)) == wanted
+        rows = _attempt_review_roster_rows(item)
+        row_names = frozenset(str(row.get("slot_id") or row.get("subagent_id") or "")
+                              for row in rows if row.get("additional") or (row.get("review_plan") or {}).get("additional"))
+        return bool(row_names) and row_names == wanted
+
+    def _active(state: Any) -> ReviewStateMutation:
+        expired = state.expire_stale_attempts(now_ts=_utc_now())
+        rows = [item for item in state.get_active_attempts(repo_key=repo_key)
+                if item.tool_name == tool_name and item.task_id == task_id
+                and str(item.review_retry_key or "").startswith(retry_key_prefix) and _matches(item)]
         return ReviewStateMutation(rows, changed=bool(expired))
 
     rows = update_state(drive, _active)
@@ -523,10 +571,12 @@ def settled_record(ledger, attempt, record=None, *, rows_closed=True):
     fingerprint), names at least one counted seat, each under its operation and none open, and an attempt that still
     keeps its rows holds those same counted operations closed. A missing, foreign, unreadable, empty or reopened
     record, or a counted seat still open or unbound on either side, proves nothing. ``rows_closed=False`` asks for
-    the record's own proof alone: the caller proves each of the attempt's rows itself (``settled_seats``)."""
+    the record's own proof alone: the caller proves each of the attempt's rows itself (``settled_seats``). A settled
+    record that seated advisers alone has no counted seat to wait for; a running adviser keeps only its own custody."""
     from ouroboros.review_custody import _row_is_pending
     from ouroboros.review_ledger import counted_pending, load_record
     from ouroboros.review_state import _attempt_review_roster_rows, counted_roster_rows
+    from ouroboros.review_ledger import advisers_only
 
     record_id = str(getattr(attempt, "review_record_id", "") or "")
     try:
@@ -535,14 +585,15 @@ def settled_record(ledger, attempt, record=None, *, rows_closed=True):
     except (OSError, ValueError):
         return None
     seats = counted_roster_rows([row for row in (record or {}).get("rows") or [] if isinstance(row, dict)])
-    if (not record or record.get("task_id") != attempt.task_id or not seats or counted_pending(record.get("rows") or [])
+    alone = bool(record) and advisers_only(record) and record.get("state") == "settled"
+    if (not record or record.get("task_id") != attempt.task_id or not (seats or alone) or counted_pending(record.get("rows") or [])
             or not all(seat.get("operation_id") for seat in seats)
             or (attempt.tool_name in _SETTLED_PROJECTION
                 and (record.get("fingerprints") or {}).get("binding") != attempt.pre_review_fingerprint)):
         return None
     confirmed = {str(seat.get("seat_id") or ""): str(seat["operation_id"]) for seat in seats}
     own = counted_roster_rows(_attempt_review_roster_rows(attempt))
-    if rows_closed and not attempt.raw_stripped and (not own or any(_row_is_pending(row) or confirmed.get(
+    if rows_closed and not attempt.raw_stripped and (not (own or alone) or any(_row_is_pending(row) or confirmed.get(
             str(row.get("slot_id") or row.get("slot") or "")) != str(row.get("operation_id") or "") for row in own)):
         return None
     return record
@@ -590,7 +641,7 @@ def settled_seats(ledger, attempt, record=None):
         seats += [seat for seat in custody_closed_seats(ledger, attempt, record, {seat_key(seat) for seat in seats})
                   if seat_key(seat) in held]
     standing = {seat_key(seat) for seat in seats}
-    if not counted or any(seat_key(row) not in standing for row in counted):
+    if not (counted or rows) or any(seat_key(row) not in standing for row in counted):
         return None
     return record, seats
 
@@ -876,6 +927,25 @@ def recorded_commit_source(ctx, reference, state):
         pre_review_fingerprint=str(reference.get("pre_review_fingerprint") or ""), review_record_id=record_id,
         critical_findings=list(verdict.get("critical_findings") or []),
         advisory_findings=list(verdict.get("advisory_findings") or []), finished_ts=str(record.get("ts") or ""))
+
+
+def advisers_alone_reference(ctx, source, *, locked):
+    """Whether an author continuation's returned commit review is positively an advisers-only wave (Cyber Pro): its
+    roster names seats and every one is additional, or, compacted (``raw_stripped``), its bound settled record says so
+    (read outside the state lock only; inside, the source bound there already passed). Anything unproven, a $0 or
+    technical refusal without a roster included, is not: no other refusal is added."""
+    from ouroboros.review_state import _attempt_review_roster_rows, counted_roster_rows
+    from ouroboros.review_ledger import advisers_only
+
+    rows = _attempt_review_roster_rows(source)
+    if rows:
+        return not counted_roster_rows(rows)
+    if not source.raw_stripped or locked:
+        return False
+    from ouroboros.review_ledger import ledger_root
+
+    record = settled_record(ledger_root(ctx), source)
+    return bool(record) and advisers_only(record)
 
 
 def stripped_source_bound(ctx, source, *, locked):

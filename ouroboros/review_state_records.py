@@ -11,7 +11,7 @@ review_state.py re-exports every name.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, fields, is_dataclass
+from dataclasses import MISSING, dataclass, field, fields, is_dataclass
 from typing import Any, Dict, List, Optional
 
 
@@ -39,7 +39,14 @@ class ReviewStateLockError(TimeoutError):
 def _dataclass_mapping(value: Any) -> Dict[str, Any]:
     """Let the JSON encoder recurse without dataclasses.asdict's deep copies."""
     if is_dataclass(value) and not isinstance(value, type):
-        return {field.name: getattr(value, field.name) for field in fields(value)}
+        return {
+            item.name: getattr(
+                value,
+                item.name,
+                item.default_factory() if item.default_factory is not MISSING else item.default,
+            )
+            for item in fields(value)
+        }
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
@@ -211,6 +218,12 @@ class CommitAttemptRecord:
     review_record_id: str = ""
     # Exact preparation inputs (known prior record ids and a retained rebuttal).
     review_input: Dict[str, Any] = field(default_factory=dict)
+    # Canonical reviewer selectors used to recover an adviser-only round after
+    # its roster entries disappear.  This is deliberately separate from
+    # ``review_input``: that mapping is the paid dispute-history binding and
+    # selector metadata must never make an otherwise missing binding look
+    # present.
+    adviser_selectors: List[str] = field(default_factory=list)
     # The FAIL or no verdict the gate let this attempt go on past (``review_overrides``): what a later continuation
     # of it, in any process, went on over when no review record says more. "" when its review met none.
     review_override_reason: str = ""
@@ -304,6 +317,11 @@ def _merge_attempt(existing: CommitAttemptRecord, incoming: CommitAttemptRecord)
         scope_raw_result=_continued_scope(getattr(existing, "scope_raw_result", None), getattr(incoming, "scope_raw_result", None)),
         author_disposition=dict(incoming.author_disposition or existing.author_disposition),
         review_input=dict(getattr(incoming, "review_input", None) or getattr(existing, "review_input", None) or {}),
+        adviser_selectors=list(
+            getattr(incoming, "adviser_selectors", None)
+            or getattr(existing, "adviser_selectors", None)
+            or []
+        ),
         # Once an attempt physically dispatched a paid triad/scope wave the fact is
         # durable: a later terminal update on the same row must never launder it.
         paid=bool(getattr(incoming, "paid", False) or getattr(existing, "paid", False)),

@@ -544,10 +544,8 @@ def _record_choice(drive: Any, record: Dict[str, Any], choices: List[_Choice]) -
             changed = True
         if not changed:
             raise ledger.RecordUnchanged()
-        counted = [row for row in rows if not row.get("additional")]
         before = dict(payload.get("verdict") or {})
-        verdict = ledger.reduce_verdict(counted, dispatch_refusal=payload.get("dispatch_refusal"), pending=True)
-        verdict["per_row"].update({str(row.get("seat_id") or ""): ledger.row_verdict(row) for row in rows if row.get("additional")})
+        verdict = ledger.reduce_verdict(rows, dispatch_refusal=payload.get("dispatch_refusal"), pending=True)
         verdict.update({key: list(before.get(key) or []) for key in (*ledger.HEAVY_VERDICT_FIELDS, "degraded_reasons", "wave_failures")})
         return {**payload, "rows": rows, "verdict": verdict, "state": ledger.STATE_PENDING, "cost": ledger.record_cost(rows),
                 "panel": {**dict(payload.get("panel") or {}), "not_reached": ledger.panel_not_reached(rows)}}

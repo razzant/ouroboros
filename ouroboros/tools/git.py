@@ -118,7 +118,12 @@ def _free_cycle_gate(
     if error:
         return error
     if bool(getattr(ctx, "_review_resume_pending", False)):
-        if pending is not None and str(getattr(pending, "review_retry_key", "") or "") == retry_key:
+        from ouroboros.tools.parallel_review import commit_round_keys
+
+        # A review-only call composes before its overlap check: advisers alone still collect their open counted round.
+        if pending is not None and str(getattr(pending, "review_retry_key", "") or "") in {retry_key, *commit_round_keys(
+                ctx, commit_message, goal=goal, scope=scope, review_rebuttal=review_rebuttal, binding_fingerprint=fp)}:
+            ctx._current_review_retry_key = str(pending.review_retry_key)
             ctx._review_reconcile_only = True
             return None
         if cyber_review_authority():  # Cyber: no second wave and no veto
