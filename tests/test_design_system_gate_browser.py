@@ -14,8 +14,9 @@ from urllib.parse import urlparse
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
+from tests import settings_browser_helpers as settings
 from tests._shared import answer_projects
-from tests.settings_browser_helpers import HOME, walk_settings
+from tests.settings_browser_helpers import HOME
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
@@ -182,6 +183,33 @@ def rest(page, timeout=5000):
     settle(page)
 
 
+def walk_settings(page, measure, *, skill='', settle):
+    """Audit the same registered views and editors with Ouroboros's card in either column."""
+    settings.open_settings(page, '')
+    overview = page.locator(f'{HOME} [data-settings-overview-row]:visible')
+    if overview.count():
+        overview.click()
+    # The card moves from the list into the overview pane when both columns fit.
+    page.locator('#page-settings [data-settings-card]').wait_for(state='visible')
+    settle()
+    measure('home')
+    paths = page.evaluate(settings.SETTINGS_PATHS, skill)
+    for path in paths:
+        level = settings.open_settings(page, path)
+        if path.startswith('skill/'):
+            level.locator('[data-extension-settings-form]').wait_for(state='visible')
+        settle()
+        measure(path)
+        head = level.locator('[data-entry-id]').first
+        if head.count():
+            settings.open_entry(page, head.get_attribute('data-entry-id'))
+            settle()
+            measure(settings.top_path(page))
+    settings.open_settings(page, '')
+    settle()
+    return paths
+
+
 def nav_pages(page):
     # The one registry of places (web/modules/pages.js): a new page is gated here with no further edit.
     ids = page.evaluate("async () => (await import('/static/modules/pages.js')).PAGES.map(p => p.id)")
@@ -193,6 +221,14 @@ def nav_pages(page):
 def open_nav(page, name):
     row = page.locator(f'[data-nav-page="{name}"]')
     toggle = page.locator('[data-mobile-nav-toggle]:visible').first
+    # A one-column section page has Back in place of Places. Return through its real header controls.
+    if page.locator('html').get_attribute('data-layout') == 'stack':
+        while not toggle.count():
+            back = page.locator('.page.active .app-page-header .shell-back:visible').first
+            if not back.count():
+                break
+            back.click()
+            rest(page)
     drawer = bool(toggle.count())
     if drawer and toggle.get_attribute('aria-expanded') != 'true':
         toggle.click()
@@ -218,7 +254,7 @@ def save_evidence(tmp_path, name, facts):
     root = Path(os.environ.get('OUROBOROS_UI_EVIDENCE_DIR', str(tmp_path)))
     root.mkdir(parents=True, exist_ok=True)
     path = root / f'{name}.json'
-    path.write_text(json.dumps(facts, indent=2))
+    path.write_text(json.dumps(facts, indent=2), encoding='utf-8')
     return path
 
 
@@ -255,9 +291,11 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
                     facts[key] = page.evaluate(MEASURE, root)
                     if any(facts[key].values()):
                         failures[key] = facts[key]
-                    # The way to the other places stays on every Settings view: ☰ in the header on a phone.
-                    if width < 720 and not page.locator(root + ' .app-page-header [data-mobile-nav-toggle]').is_visible():
-                        failures[key + '/menu'] = 'the menu button left the header'
+                    # A page alone has Back; beside its list the Places control stays with that list.
+                    if width < 720:
+                        control = '[data-mobile-nav-toggle]' if page.locator(HOME).is_visible() else '[data-settings-back]'
+                        if not page.locator(root + ' .app-page-header ' + control).is_visible():
+                            failures[key + '/navigation'] = f'the expected {control} left the header'
                 # The home, every page a module registered (the list of skill forms and the fixture skill's form
                 # among them), and one editor of a page that lists entries.
                 views = walk_settings(page, measure_settings, skill='gate_skill', settle=lambda: rest(page))
@@ -268,14 +306,21 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
                 page.wait_for_selector('.skills-card')
             if name == 'widgets':
                 page.wait_for_selector('.widgets-card')
-            # Dashboard and Skills subviews use the shared tab strip.
-            tabs = page.locator(root + ' .app-tab-strip [role="tab"]').all()
+            # Dashboard's vertical rail replaced its strip; every registered view still gets measured.
+            tab_selector = ' [data-dashboard-tab]' if name == 'dashboard' else ' .app-tab-strip [role="tab"]'
+            tabs = page.locator(root + tab_selector).all()
+            if name == 'dashboard':
+                registered = ['logs', 'activity', 'consciousness', 'costs', 'updates', 'storage', 'evolution']
+                assert [tab.get_attribute('data-dashboard-tab') for tab in tabs] == registered
             for index in range(max(1, len(tabs))):
                 tab_name = 'page'
                 if tabs:
+                    if name == 'dashboard' and not tabs[index].is_visible():
+                        page.locator(root + ' [data-dashboard-list-back]').click()
+                        rest(page)
                     tabs[index].click()
-                    tab_name = tabs[index].inner_text().strip()
-                settle(page)
+                    tab_name = tabs[index].get_attribute('data-dashboard-tab') if name == 'dashboard' else tabs[index].inner_text().strip()
+                rest(page)
                 key = f'{name}/{tab_name}'
                 facts[key] = page.evaluate(MEASURE, root)
                 if any(facts[key].values()):
@@ -409,7 +454,8 @@ def test_content_regions_fit_with_touch_controls_and_local_table_scroll(gate_ui)
             if name == 'settings':
                 walk_settings(page, lambda view: results.__setitem__('settings/' + view, page.evaluate(MEASURE, scope)),
                               skill='gate_skill', settle=lambda: rest(page))
-                for row in page.locator(f'{HOME} [data-settings-open]').all():
+                # The overview's rail row exists only in two panes; hidden rows have no touch target.
+                for row in page.locator(f'{HOME} [data-settings-open]:visible').all():
                     assert row.bounding_box()['height'] >= 44, row.get_attribute('data-settings-open')
             else:
                 settle(page)
