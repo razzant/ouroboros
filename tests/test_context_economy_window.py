@@ -707,7 +707,13 @@ def _shown_low(main_call, monkeypatch, tmp_path, cut, holds_reply=True):
             "legacy"]})
     ctx, _gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, view=snapshot_json(actor),
                                                           holds_reply=("account-b", "account-c") if holds_reply else ())
-    windows.update({"account-a": 150_000 if cut == "window" else 1_000_000, "account-b": 100_000})
+    # The window cut takes the narrowest window that still holds a cut Low view, measured from the real prompt and
+    # tool schemas: their growth must never flip this start to Nano (a fixed 150,000 did after #3403).
+    width = 1_000_000 if cut != "window" else next(
+        (width for width in range(150_000, 400_001, 10_000) if (shown := plan(width)).initial_mode == "low"
+         and shown.low_projection.memory_facts["floor"]["by_budget"] > 0), None)
+    assert width is not None, "no window up to 400,000 holds a cut Low view"
+    windows.update({"account-a": width, "account-b": 100_000})
     built = plan(windows["account-a"])
     assert built.initial_mode == "low" and built.low_projection.memory_facts["floor"]["by_budget"] > 0
     ctx.tools, ctx.context_fit_plan, ctx.active_context_mode = tools, built, "low"
