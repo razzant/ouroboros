@@ -6118,6 +6118,8 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     padding-top: 0;
     overflow-anchor: none; /* logs.js owns the entry anchor while chunks are inserted or moved */
 }
+/* The shared filter chips spaced as Skills' strip: a word wide each, 4 px apart, the first word on the list's edge.
+   Clear keeps its place at the row's end at rest, unseen, so it comes without moving or growing the row. */
 .logs-filters {
     --control-h: var(--control-h-sm);
     position: sticky;
@@ -6125,35 +6127,33 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     z-index: 1;
     display: flex;
     flex-wrap: wrap;
-    gap: var(--space-2);
+    gap: 2px var(--space-1);
     align-items: center;
+    margin-left: calc(-1 * var(--space-2));
     padding: var(--space-4) 0 var(--space-2);
     background: var(--bg-primary);
 }
+.logs-filters > .filter-chip { --control-pad-x: var(--space-2); }
+.logs-filters-clear { margin-left: var(--space-1); }
+.logs-filters-clear:not([data-shown]) { visibility: hidden; }
 
 /* The filter chips wrap on a phone: under a finger they take the touch minimum as their own height. */
 @media (pointer: coarse) {
     .logs-filters { --control-h: var(--touch-target-min); }
 }
-
-.logs-inline-clear {
-    margin-left: auto;
-}
-/* A pane narrower than the six chips and Clear at their usual spacing draws them closer, so they still keep to one
-   line beside a section's list (owner's window: a 455 px tab body); where even that line does not fit, they stand
-   in two even rows of three, Clear at the end of the first, never one chip alone on a row of its own. */
-@container dashboard (max-width: 34rem) {
-    .logs-filters { gap: var(--space-1); }
-    .logs-filters > .filter-chip { --control-pad-x: var(--space-2); }
-}
+/* A pane narrower than the six chips and Clear's place on one line (452 px with the strip's lead; the owner's window
+   gives 459) holds them in two even rows of three, Clear at the end of the second: never one alone on a row. */
 @container dashboard (max-width: 27.75rem) {
     .logs-filters { display: grid; grid-template-columns: repeat(3, auto) minmax(0, 1fr); justify-items: start; }
-    .logs-filters > .logs-inline-clear { grid-column: 4; grid-row: 1; justify-self: end; }
+    .logs-filters > .filter-chip:nth-of-type(4) { grid-column-start: 1; }
+    .logs-filters > .logs-filters-clear { grid-column: 4; grid-row: 2; }
 }
 
 .logs-card { display: grid; gap: var(--space-2); min-width: 0; }
 .logs-empty { margin: 0; color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
 .logs-empty[hidden] { display: none; }
+/* The list's own action stands after it, where the reader following the newest event is. */
+.logs-clear-list { justify-self: start; }
 
 #log-entries {
     display: grid;

@@ -134,8 +134,8 @@ palette | web/ui.css | :root[data-theme="light"] | --tone-amber-hover
 """
 
 # How many amber references each first-party script may hold, all data categories: the fourth default chart series
-# (theme_palette.js, which host charts draw from) and Logs' task category.
-SCRIPT_AMBER = {"web/modules/log_events.js": 1, "web/modules/theme_palette.js": 1}
+# (theme_palette.js, which host charts draw from). Logs' task category is painted by its sheet rule alone.
+SCRIPT_AMBER = {"web/modules/theme_palette.js": 1}
 
 
 def _decommented(css: str) -> str:

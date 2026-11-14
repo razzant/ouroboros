@@ -531,7 +531,7 @@ test('Logs reports partial history without losing live rows or deduplication, th
     assert.equal(calls.length, 8, 'only existing init/reconnect backfill runs');
 });
 
-test('Logs reads oldest to newest, says why it is empty, and keeps one quiet tone until a filter narrows it', async (t) => {
+test('Logs reads oldest to newest, says why it is empty, and shows the kinds chosen or, at rest, every kind', async (t) => {
     const { mount, routes, ws } = setup(t);
     const live = { type: 'test_live_event', ts: '2026-09-09T12:00:00Z', message: 'live' };
     const earlier = { type: 'test_earlier_event', ts: '2026-09-09T11:59:00Z', message: 'earlier' };
@@ -564,27 +564,67 @@ test('Logs reads oldest to newest, says why it is empty, and keeps one quiet ton
     entries.dispatchEvent({ type: 'click', target: raw });
     assert.equal(entries.children[0].querySelector('.log-raw').hidden, false);
     assert.equal(raw.getAttribute('aria-expanded'), 'true');
-    // Every filter on narrows nothing: no chip takes the chosen tone; one off, the ones still on do (U031).
+    // The filter is the shared chips with one state model (U031): at rest none is lit and every kind shows, and Clear
+    // keeps its place at the row's end unseen; a chosen chip shows its kind, and only the chosen chips are lit.
     const chips = mount.querySelectorAll('.filter-chip');
-    assert.ok(chips.length > 1);
-    assert.ok(chips.every((chip) => !chip.classList.contains('active') && chip.getAttribute('aria-pressed') === 'true'));
-    await chips[0].fire('click');
-    assert.equal(chips[0].classList.contains('active'), false);
-    assert.equal(chips[0].getAttribute('aria-pressed'), 'false');
-    assert.ok(chips.slice(1).every((chip) => chip.classList.contains('active')));
-    for (const chip of chips.slice(1)) await chip.fire('click');
+    const clear = mount.querySelector('.logs-filters-clear');
+    assert.deepEqual(chips.map((chip) => chip.textContent), ['Tools', 'LLM', 'Errors', 'Tasks', 'System', 'Consciousness']);
+    assert.equal(clear.parentElement.children.at(-1), clear, 'Clear is the row\'s last item');
+    const atRest = () => chips.every((chip) => !chip.classList.contains('active') && chip.getAttribute('aria-pressed') === 'false')
+        && clear.dataset.shown === undefined;
+    assert.ok(atRest(), 'at rest no chip is lit and Clear is unseen');
+    assert.ok(entries.children.every((entry) => !entry.hidden), 'at rest every kind shows');
+    const [tools, , , , system] = chips;  // both events here are System's
+    await tools.fire('click');
+    assert.deepEqual(chips.map((chip) => chip.classList.contains('active')), [true, false, false, false, false, false]);
+    assert.equal(tools.getAttribute('aria-pressed'), 'true');
+    assert.equal(clear.dataset.shown, '', 'Clear comes while a kind is chosen');
+    assert.ok(entries.children.every((entry) => entry.hidden), 'a chosen kind shows alone');
     assert.equal(empty.hidden, false);
     assert.match(empty.textContent, /The filters hide every event\./);
+    await system.fire('click');
+    assert.ok(entries.children.every((entry) => !entry.hidden), 'a second chosen kind shows beside the first');
+    assert.equal(empty.hidden, true);
+    await clear.fire('click');
+    assert.ok(atRest(), 'Clear returns to the rest');
+    assert.ok(entries.children.every((entry) => !entry.hidden));
+    await tools.fire('click');
     await empty.fire('click', { target: empty.querySelector('[data-log-show-all]') });
     assert.ok(entries.children.every((entry) => !entry.hidden), 'Show all brings every event back');
     assert.equal(empty.hidden, true);
-    assert.ok(chips.every((chip) => !chip.classList.contains('active')));
-    // Clear says when, and that new events appear (U033).
+    assert.ok(atRest());
+    // Clear list says when, and that new events appear (U033).
     await mount.querySelector('#btn-clear-logs').fire('click');
     assert.match(empty.textContent, /^Cleared at \d\d:\d\d\. New events appear here\.$/);
     ws.emit('log', { data: { ...live, ts: '2026-09-09T12:01:00Z' } });
     assert.equal(empty.hidden, true);
 });
+
+// The filter's choice lived in `state.activeFilters` as the kinds SHOWN (all six at rest, one turned off to narrow);
+// the candidate reads it once as the kinds CHOSEN, so a narrowed view stays the view the owner had.
+for (const [name, stored, lit, shown] of [
+    ['a kind turned off keeps the other five chosen', { tools: false, llm: true, errors: true, tasks: true, system: true, consciousness: true },
+        ['LLM', 'Errors', 'Tasks', 'System', 'Consciousness'], ['llm']],
+    ['all six on is the rest', { tools: true, llm: true, errors: true, tasks: true, system: true, consciousness: true }, [], ['tools', 'llm']],
+    ['one kind on is that kind chosen', { tools: true }, ['Tools'], ['tools']],
+    ['no stored choice is the rest', undefined, [], ['tools', 'llm']],
+]) {
+    test(`Logs carries a stored filter over: ${name}`, async (t) => {
+        const { mount, routes, ws } = setup(t);
+        for (const log of ['events', 'tools', 'progress', 'supervisor']) routes.set(logUrl(log), response({ entries: [] }));
+        const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs', ...(stored ? { activeFilters: { ...stored } } : {}) };
+        initLogs({ mount, ws, state });
+        await settle();
+        ws.emit('log', { data: { type: 'tool_call_finished', tool: 'read_file', is_error: false, ts: '2026-09-16T12:00:00Z' } });
+        ws.emit('log', { data: { type: 'llm_usage', model: 'm', ts: '2026-09-16T12:00:01Z' } });
+        const chips = mount.querySelectorAll('.filter-chip');
+        assert.deepEqual(chips.filter((chip) => chip.classList.contains('active')).map((chip) => chip.textContent), lit);
+        assert.deepEqual(chips.filter((chip) => chip.getAttribute('aria-pressed') === 'true').map((chip) => chip.textContent), lit);
+        assert.equal(mount.querySelector('.logs-filters-clear').dataset.shown, lit.length ? '' : undefined);
+        const entries = mount.querySelector('#log-entries').children;
+        assert.deepEqual(entries.filter((entry) => !entry.hidden).map((entry) => entry.dataset.category), shown);
+    });
+}
 
 test('Logs prints an event\'s name once and names a task card by its short id without repeating its lineage', async (t) => {
     const { mount, routes, ws } = setup(t);

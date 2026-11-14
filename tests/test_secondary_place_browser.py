@@ -212,19 +212,19 @@ def test_hidden_logs_take_a_burst_without_drawing_and_shown_keep_filters_raw_sel
             assert raw.evaluate("pre => pre.textContent") == ""
 
             # The owner's filter stays across another page; so does a card's open Timeline.
-            chip = page.locator(".filter-chip", has_text="System")
-            chip.click()
-            expect(chip).not_to_have_class(re.compile(r"\bactive\b"))
-            expect(chip).to_have_attribute("aria-pressed", "false")  # off (quiet chips: none is toned while all are on)
             card = entries.locator(".log-task-card").last
-            card.locator("summary").click()
+            card.locator("summary", has_text="Timeline").click()
             rows = card.locator(".log-task-event")
             assert rows.count() >= 1
+            chip = page.locator(".filter-chip", has_text="System")
+            chip.click()
+            expect(chip).to_have_class(re.compile(r"\bactive\b"))
+            expect(chip).to_have_attribute("aria-pressed", "true")  # chosen: System's events alone are shown
             _nav(page, "settings")
             _nav(page, "dashboard")
-            expect(chip).not_to_have_class(re.compile(r"\bactive\b"))
-            expect(chip).to_have_attribute("aria-pressed", "false")
-            assert card.locator("details").evaluate("d => d.open")
+            expect(chip).to_have_class(re.compile(r"\bactive\b"))
+            expect(chip).to_have_attribute("aria-pressed", "true")
+            assert card.locator("details").first.evaluate("d => d.open")
             chip.click()
 
             # A live event for the card holding the selection and the focus moves the card, not them.

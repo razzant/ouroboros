@@ -65,26 +65,34 @@ export function initLogs({ ws, state, mount }) {
     // The reader follows the newest entry (`pinned`) or reads an entry (`anchor`); `ownTop` is this module's own scroll.
     let pinned = true, anchor = null, ownTop = null, selectionInside = false, settleQueued = false;
 
-    state.activeFilters = state.activeFilters || Object.fromEntries(
-        Object.keys(LOG_CATEGORIES).map((key) => [key, true]),
-    );
+    // The filter shows the kinds chosen, every kind while none is: the rest, no chip lit and no Clear. The choice lives
+    // in `state.activeFilters`, which meant the kinds SHOWN before (all six at rest, one turned off to narrow): read
+    // once here, a kind it still shows stays chosen and all six (or none) is the rest, so what the owner saw stays.
+    const KINDS = Object.keys(LOG_CATEGORIES);
+    const choice = state.activeFilters || {};
+    if (KINDS.every((key) => choice[key])) KINDS.forEach((key) => { choice[key] = false; });
+    state.activeFilters = choice;
+    const narrowed = () => KINDS.some((key) => state.activeFilters[key]);
+    const shows = (category) => !narrowed() || Boolean(state.activeFilters[category]);
 
     // One Dashboard tab body is the tab's root and its one scroller; the filters stay at its top while the list,
-    // one card of tray rows, scrolls under them. The history line and the empty line live in the list's card.
+    // one card of trays, scrolls under them. The history line, the empty line and Clear list live in the list's card.
     const page = document.createElement('div');
     page.id = 'page-logs';
     page.className = 'dashboard-body settings-logs-panel';
     page.innerHTML = `
-        <div class="logs-filters" id="log-filters"><button type="button" class="btn btn-ghost btn-sm logs-inline-clear" id="btn-clear-logs">Clear</button></div>
+        <div class="logs-filters" id="log-filters" role="group" aria-label="Show"><button type="button" class="btn btn-ghost btn-sm logs-filters-clear">Clear</button></div>
         <section class="ui-card logs-card">
             <div class="ui-status logs-history-status" role="status"></div>
             <p class="logs-empty" data-log-empty hidden></p>
             <div id="log-entries"></div>
+            <button type="button" class="btn btn-ghost btn-sm logs-clear-list" id="btn-clear-logs">Clear list</button>
         </section>
     `;
     mount.appendChild(page);
 
     const filtersDiv = page.querySelector('#log-filters');
+    const clearChoice = page.querySelector('.logs-filters-clear');
     const logEntries = page.querySelector('#log-entries');
     const historyStatus = page.querySelector('.logs-history-status');
     const emptyLine = page.querySelector('[data-log-empty]');
@@ -148,7 +156,7 @@ export function initLogs({ ws, state, mount }) {
     }
 
     function updateVisibility(entry) {
-        if (entry.node) entry.node.hidden = !state.activeFilters[entry.category];
+        if (entry.node) entry.node.hidden = !shows(entry.category);
         raw.exposure();
     }
 
@@ -158,7 +166,7 @@ export function initLogs({ ws, state, mount }) {
     let emptyWords = null;
     function updateEmptyState() {
         if (!isLogsVisible()) return;
-        const quiet = [...entries.values()].some((entry) => state.activeFilters[entry.category])
+        const quiet = [...entries.values()].some((entry) => shows(entry.category))
             || (historyLoading && !entries.size);
         if (emptyLine.hidden !== quiet) emptyLine.hidden = quiet;
         if (quiet) return;
@@ -169,15 +177,17 @@ export function initLogs({ ws, state, mount }) {
         else emptyLine.innerHTML = 'The filters hide every event. <button type="button" class="btn btn-ghost btn-sm" data-log-show-all>Show all</button>';
     }
 
-    // Filters narrow the list: while every one is on nothing is narrowed and no chip takes the chosen tone; once
-    // one is off, the ones still on are the chosen ones (board fork "Logs filters": quiet chips, one tone).
+    // The shared filter chips (ui.css `.filter-chip`, as Skills' filters): a chosen kind is lit in the soft crimson and
+    // pressed. Clear is the row's last item while a kind is chosen; at rest its place stays, unseen, so the row never
+    // grows or wraps when it comes (DESIGN principle 6).
     const chips = new Map();
     function syncFilterChips() {
-        const narrowed = Object.keys(LOG_CATEGORIES).some((key) => !state.activeFilters[key]);
         chips.forEach((chip, key) => {
-            chip.classList.toggle('active', narrowed && Boolean(state.activeFilters[key]));
+            chip.classList.toggle('active', Boolean(state.activeFilters[key]));
             chip.setAttribute('aria-pressed', String(Boolean(state.activeFilters[key])));
         });
+        if (narrowed()) clearChoice.dataset.shown = '';
+        else delete clearChoice.dataset.shown;
     }
 
     function applyFilters() {
@@ -188,29 +198,29 @@ export function initLogs({ ws, state, mount }) {
     }
 
     function renderFilters() {
-        const inlineClear = filtersDiv.querySelector('.logs-inline-clear');
-        filtersDiv.innerHTML = '';
-        chips.clear();
-        Object.entries(LOG_CATEGORIES).forEach(([key, cat]) => {
+        for (const [key, label] of Object.entries(LOG_CATEGORIES)) {
             const chip = document.createElement('button');
             chip.type = 'button';
             chip.className = 'filter-chip';
-            chip.textContent = cat.label;
+            chip.textContent = label;
             chip.addEventListener('click', () => {
                 state.activeFilters[key] = !state.activeFilters[key];
                 applyFilters();
             });
             chips.set(key, chip);
-            filtersDiv.appendChild(chip);
-        });
-        if (inlineClear) filtersDiv.appendChild(inlineClear);
+            filtersDiv.insertBefore(chip, clearChoice);
+        }
         syncFilterChips();
     }
 
-    emptyLine.addEventListener('click', (event) => {
-        if (!event.target?.closest?.('[data-log-show-all]')) return;
-        Object.keys(LOG_CATEGORIES).forEach((key) => { state.activeFilters[key] = true; });
+    // Clear and the empty line's Show all return the filter to its rest: every kind shown.
+    function showAll() {
+        KINDS.forEach((key) => { state.activeFilters[key] = false; });
         applyFilters();
+    }
+    clearChoice.addEventListener('click', showAll);
+    emptyLine.addEventListener('click', (event) => {
+        if (event.target?.closest?.('[data-log-show-all]')) showAll();
     });
 
     // ---- The entries (data) --------------------------------------------------------------------------------------
@@ -797,7 +807,7 @@ export function initLogs({ ws, state, mount }) {
         backfillAbort?.abort(); backfillAbort = null; backfillRevision += 1;
         backfillOwed = false;
         historyLoading = false;
-        // Clear empties this view, not the evidence that its history could not be read.
+        // Clear list empties this view, not the evidence that its history could not be read.
         if (cancelledRead) {
             setInlineStatus(historyStatus, 'History read cancelled. Live events continue.', 'warn');
             historyStatus.hidden = false;

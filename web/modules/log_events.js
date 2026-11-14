@@ -27,14 +27,8 @@ const REVIEW_LIFECYCLE_ERROR_STATUSES = new Set([
 
 export { formatReviewProjection } from './review_presentation.js';
 
-export const LOG_CATEGORIES = {
-    tools: { label: 'Tools', color: 'var(--blue)' },
-    llm: { label: 'LLM', color: 'var(--accent)' },
-    errors: { label: 'Errors', color: 'var(--red)' },
-    tasks: { label: 'Tasks', color: 'var(--amber)' },
-    system: { label: 'System', color: 'var(--text-muted)' },
-    consciousness: { label: 'Consciousness', color: 'var(--accent)' },
-};
+// The Logs kinds and their filter labels; each kind's colour is the sheet's (style.css `.log-type.<kind>`).
+export const LOG_CATEGORIES = { tools: 'Tools', llm: 'LLM', errors: 'Errors', tasks: 'Tasks', system: 'System', consciousness: 'Consciousness' };
 
 // The Errors filter follows the same typed failure phases on live and replay rows.
 const ERROR_LOG_PHASES = new Set(['error', 'timeout', 'lifecycle_error']);
