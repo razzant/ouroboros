@@ -32,7 +32,7 @@ _NOT_SHOWN = "The card was not shown."
 _MAX_CARD_IMAGE_BYTES = 2 * 1024 * 1024
 # The only media a card draws (``safeMediaSrc`` in web/modules/widget_render.js): an inline data: URI.
 _DRAWABLE_MEDIA = re.compile(
-    r"data:(image/(?:png|jpeg|jpg|gif|webp)|audio/(?:mpeg|wav|ogg)|video/(?:mp4|webm|ogg));base64,[A-Za-z0-9+/=]+", re.I)
+    r"data:(image/(?:png|jpeg|jpg|gif|webp)|audio/(?:mpeg|wav|ogg)|video/(?:mp4|webm|ogg));base64,[A-Za-z0-9+/=]+", re.I | re.A)
 
 SHOW_CARD_TOOL_SCHEMA: Dict[str, Any] = {
     "name": "show_card",
@@ -128,9 +128,11 @@ def _nodes(components: Any, where: str = "components",
         if not isinstance(node, dict):
             continue
         here, aimed = f"{where}[{idx}]", targeted or bool(node.get("target")) or bool(node.get("condition_key"))
-        yield here, node, str(node.get("type") or ""), not aimed
-        yield from _nodes(node.get("components"), f"{here}.components", aimed)
-        for tab_idx, tab in enumerate(node.get("tabs") if isinstance(node.get("tabs"), list) else []):
+        kind = str(node.get("type") or "")
+        yield here, node, kind, not aimed
+        if kind == "group":  # the only containers the renderer draws: a group's components and each tab's
+            yield from _nodes(node.get("components"), f"{here}.components", aimed)
+        for tab_idx, tab in enumerate(node.get("tabs") if kind == "tabs" and isinstance(node.get("tabs"), list) else []):
             if isinstance(tab, dict):
                 yield from _nodes(tab.get("components"), f"{here}.tabs[{tab_idx}].components", aimed)
 
