@@ -10109,12 +10109,13 @@ html[data-layout="stack"] .project-panel {
     width: fit-content;
     max-width: 100%;
 }
-/* The meta line is facts: each one whole on its line (a fact wider than the line wraps inside itself), parted by a
-   dot that stays with the fact before it, so no line starts with a separator. A spent window is the one fact in the
-   warning's hue (DESIGN principle 3: the words that carry the state take the hue; the row's body stays neutral, so
-   rows never alternate); the plan, who it is and "checked …" keep the meta ink. */
-.harness-account-meta .meta-fact { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
-.harness-account-meta .meta-fact:not(:last-of-type)::after { content: " ·"; margin-right: 0.35em; color: var(--text-meta); }
+/* The meta line is facts: each one whole on its line (a fact wider than the line wraps between its words, and an
+   address in it, as the name's, is cut with an ellipsis rather than inside a word), parted by a dot that stays with
+   the fact before it, so no line starts with a separator. A spent window is the one fact in the warning's hue (DESIGN
+   principle 3: the words that carry the state take the hue; the row's body stays neutral, so rows never alternate);
+   the plan, who it is and "checked …" keep the meta ink. Its top stands on the line's top, as its baseline did. */
+.harness-account-meta .meta-fact { display: inline-block; max-width: 100%; overflow: hidden; overflow-wrap: normal; text-overflow: ellipsis; vertical-align: top; }
+.harness-account-meta .meta-fact:not(:last-of-type)::after { content: "\00a0·"; margin-right: 0.35em; color: var(--text-meta); }
 .harness-account-meta .meta-fact[data-tone="warn"] { color: var(--status-warn-word, var(--text-meta)); }
 /* The light seed's half of the warning row (DESIGN seed table: light — the row's tint, its words in their own ink;
    dark — a neutral row, its words in the hue): the one warning row with a body, so the theme scopes its rule here. */

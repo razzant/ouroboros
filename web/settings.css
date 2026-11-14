@@ -1632,9 +1632,19 @@ textarea.ui-control.settings-rules-text {
 }
 .agent-family-accounts .harness-account-row[data-tone="warn"] { background: var(--status-warn-bg); }
 .harness-account-mark { grid-area: mark; display: grid; place-items: center; min-width: 22px; color: var(--text-secondary); }
+/* An account's name is one line: an address never breaks inside itself, and one longer than the line is cut with an
+   ellipsis (the markup offers no break at its @ or its dots). */
+.agent-family-accounts .harness-account-main > strong { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .agent-family-accounts .harness-account-actions { flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 .harness-account-actions > [data-resources] { margin: 0; }
 .harness-account-extra { grid-column: 2 / -1; grid-row: 3; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-1); }
+/* A row too narrow to keep its words about 200 px beside the switch and More (a phone leaves them 150) stands them
+   under the words, at their start, and Sign in's line under them; the owner's window keeps them at the row's end. */
+@container (max-width: 22rem) {
+    .agent-family-accounts .harness-account-row > :is(.harness-account-main, .harness-account-meta, .harness-account-actions) { grid-column: 2 / -1; }
+    .agent-family-accounts .harness-account-row > .harness-account-actions { grid-row: 3; justify-content: flex-start; margin-top: var(--space-1); }
+    .agent-family-accounts .harness-account-row > .harness-account-extra { grid-row: 4; }
+}
 /* What is rare shows while More is open: the row holds the :has() in its own compound and lends the line its display;
    closed, the fallback hides it, and a line of nothing else takes no room. */
 .harness-account-row:has([data-resources][aria-expanded="true"]) {
