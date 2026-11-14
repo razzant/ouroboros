@@ -272,9 +272,12 @@ FOCUS_TOKENS = ("var(--focus-accent-border)", "var(--focus-accent-ring)")
 
 # A selector that only REACTS to another element's keyboard focus paints no focus of its own: the ring is on the
 # focused element's own selector, named here beside it. The Pin of a Project row hides the row's time while it has
-# keyboard focus, so the time never shows through the Pin that stands in its place.
+# keyboard focus, so the time never shows through the Pin that stands in its place, and the row's mark, so the Pin's
+# ring never lies on it.
 FOCUS_REACTIONS = {
     "web/style.css: .nav-project-pin:focus-visible ~ .nav-project-row .nav-project-time":
+        "web/style.css: .nav-project-pin:focus-visible",
+    "web/style.css: .nav-project-pin:focus-visible ~ .nav-project-row .nav-mark-slot":
         "web/style.css: .nav-project-pin:focus-visible",
 }
 

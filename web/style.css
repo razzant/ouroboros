@@ -9315,6 +9315,21 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 @media (hover: hover) {
     .nav-project-item:hover .nav-project-time { visibility: hidden; }
 }
+/* The row's mark gives way while the row's controls are drawn, as its time does: its moving dots never stand beside
+   the ⋯ as a second three-dot glyph, and a focused Pin's ring never lies on it. Its words stay in the row's name. The
+   ⋯ is drawn with a pointer's hover or the keyboard anywhere in the row, on touch while it is focused or its menu open
+   (below), over the row's end, where the time gives way to it as to the Pin; the Pin while it has the keyboard. */
+.nav-project-pin:focus-visible ~ .nav-project-row .nav-mark-slot { visibility: hidden; }
+@media (hover: hover) {
+    .nav-project-item:is(:hover, :focus-within) .nav-mark-slot { visibility: hidden; }
+}
+@media (pointer: coarse) {
+    /* The row asks of the ⋯ after it (:has() stays in its own compound) and its end reads the answer. */
+    .nav-project-row:has(~ .nav-project-kebab:is(:focus, [aria-expanded="true"])) {
+        --nav-row-end: hidden;
+    }
+    .nav-project-row :is(.nav-mark-slot, .nav-project-time) { visibility: var(--nav-row-end, visible); }
+}
 .nav-project-pin:has(+ .nav-project-row.active) { color: var(--tone-crimson-ink); }
 @media (hover: hover) {
     .nav-project-item:hover > .nav-project-pin {
