@@ -31,7 +31,7 @@ def test_the_servers_open_file_limit_rises_to_its_hard_limit_at_start(monkeypatc
     assert "raise_open_file_limit()" in inspect.getsource(server.main)
 
 
-def test_the_server_shortens_the_interpreters_switch_interval_at_start(monkeypatch, tmp_path):
+def test_the_server_tunes_its_interpreter_at_start(monkeypatch, tmp_path):
     """A read takes the interpreter lock back after each store step only when a computing thread yields, once per
     switch interval: the server asks for 1 ms instead of CPython's 5 ms, in ``main`` before it serves (#3399), and
     collects its young generation after 20,000 new objects instead of 700. The conftest fixture puts the session's own
@@ -59,14 +59,3 @@ def test_the_server_shortens_the_interpreters_switch_interval_at_start(monkeypat
         server.main()
     assert sys.getswitchinterval() == pytest.approx(0.001)
     assert gc.get_threshold() == (20_000, 7, 3), "the young generation's threshold rises with it, the older keep theirs"
-
-
-def test_the_gc_threshold_helper_keeps_the_older_generations_thresholds():
-    """Only the young generation's threshold changes; whatever the older two are stays (#3399)."""
-    import gc
-
-    from ouroboros import server_entrypoint
-
-    gc.set_threshold(700, 7, 3)  # the conftest fixture puts the session's own thresholds back
-    server_entrypoint.raise_gc_threshold()
-    assert gc.get_threshold() == (20_000, 7, 3)
