@@ -143,7 +143,7 @@ def test_first_run_onboarding_is_presented_only_after_the_gateway_is_healthy():
         "_prepare_first_run_settings()",
         "_requested_server_port()",
         "lifecycle_thread.start()",
-        "_await_server_ready(port, _abort, lifecycle_thread)",
+        "_await_server_ready(port, _shutdown_event, lifecycle_thread)",
         "_present_first_run_onboarding(",
     ]
     positions = [src.index(marker) for marker in order]
@@ -269,7 +269,7 @@ def test_completion_reporting_restart_required_recycles_the_managed_server(monke
     src = inspect.getsource(launcher.main)
     restart_at = src.index('if onboarding["restart_required"]')
     assert "_request_agent_restart()" in src[restart_at:restart_at + 800]
-    assert "_await_server_ready(port, _abort, lifecycle_thread)" in src[restart_at:restart_at + 800]
+    assert "_await_server_ready(port, _shutdown_event, lifecycle_thread)" in src[restart_at:restart_at + 800]
 
 
 def test_macos_recovery_uses_the_live_window_and_current_gateway_after_setup(monkeypatch):

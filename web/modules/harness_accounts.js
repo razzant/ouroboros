@@ -488,7 +488,7 @@ function daemonBaseStatusLine(payload, { checking = false, reads = null } = {}) 
     // same facet gate decides whether the line may say what is serving.
     if (runtimeState === 'newer_serving') {
         const pinned = runtime.target_version || '?';
-        const refusal = `After Restart Claudexor, Panic or an engine exit, ${pinned} may refuse data a newer engine served.`;
+        const refusal = `After Quit, Restart Claudexor, Panic or an engine exit, ${pinned} may refuse data a newer engine served.`;
         if (!unread.length) {
             return { tone: 'warn', text: `Engine ${daemon.engine_version || '?'} keeps serving; this Ouroboros version pins older Claudexor ${pinned}. ${refusal}` };
         }

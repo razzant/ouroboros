@@ -539,7 +539,7 @@ class ClaudexorRuntimeManager:
             if self._pin is not None:
                 try:
                     command = self._managed_command()
-                    # The daemon outlives the app: a bundled Node goes through the install owner, which keeps a copy.
+                    # The daemon may outlive the app: a bundled Node goes through the install owner, keeping a copy.
                     if command and command[0] != bundled_node(self._pin.node_version):
                         try:
                             self._probe(command, self._pin)
@@ -919,7 +919,7 @@ class ClaudexorRuntimeManager:
         return ""
 
     def _resolve_node(self, pin: ClaudexorRuntimePin, *, bundled: bool = True) -> str:
-        """An exact managed Node, complete then Node-only, before the bundled one the daemon would outlive."""
+        """An exact managed Node, complete then Node-only, before the bundled one the daemon may outlive."""
         from ouroboros.platform_layer import node_distribution_platform
 
         platform_key = node_distribution_platform()

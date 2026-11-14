@@ -1,7 +1,8 @@
 """Launcher process cleanup: startup stray discovery and final recorded-owner teardown.
 
 ``kill_runtime_orphans`` is the close/Panic finalizer for recorded server and
-companions. The discovery sweep described below runs only at startup.
+companions; ``QuitEngineStop`` then ends the owned engine on an explicit Quit only.
+The discovery sweep described below runs only at startup.
 
 A launcher that holds the single-instance pid lock is, by that lock, the only actor entitled to run
 a managed server against this data directory — so any OTHER process running THIS install's
@@ -37,6 +38,7 @@ import logging
 import os
 import pathlib
 import subprocess
+import threading
 import time
 from typing import Iterable, List, Optional, Set, Tuple
 
@@ -95,6 +97,112 @@ def kill_runtime_orphans(data_dir, cleanup_recorded_server, *, reason: str, log)
             log.info("Killed orphaned child pid=%d", child.pid)
         except (ProcessLookupError, PermissionError, OSError):
             pass
+
+
+POSIX_STARTERS = "not confirmed: POSIX workers leave their server's session and no Job holds them"
+SERVER_GAP = "the captured server's exit is unconfirmed"
+
+
+class QuitEngineStop:
+    """Quit's last stop: this installation's own Claudexor engine, before the PID lock goes.
+
+    Only an owner's exit sets ``requested``: the desktop closer an owner gesture started (window close,
+    the indicator's Quit, Cmd+Q, sign-out; ``Background.exit_launcher``) or a signal a headless launcher's
+    handler accepted. Restart, Update, a settings or onboarding recycle (the same ``quit`` pipe), a crash,
+    launcher EOF, hiding, a lost indicator or window, Panic and a signal before that handler never do,
+    so the engine keeps outliving its server there.
+
+    A server's death does not end its workers, and a worker can still start the engine. On Windows
+    every retirement, under the launcher's publication lock (``retire``), terminates the generation's
+    Job and confirms it empty before closing it, so a Quit whose server stop waits on that lock, or
+    comes later, meets no starter. POSIX workers leave their server's session and no Job holds them:
+    their exit stays unconfirmed and is disclosed, never inferred from the server's process group.
+    The lifecycle thread is joined, so a start published after the stop's grace is stopped first.
+    Whatever stays unconfirmed is disclosed (``disclosed``), and the stop still runs.
+
+    The stop is a private ``OwnedClaudexorDaemon`` instance's cooperative ``stop_outcome``, never this
+    process's singleton: a Panic accepted meanwhile still finds no manager here, requests the ledgered
+    engine stop at once (``execute_panic_stop``) and settles with its own manager. Runs of every program
+    on this engine end with it; a foreign home is never stopped. One outcome per launcher: a second
+    caller waits for it.
+    """
+
+    CONFIRM_SEC = 5.0
+
+    def __init__(self, grace: float = 0.0) -> None:
+        self.requested = threading.Event()
+        self.lifecycle: Optional[threading.Thread] = None
+        self.grace = grace  # the launcher's stop grace: a late-published start's own stop may take it
+        self.windows = _pl.IS_WINDOWS
+        self.disclosed: Optional[List[str]] = None  # what the decided stop could not confirm
+        self._lock = threading.Lock()
+        self._gaps: List[str] = []
+        self._outcome: Optional[str] = None
+
+    def retire(self, job, *, terminate=None, close=None, panic: bool = False) -> None:
+        """A retired generation's Windows Job, under the launcher's publication lock: terminate it, confirm it
+        has no running member, then close it, so neither a later Quit nor one waiting on this lock stops the
+        engine beside a starter still terminating. A generation that exited by Panic is only terminated and
+        closed: Panic's exit never waits here. Never raises; an unconfirmed drain stays a gap Quit discloses."""
+        if job is None:
+            return
+        problem = ""
+        try:
+            problem = str((terminate or _pl.terminate_job)(job) or "")
+            deadline = time.monotonic() + self.CONFIRM_SEC
+            while not (panic or problem) and _pl.job_has_running_member(job) is not False:
+                if time.monotonic() >= deadline:
+                    problem = "a generation Job member did not confirm its exit"
+                time.sleep(0.05)
+        except Exception as exc:
+            problem = f"generation Job unreadable ({type(exc).__name__})"
+        try:
+            closed = str((close or _pl.close_job)(job) or "")
+        except Exception as exc:
+            closed = f"generation Job close failed ({type(exc).__name__})"
+        for gap in (problem, closed):
+            if gap:  # disclosed now, and again by a later Quit's stop
+                log.warning("Generation Job retirement: %s; its starters' exit is unconfirmed", gap)
+                if gap not in self._gaps:
+                    self._gaps.append(gap)
+
+    def stop_engine(self, *, server_stopped: bool) -> str:
+        """``not_requested`` without Quit; else the engine stop outcome, decided once. An exit decides again when
+        an owner's Quit arrives after an earlier call: an unconfirmed server stop stays disclosed for that call."""
+        if not server_stopped and SERVER_GAP not in self._gaps:
+            self._gaps.append(SERVER_GAP)
+        if not self.requested.is_set():
+            return "not_requested"
+        with self._lock:
+            if self._outcome is None:
+                self._outcome = self._stop()
+            return self._outcome
+
+    def _stop(self) -> str:
+        started = time.monotonic()
+        gaps = []
+        try:
+            if self.lifecycle is not None:
+                self.lifecycle.join(timeout=self.grace + self.CONFIRM_SEC)
+                if self.lifecycle.is_alive():
+                    gaps.append("the lifecycle thread did not finish")
+        except Exception as exc:  # the close body must still reach the stop and the PID lock's release
+            gaps.append(f"the lifecycle thread unreadable ({type(exc).__name__})")
+        gaps += self._gaps
+        self.disclosed = gaps + ([] if self.windows else [POSIX_STARTERS])
+        if gaps:
+            log.warning("Quit: generation starters unconfirmed (%s); an engine they start after this stop may "
+                        "survive", "; ".join(gaps))
+        try:  # an import failure too is an unconfirmed stop, never an exception past the PID lock's release
+            from ouroboros.claudexor_daemon import OwnedClaudexorDaemon
+
+            outcome = OwnedClaudexorDaemon().stop_outcome()
+        except Exception as exc:
+            log.critical("Quit: owned Claudexor stop raised %s; custody is unconfirmed", type(exc).__name__)
+            outcome = "unconfirmed"
+        log.info("Quit: owned Claudexor stop %s after %.1fs; generation starters %s", outcome,
+                 time.monotonic() - started, "UNCONFIRMED" if gaps else "drained" if self.windows else POSIX_STARTERS)
+        return outcome
 
 
 def _path_forms(base, leaf: str = "") -> Set[str]:

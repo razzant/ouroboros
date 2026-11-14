@@ -78,7 +78,7 @@ def prepare_first_run_settings() -> tuple[dict, bool]:
 
 def present_first_run_onboarding(
     settings: dict, port: int, *, open_external_url: Callable[[str], dict],
-    headless: bool = False, read_port: Callable[[], int | None] | None = None,
+    headless: bool = False, read_port: Callable[[], int | None] | None = None, attach: Callable | None = None,
 ) -> dict:
     """Show first-run onboarding served by the ALREADY-RUNNING managed gateway.
 
@@ -164,6 +164,8 @@ def present_first_run_onboarding(
         min_size=(840, 640),
     )
     appearance.attach(window)
+    if attach is not None:
+        attach(window)  # the launcher's app-level Quit (``Background.attach_setup``), never a close policy
     paint_room(window)  # macOS: opens in the Mac's room colour until its page paints the saved choice
     # Share persistent local UI storage with the same-origin main window.
     # This includes cookies and website data, not only the appearance choice.

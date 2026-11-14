@@ -34,7 +34,7 @@ Lifecycle belongs to the installation, not the process that first needed it:
   the descriptor port (a foreign daemon on a recycled port stays disclosed, not
   killed). A runtime pin is never hot-swapped: the live engine keeps serving
   until a restart onto another pin, not a lower release, ends it
-  (``server_restart._stop_owned_daemon_for_new_pin``), Panic or the owner's
+  (``server_restart._stop_owned_daemon_for_new_pin``), Quit, Panic or the owner's
   Restart Claudexor stops it, or it exits; the next start selects the pin (PERSISTENCE.md).
 
 Zero auth logic lives here or anywhere in Ouroboros: login jobs, device-code

@@ -490,7 +490,8 @@ def test_headless_teardown_sweeps_no_port_and_names_the_published_one():
     abort_at = src.index("Shutdown requested during startup")
     fail_at = src.index("failed to become healthy")
     for section_start, reason in ((abort_at, "startup_abort"), (fail_at, "startup_failure")):
-        assert f'_cleanup_recorded_server_process("{reason}")' in src[section_start:section_start + 700]
+        assert f'_startup_teardown("{reason}"' in src[section_start:section_start + 700]
+    assert "_cleanup_recorded_server_process(reason)" in inspect.getsource(launcher._startup_teardown)
     assert "kill_process_on_port(" not in inspect.getsource(launcher._kill_orphaned_children).split(
         "for companion_port")[0], "only the disclosed companion ports remain"
 

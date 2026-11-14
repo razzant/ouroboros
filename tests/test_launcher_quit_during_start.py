@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros import launcher_server_reaper as reaper
 from ouroboros.config import PANIC_EXIT_CODE
 from tests.test_launcher_handoff_stop import native_guard as native_guard
 
@@ -209,10 +210,16 @@ def windows(agent, monkeypatch, native_guard):
     monkeypatch.setattr(launcher, "assign_pid_to_job", lambda job, pid: calls.append(("assign", job)) or True)
     monkeypatch.setattr(launcher, "resume_process", lambda pid: calls.append("resume") or True)
     monkeypatch.setattr(launcher, "create_kill_on_close_job", lambda **kw: calls.append("create job") or "job")
+    # Every retirement drains its Job before closing it (``QuitEngineStop.retire``): the fake Job is empty once
+    # terminated, so its query is faked like the Job itself and never reaches the native call native_guard denies.
+    quit_ = reaper.QuitEngineStop()
+    monkeypatch.setattr(launcher, "_quit", quit_)
+    monkeypatch.setattr(reaper._pl, "job_has_running_member", lambda job: False if job == "job" else None)
     monkeypatch.setattr("ouroboros.process_logging.copy_capped_output", lambda *a, **kw: None)
     server = _FakeServer(calls)
     monkeypatch.setattr(launcher, "_hidden_popen", lambda cmd, **kw: server)
-    return SimpleNamespace(launcher=launcher, calls=calls, server=server, shutdown=agent.shutdown)
+    yield SimpleNamespace(launcher=launcher, calls=calls, server=server, shutdown=agent.shutdown)
+    assert not quit_._gaps, "a fake Job's retirement confirmed its drain"
 
 
 def test_windows_a_stop_before_the_resume_forces_the_suspended_child_without_a_drain(windows, monkeypatch):
