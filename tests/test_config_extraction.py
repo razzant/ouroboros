@@ -39,6 +39,8 @@ _ADDED_OWNERS = {
     "SERVER_ADMISSION_WAIT_SEC": runtime_limits,
     # The server's interpreter switch interval (``server_entrypoint.shorten_switch_interval``).
     "SERVER_SWITCH_INTERVAL_SEC": runtime_limits,
+    # The server's young-generation collection threshold (``server_entrypoint.raise_gc_threshold``).
+    "SERVER_GC_THRESHOLD0": runtime_limits,
     "STOP_ADMISSION_DRAIN_SEC": runtime_limits,
     "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC": runtime_limits,
     # The supervisor loop's bounded events pass and the budget-projection retry interval.
