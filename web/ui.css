@@ -1144,6 +1144,14 @@ html[data-layout="stack"] .section-rail { padding-inline: 12px; }
         margin-inline-start: calc(var(--section-rail-start) - var(--page-header-padding-x));
     }
     .section-place[data-section-view="page"] .section-lead-rail { display: flex; }
+    /* A touch window keeps the phone's band, `☰` and the place's name on one centre line, and puts the columns' names
+       on a row under it (as Settings, settings.css). Its band is inset by --space-3 (style.css, the stack layout's
+       header), not the desk's padding: the lead starts at the list's own inset, over its rows and the page's cards. */
+    html[data-layout="stack"] .section-place > .app-page-header { grid-template-areas: "leading title toolbar" "lead lead lead"; }
+    html[data-layout="stack"] .section-place > .app-page-header > .app-page-title-block { display: contents; }
+    html[data-layout="stack"] .section-place > .app-page-header .app-page-title-row { grid-area: title; }
+    html[data-layout="stack"] .section-place > .app-page-header .app-page-lead { grid-area: lead; min-height: var(--touch-target-min); }
+    html[data-layout="stack"] .section-place[data-section-view="page"] .section-lead { margin-inline-start: calc(var(--section-rail-start) - var(--space-3)); }
     .section-shell[data-section-view="page"] > .section-rail .section-list { gap: var(--space-4); }
     .section-shell[data-section-view="page"] > .section-rail .section-group { gap: var(--space-1); }
     .section-shell[data-section-view="page"] > .section-rail .section-group-title { padding-inline: var(--space-2); }
