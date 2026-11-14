@@ -571,3 +571,65 @@ def test_a_stray_marker_line_an_overwrite_leaves_is_named_with_the_way_to_remove
     again = _update_world(ctx, mode="edit", old_str="- a note", content="- a newer note", expected_revision=_rev(world))
     assert again.startswith("OK: world map updated (edit") and world.read_text(encoding="utf-8") == mine.replace(
         "- a note", "- a newer note"), again
+
+
+def test_an_empty_map_is_refused_in_every_mode_before_a_block_could_fill_it(tmp_path, monkeypatch):
+    """K17 (A2): the map is never empty. Blank content, a revert to an empty version and an edit that deletes the whole
+    of an unfenced legacy map are argument errors that write nothing, judged before the host's generated block could
+    fill the empty text; a result with words in the same modes lands, with the block."""
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")
+    canonical = tmp_path / "canonical"
+    (canonical / "memory").mkdir(parents=True)
+    world, journal = canonical / "memory" / "WORLD.md", canonical / "memory" / "world_journal.jsonl"
+    ctx = _world_ctx(canonical, canonical)
+
+    def rows():
+        return journal.read_text(encoding="utf-8").splitlines() if journal.exists() else []
+
+    world.write_bytes(b"")  # an empty map an outside write left: the version sha256(b"")
+    empty = _rev(world)
+    assert _update_world(ctx, "# My map\n\n- a note\n", expected_revision=empty).startswith("OK:")
+    fenced, written = world.read_bytes(), len(rows())
+    for reply in (_update_world(ctx, "  \n", expected_revision=_rev(world)),
+                  _update_world(ctx, mode="revert", version=empty, expected_revision=_rev(world))):
+        assert reply.startswith("⚠️ TOOL_ARG_ERROR: ") and "world map" in reply and "empty" in reply, reply
+        assert world.read_bytes() == fenced and len(rows()) == written
+    legacy = b"# My map\n\n- a note\n"
+    world.write_bytes(legacy)  # unfenced: an edit of it gets the block, as an overwrite does
+    emptied = _update_world(ctx, mode="edit", old_str=legacy.decode("utf-8"), content="", expected_revision=_rev(world))
+    assert emptied.startswith("⚠️ TOOL_ARG_ERROR: the edit leaves the world map empty or whitespace only"), emptied
+    assert world.read_bytes() == legacy and len(rows()) == written
+    kept = _update_world(ctx, mode="edit", old_str="- a note", content="- a kept note", expected_revision=_rev(world))
+    assert kept.startswith("OK: world map updated (edit") and world.read_text(encoding="utf-8") == \
+        f"# My map\n\n{_measured('fresh')}\n\n- a kept note\n", kept
+    back = _update_world(ctx, mode="revert", version=hashlib.sha256(fenced).hexdigest(), expected_revision=_rev(world))
+    assert back.startswith("OK: world map updated (revert") and world.read_bytes() == fenced, back
+
+
+def test_a_revert_to_an_authored_or_modified_legacy_map_keeps_its_text_beside_the_current_block(tmp_path):
+    """K17 (A7): only a STOCK first-boot profile's generated lines leave on revert; a legacy map the mind wrote, or a
+    stock one it edited (no fence either), comes back whole with the host's current block after its title."""
+    from ouroboros.tools.control_runtime import _update_world
+
+    footer = "*(Generated automatically on first boot)*\n"
+    authored = "# My own map\n\n- the Pi answers on ssh\n"
+    modified = f"# WORLD.md — Environment Profile\n\n## System\n- **OS**: old\n- the Pi answers on ssh\n\n{footer}"
+    stock = f"# WORLD.md — Environment Profile\n\n## System\n- **OS**: old\n\n{footer}\n## My notes\n- kept\n"
+    block = _measured("host")
+    for number, legacy in enumerate((authored, modified, stock)):
+        canonical, world = _map_with_block(tmp_path / f"case-{number}")
+        version = hashlib.sha256(legacy.encode("utf-8")).hexdigest()
+        (canonical / "memory" / "world_journal.jsonl").write_text(json.dumps({
+            "ts": "2026-01-01T00:00:00Z", "focus": {"role": "host"}, "old_sha256": "", "new_sha256": version,
+            "new_content": legacy, "old_content": ""}) + "\n", encoding="utf-8")
+        reply = _update_world(_world_ctx(canonical, canonical), mode="revert", version=version,
+                              expected_revision=_rev(world))
+        text = world.read_text(encoding="utf-8")
+        assert reply.startswith("OK: world map updated (revert") and text.count(block) == 1, reply
+        if legacy is stock:  # the other half: generated lines leave, the mind's notes stay
+            assert "- **OS**: old" not in text and footer not in text and "## My notes\n- kept" in text, text
+        else:
+            title, _newline, rest = legacy.partition("\n")
+            assert text == f"{title}\n\n{block}\n\n{rest.lstrip()}", text  # every line of it, the block after its title
