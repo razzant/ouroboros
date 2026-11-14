@@ -185,7 +185,10 @@ export function settingsReturn({ layers = null, openSettings = null, id = BACK_L
         const page = host.closest?.('.page') || host;
         const header = page.querySelector(':scope > .app-page-header');
         scope = host;
+        let appliedLayout = null;
         const sync = (layout = currentLayout()) => {
+            if (layout === appliedLayout) return;
+            appliedLayout = layout;
             const steps = () => {
                 remove();
                 if (layout !== 'stack') return;
