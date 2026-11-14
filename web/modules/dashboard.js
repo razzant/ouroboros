@@ -265,11 +265,11 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     const leadName = page.querySelector('[data-dashboard-lead-name]');
     const listBack = page.querySelector('[data-dashboard-list-back]');
     const backSlot = page.querySelector('[data-dashboard-back-slot]');
-    const tabStrip = bindTabStrip(list, { dataAttr: 'data-dashboard-tab', onChange: (name) => showTab(name) });
+    const tabStrip = bindTabStrip(list, { dataAttr: 'data-dashboard-tab', onChange: (name) => showTab(name, { asLevel: true }) });
     const disposeFade = bindScrollFade(rail);
     // Two panes from a 40rem box where the engine draws them (ui.css @container sectionplace), as Settings.
     const panes = () => sectionHoldsTwoPanes(page);
-    let level = false;   // one column: the open page stands as a level over the list
+    let level = false;   // an explicit choice stays open when two panes narrow to one
     let layered = false;
 
     // The way back to Settings stands in the band's Back slot, before the page's name.
@@ -315,10 +315,9 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     }
 
     function openLevel() {
-        if (panes()) return;
         level = true;
         paint();
-        (listBack && !listBack.hidden ? listBack : panelsEl).focus?.({ preventScroll: true });
+        if (!panes()) (listBack && !listBack.hidden ? listBack : panelsEl).focus?.({ preventScroll: true });
     }
 
     function closeLevel() {
@@ -330,10 +329,10 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     }
     listBack?.addEventListener('click', () => closeLevel());
 
-    // A row pressed in one column opens its page as a level (pressed again, the page it already shows).
+    // Pressing even the already selected row chooses its page, so it stays open if the list later gives way.
     list.addEventListener('click', (event) => {
         const row = event.target.closest?.('[data-dashboard-tab]');
-        if (row && rows.includes(row) && !panes()) openLevel();
+        if (row && rows.includes(row)) openLevel();
     });
 
     const onPageShown = (event) => {

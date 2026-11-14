@@ -891,3 +891,44 @@ test('a root font that moves the two panes\' 40rem repaints the Dashboard: the p
     assert.deepEqual([dashboard.page.dataset.sectionView, listBack.hidden], ['page', true], 'beside the list again, without Back');
     dashboard.destroy();
 });
+
+test('a page explicitly chosen beside the Dashboard list survives narrowing, while the automatic landing returns to the list', async (t) => {
+    for (const gesture of ['same row', 'another row', 'keyboard']) await t.test(gesture, async (sub) => {
+        const { mount, window, document } = setup(sub);
+        const content = new NodeStub(); content.id = 'content'; mount.append(content);
+        window.CSS = { supports: () => true };
+        let width = 735;
+        const before = { box: NodeStub.prototype.getBoundingClientRect, observer: globalThis.ResizeObserver };
+        NodeStub.prototype.getBoundingClientRect = () => ({ width });
+        const observers = [];
+        globalThis.ResizeObserver = class { constructor(fn) { observers.push(fn); } observe() {} disconnect() {} };
+        sub.after(() => { NodeStub.prototype.getBoundingClientRect = before.box; globalThis.ResizeObserver = before.observer; });
+        const layers = new Map();
+        const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
+        const dashboard = initDashboard({ state, layers: { push: layer => layers.set(layer.id, layer), remove: id => layers.delete(id) } });
+        try {
+            const list = dashboard.page.querySelector('.dashboard-tabs');
+            const rows = list.querySelectorAll('[data-dashboard-tab]');
+            const back = dashboard.page.querySelector('[data-dashboard-list-back]');
+            const resize = value => { width = value; observers.forEach(fn => fn([{ target: dashboard.page }])); };
+            resize(390);
+            assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['home', 0], 'automatic landing has not chosen a page');
+            resize(735);
+            const chosen = gesture === 'same row' ? rows[0] : gesture === 'another row' ? rows[5] : rows[6];
+            if (gesture === 'keyboard') await list.fire('keydown', { target: rows[0], key: 'End', preventDefault() {} });
+            else await list.fire('click', { target: chosen, preventDefault() {} });
+            assert.equal(state.dashboardActiveSubtab, chosen.dataset.dashboardTab);
+            assert.equal(back.hidden, true);
+            const control = new NodeStub('button'); dashboard.page.querySelector('.dashboard-panels').append(control); control.focus();
+            resize(390);
+            assert.deepEqual([dashboard.page.dataset.sectionView, back.hidden, [...layers.keys()]], ['page', false, ['dashboard-level']]);
+            assert.equal(document.activeElement, control, 'resizing keeps the focused page control');
+            resize(735);
+            assert.deepEqual([dashboard.page.dataset.sectionView, back.hidden, layers.size], ['page', true, 0]);
+            resize(390);
+            await back.fire('click');
+            assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['home', 0]);
+            assert.equal(document.activeElement, chosen, 'Back returns to the chosen row');
+        } finally { dashboard.destroy(); }
+    });
+});
