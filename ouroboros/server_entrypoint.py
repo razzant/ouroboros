@@ -260,14 +260,16 @@ def shorten_switch_interval() -> None:
 
 
 def raise_gc_threshold() -> None:
-    """The server collects its young generation after 20,000 new container objects instead of CPython's 700 (owner,
-    15.11.2026, #3399). Decoding a large task body creates tens of thousands of dicts and lists, and every 700 of them
-    a collection ran while holding the interpreter: on the owner's live server collections held it 7-19 % of the time,
-    nearly all started inside JSON decoding. On a stand with nine million long-lived objects, 300 decodes of a 1.5 MB
-    body ran 2,751 young and 250 middle collections, 15 % of the decoding time; with 20,000, one collection. Objects
-    still die by reference counting at once; only cyclic garbage waits longer for its collection (at most about 20,000
-    young objects, a few MB). The older generations keep CPython's thresholds; children keep CPython's default. No
-    setting."""
+    """The server collects its young generation after 20,000 net new container objects instead of CPython's 700
+    (owner, 15.11.2026, #3399). Decoding a large task body creates tens of thousands of dicts and lists, and every 700
+    of them a collection ran while holding the interpreter: on the owner's live server collections held it 7-19 % of
+    the time, about 80 % of them started inside JSON decoding. On a stand with nine million long-lived objects, 300
+    decodes of a 1.5 MB body ran 2,751 young and 250 middle collections, 15 % of the decoding time; with 20,000, one.
+    Objects still die by reference counting at once; cyclic garbage, and whatever only it holds, waits for a later
+    collection. That is a count of objects, not a bound on bytes: a few cycles can hold large payloads, and an idle
+    interpreter collects nothing. The older generations keep CPython's thresholds, which count young collections, so
+    theirs come about 28 times rarer too. Children started by spawn, forkserver or exec keep CPython's default; a forked
+    one inherits this. No setting."""
     from ouroboros.runtime_limits import SERVER_GC_THRESHOLD0
 
     gc.set_threshold(SERVER_GC_THRESHOLD0, *gc.get_threshold()[1:])

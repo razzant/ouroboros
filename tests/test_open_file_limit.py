@@ -51,14 +51,14 @@ def test_the_server_shortens_the_interpreters_switch_interval_at_start(monkeypat
     server_entrypoint.shorten_switch_interval()
     assert sys.getswitchinterval() == pytest.approx(0.001)
     sys.setswitchinterval(0.005)
-    gc.set_threshold(700, 10, 10)
+    gc.set_threshold(700, 7, 3)
     monkeypatch.setattr(server, "DATA_DIR", tmp_path)
     monkeypatch.delenv("OUROBOROS_LAUNCH_INTENT", raising=False)
     monkeypatch.setattr(server, "verify_settings_integrity", serving)  # the first step past the process setup
     with pytest.raises(Serving):
         server.main()
     assert sys.getswitchinterval() == pytest.approx(0.001)
-    assert gc.get_threshold() == (20_000, 10, 10), "the young generation's threshold rises with it, the older keep theirs"
+    assert gc.get_threshold() == (20_000, 7, 3), "the young generation's threshold rises with it, the older keep theirs"
 
 
 def test_the_gc_threshold_helper_keeps_the_older_generations_thresholds():

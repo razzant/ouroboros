@@ -1023,9 +1023,10 @@ def _keep_the_pytest_interpreter_tuning():
     import sys
 
     interval, thresholds = sys.getswitchinterval(), gc.get_threshold()
+    set_interval, set_threshold = sys.setswitchinterval, gc.set_threshold  # a test may patch either; restore through these
     yield
-    sys.setswitchinterval(interval)
-    gc.set_threshold(*thresholds)
+    set_interval(interval)
+    set_threshold(*thresholds)
 
 
 @pytest.fixture(autouse=True)

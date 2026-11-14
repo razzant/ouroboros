@@ -60,7 +60,7 @@ SERVER_ADMISSION_WAIT_SEC = 10.0
 # The server's interpreter switch interval (CPython's default 0.005 s): a computing thread is asked to hand the lock
 # over after this long when another thread waits (owner, 14.11.2026, #3399; ``server_entrypoint``). No setting.
 SERVER_SWITCH_INTERVAL_SEC = 0.001
-# The server's young-generation collection threshold (CPython's default 700 new container objects): a large
+# The server's young-generation collection threshold (CPython's default 700 net new container objects): a large
 # JSON decode no longer runs a collection under the interpreter lock every 700 objects (owner, 15.11.2026, #3399;
 # ``server_entrypoint``). The older generations keep CPython's thresholds. No setting.
 SERVER_GC_THRESHOLD0 = 20_000
