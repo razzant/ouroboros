@@ -575,3 +575,50 @@ test('a root font that moves the two panes\' 40rem repaints Settings: the pane a
     heard(pane).fn([]);
     assert.equal(back.hidden, false);
 });
+
+test('Settings search belongs to the phone list and returns to the desktop header as the same working field', async (t) => {
+    const { env, content, state, showPage } = world(t);
+    globalThis.requestAnimationFrame = fn => setImmediate(fn);
+    env.document.createElement = tag => new DescendantStub(tag);
+    env.window.ouroLayout = { layout: 'stack' };
+    const observers = [];
+    const previous = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class { constructor(fn) { observers.push(fn); } observe() {} disconnect() {} };
+    t.after(() => { globalThis.ResizeObserver = previous; });
+    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const wide = { on: false };
+    layout(t, controls, content, wide);
+    await controls.open('');
+    await settle();
+    const field = content.querySelector('#settings-search');
+    const search = field.parentElement;
+    const home = content.querySelector('.settings-home-column');
+    const slot = content.querySelector('[data-settings-search-slot]');
+    assert.equal(home.firstChild, search, 'one phone band: the search starts the scrolling list');
+    field.value = 'context';
+    await field.fire('input');
+    assert.ok(content.querySelectorAll('[data-settings-open]').some(row => row.dataset.settingsOpen === 'models'));
+    // Moving a focused input's parent drops native focus; model that browser seam in this small DOM.
+    const remove = search.remove.bind(search);
+    search.remove = () => { if (search.contains(env.document.activeElement)) env.document.activeElement = env.document.body; remove(); };
+    field.focus();
+    // One pane on both sides of the shell switch: no automatic page opening has its own focus to take.
+    for (const layoutName of ['docked', 'stack']) {
+        env.window.ouroLayout.layout = layoutName;
+        const before = search.parentElement;
+        observers.forEach(fn => fn([{ target: content.querySelector('.settings-shell') }]));
+        assert.equal(search.parentElement, before, 'a resize notification never reparents the field inside the observer');
+        await settle();
+        assert.equal(env.document.activeElement, field, 'a resize keeps the keyboard in Search');
+    }
+    for (const [layoutName, two, parent] of [['docked', false, slot], ['docked', true, slot], ['stack', true, slot], ['stack', false, home]]) {
+        wide.on = two;
+        env.window.ouroLayout.layout = layoutName;
+        observers.forEach(fn => fn([{ target: content.querySelector('.settings-shell') }]));
+        await settle();
+        assert.equal(search.parentElement, parent, `${layoutName}/${two}: search follows the list`);
+        assert.equal(content.querySelector('#settings-search'), field);
+        assert.equal(field.value, 'context', 'moving the field preserves the query and its listener');
+    }
+    assert.equal(home.firstChild, search);
+});

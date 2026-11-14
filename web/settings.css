@@ -47,8 +47,8 @@ html[data-layout="stack"] .settings-page { padding-inline: 12px; }
     .settings-shell[data-section-view="page"] .settings-door-glyph.settings-overview-glyph { width: 20px; height: 20px; margin-inline-end: var(--space-2); }
 }
 
-/* A phone: the band is `☰ Settings`, and the row under it holds the field over the home, or `(‹) <page>` over a page,
-   at the column's own inset. */
+/* A phone's two panes keep the columns' lead under the place's band. One column (below) has one band: the
+   home puts its search in the scrolling list, and a page replaces the place's name with Back and its own name. */
 html[data-layout="stack"] #page-settings > .app-page-header {
     grid-template-areas: "leading title toolbar" "lead lead lead";
 }
@@ -60,6 +60,9 @@ html[data-layout="stack"] #page-settings .settings-lead-col { gap: var(--space-2
    leading control on a screen). Only a page that replaced the list gives the places control up: with the list beside
    its page (40rem up to the shell's switch) the first-level page has no Back, so the control stays. */
 @container sectionplace (max-width: calc(40rem - 0.02px)) {
+    /* Collapse the empty lead after Search moves, never hide a focused field while its resize frame waits. */
+    html[data-layout="stack"] #page-settings[data-section-view="home"]:has([data-settings-search-slot]:empty) > .app-page-header { grid-template-areas: "leading title toolbar"; }
+    html[data-layout="stack"] #page-settings[data-section-view="home"]:has([data-settings-search-slot]:empty) > .app-page-header .app-page-lead { display: none; }
     html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header > .app-page-leading,
     html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
     html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header { grid-template-areas: "lead lead lead"; }

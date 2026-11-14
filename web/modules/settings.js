@@ -21,7 +21,7 @@
  * path; the row helper never rewrites a field that holds focus or typed text. */
 
 import { settingsReturn } from './dashboard.js';
-import { sectionHoldsTwoPanes } from './layout.js';
+import { currentLayout, sectionHoldsTwoPanes } from './layout.js';
 import { renderBackControl, renderPageHeader, setBackControlTarget } from './page_header.js';
 import { revealPastFade, bindScrollFade } from './scroll_fade.js';
 import { readSettings } from './settings_controls.js';
@@ -57,7 +57,7 @@ export function initSettings(ctx = {}) {
     // The header over the columns (docs/DESIGN.md "Page header"): no `Settings` word in the band (the sidebar's row
     // names the place). Over the list (and over the home alone) stands its search field; over a page, its name in the
     // header's one title style, after the one Back where Back leads to a level not on screen (settings.css lays the
-    // lead on the shell's own columns). On a phone the band is `☰ Settings` and the lead is the row under it.
+    // lead on the shell's own columns). A phone's home has one band, `☰ Settings`; its search starts the list.
     const leadHtml = `<div class="settings-lead section-lead" data-settings-lead>
             <span class="settings-lead-col settings-lead-rail section-lead-col section-lead-rail" data-settings-search-slot></span>
             <span class="settings-lead-col settings-lead-page section-lead-col section-lead-page">${renderBackControl({ to: 'Settings', attrs: 'data-settings-back' })}<span class="app-page-lead-title" data-settings-lead-name></span></span>
@@ -102,9 +102,9 @@ export function initSettings(ctx = {}) {
     };
     const home = mountSettingsHome(homeEl, { open: pressed,
         ctx: { ...pageCtx, stateSnapshots } });
-    // The home's search field moves into the header's lead, over the list: the same element, with its listeners.
+    // The same search field, with its listeners and query, follows the list between its home and header.
     const searchField = homeEl.querySelector('.settings-search');
-    if (searchField) page.querySelector('[data-settings-search-slot]')?.append(searchField);
+    const searchSlot = page.querySelector('[data-settings-search-slot]');
     // From a 40rem box Settings always shows two panes; when the list's Ouroboros row is chosen its pane holds
     // Ouroboros's card. Below 40rem the list is one column.
     const card = homeEl.querySelector('[data-settings-card]');
@@ -127,6 +127,16 @@ export function initSettings(ctx = {}) {
         return overviewEl;
     }
     const panes = () => sectionHoldsTwoPanes(page);
+    function placeSearch() {
+        const inHome = currentLayout() === 'stack' && !panes();
+        const parent = inHome ? cardHome : searchSlot;
+        if (!searchField || !parent) return;
+        if (searchField.parentElement === parent && (!inHome || parent.firstChild === searchField)) return;
+        const active = searchField.contains(document.activeElement) ? document.activeElement : null;
+        if (inHome) parent.insertBefore(searchField, parent.firstChild);
+        else parent.append(searchField);
+        if (active?.isConnected && document.activeElement !== active) active.focus?.({ preventScroll: true });
+    }
     // With two panes and no page open, the page last seen on this device comes back (Models on a first visit, or
     // when that page is no longer there).
     let landing = false;
@@ -340,6 +350,7 @@ export function initSettings(ctx = {}) {
         const level = top();
         state.settingsPath = level?.path || '';
         const overview = placeOverview(level);
+        placeSearch();
         shell.dataset.settingsView = shell.dataset.sectionView = level || overview ? 'page' : 'home';
         if (!level) queueMicrotask(ensurePage);
         paintLead();
@@ -440,19 +451,18 @@ export function initSettings(ctx = {}) {
     // where it was left.
     const resized = () => {
         if (panes() !== panesBefore) { paint({ quiet: true }); return; }
+        placeSearch();
         if (beside() === besideBefore) return;
         besideBefore = beside();
         if (besideBefore) homeEl.scrollTop = places.get(homeEl) || 0;
         paintLead();
         syncLayers();
     };
-    // The shell's box repaints at once. A change of the root font moves the two panes' 40rem while the box keeps its
-    // width: the pane gains or loses the list beside it and the list's rows resize, and those repaint at the next frame
-    // (the repaint resizes them again, a loop the observer would refuse).
+    // A new shell width or root font can move the two panes' 40rem. Repaint at the next frame: moving Search
+    // between the header and list changes these observed boxes again, which a resize callback must not do.
     let frame = 0;
-    const resize = typeof ResizeObserver === 'function' ? new ResizeObserver((entries) => {
-        if (entries.some((entry) => entry.target === shell)) resized();
-        else frame ||= requestAnimationFrame(() => { frame = 0; resized(); });
+    const resize = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
+        frame ||= requestAnimationFrame(() => { frame = 0; resized(); });
     }) : null;
     [shell, levelsEl, homeEl.querySelector('[data-settings-list]')].forEach((box) => box && resize?.observe(box));
     const disposeFade = bindScrollFade(homeEl);
