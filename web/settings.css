@@ -517,7 +517,7 @@ html[data-layout="stack"] .settings-search { height: 44px; }
    under a finger their controls take the touch minimum as their own height through the control tokens (the lock
    writes the box), so no reach covers a neighbour (DESIGN "Touch and containment"). */
 @media (pointer: coarse) {
-    :is(.settings-toolbar, .secret-input-row, .harness-account-actions, .account-resource-panel,
+    :is(.settings-toolbar, .secret-input-row, .harness-account-actions, .harness-account-extra, .account-resource-panel,
         .settings-extension-actions, .harness-maintenance-actions),
     .settings-shell .ui-action-row:has(> .btn ~ .btn ~ .btn) {
         --control-h: var(--touch-target-min);
@@ -1604,8 +1604,10 @@ textarea.ui-control.settings-rules-text {
 .accounts-bar[data-state="need"] > b { min-height: 6px; background: var(--mark-owner); }
 .accounts-bar[data-state="off"] { align-self: flex-end; height: 22%; }
 /* An account: its mark (the owner's dot while it needs sign-in, else what is left of its window), its name and login
-   state, its facts, then Sign in while it is needed, its place in rotation as a switch, and More. What is rare (Sign
-   in again, Remove) shows with More, whose panel holds the account's resources. A row that needs sign-in is tinted. */
+   state, its facts, and at the row's end, at every width, its place in rotation as a switch and More, as a key's or
+   a server's switch stands. Sign in, while it is needed, stands on a line under the words; what is rare (Sign in
+   again, Remove) shows on that line with More, whose panel holds the account's resources. A row that needs sign-in
+   is tinted. */
 .agent-family-accounts .harness-account-row {
     grid-template-columns: auto minmax(0, 1fr) auto;
     grid-template-areas: "mark main actions" "mark meta actions";
@@ -1618,14 +1620,11 @@ textarea.ui-control.settings-rules-text {
 }
 .agent-family-accounts .harness-account-row[data-tone="warn"] { background: var(--status-warn-bg); }
 .harness-account-mark { grid-area: mark; display: grid; place-items: center; min-width: 22px; color: var(--text-secondary); }
-.agent-family-accounts .harness-account-actions { align-items: center; justify-content: flex-end; gap: var(--space-2); }
+.agent-family-accounts .harness-account-actions { flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 .harness-account-actions > [data-resources] { margin: 0; }
-.harness-account-actions > [data-resources][aria-expanded="false"] ~ [data-rare] { display: none; }
+.harness-account-extra { grid-column: 2 / -1; grid-row: 3; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-1); }
+.harness-account-row:has([data-resources][aria-expanded="false"]) .harness-account-extra > [data-rare],
+.harness-account-row:has([data-resources][aria-expanded="false"]) .harness-account-extra:not(:has(> :not([data-rare]))) { display: none; }
 .agent-family-accounts .account-resource-panel { margin-top: var(--space-2); }
 .agent-family-accounts .account-resource-head { flex-wrap: wrap; }
 .agent-family-accounts .account-resource-head > h5 { overflow-wrap: normal; }
-@container (max-width: 28rem) {
-    .agent-family-accounts .harness-account-row > :is(.harness-account-main, .harness-account-meta, .harness-account-actions) { grid-column: 2 / -1; }
-    .agent-family-accounts .harness-account-row > .harness-account-actions { grid-row: 3; justify-content: flex-start; margin-top: var(--space-1); }
-    .agent-family-accounts .harness-account-row > .account-resource-panel { grid-row: 4; }
-}

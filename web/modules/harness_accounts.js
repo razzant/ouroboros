@@ -1105,8 +1105,9 @@ function rowHtml(row, payload, facets = {}) {
     const loginAction = rowLoginAction(row, payload);
     const on = row.enabled !== false;
     // Row ACTIONS follow the engine's own routes: every named registry row has the PATCH Enabled toggle (its place in
-    // rotation, a switch that acts at once) and DELETE Remove. Sign in stands in the row while the account is not
-    // signed in; what is rare (Sign in again, Remove) waits behind More with the account's resources. A login that
+    // rotation, a switch that acts at once) and DELETE Remove. The switch and More keep the row's end at every width;
+    // Sign in stands on a line under the words while the account is not signed in, and what is rare (Sign in again,
+    // Remove) shows on that line with More, whose panel holds the account's resources. A login that
     // is verified is the quiet case and says nothing: the card's first line counts them, and a row speaks of trouble.
     const rare = String(row?.status?.verification || '') === 'passed';
     const login = `<button type="button" class="btn btn-default btn-sm" data-harness-login${rare ? ' data-rare' : ''}>${escapeHtml(loginAction.label)}</button>`;
@@ -1118,11 +1119,11 @@ function rowHtml(row, payload, facets = {}) {
                 ${badge.tone === 'ok' ? '' : `<span class="ui-status" data-tone="${badge.tone}">${escapeHtml(badge.label)}</span>`}
             </div>
             <div class="harness-account-meta muted">${metaParts.map((part) => `<span class="meta-fact"${part.tone ? ` data-tone="${part.tone}"` : ''}>${escapeHtml(part.text)}</span>`).join('')}${capabilityMarkup(row, payload)}</div>
-            <div class="harness-account-actions">${rare ? '' : login}
+            <div class="harness-account-actions">
                 <label class="ui-switch"><input type="checkbox" role="switch" data-harness-toggle data-enabled="${on ? '1' : '0'}" aria-checked="${on}" aria-label="${escapeHtml(`Use ${name} in rotation`)}"${on ? ' checked' : ''}><span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span></label>
                 <button type="button" class="settings-disclosure ui-hit-area" data-resources aria-expanded="false" aria-controls="${escapeHtml(resourcePanelId(row))}">More${DISCLOSURE_CARET}</button>
-                ${rare ? login : ''}<button type="button" class="btn btn-danger btn-sm" data-harness-remove data-rare>Remove</button>
             </div>
+            <div class="harness-account-extra">${login}<button type="button" class="btn btn-danger btn-sm" data-harness-remove data-rare>Remove</button></div>
         </div>
     `;
 }
