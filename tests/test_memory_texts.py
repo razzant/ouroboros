@@ -657,3 +657,14 @@ def test_the_doors_bad_start_or_fingerprint_is_an_argument_error_before_the_list
         assert reply.startswith("⚠️ TOOL_ARG_ERROR: ") and named in reply and "position_mismatch" not in reply, (
             arguments, reply)
     assert "position_mismatch" in _read(ctx, source="identity", start=5, fingerprint="0" * 16)
+
+
+def test_a_fingerprint_without_the_read_it_continues_names_both_reads(tmp_path, identity):
+    """C6: memory_read with a fingerprint and neither read it continues names both, a proposed_selection read and a
+    source's list of versions; with source, the same fingerprint continues that list."""
+    ctx = _ctx(tmp_path)
+    reply = _read(ctx, fingerprint="0" * 16)
+    assert reply.startswith("⚠️ TOOL_ARG_ERROR: fingerprint continues a proposed_selection read or a source's list of "
+                            "versions"), reply
+    fingerprint = re.search(r"fingerprint='([0-9a-f]{16})'", _read(ctx, source="identity"))[1]
+    assert _read(ctx, source="identity", fingerprint=fingerprint).startswith("[identity: versions newest first")

@@ -1293,7 +1293,7 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
     if revision and not node_id:
         return _arg_error(ctx, "revision reads one record (node_id) as of that revision")
     if fingerprint and (proposed_selection is None or not isinstance(fingerprint, str)):
-        return _arg_error(ctx, "fingerprint continues a proposed_selection read, as its continuation names it")
+        return _arg_error(ctx, "fingerprint continues a proposed_selection read or a source's list of versions")
     if type(after_seq) is not int or after_seq < 0 or type(start) is not int or start < 0:
         return _arg_error(ctx, "after_seq and start are non-negative integers")
     limit = tool_result_limit("memory_read")
