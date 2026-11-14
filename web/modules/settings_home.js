@@ -13,7 +13,7 @@
 import { apiClient, fetchJson } from './api_client.js';
 import { confirmAndSendRestart, headerBudgetPresentation } from './chat_activity.js';
 import { routeSource, shortName } from './chat_model_routes.js';
-import { accountName, accountRows, claudexorStatus, familyLabel, READ_OK } from './claudexor_status_store.js';
+import { accountName, accountRows, claudexorStatus, facetReadState, familyLabel, READ_OK } from './claudexor_status_store.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { normalizeConsciousness, parseRoster } from './consciousness_api.js';
 import { headlineView } from './consciousness_dashboard.js';
@@ -453,10 +453,15 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     }
     const paint = () => { paintCard(); paintList(); };
 
-    // The accounts store as it stands: this subscriber is never a visible surface, so it arms no poll and reads nothing.
+    // The accounts store as it stands: this subscriber is never a visible surface, so it arms no poll and asks it nothing.
+    // Until a page has read the accounts there, the home's own passive roster says them (`roster`), so the Accounts row
+    // and the card say the same beside every page.
+    const storeRead = () => store.reads?.accounts === READ_OK;
     const readAccounts = (view = { reads: store.reads, snapshot: store.snapshot, everSettled: store.everSettled }) => {
-        facts.accounts = { read: view.reads?.accounts, snapshot: view.snapshot, rows: accountRows(view.snapshot),
-            kind: view.everSettled ? refreshActionKind(view.snapshot) : 'refresh' };
+        const own = view.reads?.accounts !== READ_OK && facts.roster;
+        facts.accounts = own ? { read: facetReadState(facts.roster, 'accounts'), snapshot: facts.roster, rows: accountRows(facts.roster), kind: 'refresh' }
+            : { read: view.reads?.accounts, snapshot: view.snapshot, rows: accountRows(view.snapshot),
+                kind: view.everSettled ? refreshActionKind(view.snapshot) : 'refresh' };
     };
     const READS = {
         settings: () => ctx.readSettings(),
@@ -466,9 +471,12 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         update: () => apiClient.updateStatus(),
         storage: () => fetchJson('/api/storage', { cache: 'no-store' }),
         autostart: () => apiClient.desktopAutostart(),
+        // The roster and the windows the engine last observed, as Costs reads them: it starts and refreshes nothing.
+        roster: async () => (storeRead() ? facts.roster : fetchJson('/api/claudexor/status?view=quota', { cache: 'no-store' })),
     };
     async function read(name, run) {
         try { facts[name] = (await READS[name]()) ?? null; } catch { facts[name] = null; }
+        if (name === 'roster') readAccounts();
         if (run === serial) paint();
     }
     async function readState(run) {

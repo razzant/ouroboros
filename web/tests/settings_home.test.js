@@ -181,7 +181,8 @@ test('showing the home reads only what is passive: no catalogue, no review pool,
     await home.refresh();
     await settle();
     assert.deepEqual([...new Set(env.calls)].sort(), Object.keys(ANSWERS).sort(), 'the home\'s own reads, each a GET that starts nothing');
-    for (const url of STARTS) assert.ok(!env.calls.some((call) => String(call).startsWith(url)), url);
+    // A start is any read under these addresses but the passive ones the home reads, which ANSWERS lists exactly.
+    for (const url of STARTS) assert.ok(!env.calls.some((call) => String(call).startsWith(url) && !Object.hasOwn(ANSWERS, String(call))), url);
     assert.deepEqual(statusReads, [], 'the accounts store is read as it stands, never asked');
     assert.equal(store.subscriberCount, 1);
     assert.equal(store.polling, false, 'the home is no visible surface of the store: it arms no poll');
@@ -209,7 +210,7 @@ test('a page reads when it is shown, not when Settings is', async (t) => {
     await controls.open('');
     await settle();
     const atHome = reads.length;
-    assert.ok(atHome >= 1 && !env.calls.some((call) => STARTS.some((url) => String(call).startsWith(url))));
+    assert.ok(atHome >= 1 && !env.calls.some((call) => STARTS.some((url) => String(call).startsWith(url) && !Object.hasOwn(ANSWERS, String(call)))));
     assert.equal(content.querySelectorAll('.settings-page').length, 0);
     // The skill sources page (settings_extension_forms.js): its own read fires for its own path only.
     assert.ok(settingsPageFor('skill-sources'));
@@ -397,4 +398,35 @@ test('the list marks the page that is open: the top level\'s own row, else the n
     assert.deepEqual(chosen(), ['models']);
     home.mark([]);
     assert.deepEqual(chosen(), []);
+});
+
+test('the Accounts row counts the accounts beside every page: the home\'s passive roster until a page read them', async (t) => {
+    const { env, content } = world(t);
+    const roster = (n) => ({ profiles: Array.from({ length: n }, (_, i) => ({ profile: { harness_id: 'codex', profile_id: `p${i}`,
+        display_name: `p${i}`, enabled: true }, status: { verification: 'passed' }, identity: {} })) });
+    env.routes.set('/api/settings', async () => ({ ok: true, status: 200,
+        json: async () => ({ ...ANSWERS['/api/settings'], _meta: { connections: [{ configured: true }, { configured: true }] } }) }));
+    env.routes.set('/api/claudexor/status?view=quota', async () => ({ ok: true, status: 200,
+        json: async () => ({ view: 'quota', profiles: roster(3), quota: [], reads: { catalog: 'not_read', accounts: 'ok', quota: 'ok' } }) }));
+    const statusReads = [];
+    const store = createClaudexorStatusStore({ fetchImpl: async (url) => { statusReads.push(url); return { ok: true, status: 200,
+        json: async () => ({ daemon: { state: 'running' }, harnesses: [], profiles: roster(4), quota: [], reads: { catalog: 'ok', accounts: 'ok', quota: 'ok' } }) }; } });
+    t.after(() => store.dispose());
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws: { isConnected: () => true }, stateSnapshots: { latest: () => ({}) } } });
+    t.after(() => home.dispose());
+    await home.refresh();
+    await settle();
+    const answer = () => content.querySelector('[data-settings-open="accounts"]').querySelector('[data-settings-answer]').textContent;
+    const passive = () => env.calls.filter((call) => call === '/api/claudexor/status?view=quota').length;
+    // Beside Models, before any page read the shared store: the roster the home read itself, never the store asked.
+    assert.deepEqual([answer(), statusReads], ['3 accounts, 2 API keys', []]);
+    // A page that shows the accounts read the store (Agents, a provider's page): its roster answers, and the home stops
+    // reading its own.
+    await store.refresh();
+    await settle();
+    assert.equal(answer(), '4 accounts, 2 API keys');
+    const before = passive();
+    await home.refresh();
+    await settle();
+    assert.deepEqual([answer(), passive()], ['4 accounts, 2 API keys', before]);
 });
