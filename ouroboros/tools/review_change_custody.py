@@ -44,7 +44,8 @@ def paid_repo_key(ctx: Any, root: Any) -> str:
     """The host-bound source owns a copy's paid pool, never its review identity.
 
     Follow actual copy provenance only: neither a directory name nor a shared
-    remote proves ownership. Pin this address on the paid row before copy GC.
+    remote proves ownership. Pin this address on the paid row before copy GC:
+    a deleted legacy drive or repository is not reconstructed.
     """
     from ouroboros.review_ledger import ledger_root
     from ouroboros.subagent_worktrees import list_worktrees
