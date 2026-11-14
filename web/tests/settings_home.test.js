@@ -158,6 +158,11 @@ test('This computer and Updates answer on every host: who can open it where the 
     assert.equal(updates({ state: {} }), undefined, 'no version, no claim');
     assert.equal(updates({ state: { version: '7.10.2' }, update: { managed: true, check_ok: true, current_version: '7.10.2' } }), 'Up to date · 7.10.2');
     assert.equal(updates({ state: { version: '7.10.2' }, update: null }), 'Not checked', 'a status read that failed says so');
+    // An update that waits says what it brings, in the owner's colour: the row's name already says Updates, and the
+    // list's one line keeps the number whole ("Update available: 163 ne…" lost it).
+    const waiting = { managed: true, check_ok: true, available: true, safe_to_apply: true, current_version: '7.10.2' };
+    assert.deepEqual(homeAnswers({ update: { ...waiting, latest_version: '7.10.2', behind: 163 } })['dashboard:updates'], { text: '163 new changes', owner: true });
+    assert.equal(updates({ update: { ...waiting, latest_version: '7.11.0' } }), '7.10.2 → 7.11.0');
 });
 
 test('the card says who it is and its state, never that nothing waits', () => {

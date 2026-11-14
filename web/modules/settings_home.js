@@ -151,7 +151,11 @@ function toolsWords(tools) {
 function updateWords(update) {
     const verdict = updateVerdict(update);
     const words = { unchecked: NOT_CHECKED, check_failed: 'Could not check', unmanaged: 'Managed updates unavailable' }[verdict.state];
-    return { text: words ? fmt(words) : String(verdict.headline || '').replace(/\.$/, ''), owner: ['available', 'available_unsafe'].includes(verdict.state) };
+    const waits = ['available', 'available_unsafe'].includes(verdict.state);
+    // An update that waits says what it brings (`163 new changes`, `7.10.2 → 7.11.0`): the row's name says Updates and
+    // its mark that it waits, so a list's one line keeps the number whole.
+    const headline = String(verdict.headline || '').replace(/\.$/, '');
+    return { text: words ? fmt(words) : waits ? headline.replace(/^Update available:\s*/, '') : headline, owner: waits };
 }
 
 const START_WORDS = { on: 'Starts at sign-in', off: 'Starts by hand', other_copy: 'Another copy starts at sign-in', disabled_by_os: 'Start at sign-in is off in the system' };
