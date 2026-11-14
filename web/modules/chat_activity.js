@@ -21,9 +21,9 @@ import {
     accountedUpperBoundWithChildren,
     escapeHtmlAttr,
     escapeHtmlText as escapeHtml,
-    formatUsdWhole,
     renderMarkdown,
 } from './utils.js';
+import { formatLimitUsd } from './storage_format.js';
 
 export function withTaskCostMeta(summary, payload, { replace = false, rawTs = '' } = {}) {
     const projection = taskCostProjection(payload, rawTs);
@@ -653,7 +653,7 @@ export function headerBudgetPresentation(data) {
     const limit = rawLimit !== null && rawLimit > 0 ? rawLimit : 0;
     const label = typeof data.budget_text === 'string' && data.budget_text.trim()
         ? data.budget_text
-        : `${formatUsdWhole(spent)} / ${limit > 0 ? formatUsdWhole(limit) : '∞'}`;
+        : `${formatLimitUsd(spent, limit)} of ${limit > 0 ? formatLimitUsd(limit, limit, 'limit') : '∞'}`;
     return {
         state: 'available',
         label,

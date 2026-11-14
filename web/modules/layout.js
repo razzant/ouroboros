@@ -91,3 +91,14 @@ export function onLayoutChange(handler, { w = win() } = {}) {
     w.addEventListener('ouro:layout-changed', listener);
     return () => w.removeEventListener('ouro:layout-changed', listener);
 }
+
+/** Does a section (Settings, the Dashboard) hold its list beside the open page? The sheets draw that from a 40rem box
+ * with a container query (ui.css `@container sectionplace`), and the section's module asks here before it treats a page
+ * as standing beside the list. An engine without container queries (WebKit before 16, Chromium before 105) draws one
+ * column at every width, so there the answer is no: a module that assumed two panes would hide Back and never show
+ * the list. A document that cannot say (a test's fake DOM) is a current engine. */
+export function sectionHoldsTwoPanes(page, { w = win(), root = rootOf() } = {}) {
+    if (w?.CSS?.supports && !w.CSS.supports('container-type', 'inline-size')) return false;
+    const rem = parseFloat(w?.getComputedStyle?.(root)?.fontSize) || 16;
+    return (page?.getBoundingClientRect?.().width || 0) >= 40 * rem;
+}

@@ -667,13 +667,13 @@ def test_each_door_chevron_says_its_own_door_in_every_state(engine):
 
 # A Swarm root's stored detail in the host's receipt facts. Details reads it, the way the line reaches a card.
 SWARM = {"status": "failed", "metadata": {"subagents_mode": "swarm"}, "swarm_efficiency": {"subagent_count": 2}}
-SWARM_SHORT = "Swarm · 2 helpers requested"
+SWARM_SHORT = "Swarm · 2 subagents requested"
 SWARM_LONG = {**SWARM, "swarm_efficiency": {"subagent_count": 12}, "swarm_receipt": {"cost": {
     "known_final_usd": 12.34, "unknown_attempts": 3, "attempts": [
         {"attempt_id": "a1", "task_id": "w-root", "model": "model-alpha"},
         {"attempt_id": "a2", "task_id": "s1", "model": "model-bravo", "kind": "subscription_session"},
         {"attempt_id": "a3", "task_id": "s2", "model": "model-charlie", "kind": "subscription_session"}]}}}
-SWARM_LONG_TEXT = "Swarm · 12 helpers requested · 3 models · $12.34 known + 3 not final · 2 subscription sessions"
+SWARM_LONG_TEXT = "Swarm · 12 subagents requested · 3 models · $12.34 known + 3 not final · 2 subscription sessions"
 
 
 def _read_receipt(room, task_id):
@@ -852,13 +852,13 @@ def test_a_root_proven_solo_closes_its_foot_and_an_open_fact_reopens_it(engine, 
             if shot:
                 card.screenshot(path=shot)
 
-        read(details["sw-solo"], "Swarm · helpers unknown · 1 model · $0.12 known")
+        read(details["sw-solo"], "Swarm · subagents unknown · 1 model · $0.12 known")
         unknown = page.evaluate(FOOT, "sw-solo")
         assert unknown["shown"] and abs(unknown["inset"] - 16) <= 1.5, unknown
         snap("1-unknown")
         # The same tree from a receipt that never read the refusals: no proof, so the line stays rather than going.
         older = {key: value for key, value in SOLO_RECEIPT.items() if key != "refused_starts"}
-        read({**SOLO_BASE, "swarm_efficiency": SOLO_NONE, "swarm_receipt": older}, "Swarm · helpers unknown · 1 model · $0.12 known")
+        read({**SOLO_BASE, "swarm_efficiency": SOLO_NONE, "swarm_receipt": older}, "Swarm · subagents unknown · 1 model · $0.12 known")
         snap("1b-older-receipt-stays")
         read({**SOLO_BASE, "swarm_efficiency": SOLO_NONE, "swarm_receipt": SOLO_RECEIPT}, "")
         assert line.count() == 0
@@ -866,7 +866,7 @@ def test_a_root_proven_solo_closes_its_foot_and_an_open_fact_reopens_it(engine, 
         assert not proven["shown"] and abs(proven["inset"] - untouched["inset"]) <= 1, (proven, untouched)
         snap("2-proven-solo")
         refused = {**SOLO_RECEIPT, "refused_starts": [{"invocation_id": "i1", "task_id": "sw-solo", "reason": "engine_refused"}]}
-        read({**SOLO_BASE, "swarm_efficiency": SOLO_NONE, "swarm_receipt": refused}, "Swarm · 1 helper start failed · 1 model · $0.12 known")
+        read({**SOLO_BASE, "swarm_efficiency": SOLO_NONE, "swarm_receipt": refused}, "Swarm · 1 subagent start failed · 1 model · $0.12 known")
         reopened = page.evaluate(FOOT, "sw-solo")
         assert reopened["shown"] and abs(reopened["inset"] - 16) <= 1.5, reopened
         snap("3-refused-start")
@@ -875,5 +875,5 @@ def test_a_root_proven_solo_closes_its_foot_and_an_open_fact_reopens_it(engine, 
             {"id": "run:r1", "task_id": "sw-solo", "kind": "delegated_run", "start": _at("22:41")},
             {"id": "invocation:i2", "task_id": "sw-solo", "kind": "delegated_start", "start": None, "state": "pending"}]}
         read({**SOLO_BASE, "swarm_efficiency": {"subagent_count": 1}, "swarm_receipt": mixed},
-             "Swarm · 1 helper started · 1 helper start unconfirmed · 1 model · $0.12 known")
+             "Swarm · 1 subagent started · 1 subagent start unconfirmed · 1 model · $0.12 known")
         snap("4-started-and-open")

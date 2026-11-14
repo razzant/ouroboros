@@ -297,7 +297,10 @@ test('one corrupt option refuses that card only, preserving index integrity', ()
     } finally { fx.restore(); }
 });
 
-test('question and stake go through the injected markdown pipeline', () => {
+// What the injected Markdown is handed: the question, and the stake after its label. The stub DOM has no text nodes,
+// so the label's own span (question_presentation.js mountQuizStake) is pinned by the real renderer instead
+// (tests/test_history_reply_browser.py, the Project question's search scene).
+test('question and stake reach the injected markdown pipeline', () => {
     const fx = fixture({ renderMarkdown: (text) => `<md>${text}</md>` });
     try {
         const card = fx.decision.buildQuizCard(WS_MSG);

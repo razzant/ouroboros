@@ -24,7 +24,6 @@ def isolated_queue(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "SETTINGS_PATH", tmp_path / "settings.json")
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("OUROBOROS_MODEL_MAX_CONCURRENCY", "3")
-    monkeypatch.setenv("OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC", "30")
     mc.reset_for_tests()
     yield tmp_path
     mc.reset_for_tests()
@@ -46,7 +45,6 @@ def _worker(root, cap, name, entered, release, cancel=None, counts=None):
     config.SETTINGS_PATH = root / "settings.json"
     os.environ["OUROBOROS_DATA_DIR"] = str(root)
     os.environ["OUROBOROS_MODEL_MAX_CONCURRENCY"] = str(cap)
-    os.environ["OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC"] = "60"
     try:
         with mc.model_call_slot("model", route=ROUTE, cancel_event=cancel):
             if counts is not None:
@@ -169,25 +167,53 @@ def test_waiter_cancellation_releases_its_ticket(isolated_queue, processes):
         assert len(_records(isolated_queue, "slot")) == 1
 
 
-@pytest.mark.parametrize("deadline", ["expired", "wait_ceiling"])
-def test_timeout_never_runs_body_and_retry_can_enter(monkeypatch, isolated_queue, deadline):
+@pytest.mark.parametrize("deadline", ["expired", "soon"])
+def test_a_passed_deadline_never_runs_body_and_retry_can_enter(monkeypatch, isolated_queue, deadline):
     monkeypatch.setenv("OUROBOROS_MODEL_MAX_CONCURRENCY", "1")
     with mc.model_call_slot("model", route=ROUTE):
-        monkeypatch.setenv("OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC", "1")
-        bound = time.time() - 1 if deadline == "expired" else None
+        bound = time.time() - 1 if deadline == "expired" else time.time() + 0.3
         with pytest.raises(mc.ModelSlotTimeout) as refused:
             with mc.model_call_slot("model", deadline_ts=bound, route=ROUTE):
-                pytest.fail("timeout bypassed capacity")
+                pytest.fail("a passed deadline bypassed capacity")
         # The refusal names the install's own slot wait (never a provider), the model, the measured wait
-        # and the bound that ended it: an already-passed deadline is not reported as a slot that never freed.
-        text, ended_by = str(refused.value), ("the caller's deadline" if deadline == "expired"
-                                              else "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC")
+        # and the only bound a wait has: its caller's deadline.
+        text = str(refused.value)
         assert text.startswith("Local model slot wait expired before dispatch: model model; no slot was acquired within "), text
-        assert text.endswith(f" s ({ended_by}); the request was not sent") and "Provider" not in text, text
+        assert text.endswith(" s (the caller's deadline); the request was not sent") and "Provider" not in text, text
         assert not _records(isolated_queue, "ticket")
         assert len(_records(isolated_queue, "slot")) == 1
     with mc.model_call_slot("model", route=ROUTE):
         assert len(_records(isolated_queue, "slot")) == 1
+
+
+def test_a_waiter_without_a_deadline_keeps_its_place_until_a_slot_frees(monkeypatch, isolated_queue):
+    """The waiter has no clock of its own (owner, 13 Nov 2026: a work waits in its own queue and keeps its place; it
+    is not sent elsewhere for waiting). A send behind a full queue says so once through its work's bound note, keeps
+    one ticket however long the holder takes, enters when the slot frees and then notes how long it stood in line. A
+    send that finds a free slot notes nothing."""
+    monkeypatch.setenv("OUROBOROS_MODEL_MAX_CONCURRENCY", "1")
+    notes, entered = [], threading.Event()
+
+    def waiting_send():
+        with mc.slot_wait_notes(lambda waited, admitted: notes.append((waited, admitted))), \
+                mc.model_call_slot("model", route=ROUTE):
+            entered.set()
+
+    thread = threading.Thread(target=waiting_send)
+    with mc.model_call_slot("model", route=ROUTE):
+        thread.start()
+        _until(lambda: notes)
+        time.sleep(0.3)  # many polls later: still one ticket, one note, no refusal
+        assert not entered.is_set() and thread.is_alive()
+        assert len(_records(isolated_queue, "ticket")) == 1 and len(notes) == 1
+        assert notes[0][0] >= 0 and notes[0][1] is False
+    thread.join(10)
+    assert entered.is_set() and not thread.is_alive() and not _records(isolated_queue, "ticket")
+    assert len(notes) == 2 and notes[1][1] is True and notes[1][0] >= 0.3  # the whole time in line, once
+    quiet = []
+    with mc.slot_wait_notes(lambda *note: quiet.append(note)), mc.model_call_slot("model", route=ROUTE):
+        assert len(_records(isolated_queue, "slot")) == 1
+    assert quiet == []
 
 
 def test_slot_released_on_exception(isolated_queue, monkeypatch):
@@ -213,10 +239,9 @@ def test_disabled_is_passthrough(monkeypatch, isolated_queue):
 
 def test_one_model_shares_its_route_and_every_other_identity_separates(monkeypatch, isolated_queue):
     monkeypatch.setenv("OUROBOROS_MODEL_MAX_CONCURRENCY", "1")
-    monkeypatch.setenv("OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC", "1")
     with mc.model_call_slot("main", route=ROUTE):
         with pytest.raises(mc.ModelSlotTimeout):
-            with mc.model_call_slot("main", route={**ROUTE, "base_url": ROUTE["base_url"] + "/"}):
+            with mc.model_call_slot("main", route={**ROUTE, "base_url": ROUTE["base_url"] + "/"}, deadline_ts=time.time() + 0.3):
                 pytest.fail("the same model on the same route escaped by an endpoint spelling")
         for model, key, value in [("checker", "provider", "test"), ("main", "api_key", "other-fake"),
                                   ("main", "base_url", "https://other.invalid/v1"), ("main", "provider", "other")]:
@@ -231,7 +256,6 @@ def test_one_model_shares_its_route_and_every_other_identity_separates(monkeypat
 def test_managed_engine_routes_are_not_queued_by_the_host(monkeypatch, isolated_queue):
     """Claudexor's one daemon arbitrates its accounts: the host cap never shrinks that parallel work."""
     monkeypatch.setenv("OUROBOROS_MODEL_MAX_CONCURRENCY", "1")
-    monkeypatch.setenv("OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC", "1")
     managed = {"provider": "claudexor", "source": "managed", "credential_profile_id": ""}
     with mc.model_call_slot("main", route=managed):
         with mc.model_call_slot("main", route=managed):
@@ -239,7 +263,7 @@ def test_managed_engine_routes_are_not_queued_by_the_host(monkeypatch, isolated_
     # A direct route at the same cap still queues (the guard is not off).
     with mc.model_call_slot("main", route=ROUTE):
         with pytest.raises(mc.ModelSlotTimeout):
-            with mc.model_call_slot("main", route=ROUTE):
+            with mc.model_call_slot("main", route=ROUTE, deadline_ts=time.time() + 0.3):
                 pytest.fail("a direct route escaped its cap")
 
 
@@ -437,21 +461,24 @@ def test_a_saved_cap_reaches_work_started_under_the_old_one_and_the_save_says_so
     """The Settings field's contract: the 0 / 3 / 7 an owner saves is what the NEXT physical call of a task
     that started under 3 admits under (the cap is read from the settings document at each call), the save
     reports that as an immediate effect, a saved 0 means no queue at all, and a positive cap still waits
-    and then refuses. A cap of 0 OR LESS (a hand-saved -1 included) has always meant no queue and is read
-    exactly as saved. The factory value stays 3."""
+    in line. A cap of 0 OR LESS (a hand-saved -1 included) has always meant no queue and is read
+    exactly as saved. The shipped value is blank (not chosen); a document of this release carries the format marker,
+    so the 3 it holds is the owner's."""
     from ouroboros import config
     from ouroboros.gateway.settings import _effect_buckets
     from ouroboros.settings_integrity import task_settings_scope, task_settings_snapshot
     from ouroboros.utils import atomic_write_json
 
+    from ouroboros.settings_scales import MODEL_CAP_FORMAT_KEY
+
     key = "OUROBOROS_MODEL_MAX_CONCURRENCY"
-    assert config.SETTINGS_DEFAULTS[key] == 3
-    snapshot = task_settings_snapshot({key: 3}, {key: "3", "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC": "1"})
+    assert config.SETTINGS_DEFAULTS[key] == ""
+    snapshot = task_settings_snapshot({key: 3}, {key: "3"})
     settings = isolated_queue / "settings.json"
     with task_settings_scope(snapshot):
         assert mc._cap() == 3, "no saved document: the task's own admitted value"
         for saved in (0, -1, 7, -5, 3):
-            atomic_write_json(settings, {key: saved})
+            atomic_write_json(settings, {key: saved, MODEL_CAP_FORMAT_KEY: 1})
             assert mc._cap() == saved and mc.enabled() is (saved > 0)
             assert _effect_buckets([key]) == ([key], []), "saved as an immediate effect, not 'from the next task'"
         for saved in (0, -1, -5):  # no queue at all, whatever 0-or-less number the document holds
@@ -461,6 +488,93 @@ def test_a_saved_cap_reaches_work_started_under_the_old_one_and_the_save_says_so
         atomic_write_json(settings, {key: 2})
         with mc.model_call_slot("model", route=ROUTE), mc.model_call_slot("model", route=ROUTE):
             assert len(_records(isolated_queue, "slot")) == 2
-            with pytest.raises(mc.ModelSlotTimeout):
-                with mc.model_call_slot("model", route=ROUTE):
+            with pytest.raises(mc.ModelSlotTimeout):  # its caller's deadline ends the wait; the queue has no clock
+                with mc.model_call_slot("model", route=ROUTE, deadline_ts=time.time() + 0.3):
                     pytest.fail("a request over the cap was sent anyway")
+
+
+KEY, LOCAL_ROUTE = "OUROBOROS_MODEL_MAX_CONCURRENCY", {"provider": "local", "base_url": "http://127.0.0.1:8766/v1"}
+
+
+@pytest.mark.parametrize("document,api,local", [
+    ({}, 0, 3),                             # a fresh install, or a document without the key: not chosen
+    ({KEY: ""}, 0, 3),                      # the shipped blank
+    ({KEY: 3}, 0, 3),                       # saved while every shipped default was saved: read once as not chosen
+    ({KEY: "3"}, 0, 3),
+    ({KEY: 3, "_model_cap_format": 1}, 3, 3),          # after the format marker a 3 is the owner's
+    ({KEY: 5}, 5, 5),                       # any other number was always a choice
+    ({KEY: 1, "_model_cap_format": 1}, 1, 1),
+    ({KEY: 0}, 0, 0),                       # zero or less: no limit for either, as before
+    ({KEY: -1, "_model_cap_format": 1}, -1, -1),
+    ({KEY: "unlimited", "_model_cap_format": 1}, 0, 3),
+    ({KEY: "three", "_model_cap_format": 1}, 3, 3),    # a typo reads finite, never "no limit"
+    ({KEY: 2.5, "_model_cap_format": 1}, 3, 3),
+])
+def test_a_limit_nobody_chose_leaves_api_routes_free_and_a_local_model_three(monkeypatch, isolated_queue, document,
+                                                                             api, local):
+    """Owner, 13 Nov 2026 (5A, 6A): with no number of the owner's, a route to a provider's API has no limit of the
+    host's and a model served on this computer keeps three; a number limits both; zero or less neither. The 3 every
+    earlier install saved by itself is not a choice: a document without the format marker reads it as blank, once."""
+    from ouroboros.utils import atomic_write_json
+
+    monkeypatch.delenv(KEY)
+    atomic_write_json(isolated_queue / "settings.json", document)
+    assert (mc._cap(False), mc._cap(True)) == (api, local)
+    assert (mc.enabled(False), mc.enabled(True)) == (api > 0, local > 0)
+    with mc.model_call_slot("model", route=ROUTE):  # an API route: queued exactly when a limit stands
+        assert len(_records(isolated_queue, "slot")) == (1 if api > 0 else 0)
+    with mc.model_call_slot("model", use_local=True, route=LOCAL_ROUTE):
+        assert len(_records(isolated_queue, "slot")) == (1 if local > 0 else 0)
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_the_real_sender_queues_a_local_model_and_no_api_route_while_no_limit_is_chosen(monkeypatch, isolated_queue,
+                                                                                        asynchronous):
+    """Every physical send goes through ``limit_physical_send``, which learns from the route alone whether the model
+    runs on this computer: with no number chosen the local server's sender holds a slot (three at once) and an API
+    route's sender holds none. An OpenAI-compatible endpoint that happens to be on localhost is an API route."""
+    import asyncio
+    from ouroboros import llm_attempt
+    from ouroboros.utils import atomic_write_json
+
+    monkeypatch.delenv(KEY)
+    monkeypatch.setattr(llm_attempt, "require_physical_dispatch_window", lambda: None)
+    atomic_write_json(isolated_queue / "settings.json", {})
+    seen = {}
+    for name, route in (("local", {**LOCAL_ROUTE, "usage_model": "local-model"}), ("api", {**ROUTE, "usage_model": "model"}),
+                        ("compatible", {"provider": "openai-compatible", "base_url": "http://127.0.0.1:1234/v1",
+                                        "usage_model": "served"})):
+        if asynchronous:
+            async def send(name=name):
+                seen[name] = len(_records(isolated_queue, "slot"))
+            asyncio.run(mc.limit_physical_send(route, send)())
+        else:
+            mc.limit_physical_send(route, lambda name=name: seen.__setitem__(name, len(_records(isolated_queue, "slot"))))()
+    assert seen == {"local": 1, "api": 0, "compatible": 0}
+
+
+@pytest.mark.parametrize("saved,marked,read", [(3, False, ""), ("3", False, ""), (3, True, 3), (5, False, 5), (0, False, 0)])
+def test_a_saved_shipped_three_reads_blank_once_and_the_next_save_ends_it(tmp_path, monkeypatch, saved, marked, read):
+    """The settings seam's side of 6A: the view carries the format marker, a read stays a read, the first whole save
+    writes the blank and the marker, and a 3 typed after that stays 3. An environment that still carries the earlier
+    projection of 3 does not undo it (a saved choice, blank included, is the owner's)."""
+    import json
+    from ouroboros import config
+    from ouroboros.settings_scales import MODEL_CAP_FORMAT_KEY
+
+    path = tmp_path / "saved.json"
+    path.write_text(json.dumps({KEY: saved, **({MODEL_CAP_FORMAT_KEY: 1} if marked else {})}), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)  # a save writes its migration receipts beside the document
+    inherited = {}
+    config.apply_settings_to_env({**config.SETTINGS_DEFAULTS, KEY: 3}, environ=inherited)
+    monkeypatch.setenv(KEY, inherited[KEY])  # what a worker started by the earlier release still carries
+    loaded = config.load_settings()
+    assert loaded[KEY] == read and loaded[MODEL_CAP_FORMAT_KEY] == 1
+    assert json.loads(path.read_text(encoding="utf-8")) == {KEY: saved, **({MODEL_CAP_FORMAT_KEY: 1} if marked else {})}
+    assert mc._cap(False) == (read or 0) and mc._cap(True) == (3 if read == "" else read)
+    config.save_settings(loaded)
+    stored = json.loads(path.read_text(encoding="utf-8"))
+    assert stored[KEY] == read and stored[MODEL_CAP_FORMAT_KEY] == 1
+    config.save_settings({**config.load_settings(), KEY: 3})  # the owner types 3: from now on it is a choice
+    assert config.load_settings()[KEY] == 3 and mc._cap(False) == 3

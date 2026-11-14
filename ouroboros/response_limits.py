@@ -306,7 +306,7 @@ def response_limit_preview(drive_root, route: dict, *, account="", settings=None
                             bound=provider != "claudexor" or bool(account))
     window_route.pop("use_local", None)
     return {"route": {**route, "provider": provider, "base_url": base_url, "options": options or None},
-            "response_limit": response, "window": window_projection(record),
+            "response_limit": response, "window": window_projection(record, under_way=role == "main"),
             "window_route": {**window_route, "route_fp": evidence.route_fp},
             "window_ack": bool(data.get("owner_acks", {}).get(evidence.route_fp))}
 

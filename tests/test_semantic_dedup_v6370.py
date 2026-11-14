@@ -1,7 +1,7 @@
 """v6.37.0 guards for the semantic-dedup primitive (C9.6) and its consumers
 (C9.1/C9.3/C9.5/C10.1/C10.2). The LLM is mocked everywhere — these assert the
-structural contracts (fail-open, exact-id validation, fingerprint redirect, global
-backlog routing, typed artifact field), not model quality. The backlog's own
+structural contracts (fail-open, exact-id validation, global backlog routing, typed
+artifact field), not model quality. The backlog's own
 semantic redirect, merge writer and ranked digest are retired with its host
 writers: the backlog is one authored note."""
 
@@ -108,35 +108,6 @@ def test_outcomes_recovery_uses_typed_artifact_flag():
     # The error is recovered via the typed flag despite the prose preview lacking the marker.
     assert not classified["unresolved"]
     assert classified["recovered"]
-
-
-# --------------------------------------------------------------------------- #
-# C9.3 — review_state obligation redirect (off-lock map applied under lock)
-# --------------------------------------------------------------------------- #
-
-
-def test_obligation_redirect_folds_into_existing(monkeypatch):
-    from ouroboros.review_state import AdvisoryReviewState, CommitAttemptRecord
-
-    state = AdvisoryReviewState()
-    a1 = CommitAttemptRecord(
-        ts="2026-06-18T00:00:00Z", commit_message="m1", status="blocked", repo_key="r", blocked=True,
-        critical_findings=[{"verdict": "FAIL", "severity": "critical", "item": "bug_login", "reason": "npe on submit"}],
-    )
-    state.record_attempt(a1)
-    opens = state.get_open_obligations(repo_key="r")
-    assert len(opens) == 1
-    target = opens[0].obligation_id
-
-    # A reworded restatement misses the exact fingerprint; the off-lock map redirects it.
-    a2 = CommitAttemptRecord(
-        ts="2026-06-18T00:01:00Z", commit_message="m2", status="blocked", repo_key="r", blocked=True,
-        critical_findings=[{"verdict": "FAIL", "severity": "critical", "item": "bug_login", "reason": "null pointer when the form is submitted"}],
-    )
-    from ouroboros.review_state import _make_obligation_fingerprint
-    fp = _make_obligation_fingerprint("bug_login", "null pointer when the form is submitted")
-    state.record_attempt(a2, semantic_redirects={fp: target})
-    assert len(state.get_open_obligations(repo_key="r")) == 1  # folded, not a new obligation
 
 
 # --------------------------------------------------------------------------- #

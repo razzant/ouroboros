@@ -221,7 +221,8 @@ def test_recovery_prices_the_prepared_input_not_the_canonical_image_proxy(tmp_pa
     def prepare(rows):
         return vision_routing.prepare_messages_for_send(rows, routing=routing)
     window = 131_072 if image_mode == "off" else 262_144
-    prior[1]["content"] += "p" * (4 * (window - REPLY + 500 - estimate(prepare([*prior, growth]))))
+    floor = 8_192  # a stated total no refusal has confirmed admits a request under way up to this short of it
+    prior[1]["content"] += "p" * (4 * (window - floor + 500 - estimate(prepare([*prior, growth]))))
     raw, prepared = estimate(prior), estimate(prepare(prior))
     anchor = InputAnchor(input_tokens=prepared, estimate_tokens=prepared, transcript_tokens=raw, round=1)
     assert (prepared < raw) is (image_mode == "off")
@@ -236,7 +237,7 @@ def test_recovery_prices_the_prepared_input_not_the_canonical_image_proxy(tmp_pa
     monkeypatch.setattr(loop, "_measure_round_main_fit", measure)
     fit = measure(ctx)
     deficit = fit.measurement.capacity_deficit_tokens
-    assert estimate(prepare(ctx.messages)) + REPLY - window == 500  # actual prepared bytes
+    assert estimate(prepare(ctx.messages)) + floor - window == 500  # actual prepared bytes
     assert 499 <= deficit <= 501  # carrying rounded prior counts may differ by one estimator token, either way
     if mode == "low":
         slack = context_fit.reclaim_low_water_margin(None, window)
@@ -279,7 +280,8 @@ def test_address_sizing_measures_candidates_at_the_refusal_density(tmp_path, mon
 
     monkeypatch.setattr(context_source_view, "emergency_address_view", view)
     loop_round_limits._run_emergency_address_pass(ctx, fit, rung="unseen_bodies", goal_tokens=10_000)
-    assert seen["density"] == (density or 1.0) and seen["usable"] == LIMIT - REPLY  # the window, in provider tokens
+    # The line this round's request is admitted at (a stated total less the reply floor), in provider tokens.
+    assert seen["density"] == (density or 1.0) and seen["usable"] == LIMIT - 8_192
     assert seen["candidate"] == math.ceil(fit.measurement.raw_input_tokens * (density or 1.0))
 
 

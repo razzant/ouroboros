@@ -403,10 +403,12 @@ def custom_tool_argument_error(
     tool_name: str,
     receipt: CustomArgumentValidationReceipt,
 ) -> str:
+    """The refusal of a call the custom schema rejected before any handler ran; names what failed where."""
+    detail = f": {receipt.detail}" if receipt.detail else ""
     return (
         "⚠️ TOOL_ARG_ERROR: Arguments for "
         f"'{str(tool_name or receipt.tool_name)}' failed the exact custom-tool schema "
-        f"({receipt.error_code}). Correct the arguments and call the tool again."
+        f"({receipt.error_code}){detail}. Correct the arguments and call the tool again."
     )
 
 

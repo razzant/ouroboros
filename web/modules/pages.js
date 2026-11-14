@@ -36,30 +36,34 @@ export function pagesInZone(zone) {
     return PAGES.filter((page) => page.zone === zone);
 }
 
-/** One navigation row: the place's icon and its label. Main's row carries the class the shell pins and its room's
- * status mark, in the Project rows' mark column, with the mark's words for readers (app.js paints both). */
+/** One navigation row: the place's icon and its label. Main's place is this Ouroboros's own card (owner 12.11, the
+ * fifth round, "Карточка и тихие разделы"): its picture, its name with the quiet words of the place it opens, Main's
+ * count and its room's status mark in the Project rows' mark column, and under them what Main is doing now (app.js
+ * paints the count, the mark, its words for readers and that line). */
 export function renderNavRow(page) {
     const main = page.zone === 'head';
+    if (main) {
+        return `<button class="nav-row nav-row-main nav-ouro" type="button" data-nav-page="${escapeHtml(page.id)}" title="${escapeHtml(page.hint || page.label)}">`
+            + `<span class="nav-ouro-ava" aria-hidden="true"></span>`
+            + `<span class="nav-ouro-text"><span class="nav-ouro-line1">`
+            + `<span class="nav-ouro-name" data-i18n-skip>Ouroboros</span>`
+            + `<span class="nav-row-label">${escapeHtml(page.label)}</span>`
+            + `<span class="nav-row-words" data-i18n-skip></span><span class="nav-mark-slot">${statusMarkHtml('nav-mark')}</span></span>`
+            + `<span class="nav-ouro-work" data-i18n-skip hidden></span></span></button>`;
+    }
     const icon = PAGE_ICONS[page.icon] || '';
-    const status = main ? `<span class="nav-row-words" data-i18n-skip></span><span class="nav-mark-slot">${statusMarkHtml('nav-mark')}</span>` : '';
-    return `<button class="nav-row${main ? ' nav-row-main' : ''}" type="button" data-nav-page="${escapeHtml(page.id)}" title="${escapeHtml(page.hint || page.label)}">`
-        + `${icon}<span class="nav-row-label">${escapeHtml(page.label)}</span>${status}</button>`;
+    return `<button class="nav-row" type="button" data-nav-page="${escapeHtml(page.id)}" title="${escapeHtml(page.hint || page.label)}">`
+        + `${icon}<span class="nav-row-label">${escapeHtml(page.label)}</span></button>`;
 }
 
 export function renderNavRows(zone) {
     return pagesInZone(zone).map(renderNavRow).join('\n');
 }
 
-/** The Projects header of the middle zone: the toggle (icon, label, chevron), "+", and the toggle's facts (the unread
- * count and the Projects' one status mark) in Main's number and mark columns; the toggle's name carries their words.
- * The ids are the hooks app.js and its tests read. */
+/** The head of the Projects list (owner 13.11: no "Projects" word, no collapse, the list starts with its search): the
+ * row is Find a project (projects_nav.js puts the field first in it) and "+" (New project) at its end. The header's
+ * toggle, its unread total and its one status mark are gone with the collapse they spoke for: every row carries its
+ * own mark, and nothing is hidden for a total to stand for. The id is the hook app.js reads. */
 export function renderProjectsHeader() {
-    return `<button id="nav-projects-toggle" class="nav-section-toggle" type="button" aria-expanded="true" aria-controls="nav-projects-list">`
-        + `<span class="nav-row-icon" aria-hidden="true">${PAGE_ICONS.projects}</span>`
-        + `<span class="nav-row-label">Projects</span>`
-        + `<span class="nav-chevron" aria-hidden="true">${SHELL_ICONS.chevron}</span>`
-        + `</button>`
-        + `<button id="nav-projects-add" class="nav-projects-add" type="button" title="New project" aria-label="New project">${SHELL_ICONS.plus}</button>`
-        + `<span class="nav-projects-facts" aria-hidden="true"><span id="nav-projects-count" class="nav-row-meta"></span>`
-        + `<span class="nav-mark-slot">${statusMarkHtml('nav-mark')}</span></span>`;
+    return `<button id="nav-projects-add" class="nav-projects-add" type="button" title="New project" aria-label="New project">${SHELL_ICONS.plus}</button>`;
 }

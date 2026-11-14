@@ -9,7 +9,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | domain | name | modules | proposed |
 |---|---|---:|---:|
 | D01 | Agent core & main loop | 67 | 0 |
-| D02 | LLM client, routing & providers | 48 | 0 |
+| D02 | LLM client, routing & providers | 49 | 0 |
 | D03 | Context assembly, fit & compaction | 40 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
 | D05 | Tool surfaces: files, code, shell, media, external | 55 | 0 |
@@ -18,7 +18,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D08 | Supervisor: queue, workers, events & runtime control | 79 | 0 |
 | D09 | Cancellation, owner control & process custody | 28 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
-| D11 | Gateway, server & Web UI | 119 | 0 |
+| D11 | Gateway, server & Web UI | 120 | 0 |
 | D12 | Settings & configuration | 28 | 0 |
 | D13 | Safety, guards & runtime mode | 12 | 0 |
 | D14 | Skills & extensions | 73 | 0 |
@@ -28,7 +28,7 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D18 | Launcher, packaging, platform & shared substrate | 42 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 26 | 0 |
-| **total** | | **1042** | **0** |
+| **total** | | **1044** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -280,6 +280,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/anthropic_native_custody.py`
 - `ouroboros/fallback_cooldown.py`
 - `ouroboros/gateways/image_api.py`
+- `ouroboros/gateways/search_api.py`
 - `ouroboros/image_preparation.py`
 - `ouroboros/llm.py`
 - `ouroboros/llm_anthropic.py`
@@ -843,6 +844,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateway/card_contracts.py`
 - `ouroboros/gateway/card_decision.py`
 - `ouroboros/gateway/cards.py`
+- `ouroboros/gateway/chat_search.py`
 - `ouroboros/gateway/claudexor_accounts.py`
 - `ouroboros/gateway/claudexor_contracts.py`
 - `ouroboros/gateway/claudexor_passive.py`

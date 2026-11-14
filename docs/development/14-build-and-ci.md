@@ -77,7 +77,7 @@ OUROBOROS_RUN_UI_SMOKE=1 OUROBOROS_EXPECT_BROWSER_ENGINES=chromium,webkit \
 
 ### The tiered commit and CI gates
 
-`commit_reviewed` selects `test_selection.FLOOR_TESTS`, changed tests, direct AST importers of changed code/tests and authored widening. Missing/empty floor modules block. Selection is scope, not execution: `LANE_EXCLUSION_EXPR` still skips opt-in markers (`ui_browser`). Include dirty/untracked candidate files against `HEAD` pre-commit and `HEAD~1` post-commit (body candidates: their serving fork).
+`commit_reviewed` selects `test_selection.FLOOR_TESTS`, changed tests, direct AST importers, `test_*_static.py` for `web/` and authored widening. Missing/empty floor modules block. Selection is scope, not execution: `LANE_EXCLUSION_EXPR` still skips opt-in markers. Include dirty/untracked candidate files against `HEAD` pre-commit and `HEAD~1` post-commit (body candidates: their serving fork).
 
 Imports are a minimum: `extra_tests` covers indirect/dynamic, prompt, skill and cross-language consumers; `full_tests`, unresolved impact. Both need `test_reason`, retained until adoption. Verifier/cutover changes force full: runner/selector, floor, pytest configuration and its plugins, fixture data, non-version dependency edits and `_CUTOVER`; a shared Python helper under `tests/` selects its importers, through other helpers (one that configuration imports or nothing imports forces full). No product fan-out threshold. Records bind tier, candidate/base/policy, reasons and execution counts; missing/duplicate execution blocks.
 

@@ -746,8 +746,11 @@ def test_main_input_reserve_and_account_capacity_remain_distinct(tmp_path, monke
                    model_route=_binding(evidence))
     measured = measure_main_fit(plan, plan.messages_for("max"), [],
                                 profile="owner_max", rendered_mode="max", round_id="r1").measurement
-    assert measured.capacity_total_tokens == 872_000
+    # The account's stated total stands apart from the reply reserve: a round reads it less the reply floor until a
+    # size refusal says the reply is inside it (``WindowRecord.admitted``), and its frame adds the reserve beside it.
     assert measured.response_reserve_tokens == 65_536
+    assert measured.capacity_total_tokens - measured.response_reserve_tokens == 872_000 - 8_192
+    assert measured.window["tokens"] == 872_000 and measured.window["usable"] == 872_000 - 65_536
     assert 0 < measured.estimated_input_tokens < measured.response_reserve_tokens
     assert measured.target_total_tokens is None
 

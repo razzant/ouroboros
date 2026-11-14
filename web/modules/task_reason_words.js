@@ -70,17 +70,17 @@ export const TASK_CAUSE_PHRASES = {
     deep_self_review_unavailable: "The deep self-review could not run",
     deep_self_review_error: "The deep self-review stopped on an error",
     // A helper the host could not start (agent_dispatch.executor_blocked_outcome): it never ran and spent nothing.
-    subagent_executor_unavailable: "This helper could not start because its route was unavailable; it spent nothing",
-    delegate_tools_invisible: "This helper could not start because the tools that run its session are hidden from it; it spent nothing",
-    delegate_visibility_unverified: "This helper could not start because its tools could not be checked; it spent nothing",
+    subagent_executor_unavailable: "This subagent could not start because its route was unavailable; it spent nothing",
+    delegate_tools_invisible: "This subagent could not start because the tools that run its session are hidden from it; it spent nothing",
+    delegate_visibility_unverified: "This subagent could not start because its tools could not be checked; it spent nothing",
     // #869: the provider-death rail's terminal words (twin of project_dialogue.TASK_CAUSE_PHRASES).
     provider_unavailable: "The task could not get a usable model answer, so it could not finish",
     accounting_wait_expired: "Accounting access did not recover within this turn’s wait window",
     delivery_control_degraded: "Ouroboros's final delivery instruction could not be applied, so the answer stands as delivered.",
     authoring_handover_incomplete: "The replacement model stopped before resuming tool work.",
     // A helper set to run as a coding session that finished without a succeeded run of it (subagent_bootstrap).
-    configured_actor_incomplete: "This helper was set to run as a coding session, and no such run succeeded; its answer came without one.",
-    configured_actor_unknown: "This helper was set to run as a coding session; whether that run succeeded is unknown.",
+    configured_actor_incomplete: "This subagent was set to run as a coding session, and no such run succeeded; its answer came without one.",
+    configured_actor_unknown: "This subagent was set to run as a coding session; whether that run succeeded is unknown.",
     delegated_custody_unreconciled: "Some delegated work was never reconciled.",
     // The one non-reason-code key: the task-result FIELD terminal_plan_review_open, a standing limitation.
     terminal_plan_review_open: "The plan review was still open when this answer was delivered",
@@ -151,7 +151,7 @@ const TOOL_NOUNS = {
     github_write: 'A GitHub write',
     send_user_message: 'A message send',
     place_reply: 'A reply',
-    schedule_subagent: 'A helper start',
+    schedule_subagent: 'A subagent start',
     commit_reviewed: 'A commit',
     vcs_commit_reviewed: 'A commit',
     skill_exec: 'A skill run',

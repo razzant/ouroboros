@@ -196,7 +196,7 @@ export function executorChip(evt) {
         // Checked before the evidence branches — an empty custody read would
         // otherwise print "no run yet" over a child never dispatched at all.
         // Evidence-grade so a later dispatch-shaped frame cannot downgrade it.
-        return chip(true, 'blocked', `Pinned to ${name}, but this helper could not start — the task was NOT run (no metered API spend, no delegated run)`);
+        return chip(true, 'blocked', `Pinned to ${name}, but this subagent could not start — the task was NOT run (no metered API spend, no delegated run)`);
     }
     if (!evidence) {
         const record = normalizeTaskTerminalRecord(evt);

@@ -154,7 +154,9 @@ def test_native_loop_fallback_then_symbolic_return_uses_real_role_account_and_fi
     assert rows[0]["physical_failure"]["stage"] == "raised_exception"
     dispatched = rows
     assert len({row["attempt_id"] for row in dispatched}) == 3
-    assert [row["physical_context"]["capacity_total_tokens"] for row in dispatched] == [900_000, 240_000, 900_000]
+    # Each attempt's frame: the line its request is admitted at (the stated total less the reply floor) plus the reserve.
+    assert [row["physical_context"]["capacity_total_tokens"] for row in dispatched] == [
+        window - 8_192 + 65_536 for window in (900_000, 240_000, 900_000)]
     assert [row["physical_context"]["route_fp"] for row in dispatched] == [
         "capacity-account-a", "capacity-account-b", f"capacity-{answered_route['credentialProfileId']}"]
     assert usage["transport_recovery"]["previous_attempt"]["physical_attempt_id"] == dispatched[0]["attempt_id"]

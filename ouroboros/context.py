@@ -975,9 +975,10 @@ def _capture_context_core(
     elif not declared:  # shared review history is a declared request's named omission
         try:
             from ouroboros.context_sections import review_status_host_section
-            from ouroboros.review_state import load_state
+            from ouroboros.review_state import load_state, make_repo_key
             advisory_state = load_state(canonical_root)
-            if advisory_state.latest_attempt():
+            if advisory_state.latest_attempt() or advisory_state.earlier_open_obligations(
+                    make_repo_key(pathlib.Path(env.repo_dir))):
                 advisory_section = review_status_host_section(
                     advisory_state,
                     repo_dir=pathlib.Path(env.repo_dir), drive_root=canonical_root,

@@ -32,7 +32,7 @@ def revision_line(noun: str, shown: str, revision: str) -> str:
 # section is cached with the semi-stable block, so it carries no timestamp.
 _SHARED_UNDERSTANDING_GAP = (
     "## Shared understanding\n\nNot authored yet. "
-    "knowledge_write(topic='overview', scope='global', content=...) creates it; "
+    "knowledge_write(topic='overview', scope='global', mode='overwrite', content=...) creates it; "
     "it is then loaded here in every context."
 )
 
@@ -386,9 +386,27 @@ def runtime_host_section(data: dict, coordination: str = "") -> HostSection:
 
 
 # The review-continuity host section (moved from review_state, which keeps its extraction bound).
+def earlier_obligation_lines(state: Any, repo_key: str, limit: Optional[int] = None) -> List[str]:
+    """The open obligations this checkout recorded before obligations retired, until a commit lands in it
+    (``earlier_open_obligations``): one rendering for both Review Continuity views; ``limit`` cuts each reason
+    with the explicit omission notice."""
+    from ouroboros.utils import truncate_review_artifact
+
+    rows = state.earlier_open_obligations(repo_key)
+    if not rows:
+        return []
+    lines = [f"- earlier_open_obligations={len(rows)} (recorded before obligations retired; "
+             "shown until a commit lands in this checkout)"]
+    for row in rows:
+        reason = str(row.get("reason") or "")
+        reason = truncate_review_artifact(reason, limit=limit) if limit is not None else reason
+        lines.append(f"  [{row.get('obligation_id') or '?'}] {row.get('item') or '?'}: {reason.replace(chr(10), ' ')}")
+    return lines
+
+
 def continuity_status_lines(state: Any, repo_dir: pathlib.Path,
                             stale_status: tuple[dict, str] = ({}, "")) -> List[str]:
-    """Current debts and uncertainty once, whole; historical executions have a reader.
+    """Current facts and uncertainty once, whole; historical executions have a reader.
     ``stale_status`` is ``review_state.stale_marker_status`` for this checkout."""
     from ouroboros.review_state import make_repo_key
 
@@ -400,25 +418,20 @@ def continuity_status_lines(state: Any, repo_dir: pathlib.Path,
                   f"  invalidated_by={state.stale_marker_attribution_note(marker=marker)}"]
         if look_unreadable:
             lines.append(f"  preflight_unreadable={look_unreadable} (marker unverified)")
-    debts = state.get_open_commit_readiness_debts(repo_key=repo_key)
-    lines.append(f"- commit_readiness_debt={len(debts)}")
-    for debt in debts:
-        lines += [f"- [{debt.debt_id}] status={debt.status} category={debt.category} source={debt.source}",
-                  f"  {debt.title}: {debt.summary}"]
-        if debt.source_obligation_ids:
-            lines.append(f"  obligation_ids={', '.join(debt.source_obligation_ids)}")
-        lines.extend(f"  evidence={e}" for e in dict.fromkeys(debt.evidence or []) if e != debt.summary)
-    obligations = state.get_open_obligations(repo_key=repo_key)
-    lines.append(f"- open_obligations={len(obligations)}")
-    for ob in obligations:
-        lines += [f"- [{ob.obligation_id}] [{ob.severity}] {ob.item}: {ob.reason}",
-                  f"  Source: {ob.source_attempt_ts} — {ob.source_attempt_msg}"]
-    return lines
+    latest = state.latest_attempt_for(repo_key=repo_key)
+    warnings = [str(w) for w in (getattr(latest, "readiness_warnings", None) or []) if str(w).strip()
+                and getattr(latest, "status", "") != "succeeded"]  # a landed attempt owes none
+    if warnings:
+        lines.append(f"- readiness_warnings={len(warnings)} (latest attempt, {getattr(latest, 'status', '') or '?'})")
+        lines.extend(f"  {warning}" for warning in warnings)
+    return lines + earlier_obligation_lines(state, repo_key)
 
 
 def review_status_host_section(state: Any, repo_dir: pathlib.Path, drive_root: pathlib.Path) -> str:
     from ouroboros.review_state import format_status_section, make_repo_key, stale_marker_status
 
-    return HostSection('review_continuity', format_status_section(state, repo_dir),
-                       '\n'.join(continuity_status_lines(state, repo_dir, stale_marker_status(state, drive_root, make_repo_key(repo_dir)))
+    repo_key = make_repo_key(repo_dir)
+    return HostSection('review_continuity',
+                       '\n'.join([format_status_section(state, repo_dir), *earlier_obligation_lines(state, repo_key, 120)]),
+                       '\n'.join(continuity_status_lines(state, repo_dir, stale_marker_status(state, drive_root, repo_key))
                                  + ['Historical review ledger: review_status().']))

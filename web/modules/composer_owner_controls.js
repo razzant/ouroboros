@@ -74,8 +74,8 @@ function effortRangeMarkup() {
         + '<div class="chat-effort-strip ui-hit-area" data-effort-strip data-scroll="none"><div class="chat-effort-band" data-effort-band aria-hidden="true"></div>'
         + '<div class="chat-effort-handle chat-effort-rec" data-handle="rec" role="slider" tabindex="-1" aria-label="Primary effort"></div>'
         + segments
-        + '<div class="chat-effort-handle chat-effort-cap chat-effort-min" data-handle="min" role="slider" tabindex="-1" aria-label="Minimum helper effort"></div>'
-        + '<div class="chat-effort-handle chat-effort-cap chat-effort-max" data-handle="max" role="slider" tabindex="-1" aria-label="Maximum helper effort"></div></div>'
+        + '<div class="chat-effort-handle chat-effort-cap chat-effort-min" data-handle="min" role="slider" tabindex="-1" aria-label="Minimum subagent effort"></div>'
+        + '<div class="chat-effort-handle chat-effort-cap chat-effort-max" data-handle="max" role="slider" tabindex="-1" aria-label="Maximum subagent effort"></div></div>'
         + '</div>';
 }
 
@@ -197,7 +197,7 @@ export function createEffortRangeControl({
         const word = effortText(state.draft.recommended);
         if (value.textContent !== word) value.textContent = word;
         const stored = state.stored;
-        head.setAttribute('aria-label', fmt('Primary effort: {level}; helpers {min}–{max}.', {
+        head.setAttribute('aria-label', fmt('Primary effort: {level}; subagents {min}–{max}.', {
             level: effortText(stored.recommended), min: effortText(stored.min), max: effortText(stored.max),
         }));
         capsule?.sayHint();
@@ -206,7 +206,7 @@ export function createEffortRangeControl({
     const say = () => {
         const s = snapRange(state.view || state.shown);
         const level = (i) => effortText(OWNER_TIERS[i]);
-        return { word: level(s.rec), text: fmt('Primary effort; helpers between {min} and {max}.', { min: level(s.min), max: level(s.max) }) };
+        return { word: level(s.rec), text: fmt('Primary effort; subagents between {min} and {max}.', { min: level(s.min), max: level(s.max) }) };
     };
 
     /* --- the model: drag preview, commit on gesture end, serialized saves --- */

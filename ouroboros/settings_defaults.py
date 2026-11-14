@@ -134,13 +134,11 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     # (finish_reason=null, 429/5xx/overloaded); floored at the caller's base
     # retry budget. Permanent classes fail fast regardless.
     "OUROBOROS_TRANSIENT_RETRY_MAX": 6,
-    # #4 self-DoS guard: max concurrent provider calls per (model, use_local) route; excess
-    # worker threads wait (deadline-bounded) instead of storming one model's rate limit. <=0
-    # disables. Default-on (see ouroboros/model_concurrency.py).
-    "OUROBOROS_MODEL_MAX_CONCURRENCY": 3,
-    # Hard ceiling (seconds) a provider call waits for a concurrency slot when the task has
-    # NO deadline; past it the call is refused before dispatch ($0), never sent without a slot. SSOT here.
-    "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC": 180,
+    # The owner's limit on physical calls in flight per model route (``model_concurrency``): excess sends wait in
+    # line (no clock of their own: a slot, the caller's deadline, Stop or Pause ends the wait). "": not chosen, so an
+    # API route has no limit of the host's and a local model keeps three (``settings_scales.MODEL_CAP_KEY``); a
+    # whole number limits both; <=0 limits neither.
+    "OUROBOROS_MODEL_MAX_CONCURRENCY": "",
     # The owner's interface language for this install: a BCP-47 tag ("ru", "pt-BR", "art-x-<slug>"
     # for an invented language); "" = not chosen, the English source renders. Written by
     # POST /api/ui/i18n/language, read live by the SPA and the Telegram skill, by the mind at its
@@ -196,7 +194,8 @@ SETTINGS_DEFAULTS = {**UPDATE_SETTINGS_DEFAULTS,
     "OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE": "",
     "OUROBOROS_WEBSEARCH_MODEL": "",
     # web_search backend pin: auto (default OpenAI-first cascade) | ddgs (pure
-    # retrieval, no second LLM — for fixed-model runs) | openai | openrouter | anthropic.
+    # retrieval, no second LLM — for fixed-model runs) | openai | openrouter | anthropic
+    # | deepseek (DeepSeek's Search API; explicit only, never in auto).
     "OUROBOROS_WEBSEARCH_BACKEND": "auto",
     # Main-loop OpenRouter server web-search tool. Off by default: provider-
     # specific capability, not a core provider-independence requirement.
@@ -411,6 +410,7 @@ RETIRED_SETTING_KEYS: tuple[str, ...] = (
     "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC",  # owner 3A; 30 Oct: await waits its ask, silence its window
     # pool-capacity WP5: delegate_wait is a sleep on runs (the body observes them); no window holds a slot.
     "OUROBOROS_DELEGATE_WAIT_SEC", "OUROBOROS_DELEGATE_WAIT_MAX_SEC",
+    "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC",  # owner 13 Nov: a send waits in the install's own queue with no clock of its own
 )
 
 
@@ -555,7 +555,7 @@ SETTINGS_KEYS_NOT_EXPORTED_TO_ENV = frozenset({
 # ABSENT key leaves the choice to the environment (a deployment's OUROBOROS_UI_DIR=none). A merged write
 # carries every key the read produced, so it must not author an absent key with the value the environment
 # or the default gave it: one unrelated Settings save would otherwise freeze the operator's choice on disk.
-SAVED_CHOICE_SETTINGS = frozenset({"OUROBOROS_UI_DIR", "OUROBOROS_MAX_WORKERS"})
+SAVED_CHOICE_SETTINGS = frozenset({"OUROBOROS_UI_DIR", "OUROBOROS_MAX_WORKERS", "OUROBOROS_MODEL_MAX_CONCURRENCY"})
 
 
 def unauthored_saved_choices(prepared, stored, authored=()) -> frozenset:

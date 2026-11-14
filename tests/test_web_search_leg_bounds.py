@@ -2,9 +2,9 @@
 
 A leg's bound is ``OUROBOROS_WEBSEARCH_TIMEOUT_SEC`` (480 s by default) narrowed by the task deadline
 minus the finalization reserve and by the tool's execution window; a bound spent before the send sends
-nothing. Real ``tools.search`` legs, recovery driver and accounting; the OpenAI SDK runs over an
-in-memory transport, the Anthropic SDK (not a locked dependency) is the repo's usual stand-in, and the
-clock is controlled.
+nothing. Real ``tools.search`` legs, recovery driver and accounting; the OpenAI SDK (under the OpenAI,
+OpenRouter and DeepSeek legs) runs over an in-memory transport, the Anthropic SDK (not a locked dependency)
+is the repo's usual stand-in, and the clock is controlled.
 """
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ def legs(tmp_path, monkeypatch):
     monkeypatch.setattr(deadline_utils, "utc_now", lambda: datetime.fromtimestamp(now[0], timezone.utc))
     monkeypatch.setattr(deadline_utils, "time", SimpleNamespace(time=lambda: now[0]))
     monkeypatch.setattr(model_wait, "monotonic_now", lambda slot=None: now[0])
-    for key, value in {"OUROBOROS_DATA_DIR": str(tmp_path), "TOTAL_BUDGET": "100",
+    for key, value in {"OUROBOROS_DATA_DIR": str(tmp_path), "TOTAL_BUDGET": "100", "DEEPSEEK_API_KEY": "fixture",
                        "OPENROUTER_API_KEY": "fixture", "ANTHROPIC_API_KEY": "fixture", "OPENAI_API_KEY": "fixture"}.items():
         monkeypatch.setenv(key, value)
     monkeypatch.setattr(wire, "canonical_wire_evidence_root", lambda: tmp_path)
@@ -64,11 +64,14 @@ def legs(tmp_path, monkeypatch):
             body = "".join(f"event: {e['type']}\ndata: {json.dumps(e)}\n\n" for e in (
                 {"type": "response.output_text.delta", "delta": "answer"}, completed))
             return httpx.Response(200, content=body.encode(), headers={"content-type": "text/event-stream"})
+        if request.url.path.endswith("/tools/search"):
+            return httpx.Response(200, json={"results": [{"title": "t", "url": "https://example.invalid/", "summary": "answer"}]})
         return httpx.Response(200, json={
             "id": "gen", "object": "chat.completion", "created": 1, "model": "search-model",
             "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "answer"}}],
             "usage": {"prompt_tokens": 3, "completion_tokens": 2, "cost": 0.01}})
 
+    monkeypatch.setattr(net_transport, "env_proxies_configured", lambda: False)  # a host proxy would bypass the stand-in
     monkeypatch.setattr(net_transport, "remote_httpx_transport", lambda *a, **k: httpx.MockTransport(respond))
 
     def anthropic_client(**client_kwargs):  # stand-in: construction timeout, then any per-request override
@@ -86,7 +89,7 @@ def run_leg(env, leg, *, deadline=None, tool_window=None, progress=None):
     metadata = {"deadline_at": datetime.fromtimestamp(deadline, timezone.utc).isoformat()} if deadline else {}
     ctx = SimpleNamespace(task_id="search", task_metadata=metadata, drive_root=env.root, emit_progress_fn=progress)
     send = {"openrouter": search._web_search_openrouter, "anthropic": search._web_search_anthropic,
-            "openai": search._web_search_openai}[leg]
+            "openai": search._web_search_openai, "deepseek": search._web_search_deepseek}[leg]
     if tool_window is None:
         return send(ctx, "query")
     with model_wait.execution_deadline_scope(env.now[0] + tool_window):  # the web_search tool body's window
@@ -165,6 +168,42 @@ def test_a_bound_spent_before_the_direct_send_sends_nothing(legs, monkeypatch, s
     assert [row["state"] for row in ledger_rows(legs.root)] == ["released"]
 
 
+def spend_while_reserving(env, monkeypatch, seconds):
+    reserve = ua.reserve_attempt
+
+    def reserved(*args, **kwargs):
+        result = reserve(*args, **kwargs)
+        env.now[0] += seconds
+        return result
+
+    monkeypatch.setattr(ua, "reserve_attempt", reserved)
+
+
+@pytest.mark.parametrize(("deadline", "window", "expected"), [
+    (None, None, 480.0), (None, 40.0, 30.0), (400.0, None, 170.0), (400.0, 180.0, 170.0),
+])
+def test_the_deepseek_leg_sends_with_what_is_left_of_its_bounds(legs, monkeypatch, deadline, window, expected):
+    """It records no candidate: the 10 s its reservation spends come off its socket bound the same way."""
+    spend_while_reserving(legs, monkeypatch, 10)
+    assert "answer" in run_leg(legs, "deepseek", deadline=deadline, tool_window=window)
+    assert legs.seen == [dict.fromkeys(PHASES, expected)]
+
+
+@pytest.mark.parametrize(("deadline", "window", "spent", "own"), [
+    (400.0, None, 181, True), (400.0, 1500.0, 181, True),  # its own window: its own deadline_exhausted result
+    (None, 40.0, 41, False),  # only a caller's tool window: a typed refusal, positively unsent
+])
+def test_a_bound_spent_after_the_deepseek_reservation_sends_nothing(legs, monkeypatch, deadline, window, spent, own):
+    spend_while_reserving(legs, monkeypatch, spent)
+    if own:
+        assert json.loads(run_leg(legs, "deepseek", deadline=deadline, tool_window=window))["reason_code"] == "deadline_exhausted"
+    else:
+        with pytest.raises(_PhysicalSendNotStarted) as refused:
+            run_leg(legs, "deepseek", tool_window=window)
+        assert refused.value.physical_attempt_capture.state == "released"
+    assert legs.seen == [] and [row["state"] for row in ledger_rows(legs.root)] == ["released"]
+
+
 
 def at(epoch):
     return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
@@ -197,6 +236,8 @@ def search_round(env, monkeypatch, backend, *, deadline=400.0, stage=None, spent
         if effect is not None:
             effect()
 
+    if backend == "deepseek" and stage == "recording":
+        stage = "claim"  # DeepSeek Search records no candidate: its last step before the send is the claim
     if stage == "reservation":
         for module in (ua, search):  # the recovery driver's reservation, then the direct leg's own
             def reserve(*args, _reserve=module.reserve_attempt, **kwargs):
@@ -266,15 +307,17 @@ def search_round(env, monkeypatch, backend, *, deadline=400.0, stage=None, spent
     return run
 
 
-LOOP_LEGS = ["openrouter", "anthropic", "openai"]
+LOOP_LEGS = ["openrouter", "anthropic", "openai", "deepseek"]
 
 
 def states(env):
     return [row["state"] for row in ledger_rows(env.root)]
 
 
-@pytest.mark.parametrize("backend", chosen_rows(LOOP_LEGS, 0, 2))
-@pytest.mark.parametrize("stage,ledger", [("reservation", []), ("recording", ["released"]), ("claim", ["released"])])
+@pytest.mark.parametrize("backend,stage,ledger", [
+    (backend, stage, ledger) for backend in chosen_rows(LOOP_LEGS, 0, 2, 3)
+    for stage, ledger in (("reservation", []), ("recording", ["released"]), ("claim", ["released"]))
+    if (backend, stage) != ("deepseek", "recording")])  # DeepSeek records no candidate: its claim row is that step
 def test_a_search_window_spent_before_the_send_leaves_the_loop_its_graceful_finish(legs, monkeypatch, backend,
                                                                                   stage, ledger):
     """The leg's own deadline − reserve window ends before it reserves, while it records its candidate or right
@@ -289,7 +332,7 @@ def test_a_search_window_spent_before_the_send_leaves_the_loop_its_graceful_fini
     assert legs.seen == [] and states(legs) == ledger
 
 
-@pytest.mark.parametrize("backend", chosen_rows(LOOP_LEGS, 0, 2))
+@pytest.mark.parametrize("backend", chosen_rows(LOOP_LEGS, 0, 2, 3))
 @pytest.mark.parametrize("deadline,read", [(400.0, 170.0), (None, 480.0)], ids=["timely", "unbounded"])
 def test_a_search_with_time_left_or_no_deadline_still_answers(legs, monkeypatch, backend, deadline, read):
     """10 s of recording: the send gets what is left of the window, or with no deadline the plain 480 s socket."""

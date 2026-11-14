@@ -438,6 +438,15 @@ def test_custom_calls_normalize_and_full_schema_receipt_gates_execution():
     assert invalid_receipts[0].error_code == "schema_validation_failed"
     assert not invalid_receipts[0].allows_execution
     assert custom_receipts_prove_wire_acceptance(invalid_receipts)
+    # The refusal says which constraint failed where, in jsonschema's own words, bounded; a valid call carries none.
+    assert invalid_receipts[0].detail == "marker: 'wrong' is not one of ['ok']" and valid_receipts[0].detail == ""
+    _, long_receipts = normalize_openai_custom_tool_calls([{
+        "id": "call_long",
+        "type": "custom",
+        "custom": {"name": "probe", "input": json.dumps({"marker": "w" * 5000})},
+    }], candidate)
+    detail = long_receipts[0].detail
+    assert detail.startswith("marker: 'www") and "OMISSION NOTE" in detail and len(detail) == 200
 
     _, malformed = normalize_openai_custom_tool_calls([{
         "id": "call_malformed",
@@ -812,7 +821,8 @@ def test_knowledge_tools_project_whole_where_parameter_prose_does_not_arrive(nam
     assert len(description) <= MAX_CUSTOM_DESCRIPTION_CHARS
     assert description.startswith(lead + "\n" + _SCHEMA_CLAUSE), f"{name} lead clipped on the custom route"
     words = (["view='outline'", "view='history'", "version="] if name == "knowledge_read" else
-             ["overwrite", "append", "edit", "edits", "{old_str, new_str}", "revert", "archive", "restore", "reason",
+             ["mode is required and has no default", "overwrite", "append", "edit", "edits", "{old_str, new_str}",
+              "revert", "archive", "restore", "reason",
               "summary", "expected_revision", "names the note's enduring scope and when to open it",
               "not a dated log of the latest edit", "Text a write removes stays in the note's history",
               "view='history' or version=", "put back (mode='revert')"])

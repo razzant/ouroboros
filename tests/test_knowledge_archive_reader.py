@@ -32,7 +32,7 @@ def test_a_reader_reads_exact_previous_source_after_restore(tmp_path, scope):
     registry = ToolRegistry(repo_dir=Path.cwd(), drive_root=execution)
     registry.set_context(ctx)
     original = "---\r\ntype: note\r\nsummary: Earlier meaning\r\n---\r\n# Берег\r\nEarlier facts.\r\n"
-    created = _write(registry, topic="reader-source", scope=scope, content=original)
+    created = _write(registry, topic="reader-source", scope=scope, mode="overwrite", content=original)
     revision = created["knowledge_source"]["revision"]
     archived = _write(registry, topic="reader-source", scope=scope, mode="archive",
                       expected_revision=revision, reason="Retained in an ordinary linked overview.")

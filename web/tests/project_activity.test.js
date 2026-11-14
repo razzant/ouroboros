@@ -65,7 +65,7 @@ test('the owner\'s move is the room\'s turn alone: questions and owner actions, 
 });
 
 test('the label is the room word and its first work\'s line: the episode\'s reason, then what still runs beside it', () => {
-    assert.equal(summary('held_continue').label, 'Working · Continue starts when 3 helpers of the earlier attempt finish');
+    assert.equal(summary('held_continue').label, 'Working · Continue starts when 3 subagents of the earlier attempt finish');
     assert.equal(summary('paused_by_owner').label, `Paused · You paused it · ${PRESSED}`);
     assert.equal(summary('paused_by_mind').label, 'Paused · Ouroboros paused it: pause before the update you asked for');
     assert.equal(summary('paused_unattributed').label, 'Paused', 'a Pause that declared nobody names nobody');
@@ -149,7 +149,8 @@ test('a known question survives a room whose works are unconfirmed; an owner tur
     const served = { activity: 'unknown', transition: 'none', call: '', turn: [item], amber: true, mark: 'ring',
         confirmed: false, works: [] };
     assert.deepEqual(summarizeRoom(served), { mark: 'ring', owner: true, word: 'Activity unconfirmed',
-        note: 'An unanswered question is here', label: 'Activity unconfirmed · An unanswered question is here' });
+        note: 'An unanswered question is here', line: '', name: '', focus: '',
+        label: 'Activity unconfirmed · An unanswered question is here' });
     assert.equal(summarizeRoom({ ...served, turn: [], amber: false }).owner, false);
     // The works' census incomplete and the question unreadable: the room keeps the question it had, drawn unconfirmed.
     let rooms = new Map();
@@ -259,6 +260,10 @@ test('a feed the server could not read keeps the rows the page showed; a read th
         current_questions_gaps: [{ reason: 'project_registry_unavailable' }], project_messages_revision: null }));
     assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, revision], [['old'], true, 'r1'],
         'unknown is not empty: the rows stay with the revision they were read at');
+    // Rows a body carries are the feed even while its count is unknown (the rooms read, the registry's count not).
+    const fresh = { id: 'fresh', chat_id: 43 };
+    apply(read({ projects: [fresh, old], project_listable_count: null, project_messages_revision: 'r2' }));
+    assert.deepEqual([feed.map((row) => row.id), revision], [['fresh', 'old'], 'r2'], 'carried rows are the feed');
     // A read that names the feed again is the feed, empty included.
     apply(read({ rooms: {}, projects: [], project_listable_count: 0, project_chat_ids: [], project_messages_revision: 'r0' }));
     assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, revision], [[], false, 'r0']);

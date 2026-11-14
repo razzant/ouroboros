@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import copy
 import json
+import pathlib
 import queue as queue_lib
 import threading
 import time
@@ -157,9 +158,12 @@ def _recovered_then_paused(host, tmp_path, monkeypatch, scope, *,  # noqa: F811
     return pause
 
 
-def _run_loop(host, monkeypatch, task, cut, *, waiter=False, plan=None):  # noqa: F811
-    """The real loop of one dispatched attempt, until the process is lost at ``cut``."""
+def _run_loop(host, monkeypatch, task, cut, *, waiter=False, plan=None, split=False, raises=ProcessLost):  # noqa: F811
+    """The real loop of one dispatched attempt, until the process is lost at ``cut`` (or it ends raising ``raises``);
+    ``split``: its context binds a split task's own drive and the canonical budget root, as the agent builds it."""
     registry = _registry(host.root, monkeypatch, task["id"], task["_attempt"])
+    if split:
+        registry._ctx.drive_root, registry._ctx.budget_drive_root = pathlib.Path(task["drive_root"]), str(host.root)
     if plan is not None:  # the new worker's initial plan; its route's account evidence is synthetic
         registry._ctx.context_fit_plan = plan
         monkeypatch.setattr("ouroboros.context._context_fit_route", _account_route)
@@ -223,7 +227,7 @@ def _run_loop(host, monkeypatch, task, cut, *, waiter=False, plan=None):  # noqa
                     seen.update(finisher=(_name, limit.round_idx)), lose()))
         kwargs = _loop_kwargs(host.root, registry, [])
         kwargs["task_id"] = task["id"]
-        with pytest.raises(ProcessLost):
+        with pytest.raises(raises):
             loop.run_llm_loop(**kwargs)
     return seen
 
@@ -665,6 +669,81 @@ def test_a_grant_revoked_before_consumption_reparks_and_retires_the_handover(tmp
     assert wc.checkpoint_path(tmp_path, "handover-revoked", 1).exists()
     agent._retire_working_checkpoint(ctx, {"id": "handover-revoked", "_attempt": 1})
     assert not wc.checkpoint_path(tmp_path, "handover-revoked", 1).exists(), "the live pause supersedes it"
+
+
+def _captured_while_paused(host, tmp_path, monkeypatch):  # noqa: F811
+    """The paused split Project task's ready capture (as a withdrawn closure leaves it): its row and manifest."""
+    from ouroboros.headless import current_workspace_manifest, finalize_task_artifacts
+    from ouroboros.task_results import load_task_result
+
+    _recovered_then_paused(host, tmp_path, monkeypatch, "project")
+    [paused] = host.pending
+    assert pathlib.Path(paused["drive_root"]) != host.root and paused["budget_drive_root"] == str(host.root)
+    pathlib.Path(paused["workspace_root"], "report.txt").write_text("before the Resume\n", encoding="utf-8")
+    finalize_task_artifacts(host.root, paused)
+    taken = load_task_result(host.root, "held")
+    assert taken["artifact_status"] == "ready" and taken["status"] not in {"completed", "failed", "cancelled"}
+    return paused, taken, current_workspace_manifest(host.root, "held", taken)
+
+
+@pytest.mark.parametrize("cut,split", [("before_bridge", True), ("after_bridge", True), ("after_cas", True),
+                                       ("after_resume", True), ("finisher", True), ("finisher", False)])
+def test_a_resumed_execution_owes_a_new_capture_only_once_it_entered(host, tmp_path, monkeypatch, cut, split):  # noqa: F811
+    """#3248: the ready capture an unfinished split Project task holds (taken while it was paused, as a withdrawn
+    closure leaves it) stays its own through the dispatch, every cut of the handover before its continuation was
+    consumed and restored, and the application's stop and boot; once the loop entered (``after_resume``: restored,
+    then lost; ``finisher``: its first step, before any model call) it is history and a new one is owed, on the row
+    of the canonical store terminal preparation reads (the budget root), never the task's own drive. ``split``: the
+    loop's context binds the task's own drive beside that root, as for a split task; else the canonical drive."""
+    from ouroboros.headless import current_workspace_manifest
+    from ouroboros.task_results import load_task_result
+
+    paused, taken, manifest = _captured_while_paused(host, tmp_path, monkeypatch)
+    task = _dispatch_one(host, monkeypatch)
+    dispatched = load_task_result(host.root, "held")
+    assert (dispatched["artifact_status"], dispatched["artifacts"]) == ("ready", taken["artifacts"]), "the put reopened it"
+    _run_loop(host, monkeypatch, task, cut, split=split)
+    entered = cut in {"after_resume", "finisher"}
+    row = load_task_result(host.root, "held")
+    assert row["artifact_status"] == ("pending" if entered else "ready")
+    assert (row["budget_pause"]["state"] == budget_pause.STATE_RESUMED) is (cut in {"after_cas", "after_resume", "finisher"})
+    history = {item["path"] for item in row["artifacts"] if item.get("kind") == "workspace_capture_history"}
+    assert (str(manifest) in history) is entered and manifest.is_file()
+    if not entered:
+        assert row["artifacts"] == taken["artifacts"] and current_workspace_manifest(host.root, "held", row) == manifest
+    child = load_task_result(pathlib.Path(paused["drive_root"]), "held") or {}
+    assert not child.get("artifact_status"), "the split task's own drive is never the capture's row"
+    assert _stop_boot(monkeypatch) == 1  # the application stops and boots again: the capture keeps its state
+    assert load_task_result(host.root, "held")["artifact_status"] == ("pending" if entered else "ready")
+
+
+def test_an_entry_that_cannot_reopen_the_capture_ends_before_any_model_call(host, tmp_path, monkeypatch):  # noqa: F811
+    """#3248: the entered execution's reopen cannot be written (a full disk). The attempt ends with that error at its
+    entry, after the restore and before its first step or model call (no round began), and the row's ready capture
+    stays current, its manifest's bytes unchanged."""
+    import errno
+    import hashlib
+
+    from ouroboros import headless
+    from ouroboros.headless import current_workspace_manifest
+    from ouroboros.task_results import load_task_result
+
+    _paused, taken, manifest = _captured_while_paused(host, tmp_path, monkeypatch)
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    task, writes = _dispatch_one(host, monkeypatch), []
+
+    def full_disk(root, task_id, status, **kwargs):
+        writes.append((pathlib.Path(root).resolve(), task_id, status, callable(kwargs.get("_field_projector"))))
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(headless, "write_task_result", full_disk)
+    seen = _run_loop(host, monkeypatch, task, "finisher", split=True, raises=OSError)
+    assert writes == [(host.root.resolve(), "held", "running", True)], "only the entry's reopen of the canonical row"
+    assert "finisher" not in seen, "a round began after the failed entry"
+    row = load_task_result(host.root, "held")
+    assert (row["artifact_status"], row["artifacts"]) == (taken["artifact_status"], taken["artifacts"])
+    assert current_workspace_manifest(host.root, "held", row) == manifest
+    assert hashlib.sha256(manifest.read_bytes()).hexdigest() == digest
 
 
 # --- the exact program counter, route, last-fit permission and clocks survive the handover -------

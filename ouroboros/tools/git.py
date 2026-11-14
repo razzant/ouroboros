@@ -118,7 +118,12 @@ def _free_cycle_gate(
     if error:
         return error
     if bool(getattr(ctx, "_review_resume_pending", False)):
-        if pending is not None and str(getattr(pending, "review_retry_key", "") or "") == retry_key:
+        from ouroboros.tools.parallel_review import commit_round_keys
+
+        # A review-only call composes before its overlap check: advisers alone still collect their open counted round.
+        if pending is not None and str(getattr(pending, "review_retry_key", "") or "") in {retry_key, *commit_round_keys(
+                ctx, commit_message, goal=goal, scope=scope, review_rebuttal=review_rebuttal, binding_fingerprint=fp)}:
+            ctx._current_review_retry_key = str(pending.review_retry_key)
             ctx._review_reconcile_only = True
             return None
         if cyber_review_authority():  # Cyber: no second wave and no veto
@@ -1411,7 +1416,7 @@ def get_tools() -> List[ToolEntry]:
         "review_reference": {"type": "object", "description": "Exact reference a prior commit call of this task, or of the predecessor its recorded Continue continues, returned. With author_disposition: the free explicit author continuation. Without it: collect that paid gate under its ordinary checks before Git when the index holds exactly its reviewed bytes, else read its outcome back without staging; it sends nothing but a continuation recorded for it and not yet sent; continue_seats records and sends a new one."},
         "continue_seats": {**CONTINUE_SEATS_SCHEMA, "description": "With review_reference and no author_disposition: " + CONTINUE_SEATS_SCHEMA["description"]},
         "author_disposition": AUTHOR_DISPOSITION_SCHEMA,
-        "since_review": {"type": "string", "default": "", "description": "A review_record_id of an earlier change review of this repository (another task, or a copy such as a reviewed candidate) to compare with: the panel is shown what changed since its subject, its verdict only as a label of those earlier bytes; no PASS, finding or obligation carries over. Unknown, foreign or unreadable is a stated comparison gap. Omitted: this task's earlier reviews of this checkout."},
+        "since_review": {"type": "string", "default": "", "description": "A review_record_id of an earlier change review of this repository (another task, or a copy such as a reviewed candidate) to compare with: the panel is shown what changed since its subject, its verdict only as a label of those earlier bytes; no PASS or finding carries over. Unknown, foreign or unreadable is a stated comparison gap. Omitted: this task's earlier reviews of this checkout."},
     }
     return [
         ToolEntry("commit_reviewed", {"name": "commit_reviewed", "description": reviewed_commit_description,

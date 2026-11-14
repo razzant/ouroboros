@@ -1,9 +1,9 @@
 """Settings › Agents catalogue Access through the actual served candidate (#1609).
 
 The review pool is the catalogue's marked rows (PR1639); a session row's Access is
-Full by default, Working files, or an explicit Read only. A byte-faithful candidate
+Full by default, Workspace write, or an explicit Read only. A byte-faithful candidate
 checkout serves its own Python and JS (origin proof) over an isolated data root
-seeded with a catalogue: a session row with no saved Access, Working files, Read
+seeded with a catalogue: a session row with no saved Access, Workspace write, Read
 only, an API reviewer and an unmarked Read-only row. Every choice goes through the
 real agent's page (its form's Save, its Reviewer switch), the real owner transaction,
 the pool read, a fresh page, a server restart and the pool builder the review core
@@ -27,7 +27,7 @@ pytestmark = [pytest.mark.ui_browser]
 
 REPO = Path(__file__).resolve().parents[1]
 SERVED = ("modules/subagents_settings.js", "modules/settings.js")
-CHOICES = [["full", "Full system access"], ["workspace_write", "Working files"], ["readonly", "Read only"]]
+CHOICES = [["full", "Full system access"], ["workspace_write", "Workspace write"], ["readonly", "Read only"]]
 CAVEAT = ("Full system access (the default) can reach outside the working folder. The selected agent must support it. "
           "Explicit task restrictions still apply.")
 
@@ -331,7 +331,7 @@ def test_catalogue_access_saves_reloads_restarts_and_reaches_the_pool(direct_ser
             _evidence(f"{engine}-02-saved-row-3-readonly-to-full", target=_agent(fresh, 2))
             fresh.close()
 
-            # Working files chosen on the page; the unmarked row returns to the pool unchanged.
+            # Workspace write chosen on the page; the unmarked row returns to the pool unchanged.
             _set_access(page, 0, "workspace_write")
             _set_mark(page, 1, True)
             final = [[True, "workspace_write"], [True, "workspace_write"], [True, "full"], [True, None], [True, "readonly"]]

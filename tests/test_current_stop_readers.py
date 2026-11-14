@@ -404,6 +404,126 @@ def test_a_root_money_pause_cycle_shows_each_held_child_again_and_its_selection_
     assert _source_sha(tmp_path, parked) == parked["source_ref"]["sha256"]
 
 
+HELPERS = ("helper-a", "helper-b")
+
+
+def _worker(tree, wid):
+    tree.workers.WORKERS[wid] = affirm_ready(SimpleNamespace(
+        wid=wid, busy_task_id=None, reaping=False, in_q=SimpleNamespace(put=lambda t: tree.sent.append(dict(t)))))
+
+
+def _app_stop_tree(tmp_path, monkeypatch):
+    """The root and two helpers were really dispatched (the launch claim stamps each ``admitted_dispatch``) and
+    saved work when the application stopped: the next boot holds each under its own saved-work hold (real kill,
+    snapshot and restore). The owner resumes the root alone, it waits for both helpers and sleeps cold."""
+    from ouroboros import budget_pause, model_sleep, working_checkpoint
+    from ouroboros.task_results import STATUS_SCHEDULED, write_task_result
+    from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact, install_exact_budget_pause
+    from tests._budget_pause_exact_helpers import _fast_hold, _mock_pause_observation
+    from tests.test_restart_retention import _pool_events, _queued
+    from tests.test_restart_saved_work import _stop_and_boot
+
+    queue, state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    monkeypatch.setattr(state, "budget_remaining", lambda *a, **k: 5.0)
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", "3")
+    tree = SimpleNamespace(queue=queue, workers=workers, sent=[], sup=SimpleNamespace(
+        DRIVE_ROOT=tmp_path, RUNNING=workers.RUNNING, PENDING=workers.PENDING, WORKERS=workers.WORKERS,
+        sort_pending=queue.sort_pending, persist_queue_snapshot=queue.persist_queue_snapshot, bridge=None))
+    for wid, task_id in enumerate(("root-1", *HELPERS)):
+        lineage = {"root_task_id": "root-1", **({"parent_task_id": "root-1", "delegation_role": "subagent"}
+                                                 if wid else {})}
+        write_task_result(tmp_path, task_id, STATUS_SCHEDULED, chat_id=0, **lineage)
+        workers.PENDING.append(_queued(task_id, **lineage))
+        _worker(tree, wid)
+    workers.assign_tasks()
+    assert sorted(row["id"] for row in tree.sent) == ["helper-a", "helper-b", "root-1"]
+    for task_id, meta in workers.RUNNING.items():
+        assert meta["task"]["admitted_dispatch"] == "possible", task_id
+        working_checkpoint.save_round(_loop_ctx(tmp_path, task_id, attempt=meta["attempt"])[1], "pre_effect")
+    workers.WORKERS.clear()  # the processes end with the application
+    assert _stop_and_boot(queue, workers) == 3
+    held = {row["id"]: row for row in workers.PENDING}
+    assert {task_id: (budget_hold_fact(row)["reason"], budget_hold_fact(row)["door"], row["admitted_dispatch"])
+            for task_id, row in held.items()} == {
+        task_id: (HOLD_SAVED_WORK, "app_stop", "possible") for task_id in ("root-1", *HELPERS)}
+    assert queue.resume_budget_paused_task("root-1")["ok"]
+    _worker(tree, 0)
+    workers.assign_tasks()
+    assert tree.sent[-1]["id"] == "root-1", "a root's Resume selects no helper"
+    ctx, limit = _loop_ctx(tmp_path, "root-1", attempt=workers.RUNNING["root-1"]["attempt"])
+    ctx._loop_mailbox_seen_ids, selected = set(), model_sleep.selectors(ctx, tasks=list(HELPERS))
+    shown = model_sleep.request_sleep(ctx, selected, "cold")
+    assert shown["reason"] == "dependency_held", shown
+    model_sleep.hold_notice(ctx, shown["held"])
+    _deliver(ctx, json.dumps(shown))
+    assert model_sleep.request_sleep(ctx, selected, "cold")["reason"] == "sleep_armed"
+    _fast_hold(monkeypatch, budget_pause)
+    _mock_pause_observation(monkeypatch, budget_pause, [])
+    with pytest.raises(budget_pause.BudgetPauseRequested) as slept:
+        budget_pause.enter_cold_sleep(limit)
+    budget_pause.end_dispatch_fence("root-1")
+    install_exact_budget_pause(tree.sup, "root-1", budget_pause.exact_pause_marker(slept.value.pause)["checkpoint"])
+    workers.WORKERS[0].busy_task_id = None
+    assert queue.persist_queue_snapshot(reason="root-sleeps")
+    return tree
+
+
+def test_helpers_held_since_an_app_stop_let_the_owner_pause_of_their_sleeping_root_settle_and_resume(
+        tmp_path, monkeypatch):
+    """The owner pauses the tree of a sleeping root whose two helpers an earlier application stop holds for an
+    explicit Resume. Their own holds keep them undispatched, so the Pause settles and the owner's Resume reaches
+    the root; its grant is consumed, it is shown each helper held, and its own ``resume_child_task`` selects one
+    through the supervisor; the other stays held, and its own selection refuses once its saved source no longer
+    verifies, the root running on. Reproduces 13 Nov 2026: the census read each held helper's
+    admitted launch claim as dispatchable work, the root's Resume refused ``owner_pause_effects_unsettled`` and a
+    helper's own Resume ``selection_owner_held``."""
+    from ouroboros import budget_pause, owner_pause
+    from ouroboros.tools import control, join_ledger
+    from ouroboros.tools.control_task_results import _wait_for_tasks
+    from supervisor.events_budget import HOLD_SAVED_WORK, _handle_budget_resume_child, budget_hold_fact
+    from supervisor.owner_pause_control import request_owner_pause
+
+    tree = _app_stop_tree(tmp_path, monkeypatch)
+    assert request_owner_pause("root-1", request_id="tree-pause")["ok"]
+    settled = owner_pause.read_fence(tmp_path, "root-1")["state"]
+    resumed = tree.queue.resume_budget_paused_task("root-1")
+    assert (settled, resumed["ok"]) == ("paused", True), (settled, resumed)
+    tree.workers.assign_tasks()
+    assert tree.sent[-1]["id"] == "root-1", "the root alone runs again"
+    meta = tree.workers.RUNNING["root-1"]
+    ctx, limit = _loop_ctx(tmp_path, "root-1", attempt=meta["attempt"])
+    _consume(monkeypatch, ctx, limit, meta["task"]["_budget_pause_resume"])
+    assert budget_pause.budget_pause_row(tmp_path, "root-1")["grant"]["consumed_at"]
+
+    root = _root_ctx(tmp_path)
+    waited = json.loads(_wait_for_tasks(root, list(HELPERS), timeout_sec=0))
+    assert waited["early_return"]["reason"] == "dependency_held", waited
+    assert {row["task_id"]: row["door"] for row in waited["early_return"]["held"]} == {
+        task_id: "resume_child_task" for task_id in HELPERS}
+    events, outcomes = [], []
+    monkeypatch.setattr(control, "_emit_control_event", lambda _ctx, evt: events.append(evt) or "live")
+    monkeypatch.setattr(join_ledger, "_record_child_decision_beacon", lambda *_a, **_k: None)
+    join_ledger._resume_child_task(root, "helper-a", reason="still needed")
+    _handle_budget_resume_child(events[0], _bridge(tree, outcomes))
+    assert outcomes[-1]["ok"] is True, outcomes[-1]
+    _worker(tree, 1)
+    tree.workers.assign_tasks()
+    assert [row["id"] for row in tree.sent[-2:]] == ["root-1", "helper-a"], "the same id, never its sibling"
+    assert tree.sent[-1]["_working_recovery"]["source_ref"], "it continues its saved work"
+    [sibling] = [row for row in tree.workers.PENDING if row["id"] == "helper-b"]
+    assert budget_hold_fact(sibling)["reason"] == HOLD_SAVED_WORK, "its sibling stays held"
+    # The child's own selection still proves its source; that refusal never reaches the root (#3347).
+    sibling["_working_recovery"]["source_ref"] = {**sibling["_working_recovery"]["source_ref"], "sha256": "0" * 64}
+    join_ledger._resume_child_task(root, "helper-b", reason="still needed")
+    _handle_budget_resume_child(events[-1], _bridge(tree, outcomes))
+    _worker(tree, 2)
+    tree.workers.assign_tasks()
+    assert (outcomes[-1]["ok"], outcomes[-1]["error"]) == (False, "dispatch_outcome_unknown"), outcomes[-1]
+    assert [row.get("id") for row in tree.sent].count("helper-b") == 1 and {"root-1", "helper-a"} == set(
+        tree.workers.RUNNING), "an unproven saved source never dispatches; the running root is untouched"
+
+
 def _continued(tree, tmp_path):
     """The first episode ends on a technical interruption while its helpers stay held, and the owner's Continue
     runs the next episode of the same work: a new root that names its predecessor (``owner_continue``)."""
@@ -462,7 +582,7 @@ def test_a_cold_sleep_names_on_the_owner_line_only_the_held_helper_it_chose(tmp_
         ("child-new", "awaiting_selection"), ("child-run", "awaiting_selection")]
     held = [(tail["code"], tail["ids"], tail["state"], tail["text"]) for tail in work["tails"] if tail["kind"] == "helper"]
     if chosen.get("tasks"):  # this episode is neither the helper's root nor its parent: no releaser is named
-        assert held == [("awaited_helpers_paused", ["child-run"], "held", "1 helper it waits for is paused")], held
+        assert held == [("awaited_helpers_paused", ["child-run"], "held", "1 subagent it waits for is paused")], held
     else:  # never inferred from every paused member of the work
         assert held == [], work["tails"]
 
@@ -502,7 +622,7 @@ def test_a_warm_sleep_of_the_root_names_its_held_child_and_that_ouroboros_resume
     [work] = [work for work in state_fields(tmp_path)["works"] if work["episode"]["task_id"] == "root-1"]
     assert (work["activity"], work["because"][0]["code"], work["turn"]) == ("waiting", "sleeping", [])
     assert [(tail["code"], tail["ids"], tail["text"]) for tail in work["tails"] if tail["kind"] == "helper"] == [
-        ("awaited_helpers_mind", ["child-run"], "1 helper it waits for is paused until Ouroboros resumes it")]
+        ("awaited_helpers_mind", ["child-run"], "1 subagent it waits for is paused until Ouroboros resumes it")]
 
 
 def test_an_unreadable_root_resume_basis_is_said_waited_on_once_and_its_recovery_is_shown_again(tmp_path, monkeypatch):

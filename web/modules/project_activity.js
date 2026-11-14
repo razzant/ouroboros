@@ -46,7 +46,13 @@ export function summarizeRoom(room, works = []) {
     const speaker = roomSpeaker(room, works, word);
     const line = speaker ? workLine(speaker, word) : '';
     const note = amberNote(roomAmber(room));
-    return { mark, owner: Boolean(room.amber), word, note, label: [word, line, note].filter(Boolean).join(' · ') };
+    // What a sidebar row says under its name (owner 12.11, the fifth round): the work's own name and its focus line.
+    const lead = speaker || (Array.isArray(works) ? works.find((work) => work?.room === room.room
+        || (Array.isArray(room.works) && room.works.includes(work?.work_id))) : null) || null;
+    const name = String(lead?.name || '').trim();
+    const focus = String(lead?.focus?.text || '').trim();
+    return { mark, owner: Boolean(room.amber), word, note, line, name, focus,
+        label: [word, line, note].filter(Boolean).join(' · ') };
 }
 
 // A room an incomplete or unavailable body did not list again: still shown, never as confirmed work.

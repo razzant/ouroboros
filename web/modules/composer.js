@@ -12,7 +12,7 @@ import { isPanicFrame } from './panic.js';
 import { clientSurfaceField } from './client_surface.js';
 import { apiClient, apiFetch } from './api_client.js';
 import { bindEnterSubmit, bindMenu } from './ui_interactions.js';
-import { controlIcon, strokeIcon } from './page_icons.js';
+import { controlIcon, fluentIcon } from './page_icons.js';
 import { renderMobileNavToggle } from './page_header.js';
 import { createComposerOwnerControls } from './composer_owner_controls.js';
 import { attachChatInputSizing } from './chat_input_sizing.js';
@@ -27,7 +27,7 @@ const CHAT_DRAFT_KEY = 'ouro_chat_draft';
 const CHAT_INPUT_HISTORY_KEY = 'ouro_chat_input_history';
 // The host icons a "+" item may name (`icon`); other names draw from the control glyphs a skill may name.
 const PLUS_ICONS = {
-    attach: strokeIcon('<path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>', 16),
+    attach: fluentIcon('attach', 16, 'regular'),
 };
 
 /** The composer inside the room's `.chat-input-wrap`; chat.js mounts it and namespaces its `chat-*` ids in a Project.
@@ -187,8 +187,10 @@ export function createComposer({ page, byId, ws, replies, chatSessionId, isMain,
     const attachments = createComposerAttachments({ preview: byId('attachment-preview'), attachBtn: plusBtn, fileInput,
         input, showToast, onLayout: () => requestAnimationFrame(() => onLayout()) });
 
+    // Search this chat is the pointer's way to the room's search (Ctrl+F or Cmd+F on a keyboard; chat_search.js).
     const plusMenu = createPlusMenu({ button: plusBtn, hostItems: [
         { key: 'attach', label: 'Attach file', icon: 'attach', onSelect: () => fileInput.click() },
+        ...(replies?.search ? [{ key: 'search', label: 'Search this chat', icon: 'search', onSelect: () => replies.search.open() }] : []),
     ] });
 
     // Local-only staging avoids orphan uploads and fast-send races.

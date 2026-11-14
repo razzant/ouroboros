@@ -177,7 +177,7 @@ def test_plus_lists_skill_sections_then_host_items_and_each_does_its_verb(subscr
     menu.wait_for()
     items = menu.locator("[role=menuitem]").all_inner_texts()
     assert [text.strip() for text in items] == [
-        "Attach file", "Explain simpler", "Add to list", "Add dictation…", "Make a button…"], items
+        "Attach file", "Search this chat", "Explain simpler", "Add to list", "Add dictation…", "Make a button…"], items
     assert menu.locator(".chat-plus-label").all_inner_texts() == ["Templates", "Lists", "Add to composer"], \
         "each skill under its label, the host's own items last under what they do"
     assert menu.locator("[data-plus-item='templates:simpler'] svg").count() == 1, "a skill's glyph from the host set"
@@ -195,6 +195,8 @@ def test_plus_lists_skill_sections_then_host_items_and_each_does_its_verb(subscr
     page.keyboard.press("Enter")
     menu.wait_for()
     assert page.evaluate("document.activeElement.dataset.plusItem") == "attach"
+    page.keyboard.press("ArrowDown")
+    assert page.evaluate("document.activeElement.dataset.plusItem") == "search", "the host's room actions first"
     page.keyboard.press("ArrowDown")
     page.keyboard.press("ArrowDown")
     assert page.evaluate("document.activeElement.dataset.plusItem") == "lists:add"

@@ -102,7 +102,8 @@ test('the headline card says the money of the last 24 hours alone; where it went
     const snapshot = fromState();
     const html = summaryHtml(snapshot);
     const [main, details] = [html.split('<details')[0], html.slice(html.indexOf('<details'))];
-    assert.match(strip(main), /\$\d[\d,]*\.\d\d of \$\d[\d,]*\.\d\d in the last 24 hours/, 'one money line, grouped like Costs');
+    // The fixture's $2.32 of a $20 limit: whole dollars, the spend rounded up, like the limit cards of Costs.
+    assert.match(strip(main), /\$3 of \$20 in the last 24 hours/, 'one money line, written like Costs');
     assert.doesNotMatch(main, /Slack · Acme \$|Started work|Some calls have no price|on its own clock/, 'no run-on of causes on the card');
     assert.match(main, /class="dashboard-hero"/);
     // Each cause that spent something, every place's included (no place row shows its own spend any more); the

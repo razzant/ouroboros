@@ -66,7 +66,7 @@ class FakeSettings:
             "OUROBOROS_MODEL_PROCESSING_PREFERENCES": {}, "OUROBOROS_PROCESSING_PREFERENCE": "",
             "OUROBOROS_WEBSEARCH_BACKEND": "auto", "OUROBOROS_WEBSEARCH_MODEL": "", "OUROBOROS_CONTEXT_MODE": "max",
             "OUROBOROS_IMAGE_INPUT_MODE": "auto", "OUROBOROS_PROMPT_CACHE_TTL": "1h", "OUROBOROS_MODEL_MAX_CONCURRENCY": 3,
-            "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC": 180, "OPENAI_API_KEY": "***set***", "ANTHROPIC_API_KEY": "***set***", "OPENROUTER_API_KEY": "***set***",
+            "OPENAI_API_KEY": "***set***", "ANTHROPIC_API_KEY": "***set***", "OPENROUTER_API_KEY": "***set***",
             "LOCAL_MODEL_SOURCE": "bartowski/Llama-3.3-70B-Instruct-GGUF", "LOCAL_MODEL_FILENAME": "Llama-3.3-70B-Instruct-Q4_K_M.gguf",
             "LOCAL_MODEL_PORT": 8766, "LOCAL_MODEL_N_GPU_LAYERS": -1, "LOCAL_MODEL_CONTEXT_LENGTH": 16384, "LOCAL_MODEL_CHAT_FORMAT": "",
             **values,
@@ -235,7 +235,7 @@ def test_tools_from_the_home_a_switch_writes_one_entry_and_a_stale_list_is_refus
     # The client's switch is a plain row that acts at once; the fold holds the two waits.
     assert commit_row_quiet(page, "MCP_ENABLED") == ""
     assert server.writes()[-1] == {"MCP_ENABLED": False}
-    page.wait_for_function("() => /All tool servers are off/.test(document.querySelector('#page-settings [data-mcp-global]')?.textContent || '')")
+    page.wait_for_function("() => /All MCP servers are off/.test(document.querySelector('#page-settings [data-mcp-global]')?.textContent || '')")
     level.locator("details[data-settings-fold] > summary").click()
     assert commit_row(page, "MCP_TOOL_TIMEOUT_SEC", 90).startswith("Saved · was 60")
     page.close()

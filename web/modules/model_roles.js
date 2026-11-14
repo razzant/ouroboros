@@ -4,9 +4,9 @@
 import { apiClient, fetchJson } from './api_client.js';
 import { SAFETY_MODEL_KEYS } from './consciousness_api.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
-import { controlIcon } from './page_icons.js';
+import { sourceMark } from './model_source_mark.js';
 import { MODEL_CATALOG_TIMEOUT_MS, catalogReadNote, mergeModelCatalog, refreshModelCatalog, watchAccountModelCatalog, withConnectionCatalogs } from './settings_catalog.js';
-import { CODECS, CONFIRMS, bindSettingRows, commitSetting, doorSign, outcomeLine, setButtonBusy, settingsRow, webSearchPreviewWords } from './settings_controls.js';
+import { CODECS, CONFIRMS, bindSettingRows, commitSetting, doorSign, outcomeLine, setButtonBusy, settingsRow, searchModelAfterSourceSwitch, searchModelForKey, syncSearchKey, webSearchPreviewWords } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { HAND_WRITTEN, rowsOf } from './settings_rows.js';
 import { setResult } from './ui_primitives.js';
@@ -251,18 +251,18 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
 
     function detailsHtml(row) {
         if (!showContext) return '';
-        return `<details class="model-role-details ui-disclosure"><summary><span>${only ? 'More: processing, window, longest answer' : 'Context &amp; processing'} · <span data-processing-summary>${escapeHtml(processingIntentLabel(row.processing_preference, processingPreference))}</span></span></summary>
+        return `<details class="model-role-details ui-disclosure"><summary><span>${only ? 'More: processing, context window, max output' : 'Context &amp; processing'} · <span data-processing-summary>${escapeHtml(processingIntentLabel(row.processing_preference, processingPreference))}</span></span></summary>
             <label class="ui-field">Processing ${processingSelectHtml(`data-model-role-processing aria-label="${escapeHtml(row.slot.label)} processing"`, row.processing_preference)}</label>
             <div class="ui-field-help">Uses the same model and reasoning effort. An explicit native service choice takes precedence.</div>
             <div class="ui-field-help" data-processing-capability></div>
             <div class="model-role-context">
-                <label class="ui-field">Window <input id="${escapeHtml(inputIdFor(row))}-context" class="ui-control" data-model-role-context type="number" min="0" step="1"
+                <label class="ui-field">Context window <input id="${escapeHtml(inputIdFor(row))}-context" class="ui-control" data-model-role-context type="number" min="0" step="1"
                     placeholder="Auto" value="${escapeHtml(row.context || '')}" aria-label="${escapeHtml(row.slot.label)} context window">
                     <span class="ui-field-help" data-model-context-note>${escapeHtml(modelContextNote(row.windowPreview))}</span></label>
                 <button type="button" class="btn btn-default" data-window-clear hidden>Clear confirmation</button>
             </div>
             <div class="model-role-context">
-                <label class="ui-field">Maximum response <input class="ui-control" data-response-limit type="number" min="0" step="1" placeholder="Auto" aria-label="${escapeHtml(row.slot.label)} maximum response">
+                <label class="ui-field">Max output tokens <input class="ui-control" data-response-limit type="number" min="0" step="1" placeholder="Auto" aria-label="${escapeHtml(row.slot.label)} max output tokens">
                     <span class="ui-field-help" data-response-note>Auto. Applies to this exact model and server; blank restores metadata.</span></label>
                 <button type="button" class="btn btn-default" data-response-apply>Apply maximum</button>
             </div></details>`;
@@ -443,11 +443,11 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         const note = node.querySelector('[data-response-note]');
         const value = Number(field.value || 0);
         if (apply && (field.validity.badInput || !Number.isSafeInteger(value) || value < 0)) {
-            note.textContent = 'Maximum response must be a positive whole number, or Auto.';
+            note.textContent = 'Max output tokens must be a positive whole number, or Auto.';
             field.setAttribute('aria-invalid', 'true'); return;
         }
         const model = responseModel(row);
-        if (!model || model.endsWith('::')) { note.textContent = 'Choose a model to check its maximum response.'; return; }
+        if (!model || model.endsWith('::')) { note.textContent = 'Choose a model to check its max output tokens.'; return; }
         const identity = JSON.stringify([model, row.local, row.account, row.context]);
         const draft = field.value;
         const sequence = row.responseSequence = (row.responseSequence || 0) + 1;
@@ -459,7 +459,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const data = await apiClient.responseLimitPreview({ model, local: row.local, account: row.account,
                 role: row.slot.slot, window: Number(row.context || 0) });
             if (!current()) return;
-            if (!data.response_limit || !data.route) throw new Error('Maximum response is not checked');
+            if (!data.response_limit || !data.route) throw new Error('Max output tokens are not checked');
             row.windowPreview = data;
             node.querySelector('[data-model-context-note]').textContent = modelContextNote(data);
             node.querySelector('[data-window-clear]').hidden = !data.window_ack;
@@ -467,7 +467,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             if (apply) {
                 const result = await apiClient.ownerCapabilityAck({ ...data.route, route_fp: evidence.route_fp, max_output_tokens: value });
                 if (!current()) return;
-                if (!result.ok) throw new Error(result.error || 'Maximum response could not be saved');
+                if (!result.ok) throw new Error(result.error || 'Max output tokens could not be saved');
                 evidence = result.ack;
                 saved = true;
             }
@@ -477,7 +477,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const source = evidence.source === 'owner_ack' ? 'your maximum' : 'model metadata';
             const endpoint = data.route.base_url ? new URL(data.route.base_url) : null;
             const server = endpoint ? ` Server: ${endpoint.host}${endpoint.pathname.replace(/\/$/, '')}.` : '';
-            note.textContent = `${evidence.max_output_tokens && !evidence.stale ? `${evidence.max_output_tokens.toLocaleString('en-US')} tokens · ${source}` : 'Auto: maximum response unknown'}.${server} Context window is separate.${data.route.provider === 'claudexor' ? ' Planning allowance only; the native engine controls its response.' : ''}`;
+            note.textContent = `${evidence.max_output_tokens && !evidence.stale ? `${evidence.max_output_tokens.toLocaleString('en-US')} tokens · ${source}` : 'Auto: max output tokens unknown'}.${server} Context window is separate.${data.route.provider === 'claudexor' ? ' Planning allowance only; the native engine controls its response.' : ''}`;
         } catch (error) { if (current()) note.textContent = error.message; }
         finally {
             if (row.responseApplying === sequence) row.responseApplying = 0;
@@ -720,13 +720,6 @@ export function roleBody(fresh, entry, index = 0, readFallbacks = '') {
     return body;
 }
 
-// The slot wait the concurrency row names: a finite value, below 0 shown as 0 because
-// `model_concurrency._max_slot_wait_sec` counts it so, else the 180 s default. Only the sentence follows it.
-export function slotWaitSeconds(saved) {
-    const wait = Number.parseFloat(saved);
-    return Number.isFinite(wait) ? Math.max(0, wait) : 180;
-}
-
 const slotsOf = (settings) => (Array.isArray(settings?._meta?.setup_contract?.modelSlots) ? settings._meta.setup_contract.modelSlots : []);
 const wordsOf = (id) => HAND_WRITTEN.find((row) => row.id === id) || { id, keys: [], name: id, meta: '' };
 const shortModel = (model) => String(model || '').slice(String(model || '').lastIndexOf('/') + 1);
@@ -742,13 +735,18 @@ export function routeWords(value, { local = false, account = '', follows = 'Main
         : `${API_PROVIDER_LABELS[kind] || kind}${source.includes('@') ? ` (${source.split('@')[1]})` : ''} · by API key` };
 }
 
-// A subscription's own mark; any other route takes the plain one.
-function markHtml(harness) {
-    const mark = harness ? harnessPresentation(harness) : null;
-    return mark ? `<svg viewBox="${mark.viewBox}" width="1em" height="1em" fill="currentColor" aria-hidden="true" focusable="false"><path d="${mark.path}"></path></svg>` : controlIcon('globe', 18);
+// The mark of the source a route goes through: a subscription's own, a provider's own, else its initial; a local
+// model and an unset route have none. Never a generic glyph (a globe read as "the internet", owner 13.11).
+function routeMark(value, { local = false } = {}) {
+    if (local || !String(value || '').trim()) return '';
+    const { source } = parseModelSource(value);
+    if (source.startsWith('subscription:')) return sourceMark({ lane: 'subscription', harness: source.slice(13), label: harnessPresentation(source.slice(13)).label });
+    const kind = source.split('@')[0];
+    return sourceMark({ kind, label: API_PROVIDER_LABELS[kind] || kind });
 }
 const CONTEXT_WORDS = { nano: 'Nano', low: 'Low', max: 'Max' };
-const SEARCH_SOURCES = [['auto', 'Auto'], ['openai', 'OpenAI'], ['openrouter', 'OpenRouter'], ['anthropic', 'Anthropic'], ['ddgs', 'DuckDuckGo']];
+const SEARCH_SOURCES = [['auto', 'Auto'], ['openai', 'OpenAI'], ['openrouter', 'OpenRouter'], ['anthropic', 'Anthropic'],
+    ['ddgs', 'DuckDuckGo'], ['deepseek', 'DeepSeek']];
 
 function mountModels(container, { path, ctx }) {
     const custom = (row) => `<button type="button" class="btn btn-default btn-sm" id="btn-refresh-model-catalog" data-models-action>${escapeHtml(row.control.label)}</button>`;
@@ -757,17 +755,19 @@ function mountModels(container, { path, ctx }) {
     const plain = rowsOf('models', { fold: false }).map((row) => settingsRow(row, { custom })).join('');
     container.innerHTML = `<p class="settings-page-lead">Which model does which work.</p>
         <section class="ui-card settings-card" data-setting-row="models:main">
-            <div class="models-main" data-entry-id="main"></div>
-            <p class="settings-card-note">${escapeHtml(wordsOf('models:main').meta)} ${escapeHtml(MAIN_FOLLOW_NOTE)}</p>
+            <h3 class="settings-card-title">${escapeHtml(wordsOf('models:main').name)}</h3>
+            <p class="settings-card-lead">${escapeHtml(wordsOf('models:main').meta)}</p>
+            <div class="settings-rows models-main" data-entry-id="main"></div>
+            <p class="settings-card-note">${escapeHtml(MAIN_FOLLOW_NOTE)}</p>
         </section>
         <section class="ui-card settings-card" data-setting-row="models:fallbacks">
-            <div class="settings-card-head"><h3 class="settings-card-title">If Main cannot answer</h3>
+            <div class="settings-card-head"><h3 class="settings-card-title">Fallback models</h3>
                 <span class="ui-result" data-entry-result role="status" aria-live="polite"></span>
                 <div class="ui-section-actions"><button type="button" class="btn btn-default btn-sm" data-fallback-add>Add fallback</button></div></div>
             <p class="settings-card-lead">${escapeHtml(wordsOf('models:fallbacks').meta)}</p>
             <div class="settings-rows" data-models-fallbacks></div>
         </section>
-        <section class="ui-card settings-card"><h3 class="settings-card-title">Other work</h3>
+        <section class="ui-card settings-card"><h3 class="settings-card-title">Other roles</h3>
             <p class="settings-card-lead">Each uses Main until you give it a model of its own.</p>
             <div class="settings-rows">${doors.map(door).join('')}</div></section>
         <section class="ui-card settings-card"><div class="settings-rows">${plain}</div></section>
@@ -820,10 +820,12 @@ function mountModels(container, { path, ctx }) {
         const main = route('main');
         const mainNote = labels.length ? `Choose the key it uses: ${labels.slice(0, -1).join(', ')} or ${labels.at(-1)}.`
             : keyWords(settings[slots.main?.settingKey], local('main'));
-        container.querySelector('.models-main').innerHTML = `<span class="settings-head-glyph models-main-glyph" aria-hidden="true">${markHtml(main.mark)}</span>
-            <div class="models-main-words"><span class="models-kicker">${escapeHtml(wordsOf('models:main').name)}</span>
-                <span class="models-main-name">${escapeHtml(main.follows || labels.length ? 'Not chosen yet' : main.name)}</span><span class="models-main-meta"${mainNote ? ' data-tone="warn"' : ''}>${escapeHtml(mainNote || main.source)}</span></div>
-            <button type="button" class="btn btn-default" data-entry-open>Change</button>`;
+        // The answer is one row: the model, under it the source with its own mark (or what is wrong with its key), and
+        // the chevron of a row that opens a level. The role's name is the object's title above.
+        container.querySelector('.models-main').innerHTML = `<button type="button" class="ui-row settings-row models-main-row" data-kind="door" data-entry-open>
+            <span class="ui-row-title models-main-name">${escapeHtml(main.follows || labels.length ? 'Not chosen yet' : main.name)}</span>
+            <span class="ui-row-meta models-main-meta"${mainNote ? ' data-tone="warn"' : ''}>${mainNote ? '' : routeMark(settings[slots.main?.settingKey], { local: local('main') })}<span>${escapeHtml(mainNote || main.source)}</span></span>
+            <span class="ui-row-actions">${doorSign('models/role/main')}</span></button>`;
         const list = fallbackEntries(settings);
         shown = list.map((entry) => entry.value).join(',');
         const localFallback = truthy(settings.USE_LOCAL_FALLBACK);
@@ -845,10 +847,9 @@ function mountModels(container, { path, ctx }) {
         }
         say('models:websearch', Object.fromEntries(SEARCH_SOURCES)[settings.OUROBOROS_WEBSEARCH_BACKEND || 'auto'] || String(settings.OUROBOROS_WEBSEARCH_BACKEND));
         say('models:context', CONTEXT_WORDS[String(settings.OUROBOROS_CONTEXT_MODE || '').toLowerCase()] || String(settings.OUROBOROS_CONTEXT_MODE || ''));
-        // The fold's rows are drawn once their values are read (the wait a request over the limit takes is the install's).
+        // The fold's rows are drawn once their values are read.
         if (!fold) {
-            const rows = rowsOf('models', { fold: true }).map((row) => (row.id !== 'OUROBOROS_MODEL_MAX_CONCURRENCY' ? row
-                : { ...row, more: row.more.replace('{wait}', String(slotWaitSeconds(settings.OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC))) }));
+            const rows = rowsOf('models', { fold: true });
             foldHost.innerHTML = rows.map((row) => settingsRow(row)).join('');
             fold = bindSettingRows(foldHost, { rows, ask: ctx.ask });
         }
@@ -891,7 +892,13 @@ function mountModels(container, { path, ctx }) {
         } else if (head && !hit('[data-setting-door]')) ctx.openSettings(`models/role/${head.dataset.entryId}`);
     };
     container.addEventListener('click', onClick);
-    const onShown = (event) => { if (event.detail?.path === path) { void read(); void refreshModelCatalog(); } };
+    // The catalogue is the providers' and costs a network read: it is asked at the owner's first touch of the page
+    // after each showing, so a page that is merely shown (Settings lands on it) reads nothing but settings.
+    let catalogAsked = false;
+    const askCatalog = () => { if (!catalogAsked) { catalogAsked = true; void refreshModelCatalog(); } };
+    container.addEventListener('pointerdown', askCatalog, { passive: true });
+    container.addEventListener('focusin', askCatalog);
+    const onShown = (event) => { if (event.detail?.path === path) { catalogAsked = false; void read(); } };
     const onSaved = (event) => { if (event.detail?.source === 'settings-row') void read(); };
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
     globalThis.window?.addEventListener('ouro:settings-updated', onSaved);
@@ -984,10 +991,15 @@ function mountWebSearch(container, { path, ctx }) {
         <section class="ui-card settings-card models-role"><div class="models-form">
             <label class="ui-field"><span>Source</span><select id="s-websearch-source" class="ui-control">${SEARCH_SOURCES.map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select></label>
             <label class="ui-field"><span>Model</span><input id="s-websearch-model" class="ui-control" type="text" placeholder="Recommended for each source" autocomplete="off" spellcheck="false">
-                <span class="ui-field-help">Only the built-in web search uses it. Empty follows the model Ouroboros recommends for each source.</span></label></div>
+                <span class="ui-field-help">Only the built-in web search uses it. Empty follows the model Ouroboros recommends for each source.</span></label>
+            <label class="ui-field" hidden><span>Key</span><select id="s-websearch-key" class="ui-control" hidden></select>
+                <span class="ui-field-help">DeepSeek search takes no model: choose the key it uses.</span></label></div>
             <div class="ui-field-help" data-websearch-preview role="status"></div>
             ${SAVE_ROW}</section>`;
     const [source, model, preview] = ['#s-websearch-source', '#s-websearch-model', '[data-websearch-preview]'].map((selector) => container.querySelector(selector));
+    // DeepSeek takes no model: under it the Key field, with its own help, stands in for Model (owner decision, 11 Nov 2026).
+    const key = container.querySelector('#s-websearch-key');
+    let searchKeys = {};  // the DeepSeek keys of Accounts the Key select offers
     let dirty = false;
     let previews = 0;
     // An edited native Anthropic id takes the routed spelling, so dispatch recognizes the new intent.
@@ -1004,18 +1016,27 @@ function mountWebSearch(container, { path, ctx }) {
             preview.innerHTML = `${escapeHtml(main)}${details ? ` <details class="ui-disclosure"><summary>Details</summary>${escapeHtml(details)}</details>` : ''}`;
         } catch { if (mine === previews) preview.textContent = 'Search routes could not be checked. Your choices are kept.'; }
     };
-    let asRead = {};  // the choice as read when the typing began: a Save writes only what the owner changed from it
+    let asRead = null;  // the choice as read when the typing began (null before a read): a Save writes only what changed
     const read = async () => {
-        if (dirty) { void showPreview(); return; }  // a typed choice stays; the routes it would take are read again
         let settings;
-        try { settings = await ctx.readSettings(); } catch { return; }
-        source.value = settings.OUROBOROS_WEBSEARCH_BACKEND || 'auto';
-        model.value = String(settings.OUROBOROS_WEBSEARCH_MODEL || '');
-        asRead = { OUROBOROS_WEBSEARCH_BACKEND: source.value, OUROBOROS_WEBSEARCH_MODEL: model.value };
+        try { settings = await ctx.readSettings(); } catch { if (dirty) void showPreview(); return; }
+        // A typed choice stays, one begun while this read was pending too; the routes it would take and the keys of
+        // Accounts (where the Key select's pointer leads) are read again for it. Only the first read fills the fields
+        // under typing, so a Save never writes a Source the owner was not shown.
+        if (!dirty || !asRead) {
+            source.value = settings.OUROBOROS_WEBSEARCH_BACKEND || 'auto';
+            model.value = String(settings.OUROBOROS_WEBSEARCH_MODEL || '');
+            asRead = { OUROBOROS_WEBSEARCH_BACKEND: source.value, OUROBOROS_WEBSEARCH_MODEL: model.value };
+        }
+        const profiles = settings?._meta?.setup_contract?.providerProfiles || {};
+        searchKeys = { connections: apiConnections(settings, profiles), providers: configuredApiProviders(settings, profiles),
+            providerProfiles: profiles };
+        syncSearchKey(source, model, key, searchKeys);
         void showPreview();
     };
     const say = (words) => setResult(container.querySelector('[data-editor-result]'), words);
-    const edited = () => { dirty = true; container.querySelector('[data-editor-discard]').hidden = false; say({}); void showPreview(); };
+    const edited = () => { dirty = true; syncSearchKey(source, model, key, searchKeys);
+        container.querySelector('[data-editor-discard]').hidden = false; say({}); void showPreview(); };
     const onClick = async (event) => {
         const button = event.target.closest?.('[data-editor-save]');
         if (event.target.closest?.('[data-editor-discard]')) { dirty = false; container.querySelector('[data-editor-discard]').hidden = true; void read(); return; }
@@ -1025,15 +1046,18 @@ function mountWebSearch(container, { path, ctx }) {
         try {
             const fresh = await ctx.readSettings();
             const wanted = { OUROBOROS_WEBSEARCH_BACKEND: selection().backend, OUROBOROS_WEBSEARCH_MODEL: selection().model };
-            const body = Object.fromEntries(Object.entries(wanted).filter(([key, value]) => value !== asRead[key]));
+            const body = Object.fromEntries(Object.entries(wanted).filter(([key, value]) => value !== asRead?.[key]));
             outcome = await writeModelKeys('models:websearch', body, fresh, { ask: ctx.ask });
+            if (landed(outcome)) asRead = wanted;  // the new baseline before the reread, for typing that reread keeps
         } catch (error) { outcome = { state: 'refused', effect: 'now', withheld: '', message: error?.message || String(error), code: '' }; }
         setButtonBusy(button, false);
         if (landed(outcome) || outcome.state === 'unchanged') { dirty = false; container.querySelector('[data-editor-discard]').hidden = true; await read(); }
         say(saveWords(outcome));
     };
     const onShown = (event) => { if (event.detail?.path === path) void read(); };
-    source.addEventListener('change', edited);
+    // Leaving DeepSeek drops only the key spelling written for it; the Key select spells the chosen one.
+    source.addEventListener('change', () => { model.value = searchModelAfterSourceSwitch(source.value, model.value); edited(); });
+    key?.addEventListener('change', () => { model.value = searchModelForKey(key.value, model.value); edited(); });
     model.addEventListener('input', edited);
     container.addEventListener('click', onClick);
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);

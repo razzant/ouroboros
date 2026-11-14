@@ -200,6 +200,18 @@ def test_the_facts_line_names_window_room_and_target_excess_apart(monkeypatch):
             "provider-stated input over its estimate)") in refused and "input of this refused request" not in refused
 
 
+def test_the_facts_line_states_the_time_a_work_stood_in_the_installs_own_queue(monkeypatch):
+    """The mind starts the parallel works that fill a model's queue, so it reads what the queue cost this work so
+    far (``loop_transport.slot_wait_note`` counts it); a work that never queued reads nothing about it."""
+    queued = _facts(monkeypatch, _slot_waited_sec=750.0)
+    assert "| waited 12.5 min so far in line under this install's Requests at once per model limit |" in queued
+    for seconds, words in ((0.6, "waited 1 s so far"), (2.4, "waited 2 s so far"), (59.4, "waited 59 s so far")):
+        short = _facts(monkeypatch, _slot_waited_sec=seconds)  # a wait under a minute is seconds, never "0.0 min"
+        assert f"| {words} in line under this install's" in short and " 0.0 min" not in short
+    for usage in ({}, {"_slot_waited_sec": 0.0}):
+        assert "Requests at once per model" not in _facts(monkeypatch, **usage)
+
+
 # --- #1728: a technical rebind keeps the sent view while it fits -----------------------------------
 
 def _wire(monkeypatch, messages):
@@ -215,7 +227,8 @@ def _wire(monkeypatch, messages):
     return [m for m in payload["messages"] if m["role"] == "system"]
 
 
-def _rebind(monkeypatch, root, plan, messages, *, window, ratio=1.0, status="asserted", usage=None, facts=None):
+def _rebind(monkeypatch, root, plan, messages, *, window, ratio=1.0, status="asserted", usage=None, facts=None,
+            holds_reply=False):
     import ouroboros.context
     from ouroboros import context_fit
     from ouroboros.loop_model_call import _rebind_context_fit_plan
@@ -224,8 +237,10 @@ def _rebind(monkeypatch, root, plan, messages, *, window, ratio=1.0, status="ass
     root.mkdir(parents=True, exist_ok=True)
     registry = ToolRegistry(repo_dir=root, drive_root=root)
     registry._ctx._accumulated_usage = usage
+    # A declared window's RouteFacts (its units). ``holds_reply``: a total known to hold the reply too (a local
+    # server's one buffer), read less the whole reserve; any other stated total is read less the reply floor.
     evidence = SimpleNamespace(route_fp=f"r-{window}", status=status, stale=status != "asserted", window_tokens=window,
-                               route_facts=facts or {})  # a declared window's RouteFacts (its units)
+                               route_facts=facts or {}, source="local_health" if holds_reply else "metadata")
     monkeypatch.setattr(ouroboros.context, "_context_fit_route", lambda *_a, **_kw: ({"model": "m2", "provider": "p"}, evidence))
     monkeypatch.setattr(context_fit, "_route_calibration_ratio", lambda *_a, **_kw: ratio)
     rebound, mode = _rebind_context_fit_plan(plan, registry, messages, model="m2", use_local=False, start_mode="low",
@@ -262,7 +277,11 @@ def test_a_rebind_keeps_the_sent_view_on_a_smaller_fitting_window_and_unfolds_no
         assert again.projection("low").memory_facts == low.projection("low").memory_facts
 
 
-def test_a_rebind_narrows_a_view_the_window_cannot_hold_from_its_own_level_by_the_window_alone(tmp_path, monkeypatch):
+def test_a_rebind_narrows_a_view_the_window_cannot_hold_from_its_own_level_and_takes_its_room(tmp_path, monkeypatch):
+    """A view that fits its new window is kept byte for byte (the tests around this one). A view the window cannot
+    hold is written again anyway, so with its excess it is asked a wall's slack, one eighth of the window, and not
+    left at the window's very edge, where the next tool result would meet the same wall (owner, 30 Sep 2026: a fold
+    returns to the room line). Nothing unfolds, no owner target is applied again, and the tail is never touched."""
     from tests.test_memory_view_modes import _built
 
     _core, plan = _built(tmp_path / "w", monkeypatch)
@@ -270,17 +289,22 @@ def test_a_rebind_narrows_a_view_the_window_cannot_hold_from_its_own_level_by_th
     messages = _long_tail(low)
     measured = low.reproject_for_route(window_tokens=1_000_000, known_window=True, ratio=1.0, output_reserve=65_536,
                                        tool_schemas=[], start_mode="low", current_messages=messages)
-    tight = measured.projection("low").estimated_tokens + low.output_reserve_tokens - 1
+    tight = measured.projection("low").estimated_tokens + 8_192 - 1  # one token past the stated total less the reply floor
     old = low.projection("low").memory_facts["floor"]
     rebound, mode, event = _rebind(monkeypatch, tmp_path / "n", low, messages, window=tight)
     floor = rebound.projection("low").memory_facts["floor"]
     assert mode == "low" and event["view_kept"] is False and messages[0] == rebound.projection("low").system_message()
     assert all(floor["steps"].get(step, 0) >= count for step, count in old["steps"].items())  # nothing unfolds
-    # The first host view pays this one-token shortfall before any additional memory step.
-    assert rebound.projection("low").memory_facts["host_sections_addressed"]
-    assert floor["steps"] == old["steps"]
+    assert rebound.projection("low").memory_facts["host_sections_addressed"]  # host views pay before memory detail
     assert floor["by_budget"] == old["by_budget"] and floor["budget_allowance_tokens"] is None  # no target refold
-    assert floor["allowance_tokens"] == floor["physical_allowance_tokens"]  # no working margin reapplied
+    # One eighth of the window is asked for the work as a wall's pass asks its slack (never a start's margin): memory's
+    # detail and ordinary host forms pay it, and where they cannot make all of it they give what they hold.
+    most = low.reproject_for_route(window_tokens=1_000_000, known_window=True, ratio=1.0, output_reserve=65_536,
+                                   tool_schemas=[], start_mode="low", current_messages=_long_tail(low), slack_tokens=10**7)
+    shed = measured.projection("low").estimated_tokens - rebound.projection("low").estimated_tokens
+    assert shed >= math.ceil(tight / 8) or floor["steps"] == most.projection("low").memory_facts["floor"]["steps"]
+    assert floor["allowance_tokens"] == floor["physical_allowance_tokens"]  # a held view borrows no start margin
+    assert sum(floor["steps"].values()) > sum(old["steps"].values())  # memory's detail made that room
     assert messages[1:] == _long_tail(low)[1:]  # the actual tail is never touched
 
 
@@ -297,7 +321,7 @@ def test_a_rebind_uses_only_the_exact_routes_accepted_lower_bound(tmp_path, monk
     messages = _long_tail(low)
     measured = low.reproject_for_route(window_tokens=1_000_000, known_window=True, ratio=1.0, output_reserve=65_536,
                                        tool_schemas=[], start_mode="low", current_messages=messages)
-    tight = measured.projection("low").estimated_tokens + low.output_reserve_tokens - 1
+    tight = measured.projection("low").estimated_tokens + 8_192 - 1  # one token past what this stated total admits
     accepted = tight + 80_000
     usage = {"_last_round_cache_usage": {"prompt_tokens": accepted, "provider": "p"},
              "_context_raw_input_tokens": accepted}
@@ -308,7 +332,9 @@ def test_a_rebind_uses_only_the_exact_routes_accepted_lower_bound(tmp_path, monk
     assert mode == "low" and event["view_kept"] is same_route
     # An accepted input above the stated total replaces it as an input bound; the reply stays beside it.
     assert rebound.window_tokens == (accepted + 65_536 if same_route else tight)
-    assert rebound.projection("low").memory_facts["floor"]["steps"] == old["steps"]
+    steps = rebound.projection("low").memory_facts["floor"]["steps"]
+    assert all(steps.get(step, 0) >= count for step, count in old["steps"].items())  # nothing unfolds
+    assert (steps == old["steps"]) is same_route  # the account that must narrow takes its work room with it
     assert bool(rebound.projection("low").memory_facts.get("host_sections_addressed")) is not same_route
 
 
@@ -335,12 +361,14 @@ def test_a_rebind_keeps_a_view_exactly_when_the_rounds_carried_input_fits_it(tmp
     shown = copy.deepcopy(messages)
     raw = low.reproject_for_route(window_tokens=1_000_000, known_window=True, ratio=1.0, output_reserve=65_536, tool_schemas=[],
                                   start_mode="low", current_messages=messages).projection("low").estimated_tokens
-    window = 0 if route == "unknown" else raw + 65_536 + slack  # between the shown bytes and the input carried
+    # Between the shown bytes and the input carried, on a total that holds the reply too: there Nano's smaller
+    # reserve is real room (a total nothing has proved admits the same input in every mode).
+    window = 0 if route == "unknown" else raw + 65_536 + slack
     usage = {"_last_round_cache_usage": {"prompt_tokens": raw + prepared, "provider": "p"}, "_context_raw_input_tokens": raw}
     record_input_anchor(usage, SimpleNamespace(model="m2", provider="p", output_reserve_tokens=65_536, route_fp=(
         "another-account" if route == "another-account" else f"r-{window}")), round_idx=7, estimate_tokens=raw + prepared)
     rebound, mode, event = _rebind(monkeypatch, tmp_path / "n", low, messages, window=window, usage=usage,
-                                   status="failed" if route == "unknown" else "asserted",
+                                   status="failed" if route == "unknown" else "asserted", holds_reply=True,
                                    facts={"basis": "estimator"} if route == "estimator" else None)
 
     def round_fit(transcript, rendered):  # the loop's own measurement of a round on the rebound route
@@ -356,6 +384,42 @@ def test_a_rebind_keeps_a_view_exactly_when_the_rounds_carried_input_fits_it(tmp
     if route == "same":
         # Preparation changes the input by a signed offset, not the learned tokenizer density.
         assert rebound.projection(mode).calibration_ratio == sent.measurement.measurement_density == 1.0
+
+
+@pytest.mark.parametrize("holds_reply,after", [(False, "low"), (True, "nano")], ids=["unproved-total", "total-holds-reply"])
+def test_a_held_low_view_steps_down_to_nano_only_where_nano_makes_room(tmp_path, monkeypatch, holds_reply, after):
+    """A Low view the work holds meets a window that cannot hold its transcript even with the shortest memory. On a
+    total that holds the reply, Nano's smaller reply reserve is real room and the view steps down. On a total nothing
+    has proved, Low and Nano are admitted to the same input: stepping down would cost the mode (and its reply
+    allowance) for no room, so the view stays Low and the round's own passes take bodies (review round 2)."""
+    from tests.test_memory_view_modes import _built
+
+    _core, plan = _built(tmp_path / "w", monkeypatch)
+    low = plan(1_000_000, preferred="low", tool_schemas=[])
+    messages = _long_tail(low)
+    raw = low.reproject_for_route(window_tokens=1_000_000, known_window=True, ratio=1.0, output_reserve=65_536, tool_schemas=[],
+                                  start_mode="low", current_messages=messages).projection("low").estimated_tokens
+    # The line each reading admits is 10,000 under the shown bytes: more than this view's memory can give.
+    window = raw + (65_536 if holds_reply else 8_192) - 10_000
+    _rebound, mode, event = _rebind(monkeypatch, tmp_path / "n", low, messages, window=window, holds_reply=holds_reply)
+    assert mode == after and event["view_kept"] is False
+
+
+def test_only_a_main_reading_keeps_low_where_nano_admits_no_more(tmp_path, monkeypatch):
+    """The guard above reads Main's admitted frame. A caller with a frame of its own (voice: a working reserve above
+    both modes' reply reserves, so Nano admits no more input than Low) steps the held view down as it always did."""
+    from tests.test_memory_view_modes import _built
+
+    _core, plan = _built(tmp_path / "w", monkeypatch)
+    low = dataclasses.replace(plan(1_000_000, preferred="low", tool_schemas=[]), working_reserve_tokens=70_000)
+    messages = _long_tail(low)
+
+    def fitted(window, **flags):
+        return low.reproject_for_route(window_tokens=window, known_window=True, ratio=1.0, output_reserve=65_536,
+                                       tool_schemas=[], start_mode="low", current_messages=messages, **flags)
+
+    window = fitted(10_000_000).projection("low").estimated_tokens + 70_000 - 10_000  # 10,000 over what memory can give
+    assert fitted(window).initial_mode == "nano" and fitted(window, admitted=True).initial_mode == "low"
 
 
 @pytest.mark.parametrize("owner,ran,mode", [
@@ -457,12 +521,14 @@ def test_a_cold_restore_keeps_the_tasks_own_start_not_the_restore_fit(tmp_path, 
         assert context_fit.restored_start(fresh, malformed).start == UNKNOWN_START, malformed
 
 
-def _native(main_call, monkeypatch, tmp_path, *, task_text="hi", owner_mode="low", view=None, books=0):
+def _native(main_call, monkeypatch, tmp_path, *, task_text="hi", owner_mode="low", view=None, books=0, holds_reply=()):
     """The owner's ``owner_mode`` on the fixture's real Claudexor Main call with a captured core (``view``: another
     memory snapshot in it; ``books``: Max's books grown by that many characters, as ``test_memory_view_modes._built``
     grows them): ``(ctx, gateway, tools, events, plan(window), windows)``. ``windows`` maps an account
     to the window its evidence reports (0: unknown);
-    the primary pins account-a, its configured fallback account-b, and every production rebind reads it."""
+    the primary pins account-a, its configured fallback account-b, and every production rebind reads it.
+    ``holds_reply``: accounts whose stated total is known to hold the reply too (as after a size refusal), so a request
+    under way reads it less the whole reserve; any other stated total is read less the reply floor."""
     from ouroboros import capability_evidence as ce, context, fallback_cooldown, loop_transport
     from ouroboros.model_slots import MODEL_ACCOUNTS_KEY
     from ouroboros.tool_policy import initial_tool_schemas
@@ -487,7 +553,8 @@ def _native(main_call, monkeypatch, tmp_path, *, task_text="hi", owner_mode="low
     def evidence(account, window):
         fp = ce.route_fingerprint(provider="claudexor", model=MODEL, base_url="", options=options(account))
         return SimpleNamespace(route_fp=fp, status="confirmed" if window else "unprobeable",
-                               stale=False, window_tokens=window, source_id="codex", source="advertised",
+                               stale=False, window_tokens=window, source_id="codex",
+                               source="local_health" if account in holds_reply else "advertised",
                                credential_profile_id=account, account_fingerprint=f"fingerprint-{account[-1]}")
 
     def route(task, **_kw):  # the account a production rebind asks for: explicit, the role's pin, or observed
@@ -584,8 +651,9 @@ def test_a_fallback_and_its_return_resend_the_shown_history_byte_for_byte_on_the
 
     payloads = [payload for payload, _key in gateway.uploads]
     assert text == "Primary answered after return." and len(payloads) == len(gateway.creates) == 3
+    # A round's frame: the line its request is admitted at (a stated total less the reply floor) plus the reply reserve.
     assert [row["physical_context"]["capacity_total_tokens"] for row in attempt_rows_in_start_order(ctx.drive_root)] == [
-        width[primary], width[fallback], width[primary]]
+        width[name] - 8_192 + roomy.output_reserve_tokens for name in (primary, fallback, primary)]
     for earlier, later in zip(payloads, payloads[1:]):
         assert earlier["messages"][-1]["content"].startswith(CLOCK_NOTE_PREFIX)
         assert later["messages"][:len(earlier["messages"]) - 1] == earlier["messages"][:-1]  # resent, then appended
@@ -624,10 +692,11 @@ def _unfolded(plan, addressed, message):
     # form (F5a, F6a, F7a, F8a) has no whole text of its own: it is a form of elements already addressed
 
 
-def _shown_low(main_call, monkeypatch, tmp_path, cut):
+def _shown_low(main_call, monkeypatch, tmp_path, cut, holds_reply=True):
     """The owner's Low view on account-a, with the window or the Low target setting its one start budget
     (``budget``: this room's retold records about five times as long):
-    ``(ctx, tools, events, windows, built)``. Account-b reports a 100,000-token window."""
+    ``(ctx, tools, events, windows, built)``. Account-b reports a 100,000-token window that holds the reply too
+    (``holds_reply``: False for one whose total nothing has proved)."""
     from ouroboros.memory_view import snapshot_json
     from ouroboros.tool_policy import initial_tool_schemas
     from tests import _memory_view_synthetic as syn
@@ -636,7 +705,8 @@ def _shown_low(main_call, monkeypatch, tmp_path, cut):
     if cut == "budget":
         actor = dataclasses.replace(actor, room={**actor.room, "legacy": syn.room("1", legacy=23, legacy_chars=40_000)[
             "legacy"]})
-    ctx, _gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, view=snapshot_json(actor))
+    ctx, _gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, view=snapshot_json(actor),
+                                                          holds_reply=("account-b", "account-c") if holds_reply else ())
     windows.update({"account-a": 150_000 if cut == "window" else 1_000_000, "account-b": 100_000})
     built = plan(windows["account-a"])
     assert built.initial_mode == "low" and built.low_projection.memory_facts["floor"]["by_budget"] > 0
@@ -733,11 +803,14 @@ def test_a_second_narrowing_in_nano_still_names_what_the_low_budget_took(main_ca
         assert ("context_fit_route_rebound", False) in kinds
     else:  # the same route refuses the request by 5,000 tokens
         window, fit = 100_000, loop._measure_round_main_fit(ctx, automatic_pass_used=False)
-        assert _coarsen_memory_view(ctx, fit, saving=5_000) is True  # the floor's memory step, sized by the refusal
+        # The move to Nano already took its work room from memory's detail (every form it had on this small
+        # window), so the floor's memory step has nothing left to give and says so; the pass's other steps pay.
+        assert _coarsen_memory_view(ctx, fit, saving=5_000) is False
     after = ctx.context_fit_plan
     floor = after.projection("nano").memory_facts["floor"]
     assert ctx.active_context_mode == "nano" and ctx.messages[0] == after.projection("nano").system_message()
-    assert addressed < _addressed(after, "nano") and not _unfolded(after, addressed, ctx.messages[0])
+    assert (addressed < _addressed(after, "nano")) is (second == "tighter_account")
+    assert not _unfolded(after, addressed, ctx.messages[0])
     assert floor["by_budget"] == by_budget and floor["target_tokens"] == OWNER_LOW_TARGET_TOKENS
     sent = json.dumps(ctx.messages[0], ensure_ascii=False)
     assert (f"Nano cuts for the window ({window} tokens) and the Low mode budget (250000 tokens)."
@@ -783,7 +856,7 @@ def test_an_owner_max_task_in_task_local_low_rebinds_a_fallback_and_its_return_f
     from tests import _memory_view_synthetic as syn
 
     ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, owner_mode="max",
-                                                         view=snapshot_json(syn.actor("main")))
+                                                         view=snapshot_json(syn.actor("main")), holds_reply=("account-b",))
     _unobserved_upstream(monkeypatch)
     # The primary holds the Low view it shows with room for this scenario's turns. Every request carries the real
     # tool schemas, so the window is measured from them: their growth must never decide what a return re-cuts.
@@ -894,21 +967,26 @@ def test_an_actual_refusal_narrows_memory_even_when_the_estimate_fits(tmp_path, 
 
 def test_memory_pays_a_presend_overflow_it_can_answer_and_max_keeps_its_books(main_call, monkeypatch, tmp_path):
     """06.11, the other side of the low fold below: when memory's detail can pay what the owner's words passed the
-    window by (20,000, the numbers that lowered the books before memory paid in the first pass), memory alone
-    narrows and Max keeps its whole books (29.10)."""
+    window's send ceiling by (20,000 past the stated number less the reply floor), memory alone narrows and Max
+    keeps its whole books (29.10)."""
+    from ouroboros.context_budget import NANO_MIN_HEADROOM_TOKENS
     from ouroboros import memory_floor as mf
     from ouroboros.memory_view import snapshot_json
     from ouroboros.tool_policy import initial_tool_schemas
     from tests import _memory_view_synthetic as syn
 
+    # A memory whose detail holds more than the pass must shed: the reply reserve the wall restores, the 20,000 and
+    # the return-after-fold eighth.
+    memory = syn.snapshot(room_facts=syn.room("1", legacy=23, legacy_chars=8_400, lane2=19), story=syn.pages(40, 20_000),
+                          conversations=[syn.conversation(i) for i in range(12)], mark_count=12)
     ctx, gateway, tools, events, plan, windows = _native(main_call, monkeypatch, tmp_path, owner_mode="max",
-                                                         view=snapshot_json(syn.actor("main")), books=120_000)
+                                                         view=snapshot_json(memory), books=120_000)
     roomy = plan(10_000_000)
     full = roomy.projected_tokens_with_tools("max", initial_tool_schemas(tools, context_mode="max"))
     windows["account-a"] = window = math.ceil((full + roomy.output_reserve_tokens) * 4 / 3) + 4_000
     built = plan(window)
     words = "Owner, while you worked: keep the old API alive. "
-    owner = {"role": "user", "content": words * math.ceil((window - full - roomy.output_reserve_tokens + 20_000) * 4 / len(words))}
+    owner = {"role": "user", "content": words * math.ceil((window - full - NANO_MIN_HEADROOM_TOKENS + 20_000) * 4 / len(words))}
     ctx.messages[:] = [*built.messages_for("max"), owner]
     gateway.results = [_answer(ROUTE, {"role": "assistant", "content": "Kept."})]
     gateway.dispatch = ["response_received"]
@@ -939,13 +1017,14 @@ def test_a_presend_low_fold_keeps_every_address_narrowed_from_the_max_view(
     built = plan(window)
     assert built.initial_mode == "max" and not built.projection("max").memory_facts["floor"]["steps"]  # startup: whole
     words = "Owner, while you worked: keep the old API alive. "
-    # The owner's words pass the window by 90,000: more than my memory's detail can give (06.11: memory pays in the
+    # The owner's words pass the line this request is admitted at (the stated window less the reply floor) by
+    # 90,000: more than my memory's detail can give (06.11: memory pays in the
     # first pass), so its floor lowers the books itself, the physical fact BIBLE P1 names; no second pass runs.
-    owner = {"role": "user", "content": words * math.ceil((window - full - roomy.output_reserve_tokens + 90_000) * 4 / len(words))}
+    owner = {"role": "user", "content": words * math.ceil((window - full - 8_192 + 90_000) * 4 / len(words))}
     ctx.messages[:] = [*built.messages_for("max"), owner]
     full_low = built.reproject_transcript(ctx.messages, "low")
     assert context_fit.estimate_context_prompt_tokens(full_low, initial_tool_schemas(tools, context_mode="low")) + \
-        built.output_reserve_tokens <= window  # after dropping books the original, uncut memory would fit
+        8_192 <= window  # after dropping books the original, uncut memory would be admitted
     first = copy.deepcopy(ctx.messages)
     gateway.results = [_answer(ROUTE, {"role": "assistant", "content": "Kept."})]
     gateway.dispatch = ["response_received"]
@@ -1084,13 +1163,19 @@ def test_a_window_bounded_chosen_read_survives_next_host_rows_and_source_shrink(
     assert len(originals) == 1 and len(path.read_text()) < 100
     assert any(str(row.get("content", "")).startswith("[CONTEXT_FACTS]") for row in sent["messages"])
     assert any(str(row.get("content", "")).startswith(CLOCK_NOTE_PREFIX) for row in sent["messages"])
-    delivery = trace["tool_result_delivery"][0]
+    deliveries = trace.get("tool_result_delivery") or []
     active_window = windows[sent["account"]["profileId"]]
-    assert bounded_prompt_tokens_for_payload(sent, 0) + usage["_context_response_reserve_tokens"] < active_window
-    assert delivery["whole_tokens"] + delivery["reserve_tokens"] > window
+    # The delivery sizes a chosen body against the line this request is admitted at (the stated window less the reply
+    # floor; Nano's reserve is that floor). On the 300K window the bounded view fills it, so the host rows added after
+    # it pass that line and the candidate recovers before the send, as it always did; on the 400K window the whole
+    # body and those rows fit under it: the delivery is complete (it leaves no receipt) and nothing is refused.
+    assert bounded_prompt_tokens_for_payload(sent, 0) + 8_192 <= active_window
+    assert bool(deliveries) is (window < 400_000)
+    assert all(row["whole_tokens"] + row["reserve_tokens"] > window for row in deliveries)
     assert not usage.get(REFUSED_INPUTS_KEY)
     assert gateway.uploads[0][0]["account"] == {"mode": "pin", "profileId": "account-a"}
-    assert any(row.get("checkpoint_kind") == "context_fit_refused" for row in _drained(events))
+    refused = any(row.get("checkpoint_kind") == "context_fit_refused" for row in _drained(events))
+    assert refused is (window < 400_000)
 
 
 def test_a_chosen_read_on_an_unknown_window_stays_whole_after_an_unmeasured_engine_refusal(

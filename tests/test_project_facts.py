@@ -176,8 +176,9 @@ def test_generic_tools_deny_project_store_live(tmp_path, monkeypatch):
      "journal_read(project_id='proj_x', source='reflections') reads it", "it writes it"),
     ("projects/proj_x/knowledge/notes/arch.md",
      "knowledge_read(topic='notes/arch', scope='project:proj_x') reads it and "
-     "knowledge_write(topic='notes/arch', scope='project:proj_x', content=..., expected_revision=...) writes it; "
-     "expected_revision is the revision knowledge_read returned", "root task"),
+     "knowledge_write(topic='notes/arch', scope='project:proj_x', mode=..., content=..., expected_revision=...) writes "
+     "it (edit changes exact text, append adds at the end, overwrite replaces it); expected_revision is the revision "
+     "knowledge_read returned", "root task"),
     ("projects/proj_x/knowledge/patterns.md", "Topic 'patterns' is global-only", "topic='patterns', scope="),
     ("projects/proj_x/knowledge/overview.md", "never this project copy; knowledge_list(scope='project:proj_x') may "
      "still list it", "topic='overview', scope="),
@@ -245,11 +246,15 @@ def test_project_knowledge_hints_match_what_the_knowledge_tools_address(tmp_path
     (cfg.DATA_DIR / "memory" / "knowledge" / "patterns.md").write_text("GLOBAL PATTERNS\n", encoding="utf-8")
     ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=cfg.DATA_DIR)
 
-    assert "expected_revision=" in project_store_access_block("projects/proj_x/knowledge/arch.md")
-    assert "revision_required" in _knowledge_write(ctx, "arch", "NEW\n", scope="project:proj_x")
+    hint = project_store_access_block("projects/proj_x/knowledge/arch.md")
+    assert "mode=..." in hint and "expected_revision=" in hint  # the call the hint names chooses its operation
+    assert _knowledge_write(ctx, "arch", "NEW\n", scope="project:proj_x").startswith("⚠️ TOOL_ARG_ERROR: mode is missing")
+    assert "revision_required" in _knowledge_write(ctx, "arch", "NEW\n", mode="overwrite", scope="project:proj_x")
+    assert (shelf / "arch.md").read_text(encoding="utf-8") == "PROJECT NOTE\n"
     read = _knowledge_read(ctx, "arch", scope="project:proj_x")
     revision = json.loads(read.split("\n", 1)[0].removeprefix("[Knowledge source] "))["revision"]
-    assert _knowledge_write(ctx, "arch", "NEW\n", scope="project:proj_x", expected_revision=revision).startswith("✅")
+    assert _knowledge_write(ctx, "arch", "NEW\n", mode="overwrite", scope="project:proj_x",
+                            expected_revision=revision).startswith("✅")
     assert (shelf / "arch.md").read_text(encoding="utf-8") == "NEW\n"
 
     assert "global-only" in project_store_access_block("projects/proj_x/knowledge/patterns.md")

@@ -200,7 +200,7 @@ test('a row with the re-check mark and the roster\'s own switch take the same ow
     assert.equal(isOn(delegation), false);
     assert.equal(page.container.querySelector(`[data-setting-row="${KEY}"]`).querySelector('[data-setting-result]').textContent,
         'Saved · applies to new tasks');
-    assert.equal(page.container.querySelector('[data-review-pool-stays]').textContent, 'Helpers are off; agents marked Reviewer still review.');
+    assert.equal(page.container.querySelector('[data-review-pool-stays]').textContent, 'Subagents are off; agents marked Reviewer still review.');
 });
 
 test('the agent page owns the second-check binding and releases it when left', async (t) => {
@@ -376,7 +376,7 @@ test('a new agent is an unsaved form whose on/off is a field of it; its Save add
     assert.deepEqual(page.opened, ['agents']);
 });
 
-test('Helpers may change files is a strip over the stored spelling: Auto is the unset value, and a receipt reads back in its words', async (t) => {
+test('Subagents may change files is a strip over the stored spelling: Auto is the unset value, and a receipt reads back in its words', async (t) => {
     const page = await open(t);
     const fold = page.container.querySelector('[data-agents-fold]');
     const row = fold.querySelector('[data-setting-row="OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS"]');

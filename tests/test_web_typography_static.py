@@ -270,6 +270,15 @@ FOCUS_FILES = ROOT_CONSUMERS
 FOCUS_TOKENS = ("var(--focus-accent-border)", "var(--focus-accent-ring)")
 
 
+# A selector that only REACTS to another element's keyboard focus paints no focus of its own: the ring is on the
+# focused element's own selector, named here beside it. The Pin of a Project row hides the row's time while it has
+# keyboard focus, so the time never shows through the Pin that stands in its place.
+FOCUS_REACTIONS = {
+    "web/style.css: .nav-project-pin:focus-visible ~ .nav-project-row .nav-project-time":
+        "web/style.css: .nav-project-pin:focus-visible",
+}
+
+
 def test_every_focus_visible_selector_gets_the_canonical_ring() -> None:
     """Keyboard focus has ONE appearance (docs/DESIGN.md 'Focus'): the
     `--focus-accent-border` outline (or the field idiom's
@@ -280,8 +289,10 @@ def test_every_focus_visible_selector_gets_the_canonical_ring() -> None:
     The unit is the SELECTOR, not the block: the sanctioned hybrid pattern
     keeps shared hover/focus paint in one rule (no ring) and puts the ring in a
     dedicated `:focus-visible` rule beside it, so a selector passes when ANY of
-    its blocks names a focus token. The exception allowlist is empty — a
-    legitimate exception must be added here with its justification."""
+    its blocks names a focus token. The one kind of exception is a selector that
+    reacts to another element's focus (`FOCUS_REACTIONS`): it passes only while
+    the focused element's own selector is ringed, and an entry no sheet holds
+    any more fails."""
     per_selector: dict[str, list[bool]] = {}
     for rel in FOCUS_FILES:
         source = _decommented(_read(rel))
@@ -293,8 +304,13 @@ def test_every_focus_visible_selector_gets_the_canonical_ring() -> None:
                     continue
                 per_selector.setdefault(f"{rel}: {selector}", []).append(has_token)
     assert per_selector, "no :focus-visible rules found; is the parse broken?"
+    stale = sorted(set(FOCUS_REACTIONS) - set(per_selector))
+    assert not stale, f"FOCUS_REACTIONS names selectors no sheet holds: {stale}"
+    unfocused = sorted(s for s, ringed in FOCUS_REACTIONS.items() if not any(per_selector.get(ringed, [])))
+    assert not unfocused, f"the element these selectors react to has no ring of its own: {unfocused}"
     unringed = sorted(
-        selector for selector, hits in per_selector.items() if not any(hits)
+        selector for selector, hits in per_selector.items()
+        if not any(hits) and selector not in FOCUS_REACTIONS
     )
     assert not unringed, (
         "these :focus-visible selectors never name var(--focus-accent-border) "

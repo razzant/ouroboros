@@ -364,10 +364,12 @@ def resolve_commit_review_reference(ctx: ToolContext, reference: Any, *, state: 
         raise ValueError("review_reference belongs to another task or repository")
     if reference.get("tool_name") not in {"commit_reviewed", "vcs_commit_reviewed"} or type(reference.get("attempt")) is not int:
         raise ValueError("review_reference has no exact commit attempt")
-    from ouroboros.tools.review_change_custody import commit_reference_source, stripped_source_bound
+    from ouroboros.tools.review_change_custody import advisers_alone_reference, commit_reference_source, stripped_source_bound
     state = state if locked else _load_state_unlocked(pathlib.Path(ctx.drive_root), strict_attempt_authority=True)
     source = commit_reference_source(ctx, reference, state, state.latest_attempt_for(  # an evicted free row: its record
         repo_key=repo_key, task_id=reference["task_id"], tool_name=reference["tool_name"], attempt=reference["attempt"]), locked=locked)
+    if source is not None and not cyber_review_authority() and advisers_alone_reference(ctx, source, locked=locked):
+        raise ValueError("the returned review seated additional reviewers only (Cyber Pro): outside Cyber Pro it is not a review to continue")
     if (source is None or source.phase not in {"review_only", "late_wait"}
             or not source.pre_review_fingerprint or source.pre_review_fingerprint != reference.get("pre_review_fingerprint")
             or (source.raw_stripped and not stripped_source_bound(ctx, source, locked=locked))):
@@ -445,38 +447,6 @@ def _record_commit_attempt(
         tool_name = _current_review_tool_name(ctx)
         task_id = str(getattr(ctx, "task_id", "") or "")
 
-        _findings_for_attempt = critical_findings
-        if status == "blocked" and critical_findings and block_reason != "owner_stopped":  # no model after a stop
-            try:
-                from ouroboros.tools.review_synthesis import synthesize_to_canonical_issues
-                from ouroboros.review_state import load_state as _ls_synth
-                _state_snap = _ls_synth(dr)
-                _open_obs = _state_snap.get_open_obligations(repo_key=repo_key)
-                _findings_for_attempt = synthesize_to_canonical_issues(
-                    list(critical_findings),
-                    open_obligations=_open_obs,
-                    ctx=ctx,
-                )
-            except Exception as _synth_exc:  # the findings stay as reviewers wrote them
-                log.debug("review_synthesis: pre-lock synthesis skipped: %s", _synth_exc)
-
-        # C9.3: resolve semantic-dedup redirects for free-text (bug_*/risk_*) obligations
-        # from a PRE-LOCK snapshot — the light-model call must stay OUTSIDE the review
-        # state lock. Fail-open: any failure yields no redirect (a finding opens a new
-        # obligation) and never blocks the gate. Only blocked attempts mint obligations.
-        _obligation_redirects: Dict[str, str] = {}
-        if status == "blocked" and _findings_for_attempt and block_reason != "owner_stopped":
-            try:
-                from ouroboros.review_state import (
-                    compute_obligation_semantic_redirects,
-                    load_state as _ls_dedup,
-                )
-                _obligation_redirects = compute_obligation_semantic_redirects(
-                    _ls_dedup(dr), _findings_for_attempt, repo_key=repo_key, drive_root=dr
-                )
-            except Exception as _dedup_exc:  # no redirect: a finding opens its own obligation
-                log.debug("obligation semantic dedup skipped: %s", _dedup_exc)
-
         from ouroboros.tools.review_change_custody import continued_attempt, late_write_check
         outlived = late_write_check(ctx, phase if status == "reviewing" else "", review_record_id, triad_raw_results, scope_raw_result)
 
@@ -536,7 +506,7 @@ def _record_commit_attempt(
                 duration_sec=duration_sec,
                 task_id=task_id,
                 critical_findings=_list_or_default(
-                    _findings_for_attempt,
+                    critical_findings,
                     list(getattr(existing, "critical_findings", []) or []),
                 ),
                 repo_key=repo_key,
@@ -608,7 +578,7 @@ def _record_commit_attempt(
             if status != "reviewing" and "late_result_pending" not in legacy_kwargs and cyber_review_authority():
                 attempt.late_result_pending = bool(getattr(existing, "late_result_pending", False)) or _attempt_has_active_review_custody(attempt)
             stamp_paid_review_owner(attempt, paid=bool(paid) or bind_owner)
-            state.record_attempt(attempt, semantic_redirects=_obligation_redirects)
+            state.record_attempt(attempt)
 
         update_state(dr, _mutate)
 
@@ -641,8 +611,8 @@ def _record_commit_attempt(
                                 "parent_task_id": str(getattr(ctx, "parent_task_id", "") or ""),
                             },
                             latest_attempt,
-                            latest_state.get_open_obligations(repo_key=repo_key),
                             source=source,
+                            earlier_open_obligations=latest_state.earlier_open_obligations(repo_key),
                         )
                         if continuation is not None:
                             save_review_continuation(dr, continuation, expect_task_id=task_id)
@@ -701,15 +671,17 @@ def _check_overlapping_review_attempt(ctx: ToolContext) -> Optional[str]:
         from ouroboros.review_state_custody import _attempt_review_roster_rows
 
         expired = state.expire_stale_attempts(now_ts=_utc_now())
-        rows = [
-            item for item in state.get_active_attempts(repo_key=repo_key)
-            if item.tool_name in REVIEWED_MUTATIVE_TOOLS
-            and counted_pending(_attempt_review_roster_rows(item), pending=True)
-        ]
-        return ReviewStateMutation(rows, changed=bool(expired))
+        open_rows = [item for item in state.get_active_attempts(repo_key=repo_key) if item.tool_name in REVIEWED_MUTATIVE_TOOLS]
+        rows = [item for item in open_rows if counted_pending(_attempt_review_roster_rows(item), pending=True)]
+        # Advisers alone (Cyber Pro) hold no overlap, yet their open operations are still this round's paid custody:
+        # only the exact same request rejoins them (``exact_open_peer``), never a counted one.
+        alone = [item for item in open_rows if item not in rows and _attempt_review_roster_rows(item)
+                 and all(row.get("additional") or (row.get("review_plan") or {}).get("additional")
+                         for row in _attempt_review_roster_rows(item))]
+        return ReviewStateMutation((rows, alone), changed=bool(expired))
 
     try:
-        active_attempts = update_state(pathlib.Path(ctx.drive_root), _mutate)
+        active_attempts, advisers_alone = update_state(pathlib.Path(ctx.drive_root), _mutate)
     except Exception as e:
         log.warning("Failed to check overlapping review attempts: %s", e)
         if cyber_review_authority():
@@ -731,7 +703,9 @@ def _check_overlapping_review_attempt(ctx: ToolContext) -> Optional[str]:
 
         # A round whose recorded continuation a crash left unprojected is this task's open work too: the staged
         # bytes decide whether this call rejoins it (``recorded_round_choice``), so no new attempt row opens first.
-        ctx._review_open_peers = decided_round_attempts(ctx, repo_key)
+        ctx._review_open_peers = [*decided_round_attempts(ctx, repo_key), *(
+            item for item in advisers_alone if item.task_id == str(getattr(ctx, "task_id", "") or "")
+            and item.tool_name == _current_review_tool_name(ctx) and item.review_retry_key)]
     if not active_attempts:
         return None
     task_id = str(getattr(ctx, "task_id", "") or "")
@@ -800,14 +774,14 @@ def exact_open_peer(ctx: ToolContext, commit_message: str, *, goal: str, scope: 
     """The caller's own open attempt whose exact identity this call repeats — the same staged
     bytes and intent under that attempt's own paid contract — or ``None``: a distinct candidate
     then gets its own panel and the open attempt keeps its custody, never blessing these bytes."""
-    from ouroboros.tools.parallel_review import _commit_review_retry_key
+    from ouroboros.tools.parallel_review import commit_round_keys
 
     current = getattr(ctx, "_current_review_contract_fingerprint", "")
     try:
         for peer in getattr(ctx, "_review_open_peers", None) or []:
             ctx._current_review_contract_fingerprint = str(peer.review_contract_fingerprint or current)
-            if _commit_review_retry_key(ctx, commit_message, goal=goal, scope=scope, review_rebuttal=review_rebuttal,
-                                        binding_fingerprint=fingerprint) == peer.review_retry_key:
+            if peer.review_retry_key in commit_round_keys(ctx, commit_message, goal=goal, scope=scope,
+                                                          review_rebuttal=review_rebuttal, binding_fingerprint=fingerprint):
                 return peer
     finally:
         ctx._current_review_contract_fingerprint = current

@@ -241,11 +241,21 @@ OUTPUT_OR_BODY_SIZE_MARKERS = (
 
 
 def output_or_body_size_message(text: Any) -> bool:
-    """True for output/body limits, excluding the combined input+output window."""
+    """True for output/body limits, excluding the combined input+output window.
+
+    A sentence that names ``max_tokens`` is about the window, not the output limit, when it counts the request's
+    input under the window it names and no reply above it (Anthropic's «input length and max_tokens exceed context
+    limit», vLLM's «'max_tokens' … is too large: R. … maximum context length is W tokens and your request has I input
+    tokens»): shrinking the input makes the unchanged reply fit. A reply above the window it names is an output limit."""
     low = str(text or "").lower().replace("`", "")
     if "input length and max_tokens exceed context limit" in low:
         return False  # shrinking input can make the unchanged output reserve fit
-    return any(marker in low for marker in OUTPUT_OR_BODY_SIZE_MARKERS)
+    if not any(marker in low for marker in OUTPUT_OR_BODY_SIZE_MARKERS):
+        return False
+    from ouroboros.capability_evidence import _parse_ctx_requested
+
+    (stated_input, stated_reply, _), limit = _parse_ctx_requested(low), _parse_ctx_limit_number(low)
+    return not (limit and 0 < stated_input < limit and stated_reply < limit)
 
 
 # Limit phrases share their parser with recovery. Generic lengths require token

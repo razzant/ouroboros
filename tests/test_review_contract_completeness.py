@@ -1,8 +1,8 @@
 """Every text Ouroboros writes into a seat's request is in that wave's review contract, for the current owners.
 
 A public review of each surface runs twice on the golden offline seam over different authored inputs: subject,
-goal, scope, the author's questions and rebuttal, an earlier round, an open obligation, a paged session brief and
-a paged native opening. Each seat's requests are recorded as its own executor sends them (``_actual_sends``):
+goal, scope, the author's questions and rebuttal, an earlier round, a paged session brief and a paged native
+opening. Each seat's requests are recorded as its own executor sends them (``_actual_sends``):
 - a packet or native seat's ``chat`` messages at the transport, a native episode's later requests included;
 - an agent session's work order, instructions and schema as its executor composes them.
 
@@ -298,11 +298,8 @@ def _roots(root: Path) -> tuple:
 
 def _change_run(tmp_path: Path, monkeypatch, tag: str, *, conditional: bool) -> tuple:
     """Two rounds of one change over ``tag``'s data: the second round's sends per seat, the roots its lines may come
-    from, its authored values and its names. ``conditional`` holds an open obligation and pages the session seat's
-    brief and the native seat's opening."""
-    from ouroboros.review_state_model import AdvisoryReviewState
-    from ouroboros.review_state_records import ObligationItem
-
+    from, its authored values and its names. ``conditional`` pages the session seat's brief and the native seat's
+    opening."""
     ctx, project = _foreign_project(tmp_path / tag, monkeypatch)
     _commit_big_file(project)
     monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "unlimited")
@@ -317,17 +314,14 @@ def _change_run(tmp_path: Path, monkeypatch, tag: str, *, conditional: bool) -> 
     shared.git(project, "add", f"change_{tag}.py")
     ask = {"subject": "index", "goal": f"Bump for {tag}", "scope": f"app.py of {tag}"}
     assert run_review_change(ctx, **ask)["aggregate"] == "PASS"
-    obligation = {"obligation_id": f"obl-{tag}", "item": f"item_{tag}", "reason": f"still open in {tag}"}
     if conditional:
-        held = [ObligationItem(**obligation, severity="critical", source_attempt_ts="", source_attempt_msg="")]
-        monkeypatch.setattr(AdvisoryReviewState, "get_open_obligations", lambda self, repo_key=None: held)
         monkeypatch.setattr(review_brief_coupling, "SESSION_INLINE_DIFF_CEILING_CHARS", 1)
         monkeypatch.setattr(review_native_episode, "native_landing_at", lambda bound: 1)
     requests.clear()
     rebuttal, question = f"The answer of {tag}.", f"Does {tag} hold?"
     second = run_review_change(ctx, **ask, review_rebuttal=rebuttal, author_questions=[question])
     assert second["aggregate"] == "PASS" and second["reused"] is False, second
-    values = (ask["goal"], ask["scope"], rebuttal, question, *obligation.values(), f"change_{tag}.py", f"VALUE_{tag}",
+    values = (ask["goal"], ask["scope"], rebuttal, question, f"change_{tag}.py", f"VALUE_{tag}",
               *_roots(tmp_path / tag), tag)
     return dict(requests), (Path(ctx.system_repo_dir), project), values, ("project", *_tracked(project))
 
@@ -335,7 +329,7 @@ def _change_run(tmp_path: Path, monkeypatch, tag: str, *, conditional: bool) -> 
 @pytest.mark.parametrize("conditional", [False, True], ids=["plain", "conditional"])
 def test_every_line_a_change_seat_is_handed_is_in_its_contract(tmp_path, monkeypatch, conditional):
     """Packet ``t1``, writable agent session ``t2`` and native ``s1`` of a foreign project's change (the core layer), in a
-    later round with the author's rebuttal and questions; with an obligation held and both retrieving seats paged."""
+    later round with the author's rebuttal and questions; conditionally with both retrieving seats paged."""
     first, roots, values, names = _change_run(tmp_path, monkeypatch, "alpha", conditional=conditional)
     second, more, other, _names = _change_run(tmp_path, monkeypatch, "beta", conditional=conditional)
     written = _written(first, second, _corpus(*roots, *more), values=(values, other), names=names)

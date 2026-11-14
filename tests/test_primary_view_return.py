@@ -30,8 +30,8 @@ def routes(monkeypatch):
     """Each model's own window, as the route evidence states it."""
     monkeypatch.setattr(context, "_context_fit_route", lambda task, **_kw: (
         {"model": task["model"], "provider": "openrouter", "base_url": "", "use_local": False},
-        SimpleNamespace(status="confirmed", stale=False, window_tokens=WINDOWS[task["model"]],
-                        route_fp=f"{task['model']}-route")))
+        SimpleNamespace(status="confirmed", stale=False, window_tokens=WINDOWS[task["model"]], source="local_health",
+                        route_fp=f"{task['model']}-route")))  # a one-buffer total: the reply reserve is charged whole
 
 
 def _registry(tmp_path):
@@ -117,7 +117,8 @@ def _windows_by(monkeypatch, key, windows):
     """Route evidence whose window follows one task field: the model, or the role whose account serves it."""
     monkeypatch.setattr(context, "_context_fit_route", lambda task, **_kw: (
         {"model": task["model"], "provider": "openrouter", "base_url": "", "use_local": False},
-        SimpleNamespace(status="confirmed", stale=False, window_tokens=windows[task[key]], route_fp=task[key])))
+        SimpleNamespace(status="confirmed", stale=False, window_tokens=windows[task[key]], source="local_health",
+                        route_fp=task[key])))
 
 
 def _primary_on(model, tmp_path, monkeypatch):

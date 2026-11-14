@@ -1001,7 +1001,6 @@ def test_review_status_message_names_subject_binding_mismatch():
     message = _review_status_message({
         "selected_attempt": attempt,
         "effective_status": "stale",
-        "open_debts": [],
     })
     assert "review_subject_binding_mismatch" in message  # the typed token stays
     assert "not the tree this commit would write" in message

@@ -565,6 +565,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             showPane('list');
         }
         state.rootPath = data.root_path || state.rootPath;
+        if ((data.path || '.') !== state.path) listEl.scrollTop = listScroll = 0;  // another folder: from its first row
         state.path = data.path || '.';
         state.parentPath = data.parent_path || '.';
         state.entries = Array.isArray(data.entries) ? data.entries : [];

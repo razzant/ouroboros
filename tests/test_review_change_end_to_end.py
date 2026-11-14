@@ -3,6 +3,7 @@ The only brief differences are the narrative line in ``## Informational context 
 and the gate's test execution exhibit; a standalone operation has no execution fact."""
 
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -111,23 +112,25 @@ PRIOR_OBLIGATION = "ob-prior-round-7"
 
 
 def _seed_open_obligation(drive_root: Path, repo: Path) -> None:
-    """Seed an earlier open obligation in the durable state both doors read."""
-    from ouroboros.review_state import AdvisoryReviewState, ObligationItem, make_repo_key, save_state
+    """Seed the open obligation a body with Blocking left in the durable state both doors read."""
+    from ouroboros.review_state import make_repo_key
 
-    state = AdvisoryReviewState()
-    state.open_obligations.append(ObligationItem(
-        obligation_id=PRIOR_OBLIGATION, item="cross_module_bugs", severity="critical",
-        reason="the helper's callers were not re-read", source_attempt_ts="2026-10-01T00:00:00+00:00",
-        source_attempt_msg="fix: an earlier attempt", status="still_open", repo_key=make_repo_key(repo)))
-    save_state(drive_root, state)
+    (drive_root / "state").mkdir(parents=True, exist_ok=True)
+    (drive_root / "state" / "advisory_review.json").write_text(json.dumps({
+        "state_version": 3, "attempts": [], "next_obligation_seq": 8, "open_obligations": [{
+            "obligation_id": PRIOR_OBLIGATION, "item": "cross_module_bugs", "severity": "critical",
+            "reason": "the helper's callers were not re-read", "source_attempt_ts": "2026-10-01T00:00:00+00:00",
+            "source_attempt_msg": "fix: an earlier attempt", "status": "still_open",
+            "repo_key": make_repo_key(repo)}]}), encoding="utf-8")
 
 
 def test_the_public_builder_renders_the_brief_each_seat_was_sent(staged_body, tmp_path, monkeypatch):
     """``review_admission.build_two_part_brief`` is the one public builder of a seat's
     brief (step R; D5-004, D5-07): for the frozen subject and the intent of a wave it
     renders, byte for byte, the text the operation handed that seat at the delivery
-    boundary — the author's questions as the seat read them and the prior rounds with
-    the checkout's open obligations, through the owners the runtime itself renders with.
+    boundary — the author's questions as the seat read them and the prior rounds, never
+    an obligation the checkout stored earlier, through the owners the runtime itself
+    renders with.
 
     The builder takes as ARGUMENTS what a wave reads from its context; these, and only
     these, are where its text may differ from a wave's, and each is passed here as the
@@ -175,9 +178,9 @@ def test_the_public_builder_renders_the_brief_each_seat_was_sent(staged_body, tm
                                      commit_message=label, owner_words=owner_words_text(ctx),
                                      drive_root=ctx.drive_root, task_id=ctx.task_id)
         assert brief["parts"] == row["parts"], slot_id
-        # The builder's claim is not vacuous: the questions and the open obligation are in its text.
+        # The builder's claim is not vacuous: the questions are in its text; the stored obligation is not.
         asked = "Author questions (answer each as asked):\n1. " + QUESTIONS[0] + "\n2. " + QUESTIONS[1]
-        assert asked in brief["system"] and PRIOR_OBLIGATION in brief["system"], slot_id
+        assert asked in brief["system"] and PRIOR_OBLIGATION not in brief["system"], slot_id
         # ... and its text IS the text the seat was sent, byte for byte.
         given = by_seat[slot_id]
         if brief["parts"] == [PART_CHANGE]:  # a packet seat: the system blocks and the one user turn
@@ -277,7 +280,7 @@ def test_the_commit_panel_hears_any_enabled_catalog_row_as_an_added_critic(stage
             commit_gate.compose_commit_panel(ctx, names, REASON)
 
 
-def test_a_commit_panel_that_names_no_pool_seat_is_refused_before_anything_is_staged(staged_body, tmp_path, monkeypatch):
+def test_a_commit_panel_naming_an_unknown_row_is_refused_before_anything_is_staged(staged_body, tmp_path, monkeypatch):
     from tests.review_pool_rosters import pool_seat
 
     repo = Path(staged_body["repo"])
@@ -286,13 +289,69 @@ def test_a_commit_panel_that_names_no_pool_seat_is_refused_before_anything_is_st
     monkeypatch.setattr(substrate, "run_review_request", lambda *a, **k: pytest.fail("no wave may be paid"))
     ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "gate-drive")
     shared.git(repo, "reset", "-q", "HEAD")  # the index is the gate's to stage; here nothing may be
-    for args, fragment in (({"reviewers": ["scout"], "reason": REASON}, "from the review pool"),
-                           ({"reviewers": ["nobody"]}, "not an enabled catalog row")):
+    for args, fragment in (({"reviewers": ["nobody"]}, "not an enabled catalog row"),):
         result = git_mod._commit_reviewed(ctx, COMMIT_MESSAGE, **args)
         assert "TOOL_ARG_ERROR" in result and fragment in result and "Nothing was staged" in result, result
         assert shared.git(repo, "diff", "--cached", "--name-only") == ""
     schema = next(entry.schema for entry in git_mod.get_tools() if entry.name == "commit_reviewed")["parameters"]["properties"]
     assert schema["reviewers"]["type"] == "array" and schema["reason"]["type"] == "string"
+
+
+@pytest.mark.parametrize("named", [["scout"], ["s1", "scout"]])
+def test_a_cyber_pro_commit_hears_an_adviser_alone_without_a_pass_a_hold_or_later_authority(
+        staged_body, tmp_path, monkeypatch, named):
+    """#3194 on the commit gate: Cyber Pro may seat the adviser alone; its record forms no verdict and no
+    single-reviewer fact, its settled attempt holds nothing, and after a switch to Pro + Advisory its returned
+    reference cannot stand for the counted review an author continuation needs (a counted one passes that check
+    and meets the fixture's own release-metadata preflight next)."""
+    from tests.test_review_doctrine import _head, _reference
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    record, sent = _gate_with_critic(staged_body, tmp_path, monkeypatch, mode="cyber_pro", reviewers=named, reason=REASON)
+    assert sent == sorted(named)
+    alone = named == ["scout"]
+    assert (record["verdict"]["aggregate"], record["panel"]["seats"]) == (
+        ("NOT_PERFORMED", 0) if alone else ("PASS", 1)), record["verdict"]
+    if alone:
+        assert record["verdict"]["reason"] == "no_counted_reviewers" and record["verdict"]["per_row"] == {"scout": "PASS"}
+        assert "single_reviewer_no_diversity" not in record["verdict"]["degraded_reasons"]
+    ctx = ToolContext(repo_dir=Path(staged_body["repo"]), drive_root=tmp_path / "gate-drive", task_id="task-gate")
+    first = git_mod._commit_reviewed(ctx, COMMIT_MESSAGE, reviewers=named, reason=REASON)
+    assert "Review outcome returned before commit. " in first, "a settled adviser holds nothing"
+    reference, before = _reference(first), _head(ctx)
+    assert review_ledger.load_record(ctx.drive_root, reference["review_record_id"])["verdict"]["aggregate"] != (
+        "PASS" if alone else "")
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+    monkeypatch.setattr(git_mod, "get_runtime_mode", lambda: "pro")
+    landed = git_mod._commit_reviewed(ctx, COMMIT_MESSAGE, review_reference=reference, author_disposition={
+        "disposition": "accepted", "rationale": "The second opinion was enough."})
+    assert _head(ctx) == before  # this fixture's index lacks a VERSION bump: nothing lands either way
+    assert ("REVIEW_AUTHOR_CONTINUATION_INVALID" in landed and "additional reviewers only" in landed) is alone, landed
+
+
+@pytest.mark.parametrize("roster, alone", [
+    ([], False),  # a $0 or technical refusal with no roster: the author's acceptance stays theirs
+    ([{"slot_id": "s1", "status": "error"}], False),  # a counted seat that never answered
+    ([{"slot_id": "s1"}, {"slot_id": "scout", "review_plan": {"additional": True}}], False),  # mixed
+    ([{"slot_id": "scout", "review_plan": {"additional": True}}], True),
+    ([{"slot_id": "scout", "additional": True, "status": "not_dispatched"}], True),
+])
+def test_only_a_positively_advisers_alone_commit_reference_is_set_apart(tmp_path, roster, alone):
+    """The continuation check reads one positive fact (every seated row additional), never the mere absence of a
+    counted row: no new refusal of free, technical or unanswered reviews. A compacted row without its settled
+    record proves nothing either."""
+    from types import SimpleNamespace
+
+    from ouroboros.tools.review_change_custody import advisers_alone_reference
+
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path / "drive")
+    source = SimpleNamespace(triad_raw_results=roster, scope_raw_result={}, raw_stripped=False, review_record_id="")
+    assert advisers_alone_reference(ctx, source, locked=False) is alone
+    stripped = SimpleNamespace(triad_raw_results=[], scope_raw_result={}, raw_stripped=True, review_record_id="rl-gone",
+                               task_id="t", tool_name="commit_reviewed", pre_review_fingerprint="f", attempt=1)
+    assert advisers_alone_reference(ctx, stripped, locked=False) is False
+    assert advisers_alone_reference(ctx, stripped, locked=True) is False
 
 
 def test_a_new_round_of_the_same_index_is_a_new_physical_review_not_a_replay(staged_body, tmp_path, monkeypatch):
@@ -1017,3 +1076,340 @@ def test_the_commit_gate_judges_a_bound_candidate_by_the_serving_handbook_and_re
         if slot_id != "t1":  # the retrieving seats inline the serving constitution too
             assert SERVING_RULE in text, slot_id
     assert shared.git(serving, "status", "--porcelain") == ""
+
+
+def _adviser_pool(monkeypatch) -> None:
+    """The golden rows with ``t2`` left unticked: an enabled adviser, never in the counted pool."""
+    from tests.review_pool_rosters import pool_roster, pool_seat
+
+    set_review_pool(monkeypatch, pool_roster(
+        pool_seat("t1", "openai/gpt-5.6-sol", effort="high"),
+        pool_seat("t2", "codex=gpt-5.6-sol", kind="agent_session", profile_id="pinned", effort="high", marked=False),
+        pool_seat("s1", "openai/gpt-5.6-sol", delivery="native", effort="xhigh")))
+
+
+@pytest.mark.parametrize("collect", ["request", "reference"])
+def test_cyber_pro_hears_an_adviser_alone_in_its_own_round_beside_the_counted_pool(tmp_path, monkeypatch, collect):
+    """#3194. Outside Cyber Pro an advisers-only panel is refused at $0. In Cyber Pro it runs: its record
+    stays pending while the adviser's operation is open and then forms no verdict (NOT_PERFORMED,
+    ``no_counted_reviewers``) with the adviser's answer and asked questions kept. A counted request of the same
+    subject and brief never inherits that roster: it seats its pool at once under its own retry key and checkout.
+    The identical adviser request, or its review_reference, collects its own operation ($0) over its own frozen
+    files, and once every adviser answered, the identical request reads the settled record free."""
+    ctx, project = _foreign_project(tmp_path, monkeypatch)
+    _adviser_pool(monkeypatch)
+    (project / "app.py").write_text("VALUE = 2  # staged\n", encoding="utf-8")
+    shared.git(project, "add", "app.py")
+    sends: list[dict] = []
+    pending, starts = _pending_then_answering_seat("t2", "invocation-adviser")
+    read_at_collection: list[str] = []
+
+    def answer(request, slot, actor, *, retry_state, pending_invocation_checkpoint):
+        if slot.slot_id == "t2" and retry_state.get("pending_invocation_id") == "invocation-adviser":
+            read_at_collection.append((Path(request.session_root) / "app.py").read_text(encoding="utf-8"))
+        return pending(request, slot, actor, retry_state=retry_state, pending_invocation_checkpoint=pending_invocation_checkpoint)
+
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam(sends, answer=answer))
+    ask = dict(subject="index", goal="Bump", scope="app.py", reviewers=["t2"], reason="a second look only")
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+    with pytest.raises(review_change.ReviewChangeArgumentError, match="REVIEW_PANEL_EMPTY"):
+        run_review_change(ctx, **ask)
+    assert sends == []
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    first = run_review_change(ctx, **ask)
+    assert (first["state"], first["aggregate"]) == ("pending", "NOT_PERFORMED"), first
+    assert (first["panel"]["seats"], first["panel"]["additional"], first["quorum"]["assigned"]) == (0, ["t2"], 0)
+    assert [send["slot_id"] for send in sends] == ["t2"] and len(starts) == 1
+
+    counted = run_review_change(ctx, subject="index", goal="Bump", scope="app.py")
+    assert (counted["state"], counted["aggregate"], counted["reused"]) == ("settled", "PASS", False), counted
+    assert counted["record_id"] != first["record_id"] and counted["panel"]["seats"] == 2
+    assert sorted(send["slot_id"] for send in sends[1:]) == ["s1", "t1"], "the pool was seated, not the adviser"
+    assert not any(send["reconcile_only"] for send in sends[1:]) and sends[1]["retry_key"] != sends[0]["retry_key"]
+    assert review_ledger.load_record(ctx.drive_root, first["record_id"])["state"] == "pending"
+    adviser_checkout = Path(first["subject"]["checkout"])
+    assert adviser_checkout.is_dir() and adviser_checkout != Path(counted["subject"]["checkout"])
+    assert not Path(counted["subject"]["checkout"]).exists(), "the counted wave closed only its own checkout"
+
+    if collect == "request":
+        again = run_review_change(ctx, **ask)
+    else:
+        text = review_change._handle_review_change(ctx, review_reference=first["review_reference"])
+        again = json.loads(text[text.index("{"):])
+    assert (again["record_id"], again["state"], again["reused"]) == (first["record_id"], "settled", collect == "reference")
+    record = review_ledger.load_record(ctx.drive_root, first["record_id"])
+    assert (record["verdict"]["aggregate"], record["verdict"]["reason"]) == ("NOT_PERFORMED", "no_counted_reviewers")
+    assert record["verdict"]["per_row"] == {"t2": "PASS"} and record["rows"][0]["additional"] is True
+    assert record["brief"]["parts"] == ["change", "coupling"], "the questions the adviser was asked, never cleared"
+    assert len(sends) == 4 and sends[3]["slot_id"] == "t2" and sends[3]["reconcile_only"] is True
+    assert sends[3]["retry_key"] == sends[0]["retry_key"], "the adviser's own operation was collected"
+    assert sends[3]["session_root"] == str(adviser_checkout) and read_at_collection == ["VALUE = 2  # staged\n"]
+    if collect == "request":  # a reference collection leaves the round's checkout to the maintenance prune, as for any
+        assert not adviser_checkout.exists(), "its custody closed with its collection"
+
+    repeat = run_review_change(ctx, **ask)
+    assert (repeat["record_id"], repeat["reused"], repeat["aggregate"]) == (first["record_id"], True, "NOT_PERFORMED")
+    assert len(sends) == 4, "an exact repeat of a complete advisers-only wave buys nothing"
+    assert not [row for row in _paid_rows(ctx.drive_root, project) if row.late_result_pending]
+
+
+def test_disabled_adviser_rejoins_its_own_pending_round(tmp_path, monkeypatch):
+    """A roster change cannot strand an already-paid advisers-only operation."""
+    from tests.review_pool_rosters import pool_roster, pool_seat
+
+    ctx, project = _foreign_project(tmp_path, monkeypatch)
+    _adviser_pool(monkeypatch)
+    (project / "app.py").write_text("VALUE = 2  # staged\n", encoding="utf-8")
+    shared.git(project, "add", "app.py")
+    sends: list[dict] = []
+    pending, starts = _pending_then_answering_seat("t2", "invocation-disabled-adviser")
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam(sends, answer=pending))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    ask = dict(subject="index", goal="Bump", scope="app.py", reviewers=["t2"], reason="a second look only")
+
+    first = run_review_change(ctx, **ask)
+    assert first["state"] == "pending" and len(starts) == 1
+    set_review_pool(monkeypatch, pool_roster(pool_seat("t1", "openai/gpt-5.6-sol", effort="high")))
+    again = run_review_change(ctx, **ask)
+    assert again["record_id"] == first["record_id"]
+    assert again["state"] == "settled" and again["aggregate"] == "NOT_PERFORMED"
+    assert len(sends) == 2 and sends[1]["reconcile_only"] is True
+    assert sends[1]["retry_key"] == sends[0]["retry_key"]
+    assert len(starts) == 1
+
+
+def test_disabled_adviser_rejoin_matches_the_requested_round_when_prefixes_overlap(tmp_path, monkeypatch):
+    """A disabled selector cannot collect a newer adviser round with a broader roster."""
+    from tests.review_pool_rosters import pool_roster, pool_seat
+
+    ctx, project = _foreign_project(tmp_path, monkeypatch)
+    set_review_pool(monkeypatch, pool_roster(
+        pool_seat("t1", "openai/gpt-5.6-sol", effort="high"),
+        pool_seat("t2", "codex=gpt-5.6-sol", kind="agent_session", profile_id="pinned", effort="high", marked=False),
+        pool_seat("t3", "openai/gpt-5.6-sol", effort="high", marked=False),
+    ))
+    (project / "app.py").write_text("VALUE = 2  # staged\n", encoding="utf-8")
+    shared.git(project, "add", "app.py")
+    sends: list[dict] = []
+    pending, starts = _pending_then_answering_seat("t2", "invocation-overlapping-adviser")
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam(sends, answer=pending))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    first_ask = dict(subject="index", goal="Bump", scope="app.py", reviewers=["t2"], reason="a second look only")
+    broader_ask = dict(subject="index", goal="Bump", scope="app.py", reviewers=["t2", "t3"], reason="a second look only")
+
+    first = run_review_change(ctx, **first_ask)
+    broader = run_review_change(ctx, **broader_ask)
+    assert first["state"] == broader["state"] == "pending"
+    assert first["record_id"] != broader["record_id"]
+    assert [send["slot_id"] for send in sends] == ["t2", "t2"]
+    assert broader["panel"]["additional"] == ["t2", "t3"]
+
+    set_review_pool(monkeypatch, pool_roster(pool_seat("t1", "openai/gpt-5.6-sol", effort="high")))
+    collected = run_review_change(ctx, **first_ask)
+    assert collected["record_id"] == first["record_id"]
+    assert collected["aggregate"] == "NOT_PERFORMED"
+    assert sends[-1]["slot_id"] == "t2" and sends[-1]["reconcile_only"] is True
+    assert len(starts) == 2
+
+
+@pytest.mark.parametrize("change", ["untick", "disable"])
+def test_unticking_a_reviewer_while_its_counted_round_runs_collects_that_round_never_an_adviser_wave(
+        tmp_path, monkeypatch, change):
+    """Regression control for the advisers' own round: a counted round of a named request still running is collected
+    by the same request after the owner unticks (or disables) that row, under its recorded counted roster; no adviser
+    wave is bought."""
+    from tests.review_pool_rosters import pool_roster, pool_seat
+
+    ctx, project = _foreign_project(tmp_path, monkeypatch)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    (project / "app.py").write_text("VALUE = 2  # staged\n", encoding="utf-8")
+    shared.git(project, "add", "app.py")
+    sends: list[dict] = []
+    answer, _starts = _pending_then_answering_seat("t2", "invocation-counted")
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam(sends, answer=answer))
+    ask = dict(subject="index", goal="Bump", scope="app.py", reviewers=["t2"], reason="the session seat")
+    first = run_review_change(ctx, **ask)
+    assert first["state"] == "pending" and first["panel"]["seats"] == 1 and [s["slot_id"] for s in sends] == ["t2"]
+
+    if change == "untick":
+        _adviser_pool(monkeypatch)  # t2 unticked while its counted operation runs
+    else:
+        set_review_pool(monkeypatch, pool_roster(pool_seat("t1", "openai/gpt-5.6-sol", effort="high")))
+    again = run_review_change(ctx, **ask)
+    assert (again["record_id"], again["state"], again["aggregate"]) == (first["record_id"], "settled", "PASS"), again
+    assert len(sends) == 2 and sends[1]["reconcile_only"] is True and sends[1]["retry_key"] == sends[0]["retry_key"]
+    assert again["panel"]["seats"] == 1 and again["panel"]["additional"] == []
+
+
+def _receptive_author(ctx: ToolContext) -> ToolContext:
+    """The gate's author with a continuation owner (``review_pause.receptive_binding``): its subject is frozen in the
+    round's own isolated checkout, which open custody keeps after the call returns."""
+    from ouroboros.task_results import write_task_result
+
+    write_task_result(ctx.drive_root, ctx.task_id, "running", chat_id=7)
+    ctx.task_attempt, ctx.current_task_type, ctx._loop_mailbox_seen_ids = 1, "task", set()
+    ctx.owner_wait_callback = lambda *_a, **_k: "parked"
+    return ctx
+
+
+@pytest.mark.parametrize("author, collect", [("synchronous", "request"), ("synchronous", "reference"),
+                                             ("receptive", "request"), ("receptive", "reference"),
+                                             ("review_only", "request")])  # the operator lane returns no reference
+def test_a_cyber_pro_commit_adviser_still_running_keeps_its_own_round_beside_the_counted_pool(
+        staged_body, tmp_path, monkeypatch, collect, author):
+    """#3194 on the commit gate, the reachable chain the shared composer opens: Cyber Pro seats the session adviser
+    ``t2`` alone; it is still running when the author asks the pool for the same staged bytes and intent. The counted
+    request seats its pool at once under its own retry key (``parallel_review._commit_review_retry_key``) and, for a
+    receptive author, its own frozen checkout, never collecting or replacing the adviser's paid operation; the
+    identical adviser request later collects that operation at $0 over the adviser's own retained checkout, never a
+    second start (its returned review_reference reads the settled record back without touching that custody)."""
+    from tests._review_change_fixtures import returned_reference
+
+    _adviser_pool(monkeypatch)
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    monkeypatch.setattr(git_mod, "get_runtime_mode", lambda: "cyber_pro")
+    sends: list[dict] = []
+    pending, starts = _pending_then_answering_seat("t2", "invocation-commit-adviser")
+    read_at_collection: list[str] = []
+
+    def answer(request, slot, actor, *, retry_state, pending_invocation_checkpoint):
+        if slot.slot_id == "t2" and retry_state.get("pending_invocation_id") == "invocation-commit-adviser":
+            note = Path(request.session_root or ".") / "docs" / "new_note.md"
+            read_at_collection.append(note.read_text(encoding="utf-8") if note.is_file() else "")
+        return pending(request, slot, actor, retry_state=retry_state, pending_invocation_checkpoint=pending_invocation_checkpoint)
+
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam(sends, answer=answer))
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "5")
+    ctx = ToolContext(repo_dir=Path(staged_body["repo"]), drive_root=tmp_path / "gate-drive", task_id="task-gate")
+    receptive = author == "receptive"
+    if receptive:
+        _receptive_author(ctx)
+    staged_note = shared.git(Path(staged_body["repo"]), "show", ":docs/new_note.md") + "\n"
+    ask = dict(goal=GOAL, scope=SCOPE, reviewers=["t2"], reason=REASON)
+
+    def call(**args):  # the commit tool, or the operator's review-only lane (``scripts/run_external_review.py``)
+        if author == "review_only":
+            return _run_non_committing_review_cycle(ctx, COMMIT_MESSAGE, skip_advisory_review=True, **args)
+        return git_mod._commit_reviewed(ctx, COMMIT_MESSAGE, **args)
+
+    first = call(**ask)
+    assert [send["slot_id"] for send in sends] == ["t2"] and len(starts) == 1, first
+    adviser_key, adviser_root = sends[0]["retry_key"], Path(sends[0]["session_root"] or ".")
+    checkouts = ctx.drive_root / "state" / CHECKOUT_SUBDIR
+    if receptive:  # frozen in the adviser round's own checkout, kept by its open custody
+        assert adviser_root.is_relative_to(checkouts) and adviser_root.is_dir(), adviser_root
+        assert (adviser_root / "docs" / "new_note.md").read_text(encoding="utf-8") == staged_note
+
+    counted = call(goal=GOAL, scope=SCOPE)
+    assert sorted(send["slot_id"] for send in sends[1:]) == ["s1", "t1"], counted
+    assert {send["retry_key"] for send in sends[1:]} != {adviser_key}
+    assert not any(send["reconcile_only"] for send in sends[1:]), "the pool was seated, the adviser not collected"
+    if receptive:
+        [counted_root] = {Path(send["session_root"]) for send in sends[1:] if send["session_root"]}
+        assert counted_root.is_relative_to(checkouts) and counted_root != adviser_root
+        assert not counted_root.exists(), "the settled counted wave closed only its own checkout"
+        assert (adviser_root / "docs" / "new_note.md").read_text(encoding="utf-8") == staged_note, "the adviser's stays"
+
+    if collect == "reference":  # its settled record is read back at $0; the operation stays in its own custody
+        read = git_mod._commit_reviewed(ctx, review_reference=returned_reference(first))
+        assert '"aggregate": "NOT_PERFORMED"' in read and "no new reviewer was sent" in read and len(sends) == 3, read
+        assert not receptive or adviser_root.is_dir(), "the read-back leaves the adviser's custody and checkout"
+    again = call(**ask)
+    later = sends[3:]
+    assert [send["slot_id"] for send in later] == ["t2"] and later[0]["reconcile_only"] is True, (again, later)
+    assert later[0]["retry_key"] == adviser_key and len(starts) == 1, "its own operation, never a second start"
+    if receptive:  # the late collection read the adviser's frozen files where its operation left them
+        assert later[0]["session_root"] == str(adviser_root) and read_at_collection == [staged_note]
+        assert not adviser_root.exists(), "its custody closed with its collection"
+    from ouroboros.review_state import load_state
+    assert [a.paid for a in load_state(ctx.drive_root).attempts if a.review_retry_key == adviser_key].count(True) == 1
+    record = review_ledger.load_record(ctx.drive_root, first["review_record_id"] if author == "review_only"
+                                       else returned_reference(first)["review_record_id"])
+    assert [(row["seat_id"], row["status"]) for row in record["rows"]] == [("t2", "responded")], record["rows"]
+    assert (record["verdict"]["aggregate"], record["verdict"]["reason"]) == ("NOT_PERFORMED", "no_counted_reviewers")
+
+
+@pytest.mark.parametrize("change", ["untick", "disable"])
+@pytest.mark.parametrize("author", ["synchronous", "receptive", "review_only"])
+def test_a_commit_round_counted_at_its_start_is_collected_after_its_reviewer_is_unticked(
+        staged_body, tmp_path, monkeypatch, author, change):
+    """The commit gate's regression control for the advisers' own retry key: ``t2`` counted when its round started
+    and still running; the owner unticks it, so the identical request now names an adviser alone. A synchronous
+    author's commit call collects the open round with its recorded panel. A receptive author's round is frozen, so
+    its call composes the adviser alone and collects the open counted round through ``exact_open_peer``; the
+    review-only lane (``_run_non_committing_review_cycle``) composes before its overlap check, so its resumed round
+    is matched on the same counted key (``parallel_review.commit_round_keys``). The record keeps the counted roster;
+    nobody buys an advisers-only wave. A disabled row: the synchronous commit call collects likewise; a call that
+    composes first refuses it at $0 (nothing staged or sent), and the omitted panel collects the round."""
+    from tests.review_pool_rosters import pool_roster, pool_seat
+
+    set_review_pool(monkeypatch, pool_roster(
+        pool_seat("t1", "openai/gpt-5.6-sol", effort="high"),
+        pool_seat("t2", "codex=gpt-5.6-sol", kind="agent_session", profile_id="pinned", effort="high")))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    monkeypatch.setattr(git_mod, "get_runtime_mode", lambda: "cyber_pro")
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "5")  # a wrongly bought wave would not be refused by the cap
+    sends: list[dict] = []
+    answer, starts = _pending_then_answering_seat("t2", "invocation-commit-counted")
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam(sends, answer=answer))
+    ctx = ToolContext(repo_dir=Path(staged_body["repo"]), drive_root=tmp_path / "gate-drive", task_id="task-gate")
+    if author == "receptive":
+        _receptive_author(ctx)
+
+    def call(**args):
+        if author == "review_only":
+            return str(_run_non_committing_review_cycle(ctx, COMMIT_MESSAGE, skip_advisory_review=True, **args))
+        return git_mod._commit_reviewed(ctx, COMMIT_MESSAGE, **args)
+
+    ask = dict(goal=GOAL, scope=SCOPE, reviewers=["t2"], reason=REASON)
+    first = call(**ask)
+    assert [send["slot_id"] for send in sends] == ["t2"] and len(starts) == 1, first
+    round_root = sends[0]["session_root"]
+    if change == "untick":
+        _adviser_pool(monkeypatch)
+    else:
+        set_review_pool(monkeypatch, pool_roster(pool_seat("t1", "openai/gpt-5.6-sol", effort="high")))
+    again = call(**ask)
+    if change == "disable" and author != "synchronous":
+        assert "REVIEWER_UNKNOWN" in again and "Nothing was staged" in again and len(sends) == 1, again
+        again = call(goal=GOAL, scope=SCOPE)
+    assert [send["slot_id"] for send in sends[1:]] == ["t2"] and sends[1]["reconcile_only"] is True, (again, sends)
+    assert sends[1]["retry_key"] == sends[0]["retry_key"] and len(starts) == 1
+    assert sends[1]["session_root"] == round_root, "collected over the round's own reading root"
+    from ouroboros.review_state import load_state
+    assert sum(row.paid for row in load_state(ctx.drive_root).attempts) == 1, "no advisers-only wave was bought"
+    [paid] = [row for row in load_state(ctx.drive_root).attempts if row.paid]
+    record = review_ledger.load_record(ctx.drive_root, paid.review_record_id)
+    assert (record["verdict"]["aggregate"], record["panel"]["assigned"], record["panel"]["additional"]) == (
+        "PASS", ["t2"], []), "the collected round keeps its counted roster"
+
+
+def test_the_commit_round_identity_sets_advisers_alone_apart_and_lets_them_collect_a_counted_round(tmp_path):
+    """The identity owner (``parallel_review._commit_review_retry_key``) and its frozen-checkout reader
+    (``commit_gate.exact_open_peer``): a panel of advisers alone names its own round, a counted or omitted panel the
+    shared one; an advisers-only request still rejoins its intent's open counted round, a counted request never an
+    advisers-only round."""
+    from types import SimpleNamespace
+
+    from ouroboros.tools.commit_gate import exact_open_peer
+    from ouroboros.tools.parallel_review import _commit_review_retry_key
+
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path / "drive")
+    intent = dict(goal=GOAL, scope=SCOPE, review_rebuttal="")
+
+    def key(panel):
+        ctx._commit_review_panel = panel
+        return _commit_review_retry_key(ctx, COMMIT_MESSAGE, binding_fingerprint="fp", **intent)
+
+    alone = {"seats": 0, "additional": ["t2"], "additional_seats": 1}
+    counted = key(None)
+    assert counted == key({"seats": 1, "additional": ["t2"]}) == key({"seats": 2, "additional": []})
+    assert key(alone) not in {counted, key({"seats": 0, "additional": ["t3"], "additional_seats": 1})}
+    assert key(alone).startswith("commit_review:"), "the custody layer keys commit cycles by this prefix"
+    open_counted, open_alone = (SimpleNamespace(review_retry_key=k, review_contract_fingerprint="") for k in (counted, key(alone)))
+    for panel, peers, found in ((alone, [open_counted], open_counted), (alone, [open_alone], open_alone),
+                                (None, [open_alone], None), (None, [open_counted], open_counted)):
+        ctx._commit_review_panel, ctx._review_open_peers = panel, peers
+        assert exact_open_peer(ctx, COMMIT_MESSAGE, fingerprint="fp", **intent) is found
