@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { PAGES, ZONES, pageById, pageLabel, pagesInZone, renderNavRow, renderNavRows, renderProjectsHeader } from '../modules/pages.js';
+import { PAGES, ZONES, pageById, pageLabel, pagesInZone, renderNavRow, renderNavRows, renderProjectsHeader, measureNavTools } from '../modules/pages.js';
 import { PAGE_ICONS, SHELL_ICONS } from '../modules/page_icons.js';
 import { statusMarkHtml } from '../modules/status_mark.js';
 
@@ -72,4 +72,43 @@ test('the Projects header is the New project button alone, with the shell\'s plu
     const shell = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
     const section = shell.match(/<section id="nav-projects"[^>]*>/)?.[0] || '';
     assert.match(section, / aria-label="Projects"/);
+});
+
+test('section columns follow the widest translated word, font and available width', async () => {
+    const callbacks = [], events = new Map(), properties = new Map();
+    let disposed = 0, fontReady;
+    class Observer {
+        constructor(callback) { callbacks.push(callback); }
+        observe() {}
+        disconnect() { disposed++; }
+    }
+    const labels = [40, 28, 32, 48, 62, 49].map(width => ({ width }));
+    const rows = labels.map(label => ({ querySelector: selector => selector === 'svg'
+        ? { getBoundingClientRect: () => ({ width: 16 }) } : label }));
+    const doc = { documentElement: {}, fonts: { ready: new Promise(resolve => { fontReady = resolve; }),
+        addEventListener: (name, fn) => events.set(name, fn), removeEventListener: name => events.delete(name) },
+        createRange: () => ({ selectNodeContents(label) { this.label = label; }, getBoundingClientRect() { return { width: this.label.width }; } }),
+        defaultView: { ResizeObserver: Observer, MutationObserver: Observer,
+            getComputedStyle: () => ({ columnGap: '6px', paddingLeft: '12px', paddingRight: '12px' }) } };
+    const nav = { ownerDocument: doc, children: rows, style: { setProperty: (key, value) => properties.set(key, value) } };
+    const dispose = measureNavTools(nav);
+    const columns = width => Math.floor((width - 24) / parseFloat(properties.get('--nav-tool-min')));
+    assert.equal(columns(354), 3);
+    assert.equal(columns(280), 2);
+    labels[4].width = 130;
+    callbacks.forEach(fn => fn()); // translated text / a resized sidebar / Interface size
+    assert.equal(columns(354), 2);
+    assert.equal(columns(280), 1);
+    labels[4].width = 90;
+    fontReady();
+    await Promise.resolve();
+    assert.equal(columns(354), 2, 'font completion measures the new glyph advances');
+    labels[4].width = 150;
+    events.get('loadingdone')();
+    assert.equal(columns(280), 1);
+    dispose();
+    assert.equal(events.size, 0);
+    assert.ok(disposed >= 2);
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.match(css, /grid-template-columns:\s*repeat\(auto-fit,\s*minmax\(min\(100%,\s*var\(--nav-tool-min(?:, 100%)?\)\),\s*1fr\)\)/);
 });

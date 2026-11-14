@@ -40,7 +40,7 @@ import { getInterfaceSize } from './modules/interface_size.js';
 import { initDashboard } from './modules/dashboard.js';
 import { initStorage } from './modules/storage.js';
 import { SHELL_ICONS } from './modules/page_icons.js';
-import { renderNavRows, renderProjectsHeader } from './modules/pages.js';
+import { renderNavRows, renderProjectsHeader, measureNavTools } from './modules/pages.js';
 import { renderPageHeader } from './modules/page_header.js';
 import { createRoomHeader, panicButtonHtml } from './modules/chat_header.js';
 import { isCoarsePointer, isStackLayout, measurePinnedBars, onLayoutChange, pinchMagnified, roomCoversMain } from './modules/layout.js';
@@ -113,6 +113,7 @@ primarySidebar?.querySelector('.sidebar-head')?.insertAdjacentHTML('beforeend', 
 // The tools stand at the column's bottom edge, three to a line (two in the phone drawer), above the version (owner
 // 12.11, the fifth round).
 primarySidebar?.querySelector('.sidebar-foot-meta')?.insertAdjacentHTML('beforebegin', `<div class="nav-tools">${renderNavRows('foot')}</div>`);
+measureNavTools(primarySidebar?.querySelector('.nav-tools'));
 measurePinnedBars(primarySidebar);  // a short window's row scroll margin under its pinned head and foot
 // A short window scrolls the whole column: rows that wait past a pinned bar fade under it (style.css), as the list's do.
 if (primarySidebar) bindScrollFade(primarySidebar);
