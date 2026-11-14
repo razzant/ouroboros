@@ -130,9 +130,23 @@ def test_the_lifecycle_job_keeps_the_witness_and_its_base_run_after_an_earlier_r
     assert upload["if"] == "always()"
 
 
+def test_the_base_replay_checks_its_commit_out_with_git_never_through_tar():
+    """The first native run never started the base replay: Git Bash's GNU tar unquoted ``-C "$RUNNER_TEMP/quit-base"``
+    (``D:\\a\\_temp`` reached it as ``D:<BEL>\\_temp``). Native Git checks the named commit out itself, outside the
+    candidate's tree, on every runner."""
+    path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "claudexor-platform-gate.yml"
+    steps = yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]["lifecycle"]["steps"]
+    run = next(step for step in steps if step.get("name", "").startswith("The same scenario on the named base"))["run"]
+    commands = "\n".join(line for line in run.splitlines() if not line.lstrip().startswith("#"))
+    checkout = 'git worktree add --detach "$RUNNER_TEMP/quit-base" "$BASE_SHA"'
+    assert checkout in commands and "tar " not in commands and "git archive" not in commands, run
+    assert commands.index(checkout) < commands.index('--checkout "$RUNNER_TEMP/quit-base"'), run
+
+
 def test_the_gate_reaches_the_launcher_modules_and_windows_runs_the_real_job_test_without_a_skip(tmp_path):
-    """Every launcher module the Quit touches triggers the gate; on Windows the lifecycle job runs the native real-Job
-    retirement test, whose two cases must pass: a skip or a missing case is red, never a native PASS."""
+    """Every launcher module the Quit touches, and the platform modules its Job drain reads through, triggers the gate;
+    on Windows the lifecycle job runs the native real-Job retirement test, whose two cases must pass: a skip or a
+    missing case is red, never a native PASS."""
     import fnmatch
 
     workflow = yaml.safe_load((Path(__file__).resolve().parents[1] / ".github" / "workflows"
@@ -140,7 +154,8 @@ def test_the_gate_reaches_the_launcher_modules_and_windows_runs_the_real_job_tes
     for event in ("push", "pull_request"):
         paths = workflow[True][event]["paths"]  # YAML 1.1 reads the key ``on`` as True
         for module in ("launcher.py", "ouroboros/launcher_background.py", "ouroboros/launcher_tray_macos.py",
-                       "ouroboros/launcher_onboarding.py", "ouroboros/launcher_server_reaper.py"):
+                       "ouroboros/launcher_onboarding.py", "ouroboros/launcher_server_reaper.py",
+                       "ouroboros/platform_process_target.py", "ouroboros/platform_win32_abi.py"):
             assert any(fnmatch.fnmatchcase(module, pattern) for pattern in paths), (event, module)
     steps = workflow["jobs"]["lifecycle"]["steps"]
     native = next(step for step in steps if "test_windows_retirement_returns_only_after_its_real_job_members_are_gone"
@@ -192,7 +207,8 @@ def test_every_substituted_name_is_one_the_real_lifecycle_loop_calls():
 _STUB_SERVER = r'''
 import json, os, pathlib, sys, threading
 root, pid = pathlib.Path(os.environ["OUROBOROS_WITNESS_ROOT"]), os.getpid()
-(root / "generations" / f"{pid}.json").write_text(json.dumps({"pid": pid}))
+(root / "generations" / f"{pid}.tmp").write_text(json.dumps({"pid": pid}))
+os.replace(root / "generations" / f"{pid}.tmp", root / "generations" / f"{pid}.json")  # never read half-written
 stop = threading.Event()
 def pipe():
     for line in sys.stdin:
@@ -258,6 +274,67 @@ def test_a_launcher_without_a_substituted_name_is_refused_before_any_generation(
     assert driver.wait(120) != 0
     assert not list(root.glob("generations/*.json"))
     assert "launcher seams missing" in (tmp_path / "launcher-process.log").read_text(encoding="utf-8")
+
+
+# A child started where the first generation's start runs ``git rev-parse HEAD`` (``checkout_sha``), default stdin.
+_STDIN_AT_CHECKOUT_SHA = r'''
+import json, os, pathlib, subprocess, sys
+from ouroboros import launcher_bootstrap
+_checkout_sha = launcher_bootstrap.checkout_sha
+def checkout_sha(repo_dir):
+    try:
+        child = subprocess.run([sys.executable, "-c", "import sys; print(repr(sys.stdin.buffer.read()))"],
+                               capture_output=True, text=True, timeout=10)
+        seen = child.stdout.strip()
+    except subprocess.TimeoutExpired:
+        seen = "blocked on the witness control pipe"
+    (pathlib.Path(os.environ["OUROBOROS_WITNESS_ROOT"]) / "child-stdin.json").write_text(json.dumps(seen))
+    return _checkout_sha(repo_dir)
+launcher_bootstrap.checkout_sha = checkout_sha
+'''
+
+
+def test_a_child_the_launcher_starts_reads_end_of_file_never_the_witness_control_pipe(tmp_path):
+    """The first native run never saw a generation (generation_not_ready, seen=[]) and recorded no stack. One
+    unmeasured candidate: the first start's ``checkout_sha`` runs ``git rev-parse HEAD`` on the driver's stdin, the
+    control pipe its main thread blocks reading, which can strand Windows Git (``server_process.watch_launcher_stop``
+    keeps the server's own pipe private for that reason). A child started at that call, with default stdin, reads
+    end-of-file at once."""
+    driver, root = _driver(tmp_path, prefix=_STDIN_AT_CHECKOUT_SHA)
+    try:
+        _generations(root, 1, driver)
+        driver.stdin.write("quit\n")
+        driver.stdin.flush()
+        assert driver.wait(120) == 0
+    finally:
+        if driver.poll() is None:
+            driver.kill()
+            driver.wait(30)
+    assert json.loads((root / "child-stdin.json").read_text(encoding="utf-8")) == "b''"
+
+
+_HUNG_START = r'''
+import threading
+import launcher
+def hung_start_agent(port=0):  # a generation start that never returns
+    threading.Event().wait()
+launcher.start_agent = hung_start_agent
+'''
+
+
+def test_a_generation_that_never_becomes_ready_fails_with_every_launcher_stack(tmp_path):
+    """A missing generation names where the launcher waits: before failing, the witness asks its driver for every
+    thread's stack and keeps it in the failure's facts."""
+    driver, root = _driver(tmp_path, prefix=_HUNG_START)
+    try:
+        with pytest.raises(witness.SmokeFailure) as failed:
+            witness._next_generation(root, set(), driver, seconds=3)
+    finally:
+        driver.kill()
+        driver.wait(30)
+    assert failed.value.code == "generation_not_ready" and failed.value.facts["seen"] == []
+    stacks = failed.value.facts["launcher_stacks"]
+    assert "hung_start_agent" in stacks and "agent_lifecycle_loop" in stacks, stacks
 
 
 def test_cleanup_reaches_every_root_and_process_after_a_failed_step(tmp_path, monkeypatch):

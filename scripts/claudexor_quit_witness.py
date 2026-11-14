@@ -205,10 +205,24 @@ def harness_identity(root, engine, project, home):
 # before any generation starts: the real sync must never run (tests bind these names to agent_lifecycle_loop).
 SEAMS = {"sync_existing_repo_from_bundle": None, "install_deps": True, "launcher_sources_changed": False}
 
-# The target checkout's launcher process. main() binds the lifecycle thread to Quit the same way.
+# The target checkout's launcher process. main() binds the lifecycle thread to Quit the same way. The witness's
+# control pipe stays this driver's own, as the server keeps its launcher pipe (``watch_launcher_stop``: an inherited
+# control pipe can strand Windows Git at boot): a private non-inheritable reader, and null stdin in both native tables
+# for every child the launcher starts. The first native run's missing generation recorded no stack; ``stacks`` does.
 _LAUNCHER = r'''
-import json, pathlib, sys, threading
+import faulthandler, json, os, pathlib, sys, threading
 root, repo, stub = (pathlib.Path(arg) for arg in sys.argv[1:4])
+control = os.dup(0)
+os.set_inheritable(control, False)
+with open(os.devnull, "rb", buffering=0) as empty:
+    os.dup2(empty.fileno(), 0)
+if sys.platform == "win32":
+    import ctypes, msvcrt
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.SetStdHandle.argtypes, kernel.SetStdHandle.restype = (ctypes.c_uint32, ctypes.c_void_p), ctypes.c_int
+    if not kernel.SetStdHandle(-10, msvcrt.get_osfhandle(0)):
+        raise ctypes.WinError(ctypes.get_last_error())
+control = os.fdopen(control, "r", encoding="utf-8")
 import launcher
 seams, calls = SEAMS, {}
 missing = sorted(name for name in seams if not callable(getattr(launcher, name, None)))
@@ -226,9 +240,13 @@ lifecycle = threading.Thread(target=launcher.agent_lifecycle_loop, args=(0,), da
 if hasattr(launcher, "_quit"):
     launcher._quit.lifecycle = lifecycle
 lifecycle.start()
-for line in sys.stdin:
+for line in control:
     if line.strip() == "recycle":
         launcher._request_agent_restart()
+    elif line.strip() == "stacks":  # every thread's stack, for a generation that never became ready
+        with open(root / "launcher-stacks.tmp", "w", encoding="utf-8") as stacks:
+            faulthandler.dump_traceback(stacks, all_threads=True)
+        os.replace(root / "launcher-stacks.tmp", root / "launcher-stacks.txt")
     elif line.strip() == "quit":
         break
 launcher._headless_signal_handler(15, None)
@@ -513,7 +531,24 @@ def _next_generation(root, seen, driver, seconds=600):
                 return facts
         require(driver.poll() is None, "launcher_exited_early", exit_code=driver.returncode)
         time.sleep(0.2)
-    raise SmokeFailure("generation_not_ready", "no new generation became ready", seen=sorted(seen))
+    raise SmokeFailure("generation_not_ready", "no new generation became ready", seen=sorted(seen),
+                       launcher_stacks=_launcher_stacks(root, driver))
+
+
+def _launcher_stacks(root, driver, seconds=30):
+    """Every launcher thread's stack, asked of its driver: a generation that never became ready names its wait."""
+    answer = root / "launcher-stacks.txt"
+    try:
+        driver.stdin.write("stacks\n")
+        driver.stdin.flush()
+    except (OSError, ValueError) as exc:
+        return f"not asked ({type(exc).__name__}: {exc})"
+    deadline = time.monotonic() + seconds
+    while not answer.is_file():
+        if driver.poll() is not None or time.monotonic() >= deadline:
+            return f"no answer (launcher exit {driver.poll()})"
+        time.sleep(0.2)
+    return answer.read_text(encoding="utf-8", errors="replace")
 
 
 def tool_identity(path):

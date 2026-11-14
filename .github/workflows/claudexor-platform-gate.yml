@@ -94,6 +94,8 @@ on:
       - 'ouroboros/claudexor_runtime.py'
       - 'ouroboros/claudexor_runtime_pin.json'
       - 'ouroboros/platform_layer.py'
+      - 'ouroboros/platform_process_target.py'
+      - 'ouroboros/platform_win32_abi.py'
       - 'ouroboros/tools/delegate.py'
       - 'ouroboros/tools/delegate_integration.py'
       - 'ouroboros/tools/subagent_integration.py'
@@ -131,6 +133,8 @@ on:
       - 'ouroboros/claudexor_runtime.py'
       - 'ouroboros/claudexor_runtime_pin.json'
       - 'ouroboros/platform_layer.py'
+      - 'ouroboros/platform_process_target.py'
+      - 'ouroboros/platform_win32_abi.py'
       - 'ouroboros/tools/delegate.py'
       - 'ouroboros/tools/delegate_integration.py'
       - 'ouroboros/tools/subagent_integration.py'
@@ -294,8 +298,8 @@ jobs:
           BASE_SHA: ${{ inputs.quit_witness_base }}
         run: |
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          mkdir -p "$RUNNER_TEMP/quit-base"
-          git archive "$BASE_SHA" | tar -x -C "$RUNNER_TEMP/quit-base"
+          # Native Git checks the base out: Git Bash's GNU tar unquoted -C "$RUNNER_TEMP/..." (D:\a\_temp became D:<BEL>\_temp).
+          git worktree add --detach "$RUNNER_TEMP/quit-base" "$BASE_SHA"
           py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
           "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" -- "$py" scripts/claudexor_quit_witness.py \
             --checkout "$RUNNER_TEMP/quit-base" --expect hold --quit-seconds 30 \

@@ -9,6 +9,7 @@ server's session, and their exit is disclosed as unconfirmed, never inferred. Th
 holder/rename witness is ``scripts/claudexor_quit_witness.py``.
 """
 import atexit
+import io
 import logging
 import os
 import signal
@@ -60,7 +61,7 @@ class _Job:
         self._end("close")
         return ""
 
-    def query(self, job):
+    def query(self, job, held=None):
         return self.running
 
 
@@ -79,7 +80,7 @@ def test_every_windows_retirement_empties_its_job_before_closing_it(stops, monke
     quit_.windows = True
     if quitting:
         quit_.requested.set()
-    monkeypatch.setattr(reaper._pl, "job_has_running_member", job.query)
+    monkeypatch.setattr(reaper._pl, "job_members_running", job.query)
     quit_.retire("job", terminate=job.terminate, close=job.close)
     assert events == ["terminate", "member gone", "close"] and not quit_._gaps
     assert quit_.stop_engine(server_stopped=True) == ("stopped" if quitting else "not_requested")
@@ -93,9 +94,9 @@ def test_an_unconfirmed_job_drain_still_closes_and_is_disclosed(stops, monkeypat
     quit_ = reaper.QuitEngineStop()
     quit_.windows, quit_.CONFIRM_SEC = True, 0.2
     if failure == "unreadable":
-        monkeypatch.setattr(reaper._pl, "job_has_running_member", lambda job: 1 / 0)
+        monkeypatch.setattr(reaper._pl, "job_members_running", lambda job, held: 1 / 0)
     else:
-        monkeypatch.setattr(reaper._pl, "job_has_running_member", job.query)
+        monkeypatch.setattr(reaper._pl, "job_members_running", job.query)
     close = (lambda handle: 1 / 0) if failure == "close" else job.close
     quit_.retire("job", terminate=job.terminate, close=close)
     assert events[0] == "terminate" and (failure == "close" or events[-1] == "close")
@@ -113,7 +114,7 @@ def test_an_unconfirmed_drain_is_logged_when_it_happens_even_without_a_quit(stop
     job = _Job([], die_after=None)
     quit_ = reaper.QuitEngineStop()
     quit_.windows, quit_.CONFIRM_SEC = True, 0.1
-    monkeypatch.setattr(reaper._pl, "job_has_running_member", job.query)
+    monkeypatch.setattr(reaper._pl, "job_members_running", job.query)
     with caplog.at_level(logging.WARNING, logger=reaper.__name__):
         quit_.retire("job", terminate=job.terminate, close=job.close)
         quit_.retire("job", terminate=job.terminate, close=job.close)
@@ -148,7 +149,7 @@ def test_a_generation_that_exited_by_panic_is_retired_without_waiting(windows_la
     events = world.events
     job = _Job(events, die_after=None)  # a member that would never confirm its exit
     world.install(job)
-    monkeypatch.setattr(reaper._pl, "job_has_running_member", lambda handle: pytest.fail("Panic waited on its Job"))
+    monkeypatch.setattr(reaper._pl, "job_members_running", lambda *_: pytest.fail("Panic waited on its Job"))
     world.proc.returncode = world.launcher.PANIC_EXIT_CODE
     started = time.monotonic()
     assert world.launcher._retire_agent(world.proc, "agent_exit") is True
@@ -264,7 +265,7 @@ def windows_launcher(monkeypatch):
     def install(job):
         monkeypatch.setattr(launcher, "terminate_job", job.terminate)
         monkeypatch.setattr(launcher, "close_job", job.close)
-        monkeypatch.setattr(reaper._pl, "job_has_running_member", job.query)
+        monkeypatch.setattr(reaper._pl, "job_members_running", job.query)
 
     return SimpleNamespace(launcher=launcher, events=events, proc=proc, quit=quit_, install=install)
 
@@ -331,7 +332,7 @@ def test_windows_retirement_returns_only_after_its_real_job_members_are_gone(mon
             assert launcher.stop_agent() is True  # waits on the publication lock behind that retirement
         else:
             assert launcher._retire_agent(server, "agent_exit") is True
-        assert member.poll() is not None, "the retirement returned beside a live Job member"
+        assert member.poll() is not None, f"the retirement returned beside a live Job member (gaps: {quit_._gaps})"
         assert not quit_._gaps
         if concurrent:
             retirer.join(30)
@@ -339,6 +340,232 @@ def test_windows_retirement_returns_only_after_its_real_job_members_are_gone(mon
         if member.poll() is None:
             member.kill()
         member.wait(30)
+
+
+def test_a_held_job_member_counts_until_its_process_signals(monkeypatch):
+    """The read behind every Windows retirement (``job_members_running``), with the ABI faked on any host. The native
+    run above returned beside a live member, its cause unmeasured. Termination is asynchronous and only a process's
+    signal proves its end, so here the exit code is set and the Job's list empties first: the exit-code read says
+    empty, while a member held from before the terminate counts until its process signals."""
+    import ctypes
+
+    from ouroboros import platform_layer
+
+    class ProcessIdList(ctypes.Structure):  # the ABI layout (``platform_win32_abi``) on any host
+        _fields_ = [("NumberOfAssignedProcesses", ctypes.c_uint32), ("NumberOfProcessIdsInList", ctypes.c_uint32),
+                    ("ProcessIdList", ctypes.c_size_t * 1024)]
+
+    world = {"listed": [7], "members": {7}, "signalled": set(), "refused": {}, "error": 0, "closed": []}
+
+    def query(job, info_class, buffer, size, returned):
+        listed = buffer._obj
+        listed.NumberOfAssignedProcesses = listed.NumberOfProcessIdsInList = len(world["listed"])
+        for index, pid in enumerate(world["listed"]):
+            listed.ProcessIdList[index] = pid
+        return True
+
+    def open_process(access, inherit, pid):
+        assert access == 0x00101000, "SYNCHRONIZE and limited query only"
+        world["error"] = world["refused"].get(pid, 0)
+        return None if world["error"] else 1000 + pid
+
+    def in_job(handle, job, member):
+        member._obj.value = handle - 1000 in world["members"]
+        return True
+
+    monkeypatch.setattr(platform_layer, "ctypes", SimpleNamespace(
+        byref=ctypes.byref, sizeof=ctypes.sizeof, wintypes=SimpleNamespace(BOOL=ctypes.c_int),
+        get_last_error=lambda: world["error"]), raising=False)
+    monkeypatch.setattr(platform_layer, "_JOBOBJECT_BASIC_PROCESS_ID_LIST", ProcessIdList, raising=False)
+    monkeypatch.setattr(platform_layer, "_JOBOBJECTINFOCLASS_PROCESS_ID_LIST", 3, raising=False)
+    monkeypatch.setattr(platform_layer, "_windows_process_state", lambda pid: "exited")  # its exit code is set
+    monkeypatch.setattr(platform_layer, "_kernel32", SimpleNamespace(
+        QueryInformationJobObject=query, OpenProcess=open_process, IsProcessInJob=in_job,
+        WaitForSingleObject=lambda handle, ms: 0 if handle - 1000 in world["signalled"] else 0x102,
+        CloseHandle=lambda handle: world["closed"].append(handle) or True), raising=False)
+    held = {}
+    assert platform_layer.job_members_running("job", held) is True and held == {7: 1007}  # before the terminate
+    assert platform_layer.job_has_running_member("job") is False, "the exit-code read calls the exiting member gone"
+    world["listed"] = []  # terminated: off the Job's list as its last thread began to exit, not yet signalled
+    assert platform_layer.job_has_running_member("job") is False
+    assert platform_layer.job_members_running("job", held) is True, "a held member runs until its process signals"
+    world["signalled"].add(7)
+    assert platform_layer.job_members_running("job", held) is False
+    world.update(listed=[8, 9], refused={8: 87})  # 8 is gone; 9's PID now names a process outside the Job
+    assert platform_layer.job_members_running("job", held) is False and 9 not in held and 1009 in world["closed"]
+    world.update(listed=[10], refused={10: 5})
+    assert platform_layer.job_members_running("job", held) is None, "a member it may not open is unknown, never gone"
+    platform_layer.release_job_members(held)
+    assert held == {} and 1007 in world["closed"]
+
+
+def test_a_retirement_holds_its_members_before_the_terminate_and_releases_them_before_the_close(monkeypatch):
+    events, reads = [], []
+    job = _Job(events, die_after=0.05)
+
+    def read(handle, held):
+        reads.append((list(events), held))
+        held.setdefault(7, "member handle")
+        return job.query(handle, held)
+
+    monkeypatch.setattr(reaper._pl, "job_members_running", read)
+    monkeypatch.setattr(reaper._pl, "release_job_members", lambda held: events.append(("release", dict(held))))
+    quit_ = reaper.QuitEngineStop()
+    quit_.retire("job", terminate=job.terminate, close=job.close)
+    assert reads[0][0] == [] and len(reads) > 1, "the first read holds the members before the terminate"
+    assert all(held is reads[0][1] for _, held in reads), "one held map through the whole drain"
+    assert events == ["terminate", "member gone", ("release", {7: "member handle"}), "close"] and not quit_._gaps
+
+
+@pytest.fixture
+def win32_job(native_guard, monkeypatch):
+    """The real ``job_members_running`` over ``platform_layer``'s Job ABI faked on any host, behind ``native_guard``.
+    The Job lists ``listed``; its terminate delists every member at once, and a member's process signals on its
+    ``signals_after[pid]``-th wait after that terminate (``None``: never). ``events`` records every call in order."""
+    import ctypes
+
+    from ouroboros import platform_layer
+
+    class ProcessIdList(ctypes.Structure):  # the ABI layout (``platform_win32_abi``) on any host
+        _fields_ = [("NumberOfAssignedProcesses", ctypes.c_uint32), ("NumberOfProcessIdsInList", ctypes.c_uint32),
+                    ("ProcessIdList", ctypes.c_size_t * 1024)]
+
+    world = SimpleNamespace(listed=[7], refused={}, unreadable=set(), signals_after={7: 2}, terminated=False,
+                            error=0, events=[])
+
+    def query(job, info_class, buffer, size, returned):
+        world.events.append(("query", tuple(world.listed)))
+        listed = buffer._obj
+        listed.NumberOfAssignedProcesses = listed.NumberOfProcessIdsInList = len(world.listed)
+        for index, pid in enumerate(world.listed):
+            listed.ProcessIdList[index] = pid
+        return True
+
+    def open_process(access, inherit, pid):
+        world.error = world.refused.get(pid, 0)
+        world.events.append(("open", pid, world.error))
+        return None if world.error else 1000 + pid
+
+    def in_job(handle, job, member):
+        member._obj.value = True
+        return handle - 1000 not in world.unreadable  # an unreadable member: IsProcessInJob fails
+
+    def wait(handle, ms):
+        pid, left = handle - 1000, world.signals_after.get(handle - 1000)
+        if world.terminated and left is not None:
+            world.signals_after[pid] = left = left - 1
+        world.events.append(("wait", pid, 0 if world.terminated and left is not None and left <= 0 else 0x102))
+        return world.events[-1][2]
+
+    def terminate(job):
+        world.events.append(("terminate",))
+        world.terminated, world.listed = True, []
+        return ""
+
+    world.terminate, world.close = terminate, lambda job: world.events.append(("close",)) or ""
+    monkeypatch.setattr(platform_layer, "ctypes", SimpleNamespace(
+        byref=ctypes.byref, sizeof=ctypes.sizeof, wintypes=SimpleNamespace(BOOL=ctypes.c_int),
+        get_last_error=lambda: world.error), raising=False)
+    monkeypatch.setattr(platform_layer, "_JOBOBJECT_BASIC_PROCESS_ID_LIST", ProcessIdList, raising=False)
+    monkeypatch.setattr(platform_layer, "_JOBOBJECTINFOCLASS_PROCESS_ID_LIST", 3, raising=False)
+    monkeypatch.setattr(platform_layer, "_kernel32", SimpleNamespace(
+        QueryInformationJobObject=query, OpenProcess=open_process, IsProcessInJob=in_job, WaitForSingleObject=wait,
+        CloseHandle=lambda handle: world.events.append(("release", handle)) or True), raising=False)
+    return world
+
+
+UNREADABLE_BEFORE_TERMINATE = "a generation Job member was unreadable before its terminate"
+
+
+@pytest.mark.parametrize("listed,refused,unreadable,gap", [
+    ([7, 8], {8: 5}, set(), True),  # OpenProcess: ACCESS_DENIED, beside a held member that exits
+    ([7, 8], {}, {8}, True),  # IsProcessInJob unreadable, beside it
+    ([8], {8: 5}, set(), True),  # control: the unreadable member alone
+    ([7, 8], {8: 87}, set(), False),  # control: 8 is already gone (no such PID), nothing to await
+    ([7], {}, set(), False),  # control: every member held, then awaited
+], ids=["denied", "membership-unreadable", "only-unreadable", "gone", "held"])
+def test_a_member_never_held_stays_unconfirmed_though_every_held_one_exits(win32_job, listed, refused, unreadable,
+                                                                           gap):
+    """The real retirement over the real read. A member it could not hold before the terminate is no proof of an end:
+    once the Job's list is empty and the held member signals, its exit is still unknown, so the capture's gap stays
+    disclosed; another member's ``WAIT_TIMEOUT`` in the same read never hides it. Every handle opened is closed
+    before the Job."""
+    world = win32_job
+    world.listed, world.refused, world.unreadable, world.signals_after = list(listed), refused, unreadable, {7: 1}
+    quit_ = reaper.QuitEngineStop()
+    quit_.windows = True
+    quit_.retire("job", terminate=world.terminate, close=world.close)
+    events = world.events
+    assert quit_._gaps == ([UNREADABLE_BEFORE_TERMINATE] if gap else []), events
+    assert {event[1] for event in events[:events.index(("terminate",))] if event[0] == "open"} == set(listed)
+    opened = [1000 + event[1] for event in events if event[0] == "open" and not event[2]]
+    assert sorted(opened) == sorted(event[1] for event in events if event[0] == "release"), "every handle closed"
+    assert events.count(("close",)) == 1 and events[-1] == ("close",)
+    if 7 in listed:
+        assert events.index(("wait", 7, 0)) < events.index(("release", 1007)), "the held member was awaited"
+
+
+class _Lingering:
+    """A Windows server whose quit line's grace expires; it ends once its Job is terminated."""
+
+    pid = 4242
+
+    def __init__(self, world, code):
+        self.world, self.code, self.returncode, self.waits = world, code, None, 0
+        self.stdin, self.during_grace = io.BytesIO(), None
+
+    def wait(self, timeout=None):
+        self.waits += 1
+        if self.waits == 1 and self.during_grace is not None:
+            self.during_grace()
+        if self.waits == 1 or not self.world.terminated:
+            raise subprocess.TimeoutExpired("server", timeout)
+        self.returncode = self.code
+        return self.code
+
+    def poll(self):
+        return self.returncode
+
+
+@pytest.mark.parametrize("ending", ["signals later", "never signals", "panic exit", "retired meanwhile"])
+def test_a_forced_stop_holds_its_generations_members_before_its_first_terminate(win32_job, stops, monkeypatch,
+                                                                                caplog, ending):
+    """The real ``stop_agent`` past its grace on Windows. Its forced terminate is the generation's first: a member it
+    delists before any read was held is awaited all the same, by this stop's retirement or, when the lifecycle
+    retired the generation first, by that one; a member that never signals stays a gap the Quit discloses. Panic's
+    exit releases the held handle without waiting, and a retired generation's closed Job gets no later call."""
+    import launcher
+
+    world = win32_job
+    world.signals_after = {7: None if ending == "never signals" else 2}
+    quit_ = reaper.QuitEngineStop()
+    quit_.windows, quit_.CONFIRM_SEC = True, 0.3
+    server = _Lingering(world, launcher.PANIC_EXIT_CODE if ending == "panic exit" else 1)
+    for name, value in (("IS_WINDOWS", True), ("_quit", quit_), ("_agent_proc", server), ("_agent_job", "job"),
+                        ("_agent_start", None), ("_agent_stopping", None), ("terminate_job", world.terminate),
+                        ("close_job", world.close), ("_cleanup_recorded_server_group_for_pid", lambda *a: True)):
+        monkeypatch.setattr(launcher, name, value)
+    if ending == "retired meanwhile":  # the lifecycle's retirement takes the publication lock during the grace
+        server.during_grace = lambda: launcher._retire_agent(server, "agent_exit")
+    assert launcher.stop_agent() is True and server.stdin.closed
+    events = world.events
+    assert ("open", 7, 0) in events[:events.index(("terminate",))], f"held before the first terminate: {events}"
+    assert events.count(("release", 1007)) == 1 and events.count(("close",)) == 1 and events[-1] == ("close",), events
+    assert launcher._agent_proc is None and launcher._agent_job is None
+    if ending == "panic exit":
+        assert [event[0] for event in events].count("query") == 1, "Panic's retirement never waits on its Job"
+    elif ending != "never signals":
+        assert events.index(("wait", 7, 0)) < events.index(("release", 1007)), "awaited before its release"
+    if ending == "retired meanwhile":
+        assert events.count(("terminate",)) == 1, "no call on the Job its retirement closed"
+    if ending != "never signals":
+        assert quit_._gaps == [], events
+        return
+    assert quit_._gaps == ["a generation Job member did not confirm its exit"], events
+    quit_.requested.set()
+    with caplog.at_level(logging.INFO, logger=reaper.__name__):
+        assert quit_.stop_engine(server_stopped=True) == "stopped"
+    assert quit_.disclosed == quit_._gaps and "starters UNCONFIRMED" in caplog.text
 
 
 def _headless(monkeypatch, *, signal_first):

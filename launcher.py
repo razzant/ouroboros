@@ -581,7 +581,8 @@ def stop_agent() -> bool:
         confirmed = True
     except subprocess.TimeoutExpired:
         if IS_WINDOWS and job is not None:
-            terminate_job(job)
+            with _agent_lock:  # its members held first; a generation retired meanwhile has a closed Job: no call
+                _quit.force(job if _agent_proc is proc else None, terminate=terminate_job)
         else:
             try:
                 kill_process_tree(proc, exclude_pids=_retained_shared_daemon_pids())

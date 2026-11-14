@@ -214,7 +214,7 @@ def windows(agent, monkeypatch, native_guard):
     # terminated, so its query is faked like the Job itself and never reaches the native call native_guard denies.
     quit_ = reaper.QuitEngineStop()
     monkeypatch.setattr(launcher, "_quit", quit_)
-    monkeypatch.setattr(reaper._pl, "job_has_running_member", lambda job: False if job == "job" else None)
+    monkeypatch.setattr(reaper._pl, "job_members_running", lambda job, held: False if job == "job" else None)
     monkeypatch.setattr("ouroboros.process_logging.copy_capped_output", lambda *a, **kw: None)
     server = _FakeServer(calls)
     monkeypatch.setattr(launcher, "_hidden_popen", lambda cmd, **kw: server)

@@ -114,8 +114,9 @@ class QuitEngineStop:
 
     A server's death does not end its workers, and a worker can still start the engine. On Windows
     every retirement, under the launcher's publication lock (``retire``), terminates the generation's
-    Job and confirms it empty before closing it, so a Quit whose server stop waits on that lock, or
-    comes later, meets no starter. POSIX workers leave their server's session and no Job holds them:
+    Job and confirms each member's process signalled before closing it, so a Quit whose server stop waits
+    on that lock, or comes later, meets no starter; a forced stop's earlier terminate holds the members
+    first (``force``). POSIX workers leave their server's session and no Job holds them:
     their exit stays unconfirmed and is disclosed, never inferred from the server's process group.
     The lifecycle thread is joined, so a start published after the stop's grace is stopped first.
     Whatever stays unconfirmed is disclosed (``disclosed``), and the stop still runs.
@@ -137,34 +138,62 @@ class QuitEngineStop:
         self.disclosed: Optional[List[str]] = None  # what the decided stop could not confirm
         self._lock = threading.Lock()
         self._gaps: List[str] = []
+        self._held: dict = {}  # the published generation's Job members, from before its first terminate to its retire
         self._outcome: Optional[str] = None
 
+    def force(self, job, *, terminate=None) -> None:
+        """A forced stop's terminate of the published generation's Windows Job, under the launcher's publication lock:
+        its members are held first, so that generation's ``retire`` (this stop's, or the lifecycle's after a later
+        exit) awaits each one, never a list this terminate already emptied. ``None``: no published Job, no call."""
+        if job is not None:
+            self._hold(job)
+            (terminate or _pl.terminate_job)(job)
+
     def retire(self, job, *, terminate=None, close=None, panic: bool = False) -> None:
-        """A retired generation's Windows Job, under the launcher's publication lock: terminate it, confirm it
-        has no running member, then close it, so neither a later Quit nor one waiting on this lock stops the
-        engine beside a starter still terminating. A generation that exited by Panic is only terminated and
-        closed: Panic's exit never waits here. Never raises; an unconfirmed drain stays a gap Quit discloses."""
+        """A retired generation's Windows Job, under the launcher's publication lock: terminate it, confirm every
+        member exited, then close it, so neither a later Quit nor one waiting on this lock stops the engine beside
+        a starter still terminating. Its members are held from before the first terminate (this one or ``force``'s),
+        each until its process signals (``platform_layer.job_members_running``), never on an exit code or an empty
+        list alone. A generation that exited by Panic is only terminated and closed, its held members released:
+        Panic's exit never waits here. Never raises; an unconfirmed drain stays a gap Quit discloses."""
         if job is None:
             return
         problem = ""
         try:
+            if not panic:
+                self._hold(job)
             problem = str((terminate or _pl.terminate_job)(job) or "")
             deadline = time.monotonic() + self.CONFIRM_SEC
-            while not (panic or problem) and _pl.job_has_running_member(job) is not False:
+            while not (panic or problem) and _pl.job_members_running(job, self._held) is not False:
                 if time.monotonic() >= deadline:
                     problem = "a generation Job member did not confirm its exit"
                 time.sleep(0.05)
         except Exception as exc:
             problem = f"generation Job unreadable ({type(exc).__name__})"
+        finally:
+            _pl.release_job_members(self._held)
         try:
             closed = str((close or _pl.close_job)(job) or "")
         except Exception as exc:
             closed = f"generation Job close failed ({type(exc).__name__})"
         for gap in (problem, closed):
-            if gap:  # disclosed now, and again by a later Quit's stop
-                log.warning("Generation Job retirement: %s; its starters' exit is unconfirmed", gap)
-                if gap not in self._gaps:
-                    self._gaps.append(gap)
+            self._disclose(gap)
+
+    def _hold(self, job) -> None:
+        """Before a terminate, every member the Job lists now is held; one that cannot be held stays a gap, whatever
+        the others' state (``job_members_running`` answers None). Holding proves the end of what a read listed, not of
+        a process born after one read and delisted before the next."""
+        try:
+            if _pl.job_members_running(job, self._held) is None:
+                self._disclose("a generation Job member was unreadable before its terminate")
+        except Exception as exc:
+            self._disclose(f"generation Job unreadable before its terminate ({type(exc).__name__})")
+
+    def _disclose(self, gap: str) -> None:
+        if gap:  # disclosed now, and again by a later Quit's stop
+            log.warning("Generation Job retirement: %s; its starters' exit is unconfirmed", gap)
+            if gap not in self._gaps:
+                self._gaps.append(gap)
 
     def stop_engine(self, *, server_stopped: bool) -> str:
         """``not_requested`` without Quit; else the engine stop outcome, decided once. An exit decides again when

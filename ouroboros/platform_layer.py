@@ -18,7 +18,7 @@ import time
 from typing import Any, Callable, List, Optional
 from ouroboros.platform_peer import local_connection_peer  # noqa: F401 — platform facade
 from ouroboros.platform_process_target import (  # noqa: F401 — platform facade
-    capture_process_stop_target, observe_child_exit, retained_child_group,
+    capture_process_stop_target, observe_child_exit, retained_child_group, job_members_running, release_job_members,
 )
 
 log = logging.getLogger(__name__)
