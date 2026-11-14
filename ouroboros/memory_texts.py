@@ -467,7 +467,10 @@ def read_versions(ctx: Any, address: Any, version: Any, start: Any, fingerprint:
             raise ValueError("version is a revision text; fingerprint continues the list of versions, read without one"
                              if fingerprint else "version is a revision text (the sha256 of that version)")
         source = resolve_source(ctx, address)
-        raw = source.path.read_bytes() if source.path.exists() else None
+        try:
+            raw = source.path.read_bytes()
+        except FileNotFoundError:  # absent, or removed since a check would have run: no current text; history reads
+            raw = None
     except _ScopeRefused as exc:
         return failed(exc.code, str(exc), "blocked" if exc.code == "ACCESS_BLOCKED" else "error")
     except ValueError as exc:

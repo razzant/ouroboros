@@ -633,3 +633,33 @@ def test_a_revert_to_an_authored_or_modified_legacy_map_keeps_its_text_beside_th
         else:
             title, _newline, rest = legacy.partition("\n")
             assert text == f"{title}\n\n{block}\n\n{rest.lstrip()}", text  # every line of it, the block after its title
+
+
+def test_a_map_whose_bytes_are_not_text_takes_an_overwrite_with_the_block_and_refuses_an_edit(tmp_path, monkeypatch):
+    """C1 (K11's publisher serves the map too): a map an outside write left in bytes that are not UTF-8: an edit or a
+    revert is refused typed and the door's read of the current version says it is not text, nothing written; an
+    overwrite checked against its sha256 replaces it with the host's block, its row recording that the previous bytes
+    were not text."""
+    from ouroboros.tools.chronicle import _memory_read
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")
+    canonical = tmp_path / "canonical"
+    (canonical / "memory").mkdir(parents=True)
+    world, journal = canonical / "memory" / "WORLD.md", canonical / "memory" / "world_journal.jsonl"
+    bad = "# My map\n\n- caf\xe9\n".encode("latin-1")
+    world.write_bytes(bad)
+    ctx, revision = _world_ctx(canonical, canonical), _rev(world)
+    said = f"is {len(bad)} bytes that are not UTF-8 text, so it is not shown"
+    for mode, extra in (("edit", {"old_str": "- caf", "content": "- tea"}), ("revert", {"version": "1" * 64})):
+        refused = _update_world(ctx, mode=mode, expected_revision=revision, **extra)
+        assert refused.startswith(f"⚠️ TOOL_ERROR: not_text: there is no text to {mode}.") and said in refused, refused
+    door = _memory_read(ctx, source="world", version=revision)
+    assert door.startswith("⚠️ TOOL_ERROR: not_text: The current world map") and said in door, door
+    assert world.read_bytes() == bad and not journal.exists()
+    written = _update_world(ctx, "# My map\n\n- café\n", expected_revision=revision)
+    assert written.startswith("OK: world map updated (overwrite") and world.read_text(encoding="utf-8") == \
+        f"# My map\n\n{_measured('fresh')}\n\n- café\n", written
+    row = json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])
+    assert (row["old_sha256"], row["old_not_text"], row["old_bytes"]) == (revision, True, len(bad)), row
+    assert "old_content" not in row and row["new_content"] == world.read_text(encoding="utf-8")

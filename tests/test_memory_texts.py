@@ -531,3 +531,48 @@ def test_one_long_crlf_version_reassembles_exactly_across_its_pages(tmp_path, mo
             assert line.endswith(f"memory_read(source='workpad:atlas', version='{version}', start={following[1]})"), line
             start = int(following[1])
         assert len(parts) > 3 and "".join(parts) == text, (len(parts), version)
+
+
+def test_identity_bytes_that_are_not_text_take_an_overwrite_and_refuse_an_edit_or_revert(tmp_path, identity):
+    """C1 (K11's publisher serves all three texts): identity whose bytes are not UTF-8 (only an outside write leaves
+    them) is replaced by an overwrite checked against their sha256, its row recording that they were not text; an edit
+    or a revert is refused typed, a missing revision says the text is not text instead of resending it, and the door's
+    read of that current version says the same. Nothing raises; nothing is written until the overwrite."""
+    ctx, bad = _ctx(tmp_path), "I am caf\xe9.\n".encode("latin-1")
+    identity.write_bytes(bad)
+    revision, said = _sha(bad), f"is {len(bad)} bytes that are not UTF-8 text, so it is not shown"
+    for mode, extra in (("edit", {"old_str": "I am", "content": "I was"}), ("revert", {"version": "1" * 64})):
+        refused = _update_identity(ctx, mode=mode, expected_revision=revision, **extra)
+        assert refused.startswith(f"⚠️ TOOL_ERROR: not_text: there is no text to {mode}.") and said in refused, refused
+    missing = _update_identity(ctx, "I am café.\n")
+    assert "revision_required" in missing and said in missing and "not resent" not in missing, missing
+    door = _read(ctx, source="identity", version=revision)
+    assert door.startswith("⚠️ TOOL_ERROR: not_text: The current identity") and said in door, door
+    assert identity.read_bytes() == bad and _rows(tmp_path) == []
+    written = _update_identity(ctx, "I am café.\n", revision)
+    assert written.startswith("OK: identity updated (overwrite") and identity.read_bytes() == "I am café.\n".encode(), written
+    assert "cannot be read or put back" in written and "mode='revert'" not in written
+    row = _rows(tmp_path)[-1]
+    assert (row["old_sha256"], row["old_not_text"], row["old_bytes"], row["new_content"]) == (revision, True, len(bad),
+                                                                                              "I am café.\n")
+    assert "old_content" not in row and "old_preview" not in row and row["new_preview"] == "I am café.\n"
+
+
+def test_a_text_gone_before_its_read_is_absent_and_its_history_still_lists(tmp_path, identity, monkeypatch):
+    """C1: the door reads the current bytes once; a text that is gone by then (also after an existence check said it
+    was there) is an absent text, so its history lists and an earlier version reads; a path that cannot be read for
+    another reason stays a typed failure."""
+    import pathlib
+
+    ctx, first = _ctx(tmp_path), _sha(identity.read_bytes())
+    _update_identity(ctx, IDENTITY + "\nMore.\n", first)
+    identity.unlink()
+    real, gone = pathlib.Path.exists, identity.resolve(strict=False)
+    monkeypatch.setattr(pathlib.Path, "exists",  # an existence check that ran before the text was removed
+                        lambda self, *a, **k: True if self.resolve(strict=False) == gone else real(self, *a, **k))
+    listing = _read(ctx, source="identity")
+    assert listing.startswith("[identity: versions newest first; the text does not exist now;") and \
+        f" · replaced {first} · " in listing, listing
+    assert _read(ctx, source="identity", version=first).endswith(IDENTITY)
+    identity.mkdir()  # a directory where the text should be: present, and unreadable
+    assert _read(ctx, source="identity").startswith("⚠️ TOOL_ERROR: identity unreadable: IsADirectoryError")
