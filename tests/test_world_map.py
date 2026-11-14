@@ -544,7 +544,7 @@ def test_an_unchanged_answer_still_brings_a_stale_fork_copy_to_the_canonical_map
 def test_a_stray_marker_line_an_overwrite_leaves_is_named_with_the_way_to_remove_it(tmp_path, monkeypatch):
     """K14: an overwrite may leave a lone marker line outside the host's block (the mind's text, kept as sent); its
     receipt says so and how it goes, since every edit is refused while it stays. The edit refusal names the line the
-    map already holds and the way to remove it; that way (an edit item with the line before it) lands, and an ordinary
+    map already holds and the way to remove it; that way (an edit item with a line beside it) lands, and an ordinary
     edit works again. An overwrite that leaves none says nothing of it."""
     from ouroboros.tools.control_runtime import _update_world
 
@@ -558,12 +558,12 @@ def test_a_stray_marker_line_an_overwrite_leaves_is_named_with_the_way_to_remove
     assert left.startswith("OK: world map updated (overwrite") and world.read_text(encoding="utf-8").endswith(
         f"- a note\n{wprof.MEASURED_END}\n"), left
     assert ("The map now holds a marker line outside the host's measured block at line 10: every edit is refused while "
-            "it stays. An overwrite without that line, or an edit item that replaces it together with the line before "
+            "it stays. An overwrite without that line, or an edit item that replaces it together with a line beside "
             "it (the marker alone also matches the block's own), removes it.") in left, left
     refused = _update_world(ctx, mode="edit", old_str="- a note", content="- a newer note", expected_revision=_rev(world))
     assert refused.startswith("⚠️ TOOL_ERROR: host_block: ") and ("the result has a marker line outside it at line 10 "
                                                                   "(the current map already holds one, at line 10)") in refused
-    assert refused.rstrip(".").endswith("together with the line before it (the marker alone also matches the block's "
+    assert refused.rstrip(".").endswith("together with a line beside it (the marker alone also matches the block's "
                                         "own), removes it. Nothing was written; current_revision=" + repr(_rev(world))), refused
     removed = _update_world(ctx, mode="edit", old_str=f"- a note\n{wprof.MEASURED_END}\n", content="- a note\n",
                             expected_revision=_rev(world))
@@ -688,3 +688,23 @@ def test_the_maps_refusal_names_only_the_items_at_fault(tmp_path, monkeypatch):
     landed = _update_world(ctx, mode="edit", edits=[edge, mention], expected_revision=_rev(world))
     assert landed.startswith("OK: world map updated (edit") and world.read_text(encoding="utf-8").count(
         _measured("host")) == 1, landed
+
+
+def test_a_stray_marker_on_the_first_line_goes_with_the_line_after_it(tmp_path, monkeypatch):
+    """R6: a stray marker line can stand on line 1, where no line precedes it, so the remedy names a line beside it; an
+    edit item taking the marker with the line after it removes it, and the map is the mind's text with its block."""
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")
+    canonical = tmp_path / "canonical"
+    (canonical / "memory").mkdir(parents=True)
+    world, block = canonical / "memory" / "WORLD.md", _measured("host")
+    mine = f"# My map\n\n{block}\n\n- a note\n"
+    world.write_bytes(mine.encode("utf-8"))  # bytes exactly: the anchors below span line ends
+    ctx = _world_ctx(canonical, canonical)
+    left = _update_world(ctx, f"{wprof.MEASURED_END}\n{mine}", expected_revision=_rev(world))
+    assert left.startswith("OK: world map updated (overwrite") and "block at line 1: every edit is refused" in left, left
+    assert "together with a line beside it" in left and "the line before it" not in left, left
+    removed = _update_world(ctx, mode="edit", old_str=f"{wprof.MEASURED_END}\n# My map", content="# My map",
+                            expected_revision=_rev(world))
+    assert removed.startswith("OK: world map updated (edit") and world.read_bytes() == mine.encode("utf-8"), removed

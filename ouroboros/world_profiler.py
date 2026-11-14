@@ -231,7 +231,7 @@ _MARKER_LINE_RE = re.compile(r"^(?:" + re.escape(MEASURED_START) + r"[ \t\r]*|" 
                              + r"[ \t]*\r?)$", re.M)
 # How a marker line outside the host's block goes: the marker alone also matches the block's own lines, so an edit
 # anchors it with a line beside it.
-_STRAY_REMEDY = ("An overwrite without that line, or an edit item that replaces it together with the line before it "
+_STRAY_REMEDY = ("An overwrite without that line, or an edit item that replaces it together with a line beside it "
                  "(the marker alone also matches the block's own), removes it.")
 
 
