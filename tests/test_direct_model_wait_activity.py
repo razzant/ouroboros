@@ -306,6 +306,8 @@ def test_direct_project_model_wait_census_reaches_js_and_resumes(
         assert _js_project_summary(waiting_body, task["chat_id"]) == {
             "mark": "still", "owner": owner_acts, "word": "Waiting", "note": note,
             "label": " · ".join(filter(None, ["Waiting", work["because"][0]["text"], note])),
+            # The sidebar row's own second line says the wait's reason; no work of this room is named or focused.
+            "line": work["because"][0]["text"], "name": "", "focus": "",
         }
 
         catalog.available = True

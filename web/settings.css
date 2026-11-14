@@ -1301,19 +1301,11 @@ html[data-layout="stack"] .settings-search { height: 44px; }
    body, so the light theme's unset warning word would leave it unmarked). */
 #page-settings :is(.ui-row-meta, .models-main-meta, [data-setting-meta])[data-tone="warn"] { color: var(--status-warn-fg); }
 .settings-row-result { min-height: 0; }
-/* A narrow row stacks its words over its control, and "Saved" wrapped onto a line of its own there, pushing the control
-   down as it arrived (bible, principle 6: a state change never changes a height). In such a row a good result stands
-   at the end of the title's line instead, where nothing else is; a refusal or a warning keeps its place in the text,
-   where it has room for its words. */
-.settings-row { position: relative; }
-@container (max-width: 28rem) {
-    .settings-row > .ui-row-meta > .settings-row-result[data-tone="ok"] {
-        position: absolute;
-        inset-block-start: var(--space-3);
-        inset-inline-end: var(--space-3);
-    }
-    .settings-row > .ui-row-title:has(~ .ui-row-meta > .settings-row-result[data-tone="ok"]) { padding-inline-end: 6rem; }
-}
+/* A row's result stands on a line of its own under the row's words and control, the full width of the row (the rows
+   draw it after their control). It never lies over the title, the words or the control, and the control does not move
+   when it arrives (bible, principle 6): beside the words the control is centred on the title and meta lines alone;
+   under them, the result comes after it. */
+.settings-row > .settings-row-result { grid-column: 1 / -1; }
 .settings-row [data-setting-meta]:empty,
 .settings-row-result:empty,
 .settings-row-fact:empty { display: none; }
@@ -1361,19 +1353,25 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
     -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 17 17 7'/%3E%3Cpath d='M7 7h10v10'/%3E%3C/svg%3E");
     mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 17 17 7'/%3E%3Cpath d='M7 7h10v10'/%3E%3C/svg%3E");
 }
-/* A row that leads with a mark (Costs' kinds of account): the mark stands beside both lines. */
+/* A row that leads with a mark (Costs' kinds of account): the mark stands beside both lines. Its value is a short
+   phrase said on one line: at the end of a wide row, under the words in a narrow one (below). The narrow rules of a
+   door keep their hands off it (:not([data-lead])), so the mark keeps its own column. */
 .settings-row[data-lead] { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "mark words actions" "mark meta actions"; }
+.settings-row[data-lead] .settings-row-value { white-space: nowrap; }
 /* In a narrow row a door, a switch, a stored key's state and a short number keep their place at the row's end
    (ui.css moves a narrow row's actions under its words; a strip, a list, a longer field and a number with "No limit"
    do go there). A row that leads with a mark says its value as a third line and keeps its sign at the end. */
 @container (max-width: 28rem) {
-    .settings-row:is([data-kind="door"], [data-kind="switch"], [data-kind="secret"], [data-kind="number"]:not([data-no-limit])) > :is(.ui-row-title, .ui-row-meta) { grid-column: 1; }
-    .settings-row:is([data-kind="door"], [data-kind="switch"], [data-kind="secret"], [data-kind="number"]:not([data-no-limit])) > .ui-row-actions { grid-column: 2; grid-row: 1 / span 2; flex-wrap: nowrap; justify-content: flex-end; }
+    .settings-row:is([data-kind="door"], [data-kind="switch"], [data-kind="secret"], [data-kind="number"]:not([data-no-limit])):not([data-lead]) > :is(.ui-row-title, .ui-row-meta) { grid-column: 1; }
+    .settings-row:is([data-kind="door"], [data-kind="switch"], [data-kind="secret"], [data-kind="number"]:not([data-no-limit])):not([data-lead]) > .ui-row-actions { grid-column: 2; grid-row: 1 / span 2; flex-wrap: nowrap; justify-content: flex-end; }
     .settings-row[data-lead] > :is(.ui-row-title, .ui-row-meta) { grid-column: 2; }
     .settings-row[data-lead] > .ui-row-actions { display: contents; }
     .settings-row[data-lead] .settings-row-value { grid-column: 2; grid-row: 3; }
-    .settings-row[data-lead] .settings-row-chevron { grid-column: 3; grid-row: 1 / span 3; align-self: center; }
-    .settings-row[data-lead] > .settings-head-glyph { grid-row: 1 / span 3; align-self: start; }
+    /* The mark and the sign span the lines there are: a third line only when a value says it (a span into an empty
+       third row would add a gap under the words). */
+    .settings-row[data-lead] .settings-row-chevron { grid-column: 3; grid-row: 1 / span 2; align-self: center; }
+    .settings-row[data-lead] .settings-row-value + .settings-row-chevron { grid-row: 1 / span 3; }
+    .settings-row[data-lead] > .settings-head-glyph { grid-row: 1 / span 2; align-self: start; }
 }
 
 /* A head: one entry of a list (an agent, a tool server, a provider, a key, a fallback). Its mark, its name with one
