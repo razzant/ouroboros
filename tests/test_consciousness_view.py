@@ -3,6 +3,7 @@
 import datetime as dt
 import json
 import pathlib
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,9 @@ from ouroboros import consciousness_view as view, places, usage_accounting as ua
 from ouroboros.consciousness_wake import PLACEHOLDERS, render_wake_message
 from tests._store_shared import seed_result
 from tests.fixtures_usage_store import _request, _settle
+from tests.test_cost_period import UNLISTED, _call as _period_call, root as _period_root
+
+period_root = _period_root  # the period view's own ledger fixture: a real usage store and a priced catalogue
 
 
 FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "wake_document_214a31b6.json"
@@ -144,6 +148,99 @@ def test_prompt_carries_labels_counts_and_one_allowance(tmp_path):
     assert "root: Study queue (started work)" in text
     assert "places: Inbox [mail]: active; open turns: 0" in text
     assert "allowance known spend (last 24 h): at least 2.50 / 20.00 USD" in text
+    assert "\n- install cache writes: unknown\n" in text  # a caller that read nothing says so, never "none"
+
+
+def test_cache_writes_line_folds_classes_and_never_reads_an_unshared_cost_as_zero():
+    """The row a wake carries: calls, tokens, the writes' share of recorded cost, then every class of what the writes
+    followed, in the Costs page's own order (share of cost first, then tokens). A class is one entry whatever its
+    details were, and no detail (a route's or a block's name) is printed. A call no tariff could share is unsplit: a
+    class that has some says how many beside its dollars, a class with none shared shows no dollars, and a day with
+    none shared says its share is unknown, never $0.00."""
+    def row(name, calls, tokens, usd, unsplit=0, detail=""):
+        return {"class": name, "detail": detail, "calls": calls, "write_tokens": tokens, "write_cost": usd,
+                "unshared_calls": unsplit, "shared_write_tokens": tokens if unsplit < calls else 0}
+
+    costly = [row("entered_model", 20, 30_000_000, 120.0, detail="anthropic/claude-opus-5.5"),
+              row("entered_model", 10, 15_000_000, 62.25, 2, detail="openrouter@named::anthropic/claude-opus-5.5"),
+              row("system_changed", 21, 20_000_000, 108.4, detail="my story and identity"),
+              row("append", 15, 5_000_000, 70.95), row("first_request", 18, 1_400_000, 51.2),
+              row("not_recorded", 10, 400, 0.0, 10)]
+    assert view._cache_writes_line(costly) == (
+        "94 in the last 24 h, 71,400,400 tokens, $412.80 write share of recorded cost, 12 unsplit; by what they followed: "
+        "entered_model 30 $182.25 (2 unsplit), system_changed 21 $108.40, append 15 $70.95, first_request 18 $51.20, "
+        "not_recorded 10")
+    # The order is the share of cost, not the tokens: the class that wrote most tokens with none of its cost shared
+    # comes last, and it is still in the row (nothing is cut to "the largest few").
+    mixed = [row("append", 4, 50_000_000, 0.0, 4), row("system_changed", 3, 9_000_000, 2.0),
+             row("first_request", 2, 1_000_000, 5.0), row("paused", 4, 30_010_000, 0.08, 3)]
+    assert view._cache_writes_line(mixed) == (
+        "13 in the last 24 h, 90,010,000 tokens, $7.08 write share of recorded cost, 7 unsplit; by what they followed: "
+        "first_request 2 $5.00, system_changed 3 $2.00, paused 4 $0.08 (3 unsplit), append 4")
+    # Where no cost is shared the tokens are the whole order (not the names, not the order the rows came in).
+    assert view._cache_writes_line([row("append", 31, 2_000_000, 0.0, 31), row("first_request", 9, 6_200_000, 0.0, 9)]) == (
+        "40 in the last 24 h, 8,200,000 tokens, write share of cost unknown; by what they followed: first_request 9, append 31")
+    nine = ["first_request", "entered_model", "tools_changed", "system_changed", "history_rewritten", "paused",
+            "returned_to_model", "append", "not_recorded"]  # every class the fact can name (transcript_prefix.prefix_class)
+    whole = view._cache_writes_line([row(name, 1, 1_000, float(place)) for place, name in enumerate(nine, 1)])
+    assert [entry.split()[0] for entry in whole.split("followed: ")[1].split(", ")] == nine[::-1]  # all nine, none cut
+    assert view._cache_writes_line([row("append", 1, 999, 0.004)]) == (
+        "1 in the last 24 h, 999 tokens, $0.00 write share of recorded cost; by what they followed: append 1 $0.00")
+    assert view._cache_writes_line([]) == "none recorded in the last 24 h"
+
+
+def test_cache_writes_text_reads_the_period_view_itself_and_says_unknown_when_it_cannot(period_root, monkeypatch):
+    """Through the real ledger and ``cost_period``: its row keys are the ones the line reads. A call whose route has no
+    price list keeps its recorded cost unshared, so a day of such calls says the share is unknown and prints no dollar.
+    A view that raises, or whose rows the line cannot read, is "unknown" and never "none"; the wake that asked goes on."""
+    assert view.cache_writes_text(period_root) == "none recorded in the last 24 h"
+    _period_call(period_root, model=UNLISTED, prompt=30_000, write=30_000, cost=0.25, prefix={"departs": "append"})
+    assert view.cache_writes_text(period_root) == (
+        "1 in the last 24 h, 30,000 tokens, write share of cost unknown; by what they followed: append 1")
+    _period_call(period_root, prompt=200_000, write=200_000, cost=1.60, prefix={"departs": "first"})
+    _period_call(period_root, prompt=100_000, write=100_000, cost=0.80,
+                 prefix={"departs": "system", "index": 1, "of": 3, "block": "my story and identity"})
+    _period_call(period_root, prompt=50_000, write=50_000, cost=0.40,
+                 prefix={"departs": "system", "index": 2, "of": 3, "block": "runtime facts"})
+    _period_call(period_root, prompt=100, read=100, cost=0.1, prefix={"departs": "append"})  # wrote nothing
+    assert view.cache_writes_text(period_root) == (
+        "4 in the last 24 h, 380,000 tokens, $2.80 write share of recorded cost, 1 unsplit; "
+        "by what they followed: first_request 1 $1.60, system_changed 2 $1.20, append 1")
+    # The view asked for is the last 24 hours before the wake's own clock: 25 hours on, these calls are outside it.
+    assert view.cache_writes_text(period_root, now=time.time() + 90_000) == "none recorded in the last 24 h"
+    from ouroboros.gateway import cost_period
+    from ouroboros.usage_ledger import UsageLockUnavailable
+
+    def busy(*_args, **_kwargs):
+        raise UsageLockUnavailable("the ledger is busy")
+
+    for reader in (busy, lambda *_a, **_kw: {"cache_writes": [{"class": "append"}]}):
+        monkeypatch.setattr(cost_period, "cost_period", reader)
+        assert view.cache_writes_text(period_root) == "unknown (could not be read)"
+
+
+def test_a_wake_reads_its_cache_writes_once_and_carries_them_in_every_form(monkeypatch, tmp_path):
+    """``prepare_wake`` asks once, in the carrier, and the row rides the complete observation and both stored forms
+    (``bind_wake_observation`` renders them from the same context)."""
+    from ouroboros import consciousness_wake
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    reads, forms = [], []
+    line = "3 in the last 24 h, 9,000 tokens, write share of cost unknown; by what they followed: append 3"
+    monkeypatch.setattr(view, "cache_writes_text", lambda root, now: reads.append((root, now)) or line)
+    monkeypatch.setattr(view, "place_views", lambda root, window: None)
+    monkeypatch.setattr(consciousness_wake, "observe_wake", lambda root, **kw: SimpleNamespace(full_text=lambda: "EVENTS"))
+    monkeypatch.setattr(consciousness_wake, "previous_wake_text", lambda *a, **kw: "none")
+    monkeypatch.setattr(consciousness_wake, "bind_wake_observation",
+                        lambda root, task, observation, render: forms.extend([render("OVERVIEW"), render("POINTER")]))
+    task = {"id": "w1", "chat_id": 1, "text": "[Wake-up · heartbeat]", "metadata": {}, "_wake_prepare": {
+        "boundary": None, "since": 10.0, "now": 20.0, "reason": "heartbeat", "level": "act", "repo_dir": str(repo),
+        "last_wake_at": 5.0, "last_wake_task_id": "", "disabled_tools": [], "counted_roots": [], "max_tasks": 2,
+        "interval": 600, "window": {"settled_usd": 1.0, "unknown_unmetered": 0, "limit_usd": 5.0, "spend_by_cause": None}}}
+    consciousness_wake.prepare_wake(task, tmp_path)
+    assert reads == [(tmp_path, 20.0)]
+    row = f"\n- install cache writes: {line}\n- counted roots: "
+    assert row in task["text"] and len(forms) == 2 and all(row in form for form in forms)
 
 
 def test_real_terminal_wake_uses_terminal_fact_and_card_phase(tmp_path, wake):

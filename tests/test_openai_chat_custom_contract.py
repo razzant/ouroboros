@@ -827,3 +827,41 @@ def test_knowledge_tools_project_whole_where_parameter_prose_does_not_arrive(nam
               "not a dated log of the latest edit", "Text a write removes stays in the note's history",
               "view='history' or version=", "put back (mode='revert')"])
     assert all(word in lead for word in words), [word for word in words if word not in lead]
+
+
+_MEMORY_TEXT_WORDS = {
+    "update_identity": ["mode='edit'", "edits=[{old_str, new_str}, ...]", "found once in the revision I read",
+                        "all applied or none", "mode='overwrite'", "mode='revert'", "expected_revision", "stale",
+                        "never empty", "reason", "memory_read(source='identity', version=...)"],
+    "update_world": ["mode='edit'", "edits=[{old_str, new_str}, ...]", "all or none", "mode='overwrite'",
+                     "mode='revert'", "measured block", "byte for byte", "no marker line", "current block",
+                     "expected_revision", "stale", "never empty", "memory_read(source='world', version=...)"],
+    "workpad_write": ["mode='edit'", "edits=[{old_str, new_str}, ...]", "all or none", "mode='overwrite'",
+                      "mode='revert'", "required for edit and revert", "an overwrite without it still lands",
+                      "warning", "enters every request of its project whole", "memory_read(source='workpad:"],
+    "workpad_read": ["revision", "memory_read(source='workpad')"],
+    "memory_read": ["source=identity, world, workpad or workpad:<project id>", "version=<revision>",
+                    "newest first", "need no chronicle"],
+}
+
+
+@pytest.mark.parametrize("name", sorted(_MEMORY_TEXT_WORDS))
+def test_memory_text_tools_project_whole_where_parameter_prose_does_not_arrive(name):
+    """The writers of identity, the map and a workpad, and the version door, lead with their modes (edit first),
+    their revision rule and the map's block rule: on the custom route nothing else of theirs arrives, and the lead
+    must project unclipped beside the compact schema."""
+    from ouroboros.tools.chronicle import chronicle_tools
+    from ouroboros.tools.control import get_tools as control_tools
+    from ouroboros.tools.project_journal import get_tools as journal_tools
+
+    entry = next(entry for entry in [*control_tools(), *journal_tools(), *chronicle_tools()] if entry.name == name)
+    projected = project_function_tools_to_openai_custom([{"type": "function", "function": entry.schema}]).wire_tools()
+    description = projected[0]["custom"]["description"]
+    lead = " ".join(entry.schema["description"].split())
+    assert len(description) <= MAX_CUSTOM_DESCRIPTION_CHARS
+    assert description.startswith(lead + "\n" + _SCHEMA_CLAUSE), f"{name} lead clipped on the custom route"
+    words = _MEMORY_TEXT_WORDS[name]
+    assert all(word in lead for word in words), [word for word in words if word not in lead]
+    if name.startswith(("update_", "workpad_write")):
+        assert lead.index("mode='edit'") < lead.index("mode='overwrite'")  # edit first
+        assert "content" not in entry.schema["parameters"].get("required", [])

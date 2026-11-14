@@ -13,7 +13,7 @@ from ouroboros import markdown_source
 from ouroboros import text_change
 from ouroboros.tools import knowledge as tools
 from ouroboros.tools.registry import ToolContext, ToolRegistry
-from tests._knowledge_history_shared import applied_blocks, changed_rows
+from tests._knowledge_history_shared import applied_blocks, changed_rows, printed_call
 
 TOPIC = "notes/река"
 RIVER = ("---\ntype: note\nsummary: When the river matters.\n---\n# Река\n\nБерег 🌊.\n\n## Мост\n\nСтарый мост.\n\n"
@@ -122,15 +122,37 @@ def test_history_lists_versions_newest_first_marks_the_current_one_and_names_gap
     assert "reason: not recorded" in rows[3] and "focus unknown" in rows[3]
     assert f"1 journal line(s) naming this note are not JSON and were skipped (the first at byte offset {torn_at})" in listing
     assert f"expected_revision={third.revision!r}" in listing
-    assert listing.endswith(f"expected_revision={third.revision!r}). Each line is the note after its write, so undoing a "
-                            "write means putting back the line below it, unless that line is marked not the base of the "
-                            "next write.\n"), listing
-    page = tools._knowledge_read(ctx, TOPIC, view="history", start_char=10, end_char=60)
+    assert listing.endswith(f"expected_revision={third.revision!r}). Each line is the note after its write; its undo "
+                            "puts back the version that write replaced, which is not always the line below.\n"), listing
+    # Each line names the version its write actually replaced: the capture that never landed replaced `second` too.
+    assert [re.search(r" · (replaced [0-9a-f]{64}|created it: no earlier version to put back) · ", row)[1]
+            for row in rows] == [f"replaced {second.revision}", f"replaced {second.revision}",
+                                 f"replaced {first.revision}", "created it: no earlier version to put back"]
+    fingerprint = re.search(r'"fingerprint": "([0-9a-f]{16})"', listing)[1]
+    page = tools._knowledge_read(ctx, TOPIC, view="history", start_char=10, end_char=60, fingerprint=fingerprint)
     assert body(page) == body(listing)[10:60] and '"complete_chars": ' in page
-    # The line below `second` is not marked, so it is the version the write that made `second` replaced.
-    undo = tools._knowledge_write(ctx, TOPIC, mode="revert", version=rows[3].split(" · ")[0][2:],
+    # Undoing the write that made `second` puts back the version its own line names.
+    undo = tools._knowledge_write(ctx, TOPIC, mode="revert", version=re.search(r"replaced ([0-9a-f]{64})", rows[2])[1],
                                   expected_revision=third.revision, scope="global")
     assert undo.startswith("✅") and store.read_knowledge_note(target).text == first.text, undo
+
+
+def test_the_listing_names_a_version_found_only_on_a_rows_old_side_as_that_writes_undo(tmp_path):
+    """Undo is the version a write replaced, not the line below: after an outside edit the next write's row holds the
+    outside text only on its old side, and the listing names exactly that version, which reads back and reverts."""
+    ctx, target = context(tmp_path), address(tmp_path)
+    first = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    target.path.write_bytes(first.raw.replace(b"One.", b"Outside."))  # an edit outside the writer: no row
+    outside = store.read_knowledge_note(target)
+    second = store.write_knowledge_note(target, "# Река\n\nTwo.\n", expected_revision=outside.revision).current
+    rows = [line for line in versions.render_history(second).splitlines() if line.startswith("- ")]
+    assert rows[0].startswith(f"- {second.revision} · ") and f" · replaced {outside.revision} · " in rows[0], rows
+    assert rows[1].startswith(f"- {first.revision} · ") and "not the base of the next write" in rows[1], rows
+    assert outside.revision not in rows[1]  # no line wrote the outside text: only the next row's old side holds it
+    assert versions.find_version(target, outside.revision) == (outside.text, {})
+    undo = tools._knowledge_write(ctx, TOPIC, mode="revert", version=outside.revision,
+                                  expected_revision=second.revision, scope="global")
+    assert undo.startswith("✅") and target.path.read_bytes() == outside.raw, undo
 
 
 def test_history_prints_the_headings_each_row_recorded_and_parses_no_earlier_version(tmp_path, monkeypatch):
@@ -460,3 +482,120 @@ def test_a_version_whose_forward_path_is_damaged_reads_through_the_live_note(tmp
     target.path.unlink()
     with pytest.raises(versions.VersionUnavailable, match=f"the line at byte offset {b_at} is not a JSON row"):
         versions.find_version(target, b.revision)
+
+
+def test_a_history_continuation_is_bound_to_the_list_its_first_page_read(tmp_path):
+    """K6: a later page names its list's fingerprint; after a write and a revert back to the same revision the list
+    differs although the note's revision does not, and the old continuation is refused, never spliced."""
+    ctx, target = context(tmp_path), address(tmp_path)
+    a = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    b = store.write_knowledge_note(target, "# Река\n\nTwo.\n", expected_revision=a.revision).current
+    first = tools._knowledge_read(ctx, TOPIC, view="history", end_char=120)
+    fingerprint = re.search(r'"fingerprint": "([0-9a-f]{16})"', first)[1]
+    same = tools._knowledge_read(ctx, TOPIC, view="history", start_char=120, fingerprint=fingerprint)
+    whole = tools._knowledge_read(ctx, TOPIC, view="history")
+    assert body(first) + body(same) == body(whole)  # an unchanged list continues exactly
+    assert "position_mismatch" in tools._knowledge_read(ctx, TOPIC, view="history", start_char=120)  # no list named
+    c = store.write_knowledge_note(target, "# Река\n\nThree.\n", expected_revision=b.revision).current
+    assert store.write_knowledge_note(target, "", "revert", c.revision, version=b.revision).current.revision == b.revision
+    moved = tools._knowledge_read(ctx, TOPIC, view="history", start_char=120, fingerprint=fingerprint)
+    assert moved.startswith("⚠️ TOOL_ERROR: position_mismatch") and "Two." not in moved, moved
+    assert "fingerprint continues a list of versions" in tools._knowledge_read(ctx, TOPIC, fingerprint=fingerprint)
+
+
+def test_each_history_row_prints_the_call_that_undoes_its_own_write(tmp_path):
+    """K8: every row prints the revert call to the version ITS write replaced (that old_sha256, the current revision,
+    the note's address), never the line below's; running the printed call of a write over an outside edit puts that
+    outside text back exactly; a creating row says there is no earlier version; a row whose replaced version is the
+    current text says there is nothing to put back."""
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(context(tmp_path))
+    target = address(tmp_path)
+    first = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    target.path.write_bytes(first.raw.replace(b"One.", b"Outside."))  # no row writes this version
+    outside = store.read_knowledge_note(target)
+    second = store.write_knowledge_note(target, "# Река\n\nTwo.\n", expected_revision=outside.revision).current
+    third = store.write_knowledge_note(target, "# Река\n\nThree.\n", expected_revision=second.revision).current
+    rows = [line for line in versions.render_history(third).splitlines() if line.startswith("- ")]
+    assert [row.split(" · ")[0][2:] for row in rows] == [third.revision, second.revision, first.revision]
+    calls = [re.search(r" · undo: (knowledge_write\(.*?\)) · ", row) for row in rows]
+    where = {"topic": TOPIC, "scope": "global", "mode": "revert", "expected_revision": third.revision}
+    assert printed_call(calls[0][1]) == ("knowledge_write", {**where, "version": second.revision}), rows[0]
+    assert printed_call(calls[1][1]) == ("knowledge_write", {**where, "version": outside.revision}), rows[1]
+    assert first.revision not in rows[1] and calls[2] is None  # never the adjacent row; a creation has no undo
+    assert " · created it: no earlier version to put back · " in rows[2] and "undo" not in rows[2], rows[2]
+    tool, arguments = printed_call(calls[1][1])
+    undone = registry.execute(tool, arguments)
+    assert undone.startswith("✅") and target.path.read_bytes() == outside.raw, undone
+    after = [line for line in versions.render_history(store.read_knowledge_note(target)).splitlines()
+             if line.startswith("- ")]
+    assert f"version={third.revision!r}, expected_revision={outside.revision!r})" in after[0], after[0]
+    assert " · undo: nothing to put back, that version is the current text · " in after[2], after[2]
+
+
+def test_a_bad_position_or_fingerprint_is_an_argument_error_before_the_list_is_compared(tmp_path):
+    """C4: a start_char or end_char that is negative or not an integer, and a fingerprint that is not text, are argument
+    errors naming the argument (TOOL_ARG_ERROR), before the list's fingerprint is compared: never position_mismatch. A
+    valid position with another list's fingerprint is still position_mismatch, and the right one still continues."""
+    ctx, target = context(tmp_path), address(tmp_path)
+    a = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    store.write_knowledge_note(target, "# Река\n\nTwo.\n", expected_revision=a.revision)
+    first = tools._knowledge_read(ctx, TOPIC, view="history", end_char=120)
+    fingerprint = re.search(r'"fingerprint": "([0-9a-f]{16})"', first)[1]
+    for arguments, named in (({"start_char": -1}, "start_char=-1 is not a position"),
+                             ({"start_char": "120"}, "start_char='120' is not a position"),
+                             ({"start_char": 1.5}, "start_char=1.5 is not a position"),
+                             ({"start_char": 10, "end_char": -5}, "end_char=-5 is not a position"),
+                             ({"start_char": 120, "fingerprint": 123}, "fingerprint is the text")):
+        reply = tools._knowledge_read(ctx, TOPIC, view="history", **arguments)
+        assert reply.startswith("⚠️ TOOL_ARG_ERROR: ") and named in reply and "position_mismatch" not in reply, (
+            arguments, reply)
+    assert "position_mismatch" in tools._knowledge_read(ctx, TOPIC, view="history", start_char=120, fingerprint="0" * 16)
+    later = tools._knowledge_read(ctx, TOPIC, view="history", start_char=120, fingerprint=fingerprint)
+    assert later.startswith("[Knowledge history]") and body(first) + body(later) == body(
+        tools._knowledge_read(ctx, TOPIC, view="history")), later
+
+
+def test_a_first_page_with_another_lists_fingerprint_is_told_to_read_without_one(tmp_path):
+    """R5: a first page that carries another list's fingerprint is refused (position_mismatch) and told to read
+    without the fingerprint, not to start again at the start it already had; a later page is still told to read again
+    from start_char=0."""
+    ctx, target = context(tmp_path), address(tmp_path)
+    a = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    store.write_knowledge_note(target, "# Река\n\nTwo.\n", expected_revision=a.revision)
+    first = tools._knowledge_read(ctx, TOPIC, view="history", fingerprint="0" * 16)
+    assert first.startswith("⚠️ TOOL_ERROR: position_mismatch: the fingerprint names another list of versions") and \
+        first.endswith("a first page takes none, so read it without the fingerprint") and "start_char=0" not in first, first
+    later = tools._knowledge_read(ctx, TOPIC, view="history", start_char=40, fingerprint="0" * 16)
+    assert later.endswith("read it again from start_char=0"), later
+    assert tools._knowledge_read(ctx, TOPIC, view="history").startswith("[Knowledge history]")
+
+
+def test_an_archive_or_restore_row_offers_the_opposite_lifecycle_call(tmp_path):
+    """R7: the writer refuses a revert across archive states, so a note's archive or restore row prints the opposite
+    lifecycle call as its undo (restore; archive with the reason it requires), never a revert; content rows keep their
+    revert calls. The archive row's printed restore, run, brings the note back active with its bytes; the restore row
+    then offers the archive, and the archive row, whose replaced version is current again, has nothing to put back."""
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(context(tmp_path))
+    target = address(tmp_path)
+    first = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    second = store.write_knowledge_note(target, "# Река\n\nTwo.\n", expected_revision=first.revision).current
+    archived = store.write_knowledge_note(target, "", "archive", second.revision, reason="done with it").current
+    assert archived.state == "archived"
+    rows = [line for line in versions.render_history(archived).splitlines() if line.startswith("- ")]
+    where = f"topic={TOPIC!r}, scope='global'"
+    assert f" · undo: knowledge_write({where}, mode='restore', expected_revision={archived.revision!r}) · " in rows[0], rows[0]
+    assert "mode='revert'" not in rows[0] and f"mode='revert', version={first.revision!r}" in rows[1], rows
+    listing = versions.render_history(archived)
+    assert "an archive or restore line's undo is the opposite lifecycle mode, which changes the archive field only." in listing
+    tool, arguments = printed_call(re.search(r" · undo: (knowledge_write\(.*?\)) · ", rows[0])[1])
+    restored = registry.execute(tool, arguments)
+    current = store.read_knowledge_note(target)
+    assert restored.startswith("✅") and current.state == "active" and current.raw == second.raw, restored
+    rows = [line for line in versions.render_history(current).splitlines() if line.startswith("- ")]
+    assert (f" · undo: knowledge_write({where}, mode='archive', reason=<why>, expected_revision={current.revision!r}) · "
+            in rows[0]), rows[0]
+    assert " · undo: nothing to put back, that version is the current text · " in rows[1], rows[1]
+    plain = versions.render_history(store.write_knowledge_note(address(tmp_path, "plain"), "# Plain\n").current)
+    assert "lifecycle" not in plain  # a history without archive or restore rows says nothing of them

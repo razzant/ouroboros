@@ -22,6 +22,7 @@ from ouroboros.config import (
     save_settings,  # noqa: F401
 )
 from ouroboros.depth_evidence import parse_task_depth  # noqa: F401
+from ouroboros.memory_texts import edit_properties
 from ouroboros.headless import prepare_task_drive, task_state_dir  # noqa: F401
 from ouroboros.contracts.task_contract import (
     build_task_contract,  # noqa: F401
@@ -240,6 +241,33 @@ def _sibling_tool_entries() -> List[ToolEntry]:
             *update_description_tool_entries()]
 
 
+_UPDATE_IDENTITY_DESCRIPTION = (
+    "Revise my identity manifest, who I am and who I want to become, after substantive reflection: one "
+    "file in every room; never write memory/identity.md through file tools. Change parts with "
+    "mode='edit': edits=[{old_str, new_str}, ...] (or one old_str with content), each old_str exact text "
+    "found once in the revision I read, all applied or none, an empty new_str deleting; mode='overwrite' "
+    "(default) replaces the whole text with content; mode='revert' puts back version=<revision> exactly. "
+    "expected_revision (the revision under my resident identity) is required; a stale one writes nothing "
+    "and returns what changed since. The result is never empty; reason is kept in history, not in the "
+    "text. The receipt names the version replaced, who wrote it and what left, with the calls that read "
+    "it (memory_read(source='identity', version=...)) and put it back."
+)
+_UPDATE_WORLD_DESCRIPTION = (
+    "Update my map of my world (memory/WORLD.md): what lives in my environment (agents, services, "
+    "hosts, devices), how I reach each, what worked, what is held or refused; compact, detail in "
+    "knowledge; one file in every room and drive, never written through write_file/edit_text. Change "
+    "parts with mode='edit': edits=[{old_str, new_str}, ...] (or one old_str with content), each old_str "
+    "exact text found once in the revision I read, all or none; mode='overwrite' (default) replaces the "
+    "whole map with content; mode='revert' puts back version=<revision>. The measured block (system, "
+    "roots, tools found at startup) is the host's: an overwrite keeps or restores it, an edit must leave "
+    "it byte for byte and add no marker line, a revert takes that version's own part with the current "
+    "block (a new revision when the block changed since). expected_revision (the revision under my "
+    "resident map) is required; a stale one writes nothing and returns what changed since. The result "
+    "is never empty; reason is kept in history. The receipt names what it replaced and the calls that "
+    "read it (memory_read(source='world', version=...)) and put it back."
+)
+
+
 def get_tools() -> List[ToolEntry]:
     from ouroboros.native_task_wait import SLEEP_PARAMS
     from ouroboros.subagent_inspection import inspect_subagent_tool
@@ -430,29 +458,17 @@ def get_tools() -> List[ToolEntry]:
         }, _send_user_message),
         ToolEntry("update_identity", {
             "name": "update_identity",
-            "description": (
-                'Replace your persistent identity manifest with the full supplied text after substantive reflection. '
-                'Read it first and preserve continuity. This is the identity-writing tool in every project room; do not '
-                'edit memory/identity.md through file tools.'
-            ),
-            "parameters": {"type": "object", "properties": {
-                "content": {"type": "string", "description": "Full identity content (prefer evolving over rewriting from scratch)"},
-                "expected_revision": {"type": "string", "description": "Required for an existing identity: source_revision (SHA-256 of bytes) from read_file. A stale revision refuses with the current revision."},
-            }, "required": ["content"]},
+            "description": _UPDATE_IDENTITY_DESCRIPTION,
+            "parameters": {"type": "object", "properties": edit_properties(
+                "identity", "The current revision (under the resident identity, or a receipt's or refusal's)."),
+                "required": []},
         }, _update_identity),
         ToolEntry("update_world", {
             "name": "update_world",
-            "description": "Update my map of my world (memory/WORLD.md): what lives in my environment — "
-                           "agents, services, hosts, devices — how I reach each, what worked, what is held "
-                           "or refused. The host owns the measured block (system, roots, tools found at "
-                           "startup) and keeps it; I send the whole file with the rest revised. Read it "
-                           "first and keep it compact (detail belongs in knowledge). The same continuous "
-                           "file in every room and drive; this is the only correct way to write it — never "
-                           "write memory/WORLD.md through write_file/edit_text.",
-            "parameters": {"type": "object", "properties": {
-                "content": {"type": "string", "description": "Full file content; the host keeps or restores its measured block"},
-                "expected_revision": {"type": "string", "description": "Required for an existing file: source_revision (SHA-256 of bytes) from read_file. A stale revision refuses with the current revision."},
-            }, "required": ["content"]},
+            "description": _UPDATE_WORLD_DESCRIPTION,
+            "parameters": {"type": "object", "properties": edit_properties(
+                "map", "The current revision (under the resident map, or a receipt's or refusal's)."),
+                "required": []},
         }, _update_world),
         ToolEntry("toggle_evolution", {
             "name": "toggle_evolution",

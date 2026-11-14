@@ -19,6 +19,9 @@ sha256 of the note's exact bytes. It stores their texts in one of three forms:
   ``new_content`` is the replaced text. Rows written before changes were stored keep it; nothing
   writes it now.
 
+A plain memory text's row whose replaced bytes were not UTF-8 text (``old_not_text``, written by
+``memory_publication.publish_text``) stores only its new text whole: its old side is a typed miss.
+
 ``Texts`` reads the exact old or new text of any row, verified by sha256. Forward: through ``base``
 links to the nearest stored text, applying changes. When that path breaks: from any stored text of
 the note (a whole row, an inline old text, the live note) through the changes that connect it to the
@@ -166,7 +169,8 @@ class Texts:
             raise TextUnavailable(f"the row at byte offset {offset} holds no text (digest-era)")
         keys = ("new_content", "change") if side == "new" else ("old_content", "old_content_ref", "change")
         if not any(key in row for key in keys):  # nothing stored for that side: no path to break, none to search from
-            raise TextUnavailable(f"the row at byte offset {offset} holds no {side} text")
+            raise TextUnavailable(f"the row at byte offset {offset} holds no {side} text" + (
+                " (the bytes it replaced were not UTF-8 text)" if side == "old" and row.get("old_not_text") else ""))
         broken: list[str] = []
         text = self._new(offset, row, want, broken) if side == "new" else self._old(offset, row, want, broken)
         if text is None:
