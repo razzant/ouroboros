@@ -500,7 +500,7 @@ def reconcile_transport_wait(
         emit_progress(
             (f"🌐 Primary provider answered after {elapsed / 60.0:.1f} min — resuming."
              if episode.wait_cause in PRIMARY_REFUSAL_KINDS else
-             f"🌐 The local Claudexor engine answered again after {elapsed / 60.0:.1f} min — resuming on the same model."
+             f"🌐 Model response received after {elapsed / 60.0:.1f} min — resuming."
              if episode.engine_unanswered else
              f"🌐 Provider connection restored after {elapsed / 60.0:.1f} min — resuming."),
             incident=None,

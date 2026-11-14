@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime
 import json
 import queue
+import re
 import time
 from types import SimpleNamespace
 
@@ -20,8 +21,9 @@ import pytest
 
 import ouroboros.loop as loop_mod
 import ouroboros.loop_transport as loop_transport
-from ouroboros import model_wait
+from ouroboros import model_wait, owner_model, route_choice
 from ouroboros import usage_accounting as ua
+from ouroboros.llm import LLMClient
 from ouroboros.loop import run_llm_loop
 from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY
 from ouroboros.loop_transport import (
@@ -33,6 +35,7 @@ from ouroboros.loop_transport import (
     transport_wait_step,
 )
 from ouroboros.tools.registry import ToolRegistry
+from tests._budget_pause_exact_helpers import _install_queue
 from tests._shared import saved_settings
 from tests.test_loop_transport_wait import _typed_transport_exc
 from tests.test_not_delivered_same_route import _prepare_failure, _receipt
@@ -41,18 +44,20 @@ PRIMARY, F1, F2 = "openai::primary", "openai::candidate-one", "openai::candidate
 
 
 class _Routes:
-    """Each model pops its scripted failures (a factory per send), then answers; ``sent`` records every send."""
+    """Each model pops its scripted failures (a factory per send), then answers; ``sent`` records every send and
+    ``inputs`` its messages. Main is the production client's own reading of the saved slot, live."""
+
+    default_model = LLMClient.default_model
 
     def __init__(self, root, script):
-        self.root, self.sent, self.script = root, [], {model: list(rows) for model, rows in script.items()}
-
-    def default_model(self):
-        return PRIMARY
+        self.root, self.sent, self.inputs = root, [], []
+        self.script = {model: list(rows) for model, rows in script.items()}
 
     @model_wait.model_waitable
     def chat(self, **kwargs):
         model = kwargs["model"]
         self.sent.append(model)
+        self.inputs.append(json.dumps(kwargs.get("messages"), ensure_ascii=False, default=str))
         rows = self.script.get(model) or []
         if rows:
             failure = rows.pop(0) if len(rows) > 1 else rows[0]  # the last row repeats forever
@@ -106,6 +111,14 @@ def _wait_phases(tmp_path):
     return [row["phase"] for row in rows if row.get("type") == "network_wait"]
 
 
+def _recovery_note(notes):
+    """The wait's one recovery note: that a response came after the wait, nothing about which engine or model."""
+    recovered = [note for note in notes if note.startswith("🌐 Model response received")]
+    assert len(recovered) == 1 and re.fullmatch(r"🌐 Model response received after \d+\.\d min — resuming\.",
+                                                 recovered[0]), notes
+    return recovered[0]
+
+
 def test_spent_daemon_burst_waits_on_its_model_instead_of_walking(env, tmp_path, monkeypatch):
     """The candidate side of ``test_a_spent_burst_walks_the_configured_route[_prepare_failure]``: that parent
     expectation (a paid configured route answers) is the behaviour this repair removes."""
@@ -125,8 +138,49 @@ def test_spent_daemon_burst_waits_on_its_model_instead_of_walking(env, tmp_path,
     assert entry == ("🌐 The local Claudexor engine is not answering, so this request was not sent ($0 for it). "
                      "The work keeps its model, tries no other route and retries automatically within its existing "
                      "limits. Stop cancels.")
-    assert any(note.startswith("🌐 The local Claudexor engine answered again after ")
-               and note.endswith("resuming on the same model.") for note in notes)
+    assert _recovery_note(notes)
+
+
+@pytest.mark.parametrize("trigger", ["settings", "owner_card"])
+def test_an_answer_after_the_owner_moved_the_route_claims_no_recovered_engine(env, tmp_path, monkeypatch, trigger):
+    """While the work waits on the silent daemon the owner moves its route: a new Main saved in Settings (the work
+    follows Main), or another model chosen on this work's card. The next redial binds it through the round's own
+    route handover, and its answer ends the wait. The recovery note says only that a response came: never that the
+    local Claudexor engine answered again or that the work resumed on the same model (the earlier sentence said both)."""
+    saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL=PRIMARY, OUROBOROS_MODEL_FALLBACKS=F1, OPENAI_API_KEY="key")
+    if trigger == "owner_card":  # the running work the card's durable act names (supervisor queue, task document)
+        _queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+        workers.RUNNING["t-ew"] = {"attempt": 1, "lead": {"model": PRIMARY, "use_local": False, "basis": "main"},
+                                   "task": {"id": "t-ew", "type": "task", "chat_id": 7, "root_task_id": "t-ew",
+                                            "drive_root": str(tmp_path), "metadata": {}}}
+    moved = []
+
+    def owner_moves_the_route(sec, _wake):  # the burst's two pauses come first, then the episode's paced wait
+        env.sleeps["episode"].append(sec)
+        if not moved and (tmp_path / "events.jsonl").exists() and "entered" in _wait_phases(tmp_path):
+            moved.append(saved_settings(monkeypatch, tmp_path, OUROBOROS_MODEL=F2) if trigger == "settings" else
+                         owner_model.request("t-ew", {"request_id": "press", "action": "set", "model": F2,
+                                                      "use_local": False}))
+        return False
+
+    monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", owner_moves_the_route)
+    llm, notes = _Routes(env.root, {PRIMARY: [_prepare_failure]}), []
+    text, _usage, registry = _run(tmp_path, llm, notes)
+
+    assert moved and text == f"answer from {F2}"
+    assert llm.sent == [PRIMARY] * 3 + [F2]  # F1, the configured route, was never sent: no walk answered
+    # The claimed trigger moved the primary, and the mind was told who moved it.
+    assert registry._ctx.primary_route["model"] == F2
+    if trigger == "settings":
+        assert registry._ctx.route_choice == route_choice.following("main")
+        assert f"[ROUTE FACTS] Main changed in Settings: {PRIMARY} → {F2}." in llm.inputs[-1]
+    else:
+        assert registry._ctx.route_choice == route_choice.explicit("owner")
+        assert f"[ROUTE FACTS] My human set this work's primary: {F2}." in llm.inputs[-1]
+    assert _wait_phases(tmp_path) == ["entered", "waiting", "recovered"]
+    assert notes[0].startswith("🌐 The local Claudexor engine is not answering")
+    assert _recovery_note(notes)
+    assert not any("answered again" in note or "same model" in note for note in notes), notes
 
 
 def test_an_inline_presence_turn_waits_too_under_its_existing_bound(env, tmp_path, monkeypatch):
