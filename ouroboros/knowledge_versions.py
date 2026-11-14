@@ -362,14 +362,17 @@ def _listed(row: Mapping[str, Any]) -> dict[str, Any]:
     """The facts a listing line shows, without the row's note texts (a long history is not held whole).
 
     A row has its text when it holds the whole ``new_content`` or a ``change`` against a ``base``, unless it is
-    marked ``content_digested`` (the reader refuses such a row whatever it holds); no version is rebuilt to say so."""
+    marked ``content_digested`` (the reader refuses such a row whatever it holds); no version is rebuilt to say so.
+    The sizes a row recorded travel with it: an identity or map row written before rows carried a ``delta`` has only
+    its ``old_len``/``new_len``, shown as they are (``delta_parts``), never turned into removed and added counts."""
     text = row.get("new_content")
     stored = not row.get("content_digested") and (
         (isinstance(text, str) and bool(text or not row.get("new_sha256")
                                          or row.get("new_sha256") == knowledge_rows.sha256_text("")))
         or (isinstance(row.get("change"), list) and isinstance(row.get("base"), Mapping)))
     return {**{key: row.get(key) for key in ("new_sha256", "old_sha256", "ts", "focus", "mode", "reason", "delta",
-                                             "old_chars", "new_chars", "reverted_from")}, "text_stored": stored}
+                                             "old_chars", "new_chars", "old_len", "new_len", "reverted_from")},
+            "text_stored": stored}
 
 
 def delta_parts(row: Mapping[str, Any]) -> list[str]:

@@ -350,3 +350,22 @@ def test_each_listed_write_prints_its_own_undo_with_the_project_and_running_it_r
     gone = _read(own, source="workpad")
     assert "mode='revert'" not in gone and " · undo: the workpad does not exist now, so read that version" in gone, gone
     assert "Put one back: the workpad does not exist now, so mode=revert cannot run" in gone
+
+
+def test_a_legacy_row_lists_the_sizes_it_recorded_and_a_new_row_its_delta(tmp_path, identity):
+    """K9: an identity row written before rows carried a delta (the whole-file form ``publish_memory_file`` still
+    writes, the identity writer's before this change) lists the sizes it recorded, old_len → new_len, and no removed or
+    added counts nobody recorded; a row this writer wrote lists its delta, not its lengths a second time."""
+    from ouroboros.knowledge import focus_signature
+    from ouroboros.memory_publication import publish_memory_file
+
+    ctx = _ctx(tmp_path)
+    legacy = publish_memory_file(identity, _sha(identity.read_bytes()), lambda old: old + "A legacy line.\n",
+                                 journal=identity.parent / "identity_journal.jsonl", author=focus_signature(ctx),
+                                 source_type="task")
+    assert legacy.ok and "delta" not in _rows(tmp_path)[-1] and _rows(tmp_path)[-1]["new_len"] == len(IDENTITY) + 15
+    _update_identity(ctx, mode="edit", old_str="A legacy line.", content="A newer line.", expected_revision=legacy.revision)
+    rows = [line for line in _read(ctx, source="identity").splitlines() if line.startswith("- ")]
+    assert f" · {len(IDENTITY)} → {len(IDENTITY) + 15} chars" in rows[1], rows[1]
+    assert "removed" not in rows[1] and "added" not in rows[1], rows[1]  # nothing invented beside what it recorded
+    assert re.search(r" · \d+ chars removed, \d+ added · ", rows[0]) and "→" not in rows[0], rows[0]
