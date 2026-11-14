@@ -6956,6 +6956,17 @@ html[data-layout="stack"] #page-dashboard[data-section-view="home"] > .app-page-
 .dashboard-settings-lead { margin: calc(-1 * var(--space-2)) 0 var(--space-3); color: var(--text-meta); font-size: var(--type-body); line-height: var(--line-body); }
 .dashboard-settings-fold { margin-top: var(--space-3); }
 .costs-limits .settings-row-field > .ui-control { width: 5.25rem; }  /* money: room for a larger limit than a row's short number */
+/* A limit that may be lifted (More limits): the field takes a number, and "No limit" beside it lifts the limit and,
+   chosen, says so. The field's own "No limit" placeholder read as a second switch of the same name beside it, so here
+   the empty field draws none, and a quiet "or" between the two reads the row as one sentence: [ 40 ] s or No limit. */
+.costs-limits .settings-row[data-no-limit] .settings-row-field > .ui-control::placeholder { color: transparent; }
+.costs-limits .settings-row[data-no-limit] .settings-row-field::after {
+    content: "or";
+    margin-inline-start: var(--space-1);
+    color: var(--text-meta);
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+}
 /* A card that is one row (data-solo): the row's name is the card's title, its meta the lead, its control the body. */
 .dashboard-settings[data-solo] > .settings-row { display: flex; flex-direction: column; align-items: stretch; gap: var(--space-1); padding: 0; border: 0; background: none; }
 .dashboard-settings[data-solo] .ui-row-title { font-size: var(--type-section); font-weight: 600; }
