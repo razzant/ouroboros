@@ -203,6 +203,7 @@ _extensions_ready = threading.Event()
 _extensions_ready.set()
 _dialogue_bridge: Any = None  # the chat bridge published at the store's publication (`dialogue_ready`)
 _dialogue_lock = threading.Lock()
+_event_queue_preparation = None  # this lifespan's one attempt; failures survive supervisor revival
 
 
 from ouroboros.consciousness_view import _clock_of as _clock_of, describe_consciousness, describe_consciousness_state
@@ -681,38 +682,39 @@ def _run_supervisor(settings: dict) -> None:
 
         # Managed manifest branch defaults must drive worker commit/restart flows too.
         _workers_branch_dev, _workers_branch_stable = _runtime_branch_defaults()
-        workers_init(
+        if not server_boot.wait_event_queue(_event_queue_preparation, lambda: panic_termination_requested() or any(e.is_set() for e in (_watchdog_stop, _supervisor_stop, _restart_requested, _exit_signalled))):
+            _watchdog_stop.set()
+            return
+        run_startup_phase(_loop_liveness, "startup:workers_init", lambda: workers_init(
             repo_dir=REPO_DIR, drive_root=DATA_DIR,
             branch_dev=_workers_branch_dev, branch_stable=_workers_branch_stable,
-        )
-
+        ))
         from supervisor.message_bus import send_with_budget
         from ouroboros.consciousness import BackgroundConsciousness
         import types
-
         prior_worker_pids = _startup_worker_pids(DATA_DIR)
         interrupted_running: list = []
-        restored_pending = restore_pending_from_snapshot(terminalized=interrupted_running)
+        restored_pending = run_startup_phase(_loop_liveness, "startup:queue_restore", lambda: restore_pending_from_snapshot(terminalized=interrupted_running))
         _start_preparation_generation(stop=lambda stop=_watchdog_stop: any(e.is_set() for e in (stop, _supervisor_stop, _restart_requested, _exit_signalled)))
-        kill_workers(preserve_pending=True)
-        spawn_workers()
+        run_startup_phase(_loop_liveness, "startup:old_workers_stop", lambda: kill_workers(preserve_pending=True))
+        run_startup_phase(_loop_liveness, "startup:worker_spawn", spawn_workers)
         from ouroboros.server_process import record_applied_restart_settings
         record_applied_restart_settings({"OUROBOROS_SKILLS_REPO_PATH": settings.get("OUROBOROS_SKILLS_REPO_PATH", "")})
         persist_queue_snapshot(reason="startup")
         try:
             from ouroboros.delegate_recovery import pre_adopt_planned_handoffs
 
-            pre_adopt_planned_handoffs(DATA_DIR, list(PENDING))
+            run_startup_phase(_loop_liveness, "startup:delegate_pre_adopt", lambda: pre_adopt_planned_handoffs(DATA_DIR, list(PENDING)))
         except Exception:
             log.debug("Planned delegate pre-adoption failed", exc_info=True)
-        _startup_custody_sweep()
+        run_startup_phase(_loop_liveness, "startup:custody", _startup_custody_sweep)
         recovered_files = run_startup_phase(_loop_liveness, "startup:task_recovery", lambda: _run_startup_task_recovery(
             DATA_DIR, REPO_DIR, skip_live_data=_pytest_default_real_data_dir,
             prior_worker_pids=prior_worker_pids,
         ))
         _resume_interrupted_project_deletions()
-        _startup_prune_sweeps(preserve_task_sources=bool(
-            recovered_files["unresolved"] or recovered_files["protected"] or recovered_files["errors"]), recovery_report=recovered_files)
+        run_startup_phase(_loop_liveness, "startup:prune", lambda: _startup_prune_sweeps(preserve_task_sources=bool(
+            recovered_files["unresolved"] or recovered_files["protected"] or recovered_files["errors"]), recovery_report=recovered_files))
 
         previous_fault = previous_fault_sentence(held_saved_work_count(PENDING))  # the last generation's fault, if one
         if restored_pending > 0 or interrupted_running or previous_fault:
@@ -735,8 +737,7 @@ def _run_supervisor(settings: dict) -> None:
         store_switch.startup_notice(DATA_DIR)
         from ouroboros.upgrade_notices import startup_upgrade_notices
         startup_upgrade_notices(settings)
-
-        auto_resume_after_restart()
+        run_startup_phase(_loop_liveness, "startup:resume", auto_resume_after_restart)
 
         def _get_owner_chat_id() -> Optional[int]:
             try:
@@ -1089,11 +1090,12 @@ async def lifespan(app):
     served UI and opens the store's import window; everything whose cost depends on the data, the
     installed extensions or child processes is a named step of the boot coordinator, which runs
     on its own thread while the socket already answers (``/api/health`` carries the phases)."""
-    global _event_loop, _dialogue_bridge
+    global _event_loop, _dialogue_bridge, _event_queue_preparation
     BOOT.reset()
     _extensions_ready.clear()  # this generation's extensions have not registered yet
     _supervisor_ready.clear()  # readiness is this generation's: its recovery or its supervisor proves it
     _dialogue_bridge = None
+    _event_queue_preparation = None
     lifespan_drive_root = pathlib.Path(getattr(getattr(app, "state", None), "drive_root", DATA_DIR))
     default_real_data_dir = pathlib.Path.home() / "Ouroboros" / "data"
     pytest_default_real_data_dir = (
@@ -1202,6 +1204,12 @@ async def lifespan(app):
         finally:
             _extensions_ready.set()  # loaded or not, the subscribers that exist are registered: the supervisor may start
 
+    def _prepare_event_queue() -> None:
+        global _event_queue_preparation
+        if live and startup_provider_ready:
+            _event_queue_preparation = server_boot.prepare_event_queue(lifespan_drive_root, lambda: panic_termination_requested() or any(
+                e.is_set() for e in (body_stop, _supervisor_stop, _restart_requested, _exit_signalled)))
+
     async def _start_extension_reconcile() -> None:
         from ouroboros.config import get_skills_repo_path, load_settings as _load_settings
         from ouroboros.extension_reconcile_queue import extension_reconcile_pickup_loop
@@ -1219,6 +1227,7 @@ async def lifespan(app):
         ("owned_stops", lambda: live and finish_unconfirmed_stops(lifespan_drive_root)),  # before any extension/replacement process (§9)
         ("inherited_records", lambda: live and start_inherited_import(lifespan_drive_root)),  # the one-time disk walk, off the ready path
         ("usage_store", _usage_store),
+        ("event_queue_preparation", _prepare_event_queue),
         ("skills", lambda: live and server_boot.seed_skills(lifespan_drive_root, settings, provider_ready=startup_provider_ready)),
         ("projects", lambda: live and server_boot.reconcile_projects(lifespan_drive_root)),
         ("log_listings", lambda: live and server_boot.remember_log_listings(lifespan_drive_root)),
@@ -1231,7 +1240,7 @@ async def lifespan(app):
         ("mcp", server_boot.mcp_startup),
         ("extension_reconcile", lambda: live and server_boot.on_loop(_event_loop, _start_extension_reconcile())),
         ("store", lambda: live and server_boot.wait_store_published(lifespan_drive_root, body_stop)),
-        ("supervisor", lambda: server_boot.wait_supervisor_outcome(_supervisor_ready, lambda: _supervisor_error, body_stop)),
+        ("supervisor_outcome", lambda: server_boot.wait_supervisor_outcome(_supervisor_ready, lambda: _supervisor_error, body_stop)),
     ]
     start_boot_coordinator(steps, stop=body_stop)
     BOOT.serving()

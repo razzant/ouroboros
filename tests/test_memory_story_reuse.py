@@ -102,7 +102,7 @@ def _rename(root, rooms):
 
 
 @pytest.mark.parametrize("change", [
-    "chat_row", "correction", "legacy_binding"])
+    "chat_row", "correction", "legacy_binding", "writer_terminal_row", "seal", "fold", "selection", "label", "route", "binding"])
 def test_every_source_change_is_seen_and_the_reuse_equals_a_fresh_capture(tmp_path, captures, monkeypatch, change):
     """A change of each source moves the story (it differs from before), and the capture after it equals a fresh
     full capture byte for byte, story and whole view: a reuse never serves a state that no longer holds."""
@@ -195,3 +195,23 @@ def test_view_receipts_keep_story_tokens_and_live_room_coverage(tmp_path, captur
     assert len(captures) == 1
     assert reused == _fresh(receipt)
     assert reused["blocks"]["story_tokens"] > 0 and reused["blocks"]["conversations"] > 0
+
+
+def test_worker_warm_reuses_the_ordinary_story_reader_but_keeps_new_owner_rows(tmp_path, captures, monkeypatch):
+    from types import SimpleNamespace
+    from ouroboros import reference_books
+    from supervisor.worker_process import _warm_context_sources
+
+    shared.world(tmp_path)
+    _page(tmp_path, "1", 10, 12, author=WRITER)
+    monkeypatch.setattr(reference_books, "load_reference_book", lambda *_a: None)
+    env = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, repo_path=lambda p: tmp_path / p)
+    assert _warm_context_sources(env)["story"] == "warm" and len(captures) == 1
+    before = _view(tmp_path)
+    assert len(captures) == 1 and before == _fresh(_view, tmp_path)
+    from ouroboros import dialogue_store
+    dialogue_store.append(tmp_path, "chat", {"chat_id": 1, "direction": "in", "text": "NEW OWNER WORDS AFTER WARM",
+                                            "client_message_id": "fresh-owner"})
+    after = _view(tmp_path)
+    assert "NEW OWNER WORDS AFTER WARM" in after and after != before
+    assert after == _fresh(_view, tmp_path)

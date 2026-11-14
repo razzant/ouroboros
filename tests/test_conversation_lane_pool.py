@@ -84,6 +84,23 @@ def test_lane_spare_never_spawns_in_a_marker_window(pool, monkeypatch):
     assert not pool.created
 
 
+def test_only_the_intended_spare_prewarms_not_demand_grown_carriers(pool, monkeypatch):
+    import supervisor.worker_process as wp
+
+    warmth = []
+    monkeypatch.setattr(conversation_lane, "awaiting_turns", lambda: [task("a"), task("b")])
+    monkeypatch.setattr(conversation_lane, "dispatch_awaiting_turns", lambda: None)
+    def spawn(ctx, wid, in_q, out_q, repo, drive, *, warm_context_sources=False):
+        warmth.append(warm_context_sources)
+        return Process(900 + wid)
+    monkeypatch.setattr(wp, "spawn_worker_process", spawn)
+    conversation_lane.reconcile_conversation_lane()
+    assert warmth == [False, False, True]
+    assert all(w.lane == LANE_CONVERSATION for w in workers.WORKERS.values() if w.wid != 0)
+    conversation_lane.reconcile_conversation_lane()
+    assert warmth == [False, False, True]  # booting spares are not duplicated
+
+
 def test_lane_spare_is_not_doubled_beside_a_parked_unready_carrier(pool):
     parked = add_slot(1, lane=LANE_CONVERSATION)
     parked.readiness_exhausted, parked.reaping, parked.booting = True, True, False
@@ -187,12 +204,18 @@ def test_spawn_workers_starts_the_lane_spare_first(pool, monkeypatch):
     monkeypatch.setattr(workers, "event_queue_generation", lambda: "gen")
     monkeypatch.setattr(workers, "append_jsonl", lambda *a, **k: True)
     import supervisor.worker_process as wp
-    monkeypatch.setattr(wp, "spawn_worker_process", lambda ctx, wid, in_q, out_q, repo, drive: Process(900 + wid))
+    warmth = []
+    def spawn(ctx, wid, in_q, out_q, repo, drive, *, warm_context_sources=False):
+        warmth.append(warm_context_sources)
+        return Process(900 + wid)
+    monkeypatch.setattr(wp, "spawn_worker_process", spawn)
     workers.spawn_workers()
     assert [slot.lane for slot in workers.WORKERS.values()] == [LANE_CONVERSATION]
+    assert warmth == [True]
     workers.WORKERS.clear()
     workers.spawn_workers(3)
     assert sorted(slot.lane for slot in workers.WORKERS.values()) == [LANE_CONVERSATION, LANE_PROJECT, LANE_PROJECT]
+    assert warmth == [True, True, False, False]
 
 
 def test_a_failed_boot_spawn_is_recorded_and_the_next_generation_clears_it(pool, monkeypatch):
@@ -208,14 +231,14 @@ def test_a_failed_boot_spawn_is_recorded_and_the_next_generation_clears_it(pool,
     monkeypatch.setattr(workers, "append_jsonl", lambda *a, **k: True)
     import supervisor.worker_process as wp
 
-    def refuse(*_args):
+    def refuse(*_args, **_kwargs):
         raise OSError("fork refused")
     monkeypatch.setattr(wp, "spawn_worker_process", refuse)
     assert conversation_lane.spawn_refusal() == ""
     with pytest.raises(OSError):
         workers.spawn_workers()
     assert not conversation_lane.armed() and conversation_lane.spawn_refusal() == "carrier_spawn_refused:OSError"
-    monkeypatch.setattr(wp, "spawn_worker_process", lambda ctx, wid, in_q, out_q, repo, drive: Process(900 + wid))
+    monkeypatch.setattr(wp, "spawn_worker_process", lambda ctx, wid, in_q, out_q, repo, drive, **_kw: Process(900 + wid))
     workers.spawn_workers()
     assert conversation_lane.armed() and conversation_lane.spawn_refusal() == ""
 
@@ -377,7 +400,7 @@ def test_a_stop_never_holds_q_while_a_carrier_spawn_holds_the_lifecycle_serializ
     monkeypatch.setattr(lifecycle, "_WORKER_LIFECYCLE_LOCK", serializer)
     monkeypatch.setattr(lifecycle, "_queue_lock", _BoundedQ(queue._queue_lock, 5.0))
 
-    def start_once_the_stop_waits(ctx, wid, *args):
+    def start_once_the_stop_waits(ctx, wid, *args, **kwargs):
         deadline = time.monotonic() + 10
         while "stopper" not in serializer.waiting and time.monotonic() < deadline:
             time.sleep(0.01)

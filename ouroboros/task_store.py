@@ -426,6 +426,29 @@ def documents_by_ids(root: Any, task_ids: Iterable[str]) -> Dict[str, Dict[str, 
     return dict(_documents(fetched))
 
 
+def working_note_documents(root: Any, task_ids: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+    """Only identity, status and the working-notes pointer, from one current-body snapshot.
+
+    JSON1 selects inside SQLite; Python receives no result text, handoffs or card overlays.
+    Existing rows with missing/invalid bodies remain empty documents for strict admission to
+    refuse, rather than disappearing as absent. Multi-path extraction preserves JSON types.
+    """
+    ids = sorted({str(task_id) for task_id in task_ids})
+    if not ids:
+        return {}
+    select = """SELECT t.task_id, CASE WHEN json_valid(b.body) THEN
+        CASE WHEN json_type(b.body) = 'object' THEN
+            '' || json_extract(b.body, '$.task_id', '$.status', '$.working_notes')
+        END END AS view
+        FROM tasks AS t LEFT JOIN task_bodies AS b ON b.task_id = t.task_id
+        WHERE t.task_id IN (SELECT value FROM json_each(?))"""
+    with open_store(root, write=False) as txn:
+        pages = [rows for _page, rows in _pages(txn, ids, select, ("task_id", "view"))]
+    return {row["task_id"]: dict(zip(("task_id", "status", "working_notes"), json.loads(row["view"])))
+            if row["view"] is not None else {}
+            for page in pages for row in page.rows()}
+
+
 def origin_documents(root: Any, origin: str) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
     """``(documents, faults)`` an owner message's operation may be: each row whose typed top-level origin is
     ORIGIN (``<chat_id>:<client_message_id>``, ``store_hot_facts.task_columns``), and each row an older writer

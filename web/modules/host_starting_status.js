@@ -21,12 +21,29 @@ export function bootPhase(data) {
 // pressable; its cause is the step a short bar drops before the word, and rides the title for
 // the Shade's Details. Nothing known about the phase keeps the plain Starting….
 export const START_FAILED_LEAD = 'Ouroboros could not finish starting.';
+const START_STEPS = [
+    ['extensions', 'loading extensions'],
+    ['startup:event_queue', 'preparing task transport'],
+    ['startup:bootstrap', 'checking program files'],
+    ['startup:workers_init', 'preparing executors'],
+    ['startup:queue_restore', 'restoring the queue'],
+    ['startup:old_workers_stop', 'settling previous executors'],
+    ['startup:worker_spawn', 'starting executors'],
+    ['startup:delegate_pre_adopt', 'restoring delegated work'],
+    ['startup:custody', 'checking saved processes'],
+    ['startup:task_recovery', 'restoring saved work'],
+    ['startup:prune', 'releasing finished work folders'],
+    ['startup:resume', 'resuming saved work'],
+];
 export function startingStatus(boot) {
-    const failedStep = Array.isArray(boot?.steps) ? boot.steps.find((step) => step?.state === 'failed') : null;
-    const title = String(boot?.error || (failedStep ? `${failedStep.name}: ${failedStep.error || ''}` : '') || '');
-    if (boot?.phase === 'failed') return { kind: 'failed', text: 'Start failed', tone: 'failed', step: title, title };
+    const steps = Array.isArray(boot?.steps) ? boot.steps : [];
+    const failedStep = steps.find((step) => step?.state === 'failed');
+    const failure = String(boot?.error || (failedStep ? `${failedStep.name}: ${failedStep.error || ''}` : '') || '');
+    if (boot?.phase === 'failed') return { kind: 'failed', text: 'Start failed', tone: 'failed', step: failure, title: failure };
+    const running = START_STEPS.filter(([name]) => steps.some((step) => step?.name === name && step.state === 'running'));
+    const title = [failure, ...running.map(([, label]) => label)].filter(Boolean).join(' · ');
     if (boot?.dialogue_ready === true) {
-        return { kind: 'starting', text: 'Chat ready, restoring background tasks', title };
+        return { kind: 'starting', text: `Chat ready, ${running[0]?.[1] || 'finishing startup'}`, title };
     }
     return { kind: 'starting', text: 'Starting…', title };
 }

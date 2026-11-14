@@ -172,7 +172,7 @@ def _adopt_published_extensions(pool_drive_root: str) -> None:
         log.debug("extension generation adoption failed", exc_info=True)
 
 
-def spawn_worker_process(ctx, wid, in_q, out_q, repo_dir, drive_root):
+def spawn_worker_process(ctx, wid, in_q, out_q, repo_dir, drive_root, *, warm_context_sources=False):
     """Bind a private emergency channel to this exact worker before it starts."""
     import socket
     import weakref
@@ -190,7 +190,8 @@ def spawn_worker_process(ctx, wid, in_q, out_q, repo_dir, drive_root):
         start_method = getattr(ctx, "get_start_method", None)
         no_proxy = str(start_method() if callable(start_method) else "") == "fork" or transport_no_proxy()
         proc = ctx.Process(target=worker_main, args=(wid, in_q, out_q, str(repo_dir), str(drive_root),
-                                                   _current_custody_session_id(), child, no_proxy))
+                                                   _current_custody_session_id(), child, no_proxy),
+                           kwargs={"warm_context_sources": True} if warm_context_sources else {})
         proc.daemon = True
         proc.start()
     except BaseException:
@@ -336,8 +337,42 @@ def _configure_worker_logging() -> None:
         configure_process_logging(drive_logs=None)
 
 
+def _warm_context_sources(env: Any) -> dict:
+    """Prepare common source-derived reads in their consumer process, not a frozen prompt.
+
+    Books are reread on use; the story's existing source validator owns invalidation.
+    No task/room, route, tools or owner input is captured and no legacy activation runs.
+    A failed source is simply cold on the next ordinary build, independently of others.
+    """
+    from ouroboros.reference_books import BOOK_ENTRYPOINTS, load_reference_book
+
+    outcomes = {}
+    for book in BOOK_ENTRYPOINTS:
+        try:
+            load_reference_book(env.repo_dir, book, lambda path: env.repo_path(path).read_bytes())
+            outcomes[book] = "warm"
+        except Exception as exc:
+            outcomes[book] = type(exc).__name__
+            log.debug("Context source warm missed %s", book, exc_info=True)
+    try:
+        from ouroboros.memory_view import ChronicleStore, capture_story, room_labeler
+
+        root = pathlib.Path(getattr(env, "budget_drive_root", None) or env.drive_root)
+        store = ChronicleStore(root)
+        if store.log_path.exists() and store.activation():
+            capture_story(store, root, room_labeler(root))
+            outcomes["story"] = "warm"
+        else:
+            outcomes["story"] = "inactive"
+    except Exception as exc:
+        outcomes["story"] = type(exc).__name__
+        log.debug("Context source warm missed story", exc_info=True)
+    return outcomes
+
+
 def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
-                custody_session_id: str = "", stop_socket=None, transport_no_proxy: Any = None) -> None:
+                custody_session_id: str = "", stop_socket=None, transport_no_proxy: Any = None, *,
+                warm_context_sources: bool = False) -> None:
     import os as _os
     # Mark this process as a worker BEFORE importing the agent/LLM stack (a process fact:
     # ownership, lifelines, custody), and state the spawner's transport policy beside it
@@ -498,6 +533,13 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
         birth_window.close()
         _log_worker_crash(wid, _drive, "make_agent", _e, _tb.format_exc())
         return
+    warmed = {}
+    if warm_context_sources:
+        try:
+            warmed = timed("context_sources", _warm_context_sources, agent.env)
+        except Exception as _e:
+            warmed = {"preparation": type(_e).__name__}
+            log.debug("Context source preparation unavailable", exc_info=True)
     # The births are measured first, in their own try: a failing checkout read must
     # neither leave them unbound for the idle probe nor suppress readiness. An empty
     # birth is honest; the parent then matches this child by its own Process pid.
@@ -525,6 +567,7 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
             "git_branch": _branch, "git_sha": _sha,
             **carrier_rss(),  # a fresh worker's own size, on every install (the plan's per-install measurement)
             **section_spans(),  # the birth: sections_ms / sections_cpu_ms of its steps and their counted work
+            **({"context_sources": warmed} if warm_context_sources else {}),
         })
     except Exception as _e:
         _log_worker_crash(wid, _drive, "worker_ready", _e, _tb.format_exc())

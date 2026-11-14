@@ -560,7 +560,10 @@ def reconcile_conversation_lane() -> None:
         next_id = max(pool.WORKERS, default=-1) + 1
     for wid in range(next_id, next_id + missing):
         try:
-            if not _spawn_worker_slot(wid, lane=LANE_CONVERSATION):
+            # Earlier slots serve already-waiting turns; only the final intended spare
+            # pays optional preparation before READY. A later arrival may still claim it.
+            if not _spawn_worker_slot(wid, lane=LANE_CONVERSATION,
+                                      warm_context_sources=(wid == next_id + missing - 1)):
                 break
             _SPAWN_REFUSED[0] = ""
         except Exception as exc:

@@ -614,10 +614,10 @@ def _working_notes(root: pathlib.Path, tasks: List[str]) -> Dict[str, str]:
     applied fold kept), the fact and exact reader from that field alone. One batch reads the results; a result
     without a notes address makes no entry. The notes' words and availability are read only by choice."""
     from ouroboros.main_context_authority import WORKING_NOTES_FIELD, retained_reader
-    from ouroboros.task_results import load_task_results
+    from ouroboros.task_results import load_working_note_results
 
     facts: Dict[str, str] = {}
-    for task, saved in load_task_results(root, tasks).items():
+    for task, saved in load_working_note_results(root, tasks).items():
         ref = saved.get(WORKING_NOTES_FIELD) if isinstance(saved, Mapping) else None
         if not isinstance(ref, Mapping) or not ref.get("path"):
             continue

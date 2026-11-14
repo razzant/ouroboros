@@ -239,7 +239,7 @@ def test_health_answers_with_the_phase_while_slow_boot_steps_still_run(boot_app,
             reload_release.set()
             final = _wait(lambda: (b := _health(client)["boot"])["phase"] == "ready" and b, what="phase ready")
             states = {row["name"]: row["state"] for row in final["steps"]}
-            assert states["extensions"] == "done" and states["store"] == "done" and states["supervisor"] == "done"
+            assert states["extensions"] == "done" and states["store"] == "done" and states["supervisor_outcome"] == "done"
             assert final["tasks_ready"] is True and final["dialogue_ready"] is True
             state = client.get("/api/state").json()
             assert state["supervisor_ready"] is True and state["boot"]["phase"] == "ready"
@@ -444,3 +444,265 @@ def test_a_busy_dialogue_store_is_named_instead_of_initialization(busy):
     assert sent and sent[0]["client_message_id"] == "cm-1" and sent[0]["system_type"] == "initialization_notice"
     assert ("dialogue store is busy" in sent[0]["content"]) is busy
     assert ("still initializing" in sent[0]["content"]) is (not busy)
+
+
+# --- transport preparation overlaps registration, never recovery ----------------------------
+
+@pytest.mark.parametrize("prewarm", [False, True])
+def test_native_transport_overlap_keeps_extension_delivery_and_shutdown(boot_app, monkeypatch, prewarm):
+    """Same native manager and three-second registration in both schedules; no provider calls.
+
+    False is the old sequential schedule, True the actual lifespan's new schedule. Only the
+    supervisor's costly side effects are substituted: its real admission callback stays behind
+    extension registration. The manager/queue RPC, bus subscriber and shutdown are real.
+    """
+    import json
+    from starlette.testclient import TestClient
+    from ouroboros import extension_loader, server_boot
+    from ouroboros.event_bus import EventBus, CHAT_OUTBOUND
+    from supervisor import workers
+
+    srv, root = boot_app
+    monkeypatch.setattr(workers, "_EVENT_Q", None)
+    monkeypatch.setattr(workers, "_EVENT_Q_MANAGER", None)
+    monkeypatch.setattr(workers, "_EVENT_Q_SHUTDOWN", False)
+    bus, received, stamps, managers = EventBus(), [], {}, []
+    get_queue = workers.get_event_q
+    def measured_queue(**kwargs):
+        first = workers._EVENT_Q_MANAGER is None
+        if first:
+            stamps["queue_enter"] = time.monotonic()
+        result = get_queue(**kwargs)
+        if first:
+            stamps["queue_exit"] = time.monotonic()
+        return result
+    monkeypatch.setattr(workers, "get_event_q", measured_queue)
+    entered = threading.Event()
+    prepare = server_boot.prepare_event_queue
+    if not prewarm:
+        monkeypatch.setattr(server_boot, "prepare_event_queue", lambda *_a, **_kw: None)
+
+    def reload(_root, _reader, **_kw):
+        stamps["extensions_enter"] = time.monotonic()
+        entered.set()
+        time.sleep(3)
+        bus.subscribe("saved-work-consumer", CHAT_OUTBOUND, received.append)
+        stamps["extensions_exit"] = time.monotonic()
+        return {}
+
+    def supervisor(_settings):
+        stamps["supervisor_enter"] = time.monotonic()
+        assert srv._extensions_ready.is_set()
+        assert server_boot.wait_event_queue(srv._event_queue_preparation, lambda: False)
+        queue = workers.get_event_q(drive_root=root)
+        managers.append(workers._EVENT_Q_MANAGER)
+        stamps["queue_observed"] = time.monotonic()
+        queue.put({"type": "send_message", "text": "saved terminal"})
+        bus.publish(CHAT_OUTBOUND, queue.get(timeout=5))
+        _ready_supervisor(srv)
+        return True
+
+    monkeypatch.setattr(extension_loader, "reload_all", reload)
+    monkeypatch.setattr(srv, "has_startup_ready_provider", lambda _: True)
+    monkeypatch.setattr(srv, "_start_supervisor_if_needed", supervisor)
+    with TestClient(srv.app) as client:
+        assert entered.wait(15)
+        if prewarm:
+            _wait(lambda: srv._event_queue_preparation is not None, what="preparation published")
+            srv._event_queue_preparation.result(timeout=15)
+            stamps["preparation_observed"] = time.monotonic()
+            assert stamps["queue_enter"] < stamps.get("extensions_exit", float("inf")), "native creation starts during registration"
+            assert stamps["queue_exit"] > stamps["extensions_enter"], "the actual creation interval overlaps registration"
+            manager = workers._EVENT_Q_MANAGER
+            assert workers.get_event_q() is srv._event_queue_preparation.result(), "warm read keeps the endpoint"
+            assert manager._process.is_alive()
+        _wait(lambda: _health(client)["boot"]["phase"] == "ready", what="ready after transport and registration")
+        assert len(received) == 1 and received[0]["text"] == "saved terminal"
+        assert stamps["supervisor_enter"] >= stamps["extensions_exit"]
+        rows = [json.loads(line) for line in (root / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()]
+        creation = next(row for row in rows if row.get("type") == "event_queue_generation_started")
+        elapsed = stamps["queue_observed"] - stamps["extensions_enter"]
+        print("BOOT_NATIVE_MEASUREMENT " + json.dumps({"prewarm": prewarm, "registration_seconds": 3,
+            "ready_after_registration_enter_seconds": elapsed, "manager_pid": managers[0]._process.pid,
+            "manager_start_wall_seconds": creation["manager_start_wall_seconds"],
+            "manager_start_cpu_seconds": creation["manager_start_cpu_seconds"],
+            "queue_create_wall_seconds": creation["queue_create_wall_seconds"],
+            "queue_create_cpu_seconds": creation["queue_create_cpu_seconds"], "stamps": stamps}))
+    assert managers and not managers[0]._process.is_alive(), "actual lifespan shutdown joined the original manager"
+    monkeypatch.setattr(server_boot, "prepare_event_queue", prepare)
+
+
+def test_preparation_stop_before_publication_or_while_waiting_for_lock(tmp_path, monkeypatch):
+    from concurrent.futures import wait
+    from ouroboros import server_boot
+    from ouroboros.server_liveness import BootDocument
+    from supervisor import workers, event_observation
+
+    stop, waiting = threading.Event(), threading.Event()
+    def importing(*_a, **_kw):
+        waiting.set()
+        stop.wait(0.01)
+        return {"status": "importing"}
+    monkeypatch.setattr(server_boot.store_switch, "wait_ready", importing)
+    monkeypatch.setattr(event_observation, "EventQueueManager", lambda **_: pytest.fail("no create after Stop"))
+    future = server_boot.prepare_event_queue(tmp_path, stop.is_set, BootDocument())
+    assert waiting.wait(3)
+    stop.set()
+    _wait(future.done, timeout=3, what="cancelled preparation thread")
+    assert future.cancelled()
+    assert server_boot.wait_event_queue(future, stop.is_set) is False
+
+    stop.clear()
+    waiting.clear()
+    monkeypatch.setattr(server_boot.store_switch, "wait_ready", lambda *_a, **_kw: {"status": "published"})
+    monkeypatch.setattr(workers, "_EVENT_Q", None)
+    monkeypatch.setattr(workers, "_EVENT_Q_MANAGER", None)
+    monkeypatch.setattr(workers, "_EVENT_Q_SHUTDOWN", False)
+    with workers._EVENT_Q_LOCK:
+        future = server_boot.prepare_event_queue(tmp_path, stop.is_set, BootDocument())
+        stop.set()
+    wait([future], timeout=3)
+    assert future.done()
+    assert server_boot.wait_event_queue(future, stop.is_set) is False
+    assert workers._EVENT_Q_MANAGER is None
+
+
+@pytest.mark.parametrize("fail_at", ["start", "queue", "stop_during_start"])
+def test_partial_transport_attempt_stays_owned_and_never_retries(tmp_path, monkeypatch, fail_at):
+    from ouroboros import server_boot
+    from ouroboros.server_liveness import BootDocument
+    from supervisor import workers, event_observation
+
+    stop, calls = threading.Event(), []
+    class Process:
+        pid = 0
+        exitcode = None
+        def kill(self):
+            calls.append("kill")
+            self.exitcode = -1
+        def is_alive(self):
+            return self.exitcode is None
+        def join(self, *_a):
+            calls.append("join")
+    class Manager:
+        _process = Process()
+        def __init__(self, **_kw):
+            calls.append("construct")
+        def start(self, **_kw):
+            calls.append("start")
+            if fail_at == "start":
+                self._process.exitcode = 1
+                raise TimeoutError("manager start failed")
+            if fail_at == "stop_during_start":
+                stop.set()  # models the Panic latch independently of the shutdown lock
+        def Queue(self):
+            calls.append("queue")
+            raise OSError("queue RPC failed")
+        def shutdown(self):
+            calls.append("shutdown")
+            self._process.exitcode = 0
+    monkeypatch.setattr(workers, "_EVENT_Q", None)
+    monkeypatch.setattr(workers, "_EVENT_Q_MANAGER", None)
+    monkeypatch.setattr(workers, "_EVENT_Q_SHUTDOWN", False)
+    monkeypatch.setattr(event_observation, "EventQueueManager", Manager)
+    monkeypatch.setattr(server_boot.store_switch, "wait_ready", lambda *_a, **_kw: {"status": "published"})
+    doc = BootDocument()
+    future = server_boot.prepare_event_queue(tmp_path, stop.is_set, doc)
+    from concurrent.futures import wait
+    assert wait([future], timeout=3).done
+    manager = workers._EVENT_Q_MANAGER
+    if fail_at == "stop_during_start":
+        assert server_boot.wait_event_queue(future, stop.is_set) is False
+        assert "kill" in calls and "queue" not in calls
+    else:
+        for _ in range(2):
+            with pytest.raises((OSError, TimeoutError), match="failed"):
+                server_boot.wait_event_queue(future, lambda: False)
+        with pytest.raises(RuntimeError, match="initialization did not finish"):
+            workers.get_event_q(drive_root=tmp_path)
+    assert calls.count("construct") == calls.count("start") == 1
+    assert manager is not None and doc.snapshot()["steps"][0]["state"] == "failed"
+    workers.shutdown_event_q()
+    assert "shutdown" in calls and not manager._process.is_alive()
+
+
+def test_preparation_thread_start_failure_is_retained(tmp_path, monkeypatch):
+    from ouroboros import server_boot
+    def refused(**_kw):
+        raise RuntimeError("thread unavailable")
+    monkeypatch.setattr(server_boot.threading, "Thread", refused)
+    future = server_boot.prepare_event_queue(tmp_path, lambda: False)
+    with pytest.raises(RuntimeError, match="thread unavailable"):
+        server_boot.wait_event_queue(future, lambda: False)
+
+
+def test_providerless_boot_does_not_prepare_a_transport(boot_app, monkeypatch):
+    from starlette.testclient import TestClient
+    srv, _root = boot_app
+    monkeypatch.setattr(srv.server_boot, "prepare_event_queue", lambda *_a, **_kw: pytest.fail("providerless transport"))
+    with TestClient(srv.app) as client:
+        _wait(lambda: _health(client)["boot"]["phase"] == "ready")
+        assert srv._event_queue_preparation is None
+
+
+def test_real_supervisor_retains_preparation_failure_and_runs_recovery_owner(tmp_path, monkeypatch):
+    from concurrent.futures import Future
+    import server
+    from supervisor import workers
+    from tests.test_server_shutdown import _supervisor_harness
+
+    _supervisor_harness(monkeypatch, tmp_path, ["stop"])
+    future = Future()
+    future.set_exception(OSError("native queue failed"))
+    monkeypatch.setattr(server, "_event_queue_preparation", future)
+    recovered = []
+    monkeypatch.setattr(server, "_run_startup_task_recovery", lambda *_a, **kw: recovered.append(kw))
+    monkeypatch.setattr(workers, "init", lambda **_: pytest.fail("failed preparation cannot start workers"))
+    for _ in range(2):  # a settings revival observes the same failure, never a new queue attempt
+        server._run_supervisor({})
+        assert server._supervisor_error == "Supervisor init failed: native queue failed"
+        assert not server._supervisor_ready.is_set() and server._supervisor_init_done.is_set()
+    assert len(recovered) == 2 and future.exception().args == ("native queue failed",)
+
+
+def test_stop_during_queue_rpc_and_concurrent_first_callers_share_the_attempt(tmp_path, monkeypatch):
+    from concurrent.futures import wait
+    from types import SimpleNamespace
+    from ouroboros import server_boot
+    from ouroboros.server_liveness import BootDocument
+    from supervisor import workers, event_observation
+
+    stop, entered, release = threading.Event(), threading.Event(), threading.Event()
+    calls, returned, endpoint = [], [], object()
+    class Manager:
+        _process = SimpleNamespace(pid=0, exitcode=None, is_alive=lambda: False)
+        def __init__(self, **_kw):
+            calls.append("construct")
+        def start(self, **_kw):
+            calls.append("start")
+        def Queue(self):
+            calls.append("queue")
+            entered.set()
+            assert release.wait(5)
+            return endpoint
+        def shutdown(self):
+            calls.append("shutdown")
+    for name, value in (("_EVENT_Q", None), ("_EVENT_Q_MANAGER", None), ("_EVENT_Q_SHUTDOWN", False)):
+        monkeypatch.setattr(workers, name, value)
+    monkeypatch.setattr(event_observation, "EventQueueManager", Manager)
+    monkeypatch.setattr(server_boot.store_switch, "wait_ready", lambda *_a, **_kw: {"status": "published"})
+    future = server_boot.prepare_event_queue(tmp_path, stop.is_set, BootDocument())
+    assert entered.wait(3)
+    legacy = threading.Thread(target=lambda: returned.append(workers.get_event_q()), daemon=True)
+    legacy.start()
+    stop.set()
+    try:
+        assert server_boot.wait_event_queue(future, stop.is_set) is False
+        assert not future.done(), "Stop returned while the queue RPC is still held"
+    finally:
+        release.set()
+        legacy.join(5)
+        assert wait([future], timeout=5).done
+        workers.shutdown_event_q()
+    assert future.result() is endpoint and returned == [endpoint]
+    assert calls == ["construct", "start", "queue", "shutdown"]

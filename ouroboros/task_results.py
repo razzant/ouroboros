@@ -389,6 +389,40 @@ def load_task_results(drive_root: Any, task_ids: List[str]) -> Dict[str, Any]:
     return results
 
 
+def load_working_note_results(drive_root: Any, task_ids: List[str]) -> Dict[str, Any]:
+    """Strict current working-note pointers; the same absence/refusal contract as full results.
+
+    The source remains the canonical task body. No task cards, handoff rows, normalization
+    or notes-source reads are needed to name its pointer in the resident memory view.
+    """
+    from ouroboros.task_store import working_note_documents
+
+    if not task_ids:
+        return {}
+    valid: Dict[str, str] = {}
+    for task_id in task_ids:
+        try:
+            valid[task_id] = validate_task_id(task_id)
+        except ValueError:
+            valid[task_id] = ""
+    try:
+        documents = working_note_documents(drive_root, (tid for tid in valid.values() if tid))
+    except Exception as exc:
+        return {"_unavailable": exc}
+    results: Dict[str, Any] = {}
+    for task_id, tid in valid.items():
+        if tid not in documents:
+            continue
+        data = documents[tid]
+        try:
+            _admit_stored(data, tid, strict=True, noun="task result authority")
+        except Exception as exc:
+            results[task_id] = {"_refused": exc}
+        else:
+            results[task_id] = data
+    return results
+
+
 def list_task_results(
     drive_root: Any,
     *,
