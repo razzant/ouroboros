@@ -313,6 +313,12 @@ html[data-layout="stack"] .sidebar-foot-meta { min-height: 44px; margin: var(--s
 :root[data-window-chrome="integrated"]:not([data-layout="stack"]) .sidebar-head {
     padding-top: max(var(--space-4), calc(var(--window-chrome-top) - var(--space-4)));
 }
+/* Once the head scrolls away, the scroller itself must still clear the window buttons. */
+:root[data-window-chrome="integrated"]:not([data-layout="stack"]) #primary-sidebar[data-bars-crowd] {
+    margin-top: var(--window-chrome-top);
+    height: calc(var(--vvh) - var(--window-chrome-top));
+}
+:root[data-window-chrome="integrated"]:not([data-layout="stack"]) #primary-sidebar[data-bars-crowd] .sidebar-head { padding-top: 0; }
 :root[data-window-chrome="integrated"] .onboarding-overlay {
     box-sizing: border-box;
     padding-top: var(--window-chrome-top);
