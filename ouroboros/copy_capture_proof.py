@@ -23,12 +23,14 @@ log = logging.getLogger(__name__)
 
 CAPTURE_UNPROVEN = "capture_unproven"
 _SYMLINK, _EXECUTABLE, _REGULAR = "120000", "100755", "100644"
-# This process's last keep of a plain copy for a path no saved capture holds, by copy path: ``(pid, rel, stamp,
-# fact)``. A verdict costs the checkout's Git status and ignored listing, the task's result read twice and a replay of
-# the capture in a private index; ``rel``'s keep needs none of it again while ``rel`` stands as it stood (``fact``)
-# and the task's result was not written since (``stamp``, ``task_store.signature``), since the capture it was judged
-# against is then the same. Any change reopens the whole proof. A keep needs no proof: this postpones a removal at
-# most, never causes one.
+# This process's last keep of a plain copy for an untracked or ignored path no saved capture holds, by copy path:
+# ``(pid, task_id, rel, stamp, fact)``. A verdict costs the checkout's Git status and ignored listing, the task's result
+# read twice and a replay of the capture in a private index; ``kept_as_before`` keeps such a copy again without them
+# while two facts stand: ``rel``'s lstat (``fact``) and the task result's write signature (``stamp``,
+# ``task_store.signature``: every capture publication writes the result). Nothing else is watched: a HEAD or index
+# change, or a fallback manifest rewritten without a result write, waits for the next fresh proof (that result write, a
+# Storage preview, a restart). A keep needs no proof, so this postpones a removal at most and never causes one; the
+# pass then records no typed hold for the copy, as for any keep of unsaved work. Retirement drops the entry.
 _KEPT_UNHELD: Dict[str, tuple] = {}
 
 
@@ -61,9 +63,11 @@ def plain_copy_verdict(row: Dict[str, Any], data_dir: Optional[Any] = None) -> D
         unheld: List[str] = []
         if not _unsaved(path, row, unique, base, data_dir, unheld):
             return {"remove": True, "keep_branch": False, "reason": "capture_holds"}
-        standing = next(((rel, fact) for rel in unheld if (fact := _stat_of(path / rel)) is not None), None)
+        loose = {*work["untracked"], *work["ignored"]}  # unique by being there, whatever their bytes
+        standing = next(((rel, fact) for rel in unheld if rel in loose and (fact := _stat_of(path / rel)) is not None),
+                        None)
         if stamp is not None and standing is not None:
-            _KEPT_UNHELD[str(path)] = (os.getpid(), standing[0], stamp, standing[1])
+            _KEPT_UNHELD[str(path)] = (os.getpid(), str(row.get("task_id") or ""), standing[0], stamp, standing[1])
     except Exception:
         log.debug("Work of copy %s could not be proven saved", path, exc_info=True)
     return keep
@@ -74,15 +78,21 @@ def kept_as_before(row: Dict[str, Any], data_dir: Optional[Any] = None) -> bool:
     that path stands as it stood and the task's result is unwritten since (``_KEPT_UNHELD``)."""
     path = str(pathlib.Path(str(row.get("path") or "")))
     seen = _KEPT_UNHELD.get(path)
-    if seen is None or seen[0] != os.getpid():
+    if seen is None:
         return False
     try:
-        same = _task_stamp(row, data_dir) == seen[2] and _stat_of(pathlib.Path(path) / seen[1]) == seen[3]
+        same = seen[:2] == (os.getpid(), str(row.get("task_id") or "")) and _task_stamp(row, data_dir) == seen[3] \
+            and _stat_of(pathlib.Path(path) / seen[2]) == seen[4]
     except OSError:
         same = False
     if not same:
         _KEPT_UNHELD.pop(path, None)
     return same
+
+
+def forget_kept(path: Any) -> None:
+    """A retired copy's kept evidence goes with it (``worktree_removal.retired``)."""
+    _KEPT_UNHELD.pop(str(pathlib.Path(str(path or ""))), None)
 
 
 def _task_stamp(row: Dict[str, Any], data_dir: Optional[Any]) -> Optional[Tuple[int, str]]:
@@ -283,11 +293,14 @@ def _manifest(path: pathlib.Path, row: Dict[str, Any], base: str, data_dir: Opti
 
     root, tid = _data_dir(data_dir), str(row.get("task_id") or "")
     result = load_task_result(root, tid) or {}
-    source = current_workspace_manifest(root, tid, result)
-    artifacts = source.parent
-    if result.get("native_capture_pending") or result.get("artifact_status") == "failed":
-        return None, artifacts
-    manifest = json.loads(source.read_text(encoding="utf-8"))
+    try:
+        source = current_workspace_manifest(root, tid, result)
+        artifacts = source.parent
+        if result.get("native_capture_pending") or result.get("artifact_status") == "failed":
+            return None, artifacts
+        manifest = json.loads(source.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, pathlib.Path(root)  # no capture was published: none speaks for any path
     if (manifest.get("status") != ARTIFACT_STATUS_READY_WITH_CHANGES or manifest.get("errors")
             or pathlib.Path(str(manifest.get("workspace_root") or "")).resolve(strict=False) != path.resolve(strict=False)
             or manifest.get("base_head") != base or manifest.get("current_head") != base):
@@ -328,7 +341,8 @@ def _unsaved(path: pathlib.Path, row: Dict[str, Any], unique: List[str], base: s
              unheld: Optional[List[str]] = None) -> List[str]:
     """The unique paths whose bytes and mode equal neither their verified file result nor the saved patch
     replayed onto the base in a private index. A capture of file results alone has no patch to replay.
-    ``unheld`` receives those that differ whatever their bytes: no capture speaks for them at all."""
+    ``unheld`` receives those no capture speaks for: every one without a usable manifest, else those it holds no
+    entry for."""
     from ouroboros import subagent_worktrees as sw
     from ouroboros.artifacts import stream_artifact_file
     from ouroboros.workspace_file_outputs import file_output_changes

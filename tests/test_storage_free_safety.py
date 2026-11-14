@@ -164,9 +164,10 @@ def test_a_file_changed_after_a_good_capture_stays(copies):
 def test_a_copy_kept_for_unheld_work_is_proven_again_only_when_that_path_or_its_result_changes(copies, monkeypatch):
     """The custody pass's keep of a copy for a path no capture holds needs no new proof (Git runs, the result read
     twice, a replay of the capture) while that path and the task's result stand as they stood: either changing
-    reopens it, and the copy goes once nothing unsaved is left."""
-    from ouroboros import copy_capture_proof as proof
+    reopens it, and the copy goes once nothing unsaved is left. Its retirement drops the evidence."""
+    from ouroboros import copy_capture_proof as proof, worktree_removal
 
+    monkeypatch.setattr(proof, "_KEPT_UNHELD", {})
     handle = _copy(copies)
     path = Path(handle.path)
     (path / "work.txt").write_text("saved\n", encoding="utf-8")
@@ -181,6 +182,9 @@ def test_a_copy_kept_for_unheld_work_is_proven_again_only_when_that_path_or_its_
     assert _prune(copies)["removed"] == 0 and len(proofs) == 2, "a written result reopens the proof"
     late.unlink()
     assert _prune(copies)["removed"] == 1 and not path.exists() and len(proofs) == 3, "its unheld path went: it goes"
+    proof._KEPT_UNHELD[str(path)] = (os.getpid(), "finished", "late.txt", None, None)
+    worktree_removal.retired({"path": str(path)}, copies[0])
+    assert str(path) not in proof._KEPT_UNHELD, "a retired copy keeps no evidence"
 
 
 @_NO_EXEC_BIT
