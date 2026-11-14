@@ -748,7 +748,6 @@ def _execute_single_tool(
         # provenance facts — the ABI-9 extension_generation digest included —
         # survive even when persist_call fails.
         "tool_result_meta": result_meta.get("tool_result_meta") or {},
-        "args_ref": (trace_ref.get("manifest_ref") or {}).get("path") if trace_ref else None,
         "result_ref": trace_ref.get("manifest_ref") if trace_ref else None,
     }, correlation, tool_call_id=tool_call_id)
     _publish_settlement(tools, drive_logs, settled_row)

@@ -61,6 +61,7 @@ def test_start_is_durable_before_the_handler_and_the_settlement_shares_its_ident
     assert [row["type"] for row in rows] == ["tool_call_started", "tool_call"]
     assert {row["invocation_id"] for row in rows} == {start["invocation_id"]}
     assert rows[1]["elapsed_ms"] >= 0 and "sk-secret-value" not in json.dumps(rows[1])
+    assert rows[1]["result_ref"]["path"] and "args_ref" not in rows[1], "the call's trace is named once, by its ref"
     # The canonical copy survives the execution drive (e.g. its GC).
     canonical = tmp_path / "canonical" / "logs" / "tools.jsonl"
     (logs / "tools.jsonl").unlink()
