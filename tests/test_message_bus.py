@@ -375,7 +375,9 @@ def test_send_links_broadcasts_publishes_and_persists_compact_row(monkeypatch, t
     assert live["task_id"] == "task-links"
     topic, payload = events[-1]
     assert topic == event_bus.CHAT_LINKS
-    assert set(payload) == {"chat_id", "transport", "title", "actions", "ts"}
+    # Presentation label and the stored row's invisible reply address ride along for the phone mirror.
+    assert set(payload) == {"chat_id", "transport", "title", "actions", "ts", "message_origin", "task_id", "row_address"}
+    assert payload["task_id"] == "task-links" and payload["message_origin"] == {}
     assert payload["actions"] == actions
     row = chat_rows(tmp_path)[-1]
     assert row["type"] == "links"
