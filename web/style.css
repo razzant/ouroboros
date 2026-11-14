@@ -1505,6 +1505,9 @@ html[data-layout="docked"] .app-page-lead .app-tab-strip {
 }
 html[data-layout="docked"] .app-page-lead { --control-h: var(--control-h-float); }
 html[data-layout="docked"] .app-page-lead .app-tab { pointer-events: auto; }
+/* A pane too narrow for the bar keeps the strip under the row (page_header.js bindPageHeader): there too it wraps and
+   never scrolls; only the phone's strip, at the top of its page, scrolls. */
+html[data-layout="docked"] .app-page-tabs > .app-tab-strip { flex-wrap: wrap; row-gap: var(--space-1); overflow-x: visible; }
 /* Files: the folder's location starts the bar at reading size, each folder by its name, the one you are in in primary
    ink. A location longer than the bar's start scrolls inside it as a tab strip does, fading where folders hide: it
    rests at its end (files.js), so the folders above give way first, and no folder is wider than the strip less one
