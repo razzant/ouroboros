@@ -14,6 +14,7 @@ import {
     summarizeLogEvent,
 } from './log_events.js';
 import { outcomeTone } from './task_phase_chip.js';
+import { bindScrollFade } from './scroll_fade.js';
 import { createLogRaw, LOG_RAW_HTML } from './logs_raw.js';
 
 /** Dashboard › Logs (docs/ARCHITECTURE.md §3 "Dashboard"). The panel's entries are data first: every live frame and
@@ -66,9 +67,9 @@ export function initLogs({ ws, state, mount }) {
     // The reader follows the newest entry (`pinned`) or reads an entry (`anchor`); `ownTop` is this module's own scroll.
     let pinned = true, anchor = null, ownTop = null, selectionInside = false, settleQueued = false;
 
-    // The filter shows the kinds chosen, every kind while none is: the rest, no chip lit and no Clear. The choice lives
-    // in `state.activeFilters`, which meant the kinds SHOWN before (all six at rest, one turned off to narrow): read
-    // once here, a kind it still shows stays chosen and all six (or none) is the rest, so what the owner saw stays.
+    // The filter shows the kinds chosen, every kind while none is: All, lit at rest. The choice lives in
+    // `state.activeFilters`, which meant the kinds SHOWN before (all six at rest, one turned off to narrow): read once
+    // here, a kind it still shows stays chosen and all six (or none) is the rest, so what the owner saw stays.
     const KINDS = Object.keys(LOG_CATEGORIES);
     const choice = state.activeFilters || {};
     if (KINDS.every((key) => choice[key])) KINDS.forEach((key) => { choice[key] = false; });
@@ -76,24 +77,26 @@ export function initLogs({ ws, state, mount }) {
     const narrowed = () => KINDS.some((key) => state.activeFilters[key]);
     const shows = (category) => !narrowed() || Boolean(state.activeFilters[category]);
 
-    // One Dashboard tab body is the tab's root and its one scroller; the filters stay at its top while the list,
-    // one card of trays, scrolls under them. The history line, the empty line and Clear list live in the list's card.
+    // One Dashboard tab body is the tab's root and its one scroller; the strip stays at its top while the list, one card
+    // of trays, scrolls under it. The strip is the filter (Skills' strip: it wraps, and on a phone it is one line that
+    // scrolls sideways), then the list's own action at its end; the history line and the empty line live in the card.
     const page = document.createElement('div');
     page.id = 'page-logs';
     page.className = 'dashboard-body settings-logs-panel';
     page.innerHTML = `
-        <div class="logs-filters" id="log-filters" role="group" aria-label="Show"><button type="button" class="btn btn-ghost btn-sm logs-filters-clear">Clear</button></div>
+        <div class="logs-filters"><div class="logs-kinds" id="log-filters" role="group" aria-label="Show" data-scroll-x>${
+            Object.entries({ '': 'All', ...LOG_CATEGORIES }).map(([key, label]) => `<button type="button" class="filter-chip" data-log-kind="${key}">${label}</button>`).join('')
+        }</div><button type="button" class="btn btn-ghost btn-sm logs-clear-list" id="btn-clear-logs">Clear list</button></div>
         <section class="ui-card logs-card">
             <div class="ui-status logs-history-status" role="status"></div>
             <p class="logs-empty" data-log-empty hidden></p>
             <div id="log-entries"></div>
-            <button type="button" class="btn btn-ghost btn-sm logs-clear-list" id="btn-clear-logs">Clear list</button>
         </section>
     `;
     mount.appendChild(page);
 
     const filtersDiv = page.querySelector('#log-filters');
-    const clearChoice = page.querySelector('.logs-filters-clear');
+    bindScrollFade(filtersDiv, { axis: 'x' });  // a phone's one scrolling line fades where chips hide
     const logEntries = page.querySelector('#log-entries');
     const historyStatus = page.querySelector('.logs-history-status');
     const emptyLine = page.querySelector('[data-log-empty]');
@@ -178,17 +181,15 @@ export function initLogs({ ws, state, mount }) {
         else emptyLine.innerHTML = 'The filters hide every event. <button type="button" class="btn btn-ghost btn-sm" data-log-show-all>Show all</button>';
     }
 
-    // The shared filter chips (ui.css `.filter-chip`, as Skills' filters): a chosen kind is lit in the soft crimson and
-    // pressed. Clear is the row's last item while a kind is chosen; at rest its place stays, unseen, so the row never
-    // grows or wraps when it comes (DESIGN principle 6).
-    const chips = new Map();
+    // The shared filter chips (ui.css `.filter-chip`, as Skills' strip): All leads, lit while no kind is chosen; a kind
+    // pressed is lit beside the others chosen and All goes out; All pressed clears the choice.
+    const chips = new Map([...filtersDiv.querySelectorAll('[data-log-kind]')].map((chip) => [chip.dataset.logKind, chip]));
     function syncFilterChips() {
         chips.forEach((chip, key) => {
-            chip.classList.toggle('active', Boolean(state.activeFilters[key]));
-            chip.setAttribute('aria-pressed', String(Boolean(state.activeFilters[key])));
+            const lit = key ? Boolean(state.activeFilters[key]) : !narrowed();
+            chip.classList.toggle('active', lit);
+            chip.setAttribute('aria-pressed', String(lit));
         });
-        if (narrowed()) clearChoice.dataset.shown = '';
-        else delete clearChoice.dataset.shown;
     }
 
     function applyFilters() {
@@ -198,30 +199,18 @@ export function initLogs({ ws, state, mount }) {
         follow();
     }
 
-    function renderFilters() {
-        for (const [key, label] of Object.entries(LOG_CATEGORIES)) {
-            const chip = document.createElement('button');
-            chip.type = 'button';
-            chip.className = 'filter-chip';
-            chip.textContent = label;
-            chip.addEventListener('click', () => {
-                state.activeFilters[key] = !state.activeFilters[key];
-                applyFilters();
-            });
-            chips.set(key, chip);
-            filtersDiv.insertBefore(chip, clearChoice);
-        }
-        syncFilterChips();
-    }
-
-    // Clear and the empty line's Show all return the filter to its rest: every kind shown.
-    function showAll() {
-        KINDS.forEach((key) => { state.activeFilters[key] = false; });
+    function choose(key) {
+        if (key) state.activeFilters[key] = !state.activeFilters[key];
+        else KINDS.forEach((kind) => { state.activeFilters[kind] = false; });
         applyFilters();
     }
-    clearChoice.addEventListener('click', showAll);
+
+    chips.forEach((chip, key) => chip.addEventListener('click', () => choose(key)));
+    syncFilterChips();
+
+    // The empty line's Show all is All pressed: every kind shown.
     emptyLine.addEventListener('click', (event) => {
-        if (event.target?.closest?.('[data-log-show-all]')) showAll();
+        if (event.target?.closest?.('[data-log-show-all]')) choose('');
     });
 
     // ---- The entries (data) --------------------------------------------------------------------------------------
@@ -675,8 +664,6 @@ export function initLogs({ ws, state, mount }) {
         }
         createStandaloneEntry(evt);
     }
-
-    renderFilters();
 
     // Backfill recent history so the panel is not empty when it is shown after a
     // page load or reconnect (the live WS stream only carries events from the

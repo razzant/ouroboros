@@ -212,7 +212,7 @@ def test_raw_refusals_identity_and_cancelled_continuations_never_substitute_rows
             page.get_by_role("button", name="Tools", exact=True).click()
             assert page.evaluate("() => gates[0].signal.aborted")
             page.evaluate("answer", {"status": 200, "body": _chunk(payload, 0)})
-            page.get_by_role("button", name="Clear", exact=True).click()
+            page.get_by_role("button", name="All", exact=True).click()
             page.wait_for_function("() => gates.length === 1")
             page.get_by_role("button", name="Clear list", exact=True).click()
             assert page.evaluate("() => gates[0].signal.aborted")

@@ -531,7 +531,7 @@ test('Logs reports partial history without losing live rows or deduplication, th
     assert.equal(calls.length, 8, 'only existing init/reconnect backfill runs');
 });
 
-test('Logs reads oldest to newest, gives every event one anatomy, and shows the kinds chosen or, at rest, every kind', async (t) => {
+test('Logs reads oldest to newest, gives every event one anatomy, and shows the kinds chosen or, at rest, All', async (t) => {
     const { mount, routes, ws } = setup(t);
     const live = { type: 'test_live_event', ts: '2026-09-09T12:00:00Z', message: 'live' };
     const earlier = { type: 'test_earlier_event', ts: '2026-09-09T11:59:00Z', message: 'earlier' };
@@ -564,35 +564,38 @@ test('Logs reads oldest to newest, gives every event one anatomy, and shows the 
     fold.open = true;
     entries.dispatchEvent({ type: 'toggle', target: fold });
     assert.equal(fold.querySelector('.log-raw').hidden, false);
-    // The filter is the shared chips with one state model (U031): at rest none is lit and every kind shows, and Clear
-    // keeps its place at the row's end unseen; a chosen chip shows its kind, and only the chosen chips are lit.
+    // The filter is the shared chips with one state model (U031), Skills' strip: All leads and is lit at rest, when every
+    // kind shows; a kind pressed is lit beside the others chosen and All goes out; All pressed clears the choice. The
+    // strip has no Clear of its own: its last item is the list's own action, Clear list.
     const chips = mount.querySelectorAll('.filter-chip');
-    const clear = mount.querySelector('.logs-filters-clear');
-    assert.deepEqual(chips.map((chip) => chip.textContent), ['Tools', 'LLM', 'Errors', 'Tasks', 'System', 'Consciousness']);
-    assert.equal(clear.parentElement.children.at(-1), clear, 'Clear is the row\'s last item');
-    const atRest = () => chips.every((chip) => !chip.classList.contains('active') && chip.getAttribute('aria-pressed') === 'false')
-        && clear.dataset.shown === undefined;
-    assert.ok(atRest(), 'at rest no chip is lit and Clear is unseen');
+    assert.deepEqual(chips.map((chip) => chip.textContent), ['All', 'Tools', 'LLM', 'Errors', 'Tasks', 'System', 'Consciousness']);
+    const strip = mount.querySelector('.logs-filters');
+    assert.equal(strip.children.at(-1), mount.querySelector('#btn-clear-logs'), 'Clear list ends the strip');
+    assert.equal(mount.querySelector('#btn-clear-logs').textContent, 'Clear list');
+    assert.equal(mount.querySelectorAll('.btn').filter((button) => button.textContent === 'Clear').length, 0, 'no Clear for the filter');
+    const lit = () => chips.filter((chip) => chip.classList.contains('active') && chip.getAttribute('aria-pressed') === 'true')
+        .map((chip) => chip.textContent);
+    assert.deepEqual(lit(), ['All'], 'at rest All is lit');
     assert.ok(entries.children.every((entry) => !entry.hidden), 'at rest every kind shows');
-    const [tools, , , , system] = chips;  // both events here are System's
+    const [all, tools, , , , system] = chips;  // both events here are System's
     await tools.fire('click');
-    assert.deepEqual(chips.map((chip) => chip.classList.contains('active')), [true, false, false, false, false, false]);
-    assert.equal(tools.getAttribute('aria-pressed'), 'true');
-    assert.equal(clear.dataset.shown, '', 'Clear comes while a kind is chosen');
+    assert.deepEqual(lit(), ['Tools'], 'a kind pressed is lit and All goes out');
+    assert.equal(all.getAttribute('aria-pressed'), 'false');
     assert.ok(entries.children.every((entry) => entry.hidden), 'a chosen kind shows alone');
     assert.equal(empty.hidden, false);
     assert.match(empty.textContent, /The filters hide every event\./);
     await system.fire('click');
+    assert.deepEqual(lit(), ['Tools', 'System'], 'several kinds may be chosen together');
     assert.ok(entries.children.every((entry) => !entry.hidden), 'a second chosen kind shows beside the first');
     assert.equal(empty.hidden, true);
-    await clear.fire('click');
-    assert.ok(atRest(), 'Clear returns to the rest');
+    await all.fire('click');
+    assert.deepEqual(lit(), ['All'], 'All clears the choice');
     assert.ok(entries.children.every((entry) => !entry.hidden));
     await tools.fire('click');
     await empty.fire('click', { target: empty.querySelector('[data-log-show-all]') });
     assert.ok(entries.children.every((entry) => !entry.hidden), 'Show all brings every event back');
     assert.equal(empty.hidden, true);
-    assert.ok(atRest());
+    assert.deepEqual(lit(), ['All']);
     // Clear list says when, and that new events appear (U033).
     await mount.querySelector('#btn-clear-logs').fire('click');
     assert.match(empty.textContent, /^Cleared at \d\d:\d\d\. New events appear here\.$/);
@@ -605,9 +608,9 @@ test('Logs reads oldest to newest, gives every event one anatomy, and shows the 
 for (const [name, stored, lit, shown] of [
     ['a kind turned off keeps the other five chosen', { tools: false, llm: true, errors: true, tasks: true, system: true, consciousness: true },
         ['LLM', 'Errors', 'Tasks', 'System', 'Consciousness'], ['llm']],
-    ['all six on is the rest', { tools: true, llm: true, errors: true, tasks: true, system: true, consciousness: true }, [], ['tools', 'llm']],
+    ['all six on is the rest', { tools: true, llm: true, errors: true, tasks: true, system: true, consciousness: true }, ['All'], ['tools', 'llm']],
     ['one kind on is that kind chosen', { tools: true }, ['Tools'], ['tools']],
-    ['no stored choice is the rest', undefined, [], ['tools', 'llm']],
+    ['no stored choice is the rest', undefined, ['All'], ['tools', 'llm']],
 ]) {
     test(`Logs carries a stored filter over: ${name}`, async (t) => {
         const { mount, routes, ws } = setup(t);
@@ -620,7 +623,6 @@ for (const [name, stored, lit, shown] of [
         const chips = mount.querySelectorAll('.filter-chip');
         assert.deepEqual(chips.filter((chip) => chip.classList.contains('active')).map((chip) => chip.textContent), lit);
         assert.deepEqual(chips.filter((chip) => chip.getAttribute('aria-pressed') === 'true').map((chip) => chip.textContent), lit);
-        assert.equal(mount.querySelector('.logs-filters-clear').dataset.shown, lit.length ? '' : undefined);
         const entries = mount.querySelector('#log-entries').children;
         assert.deepEqual(entries.filter((entry) => !entry.hidden).map((entry) => entry.dataset.category), shown);
     });

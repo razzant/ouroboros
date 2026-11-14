@@ -6114,42 +6114,29 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     padding-top: 0;
     overflow-anchor: none; /* logs.js owns the entry anchor while chunks are inserted or moved */
 }
-/* The shared filter chips spaced as Skills' strip: a word wide each, 4 px apart, the first word on the list's edge.
-   Clear keeps its place at the row's end at rest, unseen, so it comes without moving or growing the row. */
+/* The strip: the kinds as Skills' strip lays them out (style.css .skills-filter-strip: they wrap, and on a phone they are
+   one line that scrolls sideways), the first word on the list's edge; the list's own action at its right end. */
 .logs-filters {
     --control-h: var(--control-h-sm);
     position: sticky;
     top: 0;
     z-index: 1;
     display: flex;
-    flex-wrap: wrap;
-    gap: 2px var(--space-1);
-    align-items: center;
-    margin-left: calc(-1 * var(--space-2));
+    align-items: flex-start;
+    gap: var(--space-2);
     padding: var(--space-4) 0 var(--space-2);
     background: var(--bg-primary);
 }
-.logs-filters > .filter-chip { --control-pad-x: var(--space-2); }
-.logs-filters-clear { margin-left: var(--space-1); }
-.logs-filters-clear:not([data-shown]) { visibility: hidden; }
-
-/* The filter chips wrap on a phone: under a finger they take the touch minimum as their own height. */
+.logs-kinds { flex: 1 1 0; margin-left: calc(-1 * var(--space-2)); }
+.logs-kinds > .filter-chip { --control-pad-x: var(--space-2); white-space: nowrap; }
+/* Under a finger the strip's capsules take the touch minimum as their own height (ui.css "Touch and containment"). */
 @media (pointer: coarse) {
-    .logs-filters { --control-h: var(--touch-target-min); }
-}
-/* A pane narrower than the six chips and Clear's place on one line (452 px with the strip's lead; the owner's window
-   gives 459) holds them in two even rows of three, Clear at the end of the second: never one alone on a row. */
-@container dashboard (max-width: 27.75rem) {
-    .logs-filters { display: grid; grid-template-columns: repeat(3, auto) minmax(0, 1fr); justify-items: start; }
-    .logs-filters > .filter-chip:nth-of-type(4) { grid-column-start: 1; }
-    .logs-filters > .logs-filters-clear { grid-column: 4; grid-row: 2; }
+    .logs-filters { --control-h: var(--touch-target-min); --control-h-sm: var(--touch-target-min); }
 }
 
 .logs-card { display: grid; gap: var(--space-2); min-width: 0; }
 .logs-empty { margin: 0; color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
 .logs-empty[hidden] { display: none; }
-/* The list's own action stands after it, where the reader following the newest event is. */
-.logs-clear-list { justify-self: start; }
 
 #log-entries {
     display: grid;
@@ -7503,12 +7490,13 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .skills-search-chrome .skills-search { flex: 1 1 260px; min-width: min(200px, 100%); }
 .skills-search-chrome[data-chrome-pane="installed"]:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .skills-filter-strip,
-.skills-category-strip { display: flex; flex-wrap: wrap; gap: 2px var(--space-1); min-width: 0; }
+.skills-category-strip,
+.logs-kinds { display: flex; flex-wrap: wrap; gap: 2px var(--space-1); min-width: 0; }
 /* On a phone the filters and the categories are one line that scrolls sideways ([data-scroll-x]: the drawer's swipe
    leaves it to the strip), never a lone chip wrapped onto a second row. Like a tab strip it fades on each side that
    still hides chips (scroll_fade.js sets the edges), and under a finger its chips take the touch minimum as their own
    height, since the strip clips a reach. */
-html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip) {
+html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip, .logs-kinds) {
     flex-wrap: nowrap;
     overflow-x: auto;
     overscroll-behavior-x: contain;
@@ -7520,11 +7508,11 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip) {
     mask-image: linear-gradient(to right, transparent, black var(--strip-fade-start),
         black calc(100% - var(--strip-fade-end)), transparent);
 }
-html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)[data-scroll-start] { --strip-fade-start: var(--space-4); }
-html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)[data-scroll-end] { --strip-fade-end: var(--space-4); }
-html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-webkit-scrollbar { display: none; }
+html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip, .logs-kinds)[data-scroll-start] { --strip-fade-start: var(--space-4); }
+html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip, .logs-kinds)[data-scroll-end] { --strip-fade-end: var(--space-4); }
+html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip, .logs-kinds)::-webkit-scrollbar { display: none; }
 @media (pointer: coarse) {
-    html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip) { --control-h: var(--touch-target-min); }
+    html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip, .logs-kinds) { --control-h: var(--touch-target-min); }
 }
 .skills-filter-strip { flex-basis: 100%; margin-left: calc(-1 * var(--space-2)); }
 .skills-category-strip { margin: 0 0 var(--space-3) calc(-1 * var(--space-2)); }
