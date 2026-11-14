@@ -50,7 +50,7 @@
   added.
 - **Atomic writes** — `utils.atomic_write_json`: compact JSON (`settings.json`: indent 2),
   tmp+rename; orphan temps wait for `temp_sweep`. `json_update_lock` owns the sidecar shared by
-  `update_json_locked` and stores with custom load/save. `append_jsonl`: O_APPEND plus sidecar lock unless noted.
+  `update_json_locked` and stores with custom load/save. `append_jsonl`: one compact JSON object a line (`utils.machine_json`; rows written before that carry separator spaces, and readers parse either), O_APPEND plus sidecar lock unless noted.
 - **Evidence pack** — `ouroboros/evidence_packs.py`: a task is PACKABLE once its row is
   terminal and neither review nor council is pending (`task_packable`: indexed
   `review_collection_pending`/`plan_collection_pending` facts). Session readers hold loose
