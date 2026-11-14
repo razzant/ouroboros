@@ -504,3 +504,32 @@ test('the header Back is hidden beside the list, leads to the list in one column
     await settle();
     assert.deepEqual([pages(), back().hidden], [[], true]);
 });
+
+test('a root font that moves the two panes\' 40rem repaints Settings: the pane and the list are watched beside the shell', async (t) => {
+    const { env, content, state, showPage } = world(t);
+    env.document.createElement = (tag) => new DescendantStub(tag);
+    const observers = [];
+    const before = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class { constructor(fn) { Object.assign(this, { fn, seen: [] }); observers.push(this); } observe(box) { this.seen.push(box); } disconnect() {} };
+    t.after(() => { globalThis.ResizeObserver = before; });
+    let font = 16;
+    env.window.getComputedStyle = () => ({ fontSize: `${font}px` });
+    registerSettingsPage('test-font', { title: 'Font', mount() {} });
+    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    layout(t, controls, content, { on: true });
+    controls.page.getBoundingClientRect = () => ({ top: 0, bottom: 10, width: 735 });  // the owner's window
+    await controls.open('test-font');
+    await settle();
+    const back = content.querySelector('.app-page-header [data-settings-back]');
+    assert.equal(back.hidden, true, 'beside the list: no Back');
+    // The browser's font grows to 20 px: 40rem is 800 px, the sheets draw one column and hide the list, the shell keeps
+    // its width. The pane, which loses the list beside it, says so, and the page leads back to the list.
+    font = 20;
+    content.querySelector('[data-settings-home]').getClientRects = () => [];
+    const heard = (box) => observers.find((observer) => observer.seen.includes(box));
+    const pane = content.querySelector('.settings-levels');
+    assert.ok(heard(pane), 'the pane is watched');
+    assert.ok(heard(content.querySelector('[data-settings-list]')), 'the list is watched');
+    heard(pane).fn([]);
+    assert.equal(back.hidden, false);
+});

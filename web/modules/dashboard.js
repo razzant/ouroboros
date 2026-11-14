@@ -337,8 +337,15 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     // The answers follow the state the app already reads (every 20 s, faster while a room shows): no read of their own.
     const answerTimer = setInterval(() => { if (state.activePage === 'dashboard' && !document.hidden) paintAnswers(); }, 5000);
     answerTimer?.unref?.();  // a test runner's clock is never kept alive by it
-    const resize = typeof ResizeObserver === 'function' ? new ResizeObserver(() => paint()) : null;
-    resize?.observe(page);
+    // The place's box repaints at once. A change of the root font moves the two panes' 40rem while the box keeps its
+    // width: the pane gains or loses the list beside it and the list's rows resize, and those repaint at the next frame
+    // (the repaint resizes them again, a loop the observer would refuse).
+    let frame = 0;
+    const resize = typeof ResizeObserver === 'function' ? new ResizeObserver((entries) => {
+        if (entries.some((entry) => entry.target === page)) paint();
+        else frame ||= requestAnimationFrame(() => { frame = 0; paint(); });
+    }) : null;
+    [page, panelsEl, list].forEach((box) => resize?.observe(box));
 
     /** Show a tab's page. `back`, a Settings path ('' is its home), gives the page a Back there before its name;
      *  without it there is none. `row` brings that row into view and focuses its control. `asLevel`: in one column
@@ -383,6 +390,7 @@ export function initDashboard({ state, layers = null, openSettings = null, state
             disposeFade();
             back.clear();
             resize?.disconnect();
+            if (frame) cancelAnimationFrame(frame);
             clearInterval(answerTimer);
             if (layered) layers?.remove(LEVEL_LAYER);
             window.removeEventListener('ouro:page-shown', onPageShown);

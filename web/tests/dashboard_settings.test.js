@@ -766,3 +766,38 @@ test('in a wide window the Dashboard holds its list beside a page; an engine wit
     assert.equal(old.layers.length, 1, 'as a level a system Back closes');
     old.dashboard.destroy();
 });
+
+test('a root font that moves the two panes\' 40rem repaints the Dashboard: the pane and the list are watched beside its box', (t) => {
+    const { mount, window } = setup(t);
+    const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
+    NodeStub.prototype.getBoundingClientRect = () => ({ width: 735 });  // the owner's window: the place's box
+    t.after(() => { delete NodeStub.prototype.getBoundingClientRect; });
+    window.CSS = { supports: () => true };
+    let font = 16;
+    window.getComputedStyle = () => ({ fontSize: `${font}px` });
+    const observers = [];
+    const before = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class { constructor(fn) { Object.assign(this, { fn, seen: [] }); observers.push(this); } observe(box) { this.seen.push(box); } disconnect() {} };
+    t.after(() => { globalThis.ResizeObserver = before; });
+    const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
+    const dashboard = initDashboard({ state, openSettings: () => {} });
+    const listBack = dashboard.page.querySelector('[data-dashboard-list-back]');
+    assert.equal(dashboard.page.dataset.sectionView, 'page', '735 px hold the list beside a page at 16 px');
+    // The browser's font grows to 20 px: 40rem is 800 px, so the sheets draw one column while the box keeps its width.
+    // The pane, which loses the list beside it, says so: the list comes back instead of a page with no way to it.
+    font = 20;
+    const pane = dashboard.page.querySelector('.dashboard-panels');
+    const heard = (box) => observers.find((observer) => observer.seen.includes(box));
+    assert.ok(heard(pane), 'the pane is watched');
+    heard(pane).fn([{ target: pane }]);
+    assert.equal(dashboard.page.dataset.sectionView, 'home', 'one column shows the list');
+    dashboard.activateTab('costs');
+    assert.deepEqual([dashboard.page.dataset.sectionView, listBack.hidden], ['page', false], 'a page opened from it leads back');
+    // Back to 16 px: the list's rows shrink (the pane alone may not move while the list stands alone), two panes again.
+    font = 16;
+    const list = dashboard.page.querySelector('.dashboard-tabs');
+    assert.ok(heard(list), 'the list is watched');
+    heard(list).fn([{ target: list }]);
+    assert.deepEqual([dashboard.page.dataset.sectionView, listBack.hidden], ['page', true], 'beside the list again, without Back');
+    dashboard.destroy();
+});

@@ -433,15 +433,23 @@ export function initSettings(ctx = {}) {
     const offReconnect = ws?.on?.('open', () => announce());
     // A width that puts the home beside the page, or takes it away: the layers follow, and the home comes back
     // where it was left.
-    const resize = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
+    const resized = () => {
         if (panes() !== panesBefore) { paint({ quiet: true }); return; }
         if (beside() === besideBefore) return;
         besideBefore = beside();
         if (besideBefore) homeEl.scrollTop = places.get(homeEl) || 0;
         paintLead();
         syncLayers();
+    };
+    // The shell's box repaints at once. A change of the root font moves the two panes' 40rem while the box keeps its
+    // width: the pane gains or loses the list beside it and the list's rows resize, and those repaint at the next frame
+    // (the repaint resizes them again, a loop the observer would refuse).
+    let frame = 0;
+    const resize = typeof ResizeObserver === 'function' ? new ResizeObserver((entries) => {
+        if (entries.some((entry) => entry.target === shell)) resized();
+        else frame ||= requestAnimationFrame(() => { frame = 0; resized(); });
     }) : null;
-    resize?.observe(shell);
+    [shell, levelsEl, homeEl.querySelector('[data-settings-list]')].forEach((box) => box && resize?.observe(box));
     const disposeFade = bindScrollFade(homeEl);
     shell.addEventListener('scroll', onScroll, { capture: true, passive: true });
     window.addEventListener('ouro:page-shown', onPageShown);
@@ -455,6 +463,7 @@ export function initSettings(ctx = {}) {
         resetSecretReveals(page);
         if (event.persisted) return;
         resize?.disconnect();
+        if (frame) cancelAnimationFrame(frame);
         disposeFade();
         disposeOverviewFade?.();
         offReconnect?.();
