@@ -412,11 +412,12 @@ def delta_parts(row: Mapping[str, Any]) -> list[str]:
 
 
 def _replaced(row: Mapping[str, Any], current: str, revert: Callable[[str], str] | None,
-              blocked: tuple[str, str]) -> list[str]:
+              blocked: tuple[str, str], lifecycle: Callable[[str], str] | None = None) -> list[str]:
     """The version a write replaced, its actual undo target, and the call that puts it back over the current text
     (``revert``; ``None`` while no revert can run, ``blocked`` saying why and how the version is written instead). An
     empty ``old_sha256`` is a text that did not exist: no earlier version. A row that names no replaced version has no
-    undo; never the line below's."""
+    undo; never the line below's. A note's archive or restore row is undone by the opposite lifecycle call
+    (``lifecycle(mode)``): the writer refuses a revert across archive states."""
     old = row.get("old_sha256")
     if old == "":
         return ["created it: no earlier version to put back"]
@@ -426,6 +427,8 @@ def _replaced(row: Mapping[str, Any], current: str, revert: Callable[[str], str]
         return [f"replaced {old}", "undo: none, those bytes were not UTF-8 text and history keeps only their sha256"]
     if old == current:
         undo = "undo: nothing to put back, that version is the current text"
+    elif lifecycle is not None and row.get("mode") in ("archive", "restore"):
+        undo = "undo: " + lifecycle("restore" if row["mode"] == "archive" else "archive")
     elif revert is None:
         undo = f"undo: {blocked[0]}, so read that version and write it with {blocked[1]}"
     else:
@@ -446,14 +449,15 @@ def _row_line(row: Mapping[str, Any], marks: list[str], replaced: list[str]) -> 
 
 
 def render_listing(source: Any, current: str, title: str, read: str, revert: Callable[[str], str] | None,
-                   blocked: tuple[str, str] | None = None) -> str:
+                   blocked: tuple[str, str] | None = None, lifecycle: Callable[[str], str] | None = None) -> str:
     """A text's versions, newest first, one line each: who wrote it, when, in which mode, why, the version it replaced
     (its actual undo target, also where no line above wrote it: a first write, an outside change, a write that did not
     land) and the call that puts that version back, what it changed, with the current one marked; then the calls that
     read and put back a version. ``revert(version)`` is the exact call that puts ``version`` back over the current text
     (expected_revision, address and project included); ``None`` while no revert can run, ``blocked`` naming why and
     the write that brings a version back instead (default: the text does not exist, an overwrite creates it), so no
-    line offers a call the writer refuses."""
+    line offers a call the writer refuses; ``lifecycle(mode)`` renders a note's archive or restore call, the undo of the
+    opposite lifecycle row."""
     history = NoteHistory(source)
     rows = [_listed(row) for _offset, row in history]
     what = noun(source)
@@ -472,13 +476,16 @@ def render_listing(source: Any, current: str, title: str, read: str, revert: Cal
             marks.append("not the base of the next write (it did not land, or the file changed outside)")
         elif newer is None and revision != current:
             marks.append("not the current text (it did not land, or the file changed outside)")
-        lines.append(_row_line(row, marks, _replaced(row, current, revert, blocked)))
+        lines.append(_row_line(row, marks, _replaced(row, current, revert, blocked, lifecycle)))
     if not rows:
         lines.append(f"(no rows: this {what} was written before the journal recorded it, or outside the writer)")
     put_back = (revert("<revision>").replace("'<revision>'", "<revision>") if revert is not None else
                 f"{blocked[0]}, so mode=revert cannot run: read a version and write it with {blocked[1]}")
+    lifecycle_rows = lifecycle is not None and any(row.get("mode") in ("archive", "restore") for row in rows)
     lines.append(f"Read one: {read}. Put one back: {put_back}. Each line is the {what} after its write; its undo puts "
-                 "back the version that write replaced, which is not always the line below.")
+                 "back the version that write replaced, which is not always the line below" + (
+                     "; an archive or restore line's undo is the opposite lifecycle mode, which changes the archive "
+                     "field only" if lifecycle_rows else "") + ".")
     return "\n".join(lines) + "\n"
 
 
@@ -489,7 +496,10 @@ def render_history(note: Any) -> str:
     return render_listing(address, note.revision, f"History of {address.topic!r} ({address.scope})",
                           f"knowledge_read({arguments}, version=<revision>)",
                           lambda version: f"knowledge_write({arguments}, mode='revert', version={version!r}, "
-                                          f"expected_revision={note.revision!r})")
+                                          f"expected_revision={note.revision!r})",
+                          lifecycle=lambda mode: f"knowledge_write({arguments}, mode={mode!r}, "
+                                                 + ("reason=<why>, " if mode == "archive" else "")
+                                                 + f"expected_revision={note.revision!r})")
 
 
 def _lines(raw: bytes, start: int, end: int, sign: str) -> tuple[int, list[str]]:

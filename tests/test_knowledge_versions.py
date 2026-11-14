@@ -569,3 +569,33 @@ def test_a_first_page_with_another_lists_fingerprint_is_told_to_read_without_one
     later = tools._knowledge_read(ctx, TOPIC, view="history", start_char=40, fingerprint="0" * 16)
     assert later.endswith("read it again from start_char=0"), later
     assert tools._knowledge_read(ctx, TOPIC, view="history").startswith("[Knowledge history]")
+
+
+def test_an_archive_or_restore_row_offers_the_opposite_lifecycle_call(tmp_path):
+    """R7: the writer refuses a revert across archive states, so a note's archive or restore row prints the opposite
+    lifecycle call as its undo (restore; archive with the reason it requires), never a revert; content rows keep their
+    revert calls. The archive row's printed restore, run, brings the note back active with its bytes; the restore row
+    then offers the archive, and the archive row, whose replaced version is current again, has nothing to put back."""
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(context(tmp_path))
+    target = address(tmp_path)
+    first = store.write_knowledge_note(target, "# Река\n\nOne.\n").current
+    second = store.write_knowledge_note(target, "# Река\n\nTwo.\n", expected_revision=first.revision).current
+    archived = store.write_knowledge_note(target, "", "archive", second.revision, reason="done with it").current
+    assert archived.state == "archived"
+    rows = [line for line in versions.render_history(archived).splitlines() if line.startswith("- ")]
+    where = f"topic={TOPIC!r}, scope='global'"
+    assert f" · undo: knowledge_write({where}, mode='restore', expected_revision={archived.revision!r}) · " in rows[0], rows[0]
+    assert "mode='revert'" not in rows[0] and f"mode='revert', version={first.revision!r}" in rows[1], rows
+    listing = versions.render_history(archived)
+    assert "an archive or restore line's undo is the opposite lifecycle mode, which changes the archive field only." in listing
+    tool, arguments = printed_call(re.search(r" · undo: (knowledge_write\(.*?\)) · ", rows[0])[1])
+    restored = registry.execute(tool, arguments)
+    current = store.read_knowledge_note(target)
+    assert restored.startswith("✅") and current.state == "active" and current.raw == second.raw, restored
+    rows = [line for line in versions.render_history(current).splitlines() if line.startswith("- ")]
+    assert (f" · undo: knowledge_write({where}, mode='archive', reason=<why>, expected_revision={current.revision!r}) · "
+            in rows[0]), rows[0]
+    assert " · undo: nothing to put back, that version is the current text · " in rows[1], rows[1]
+    plain = versions.render_history(store.write_knowledge_note(address(tmp_path, "plain"), "# Plain\n").current)
+    assert "lifecycle" not in plain  # a history without archive or restore rows says nothing of them
