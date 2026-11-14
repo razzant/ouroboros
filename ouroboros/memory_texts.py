@@ -290,7 +290,7 @@ def _foreign(ctx: Any, publication: Publication) -> bool:
 
 
 def _mirror(source: TextSource, publication: Publication) -> None:
-    """A forked drive's copy (what a child's read_file opens) follows what was just published."""
+    """A forked drive's copy (what a child's read_file opens) follows what was just published, or found unchanged."""
     if source.mirror is None or not source.mirror.exists():
         return
     try:
@@ -343,8 +343,7 @@ def write_text(ctx: Any, source: Any, *, content: Any = None, mode: Any = "overw
     if notices is not None:
         lines += notices(mode, content, publication)
     lines += [f"[Argument note] {item}" for item in notes]
-    if publication.reason == "saved":
-        _mirror(source, publication)
+    _mirror(source, publication)  # every successful publication, an unchanged one too: a stale copy catches up
     if (publication.reason == "saved" and mode == "overwrite" and expected_revision is None and publication.existed
             and _foreign(ctx, publication)):
         written = knowledge_versions.written_text(publication.previous, source.outside)

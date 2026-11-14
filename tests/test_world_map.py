@@ -511,3 +511,31 @@ def test_the_resident_map_shows_its_exact_bytes_and_their_revision_and_its_fold_
     folded = world.operative_view
     assert "a partial view: its headings only" in folded and f"memory_read(source='world', version='{revision}')" in folded
     assert "Revision of this map" not in folded  # a fold proves no reading of the whole
+
+
+def test_an_unchanged_answer_still_brings_a_stale_fork_copy_to_the_canonical_map(tmp_path, monkeypatch):
+    """K12 (SPEC §3: the fork copy follows every successful publication): an overwrite or a revert whose result is the
+    current map writes no row and no canonical byte, yet a forked drive's stale copy takes the canonical bytes; a refused
+    write leaves the copy as it was."""
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")
+    canonical, world = _map_with_block(tmp_path)
+    copy = tmp_path / "fork" / "memory" / "WORLD.md"
+    copy.parent.mkdir(parents=True)
+    ctx, current = _world_ctx(canonical, tmp_path / "fork"), world.read_bytes()
+
+    def written(**arguments):
+        copy.write_bytes(b"a stale copy")
+        return _update_world(ctx, **arguments)
+
+    for refused in ({"content": current.decode("utf-8"), "expected_revision": "0" * 64},
+                    {"mode": "edit", "old_str": "- **OS**: test", "content": "- **OS**: mine", "expected_revision": _rev(world)}):
+        reply = written(**refused)
+        assert reply.startswith("⚠️") and copy.read_bytes() == b"a stale copy", reply
+    for same in ({"content": current.decode("utf-8"), "expected_revision": _rev(world)},
+                 {"mode": "revert", "version": _rev(world), "expected_revision": _rev(world)}):
+        reply = written(**same)
+        assert reply.startswith("OK: world map unchanged ("), reply
+        assert copy.read_bytes() == current and world.read_bytes() == current, (same, copy.read_bytes())
+    assert not (canonical / "memory" / "world_journal.jsonl").exists()
