@@ -161,6 +161,28 @@ def test_a_file_changed_after_a_good_capture_stays(copies):
     assert _prune(copies)["removed"] == 0 and (path / "work.txt").read_text(encoding="utf-8") == "later\n"
 
 
+def test_a_copy_kept_for_unheld_work_is_proven_again_only_when_that_path_or_its_result_changes(copies, monkeypatch):
+    """The custody pass's keep of a copy for a path no capture holds needs no new proof (Git runs, the result read
+    twice, a replay of the capture) while that path and the task's result stand as they stood: either changing
+    reopens it, and the copy goes once nothing unsaved is left."""
+    from ouroboros import copy_capture_proof as proof
+
+    handle = _copy(copies)
+    path = Path(handle.path)
+    (path / "work.txt").write_text("saved\n", encoding="utf-8")
+    assert _capture(copies, handle)["status"] == "ready_with_changes"
+    late = path / "late.txt"
+    late.write_text("no capture holds this\n", encoding="utf-8")
+    proofs, real = [], proof.plain_copy_verdict
+    monkeypatch.setattr(proof, "plain_copy_verdict", lambda row, data_dir=None: proofs.append(row) or real(row, data_dir))
+    assert _prune(copies)["removed"] == 0 and len(proofs) == 1
+    assert _prune(copies)["removed"] == 0 and len(proofs) == 1, "nothing it was kept for changed: no new proof"
+    seed_result(copies[0], "finished", document("finished", "completed"))
+    assert _prune(copies)["removed"] == 0 and len(proofs) == 2, "a written result reopens the proof"
+    late.unlink()
+    assert _prune(copies)["removed"] == 1 and not path.exists() and len(proofs) == 3, "its unheld path went: it goes"
+
+
 @_NO_EXEC_BIT
 def test_a_mode_changed_after_a_good_capture_stays(copies):
     handle = _copy(copies)

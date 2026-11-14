@@ -23,6 +23,13 @@ log = logging.getLogger(__name__)
 
 CAPTURE_UNPROVEN = "capture_unproven"
 _SYMLINK, _EXECUTABLE, _REGULAR = "120000", "100755", "100644"
+# This process's last keep of a plain copy for a path no saved capture holds, by copy path: ``(pid, rel, stamp,
+# fact)``. A verdict costs the checkout's Git status and ignored listing, the task's result read twice and a replay of
+# the capture in a private index; ``rel``'s keep needs none of it again while ``rel`` stands as it stood (``fact``)
+# and the task's result was not written since (``stamp``, ``task_store.signature``), since the capture it was judged
+# against is then the same. Any change reopens the whole proof. A keep needs no proof: this postpones a removal at
+# most, never causes one.
+_KEPT_UNHELD: Dict[str, tuple] = {}
 
 
 def plain_copy_verdict(row: Dict[str, Any], data_dir: Optional[Any] = None) -> Dict[str, Any]:
@@ -30,6 +37,7 @@ def plain_copy_verdict(row: Dict[str, Any], data_dir: Optional[Any] = None) -> D
     Anything that could not be read counts as unique: unknown never means empty."""
     path = pathlib.Path(str(row.get("path") or ""))
     base = str(row.get("base_sha") or "")
+    _KEPT_UNHELD.pop(str(path), None)  # this proof's answer replaces an earlier one
     if not path.is_dir():
         # Nothing on disk to lose; only commits on its branch can be unique.
         return {"remove": True, "keep_branch": _branch_may_hold_commits(row, base), "reason": "checkout_missing"}
@@ -37,6 +45,7 @@ def plain_copy_verdict(row: Dict[str, Any], data_dir: Optional[Any] = None) -> D
     try:
         from ouroboros.body_candidate import checkout_work
 
+        stamp = _task_stamp(row, data_dir)  # before any read of the result: a write after it changes it
         work = checkout_work(path)
         if not base or work["tip"] != base:
             return keep  # a moved HEAD carries commits no patch of this copy holds
@@ -49,11 +58,44 @@ def plain_copy_verdict(row: Dict[str, Any], data_dir: Optional[Any] = None) -> D
         unique = [*work["tracked"], *work["untracked"], *work["ignored"]]
         if not unique:
             return {"remove": True, "keep_branch": False, "reason": "no_unique_work"}
-        if not _unsaved(path, row, unique, base, data_dir):
+        unheld: List[str] = []
+        if not _unsaved(path, row, unique, base, data_dir, unheld):
             return {"remove": True, "keep_branch": False, "reason": "capture_holds"}
+        standing = next(((rel, fact) for rel in unheld if (fact := _stat_of(path / rel)) is not None), None)
+        if stamp is not None and standing is not None:
+            _KEPT_UNHELD[str(path)] = (os.getpid(), standing[0], stamp, standing[1])
     except Exception:
         log.debug("Work of copy %s could not be proven saved", path, exc_info=True)
     return keep
+
+
+def kept_as_before(row: Dict[str, Any], data_dir: Optional[Any] = None) -> bool:
+    """The custody pass's same keep without a new proof: this process kept the copy for a path no capture holds,
+    that path stands as it stood and the task's result is unwritten since (``_KEPT_UNHELD``)."""
+    path = str(pathlib.Path(str(row.get("path") or "")))
+    seen = _KEPT_UNHELD.get(path)
+    if seen is None or seen[0] != os.getpid():
+        return False
+    try:
+        same = _task_stamp(row, data_dir) == seen[2] and _stat_of(pathlib.Path(path) / seen[1]) == seen[3]
+    except OSError:
+        same = False
+    if not same:
+        _KEPT_UNHELD.pop(path, None)
+    return same
+
+
+def _task_stamp(row: Dict[str, Any], data_dir: Optional[Any]) -> Optional[Tuple[int, str]]:
+    """The task result's write signature, ``None`` without a task or when it cannot be read."""
+    if not row.get("task_id"):
+        return None
+    try:
+        from ouroboros.subagent_worktrees import _data_dir
+        from ouroboros.task_store import signature
+
+        return signature(_data_dir(data_dir), str(row["task_id"]))
+    except Exception:
+        return None
 
 
 def _discard_refusal(row: Dict[str, Any], path: pathlib.Path, data_dir: Optional[Any], live: Any, root: pathlib.Path) -> str:
@@ -282,15 +324,19 @@ def _unsaved_paths(path: pathlib.Path, row: Dict[str, Any], work: Dict[str, Any]
         return unique
 
 
-def _unsaved(path: pathlib.Path, row: Dict[str, Any], unique: List[str], base: str, data_dir: Optional[Any]) -> List[str]:
+def _unsaved(path: pathlib.Path, row: Dict[str, Any], unique: List[str], base: str, data_dir: Optional[Any],
+             unheld: Optional[List[str]] = None) -> List[str]:
     """The unique paths whose bytes and mode equal neither their verified file result nor the saved patch
-    replayed onto the base in a private index. A capture of file results alone has no patch to replay."""
+    replayed onto the base in a private index. A capture of file results alone has no patch to replay.
+    ``unheld`` receives those that differ whatever their bytes: no capture speaks for them at all."""
     from ouroboros import subagent_worktrees as sw
     from ouroboros.artifacts import stream_artifact_file
     from ouroboros.workspace_file_outputs import file_output_changes
 
     manifest, artifacts = _manifest(path, row, base, data_dir)
     if manifest is None:
+        if unheld is not None:
+            unheld.extend(unique)
         return list(unique)
     changes = {change["path"]: change for change in file_output_changes(manifest, artifacts)}
     differing = [rel for rel in unique if rel in changes and not _file_result_holds(path, changes[rel])]
@@ -313,7 +359,7 @@ def _unsaved(path: pathlib.Path, row: Dict[str, Any], unique: List[str], base: s
         if patch is not None:
             sw._git_env(path, "apply", "--cached", "--whitespace=nowarn", str(patch), env=env)
         saved = _index_entries(sw._git_env(path, "ls-files", "-s", "-z", env=env).stdout)
-        return [*differing, *_paths_differing(path, unique, saved, env)]
+        return [*differing, *_paths_differing(path, unique, saved, env, unheld)]
 
 
 def _index_entries(raw: bytes) -> Dict[str, Tuple[str, str]]:
@@ -326,11 +372,12 @@ def _index_entries(raw: bytes) -> Dict[str, Tuple[str, str]]:
     return entries
 
 
-def _paths_differing(path: pathlib.Path, unique: List[str], saved: Dict[str, Tuple[str, str]], env: Dict[str, str]) -> List[str]:
+def _paths_differing(path: pathlib.Path, unique: List[str], saved: Dict[str, Tuple[str, str]], env: Dict[str, str],
+                     unheld: Optional[List[str]] = None) -> List[str]:
     """The paths that do not stand as their saved entry: gone where the patch holds none is equal; a folder or
     special file differs (no blob can hold it). Raw bytes, no clean filter: a file whose filesystem bytes differ
-    from its Git form is not what the patch restores. A path the patch does not hold needs no hashing: it differs.
-    One process hashes every regular file."""
+    from its Git form is not what the patch restores. A path the patch does not hold needs no hashing: it differs
+    (and goes to ``unheld``). One process hashes every regular file."""
     from ouroboros import subagent_worktrees as sw
 
     differing: List[str] = []
@@ -345,6 +392,8 @@ def _paths_differing(path: pathlib.Path, unique: List[str], saved: Dict[str, Tup
             continue
         if entry is None:
             differing.append(rel)
+            if unheld is not None:
+                unheld.append(rel)
         elif stat.S_ISLNK(info.st_mode):
             if entry != (_SYMLINK, sw._git_env(path, "hash-object", "--no-filters", "--stdin", env=env,
                                                input_bytes=os.fsencode(os.readlink(target))).stdout.decode().strip()):

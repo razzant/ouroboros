@@ -1529,7 +1529,7 @@ def prune_orphans(
     # Candidate evidence comes without any lock; each decision is rechecked under that copy's own lock.
     from functools import cache, partial
     from ouroboros import body_candidate
-    from ouroboros.copy_capture_proof import plain_copy_branch
+    from ouroboros.copy_capture_proof import kept_as_before, plain_copy_branch
     from ouroboros.tools.kept_service_outputs import owed_declarations
     owed = cache(partial(owed_declarations, _data_dir(data_dir)))  # the verdicts' one read of the debts, by the first needing it
     verdicts: Dict[str, Dict[str, Any]] = {}
@@ -1565,6 +1565,8 @@ def prune_orphans(
                     path_exists = bool(entry.get("path")) and work_domain.exists(Path(entry["path"]))
                     if path_exists and float(entry.get("created_at") or 0) >= cutoff:
                         continue  # inside the retention term: the rule's wait, not a hold
+                    if path_exists and kept_as_before(entry, data_dir):
+                        continue  # kept for unsaved work and nothing it was judged on changed: a keep owes no proof
                     if not _task_proven_over(str(entry.get("task_id") or ""), data_dir, live):
                         reasons[path] = "not_proven_over"
                         continue
