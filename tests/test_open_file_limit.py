@@ -1,5 +1,6 @@
-"""The server's open-file limit rises at start (pool-capacity WP3/WP6): the body follows each live delegated run on its
-own transport, and a GUI-launched macOS process starts at 256 files, so hundreds of followed runs would meet EMFILE."""
+"""What the server sets for its own process at start. The open-file limit rises (pool-capacity WP3/WP6): the body
+follows each live delegated run on its own transport, and a GUI-launched macOS process starts at 256 files, so hundreds
+of followed runs would meet EMFILE. The interpreter's switch interval shortens (#3399)."""
 
 from __future__ import annotations
 
@@ -27,3 +28,28 @@ def test_the_servers_open_file_limit_rises_to_its_hard_limit_at_start(monkeypatc
     server_process.raise_open_file_limit()
     assert calls == ([] if set_to is None else [(set_to, hard)]), "already at its ceiling: nothing to raise"
     assert "raise_open_file_limit()" in inspect.getsource(server.main)
+
+
+def test_the_server_shortens_the_interpreters_switch_interval_at_start(monkeypatch, tmp_path):
+    """A read takes the interpreter lock back after each store step only when a computing thread yields, once per
+    switch interval: the server asks for 1 ms instead of CPython's 5 ms, in ``main`` before it serves (#3399). The
+    conftest fixture puts the session's own interval back."""
+    import server
+    from ouroboros import server_entrypoint
+
+    class Serving(Exception):
+        pass
+
+    def serving():
+        raise Serving()
+
+    sys.setswitchinterval(0.005)
+    server_entrypoint.shorten_switch_interval()
+    assert sys.getswitchinterval() == pytest.approx(0.001)
+    sys.setswitchinterval(0.005)
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    monkeypatch.delenv("OUROBOROS_LAUNCH_INTENT", raising=False)
+    monkeypatch.setattr(server, "verify_settings_integrity", serving)  # the first step past the process setup
+    with pytest.raises(Serving):
+        server.main()
+    assert sys.getswitchinterval() == pytest.approx(0.001)
