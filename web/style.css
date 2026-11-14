@@ -5354,6 +5354,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 }
 .chat-toolbar-row[data-owner-compact="values"] .chat-capsule:not([data-open="true"]) .chat-capsule-value {
     max-width: var(--capsule-value-cap);
+    /* An emptied value leaves no word spacing: 2px cancels its -2px start margin, keeping the glyph round. */
+    margin-inline-end: clamp(2px, var(--capsule-value-cap), var(--space-3));
     text-overflow: ellipsis;
 }
 .chat-toolbar-row[data-owner-glyphs="true"] .chat-capsule:not(.chat-model-mode):not([data-open="true"]) .chat-subagents-lock {
