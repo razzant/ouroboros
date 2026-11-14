@@ -938,3 +938,24 @@ for (const reason of ['Update the app or connect an engine at version 6.0.0 or n
     assert.equal(message, `Program inspection unavailable: ${reason}`);
     controller.dispose();
 });
+
+test('lazy program inspection is spaced, keeps held selections and stops with its view', async t => {
+    let clock = 1000000, visible = true;
+    t.mock.method(Date, 'now', () => clock);
+    const calls = [], intents = new Map();
+    const controller = createHarnessMaintenanceController({ intents, visible: () => visible,
+        api: { harnessMaintenanceInventory: async query => { calls.push(query); return { harnesses: [entry()] }; } } });
+    controller.poll(); await flush();
+    assert.deepEqual(calls, [{ harness: '', fresh: true, checkLatest: true }]);
+    for (let n = 0; n < 10; n++) { clock += 5000; controller.poll(); await flush(); }
+    assert.equal(calls.length, 1);
+    assert.equal(controller.view('fixture').entry.selection.version, '2.0.0');
+    clock += 120000; controller.poll(); await flush();
+    assert.equal(calls.length, 2); assert.equal(calls[1].checkLatest, false);
+    visible = false; clock += 1800000; controller.poll(); await flush();
+    assert.equal(calls.length, 2);
+    visible = true; controller.poll(); await flush();
+    assert.equal(calls[2].checkLatest, true);
+    controller.dispose(); clock += 1800000; controller.poll(); await flush();
+    assert.equal(calls.length, 3);
+});

@@ -1281,7 +1281,7 @@
  * @property {Object=} daemon
  * @property {string=} config_dir
  * @property {Array<Object>=} harnesses
- * @property {Object=} profiles
+ * @property {Object=} profiles Full Accounts adds login_capable_harnesses (string[]|null); manifest eligibility, null retains unread-manifest fail-open.
  * @property {Array<Object>=} quota
  * @property {Array<Object>=} quota_absences
  * @property {Array<Object>=} resources Engine resource facets retain decimal strings, units and independent observation times.

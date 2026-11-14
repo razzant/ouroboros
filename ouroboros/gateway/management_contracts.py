@@ -772,14 +772,25 @@ class ClaudexorQuotaRefreshRequest(TypedDict, total=False):
     target: ClaudexorAccountTarget
 
 
+class ClaudexorRefreshAttempt(TypedDict):
+    """Host transport attempt dates, not provider observation dates. ``reused``
+    marks a joined in-flight or replayed completed attempt; its dates stay original."""
+
+    started_at: str
+    completed_at: str
+    reused: bool
+
+
 class ClaudexorAccountResources(TypedDict, total=False):
-    """Engine ControlAccountResourcesResponse (or the older ControlQuotaResponse), passed through."""
+    """Engine ControlAccountResourcesResponse (or the older ControlQuotaResponse),
+    passed through with optional host refresh provenance. Provider dates are unchanged."""
 
     snapshots: Required[List[Dict[str, Any]]]
     absences: List[Dict[str, Any]]
     refreshed_at: str
     refresh_skipped: Any
     resources: List[Dict[str, Any]]
+    refresh_attempt: ClaudexorRefreshAttempt
 
 
 class ClaudexorAccountResetRequest(TypedDict):
@@ -1353,7 +1364,7 @@ __all__ = [
     "ClaudexorRestartRun", "ClaudexorRestartRuns", "ClaudexorRestartWarning", "ClaudexorRestartPreview",
     "ClaudexorRestartRequest", "ClaudexorRestartReceipt", "ClaudexorRestartResponse", "ClaudexorRestartProblem",
     "ClaudexorMaintenanceRequest", "ClaudexorMaintenanceOperation", "ClaudexorMaintenanceInventory",
-    "ClaudexorQuotaRefreshRequest", "ClaudexorAccountResources", "ClaudexorAccountResetRequest",
+    "ClaudexorQuotaRefreshRequest", "ClaudexorRefreshAttempt", "ClaudexorAccountResources", "ClaudexorAccountResetRequest",
     "ClaudexorAccountResetReceipt", "ClaudexorLoginRequest", "ClaudexorLoginInputRequest",
     "ClaudexorProfileEnabledResponse", "ReviewPoolResponse",
     "ModelPriceTier", "ModelPrice",

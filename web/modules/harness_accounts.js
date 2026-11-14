@@ -1103,7 +1103,8 @@ function rowHtml(row, payload, facets = {}) {
     const action = facets.store?.resourceAction?.(targetFor(row)) || {};
     const { badge, quota, name, metaParts } = accountRowFacts(row, payload, { ...facets, action });
     const loginAction = rowLoginAction(row, payload);
-    const on = row.enabled !== false;
+    const pending = facets.store?.profileAction?.(row.harness, row.profile_id);
+    const on = pending?.busy ? pending.requestedEnabled : row.enabled !== false;
     // Row ACTIONS follow the engine's own routes: every named registry row has the PATCH Enabled toggle (its place in
     // rotation, a switch that acts at once) and DELETE Remove. Sign in stands in the row while the account is not
     // signed in; what is rare (Sign in again, Remove) waits behind More with the account's resources. A login that
@@ -1119,7 +1120,7 @@ function rowHtml(row, payload, facets = {}) {
             </div>
             <div class="harness-account-meta muted">${metaParts.map((part) => `<span class="meta-fact"${part.tone ? ` data-tone="${part.tone}"` : ''}>${escapeHtml(part.text)}</span>`).join('')}${capabilityMarkup(row, payload)}</div>
             <div class="harness-account-actions">${rare ? '' : login}
-                <label class="ui-switch"><input type="checkbox" role="switch" data-harness-toggle data-enabled="${on ? '1' : '0'}" aria-checked="${on}" aria-label="${escapeHtml(`Use ${name} in rotation`)}"${on ? ' checked' : ''}><span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span></label>
+                <label class="ui-switch"><input type="checkbox" role="switch" data-harness-toggle data-enabled="${on ? '1' : '0'}" aria-checked="${on}" aria-label="${escapeHtml(`Use ${name} in rotation`)}"${on ? ' checked' : ''}${pending?.busy ? ' disabled aria-busy="true"' : ''}><span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span></label>
                 <button type="button" class="settings-disclosure ui-hit-area" data-resources aria-expanded="false" aria-controls="${escapeHtml(resourcePanelId(row))}">More${DISCLOSURE_CARET}</button>
                 ${rare ? login : ''}<button type="button" class="btn btn-danger btn-sm" data-harness-remove data-rare>Remove</button>
             </div>
@@ -1296,12 +1297,12 @@ async function toggleAccountEnabled(harness, profileId, enabled) {
     state.removeNotice = '';
     state.restart?.clear();
     try {
-        await setAccountEnabled(harness, profileId, enabled);
+        const receipt = await state.store.setEnabled(harness, profileId, enabled);
+        if (!receipt) throw new Error(state.store.profileAction(harness, profileId).error || 'The change was not confirmed');
     } catch (error) {
         state.removeError = `Could not ${enabled ? 'enable' : 'disable'} "${profileId}": `
-            + `${error.message || error}. The account is unchanged.`;
+            + `${error.message || error}.`;
     }
-    await state.store.refresh();
     renderRows();
 }
 
@@ -1338,7 +1339,7 @@ export async function confirmRemoveAccount(harness, profileId, {
         state.removeError = `Could not remove "${profileId}": ${error.message || error}. `
             + 'The account is unchanged.';
     }
-    await store.refresh();
+    await store.refresh({ afterCurrent: true });
     renderImpl();
 }
 
@@ -1426,19 +1427,24 @@ export function refreshHarnessStatus() {
  * foreign ownership and repair remain behind Connect.
  */
 async function refreshHarnessStatusOnActivation() {
-    const snapshot = await state.store.refresh();
+    let snapshot = await (state.store.lazyRefresh?.() || state.store.refresh());
     // The store deliberately retains the last answer after a failed GET so
     // the panel can keep useful context.  That retained snapshot is not fresh
     // evidence for an owner-triggered write: a transient outage must never
     // turn yesterday's `stale + ready` into a wake request.
-    if (state.store.error) return state.maintenance?.refresh({ fresh: true, checkLatest: true });
-    const daemon = snapshot?.daemon || state.store.snapshot?.daemon || {};
+    if (state.store.error) return state.maintenance?.poll();
+    const lifecycle = snapshot?.daemon?.state;
+    if ((!lifecycle || lifecycle === 'stale') && state.store.lazyRefresh) {
+        snapshot = await state.store.refresh({ afterCurrent: lifecycle === 'stale' });
+        if (state.store.error) return;
+    }
+    const daemon = snapshot?.daemon || {};
     if (String(daemon.state || '') === 'stale'
         && String(daemon.runtime?.state || '') === 'ready'
         && !daemon.ownership_problem) {
         await wakeDaemon();
     }
-    return state.maintenance?.refresh({ fresh: true, checkLatest: true });
+    return state.maintenance?.poll();
 }
 
 /**
@@ -1489,9 +1495,9 @@ async function _init(store, restartDeps, page) {
     // says which Settings page is shown, and only the showing of this provider's page is the owner's act that reads
     // (and may start an idle daemon); the home and the list of providers never do.
     state.disposers.push(bindStatusSurface(state.store, {
-        listener: (view) => {
+        listener: () => {
             renderRows();
-            if (!view?.loading) state.maintenance?.poll();
+            state.maintenance?.poll();
         },
         elementId: 'harness-accounts-groups',
         activationEvents: [],
@@ -1503,20 +1509,20 @@ async function _init(store, restartDeps, page) {
     // The first read must not wait for the poll interval: init runs while the
     // page may not be visible yet, and the panel would sit on "Checking
     // daemon…" until the first tick (#125).
-    state.store.refresh();
+    if (state.store.lazyRefresh) void state.store.lazyRefresh();
+    else void state.store.refresh();
     renderRows();
     return true;
 }
 
 async function refreshAllAccounts() {
-    void state.maintenance?.refresh({ fresh: true });
     if (!state.store.refreshResources) return state.store.refresh();
     if (state.store.resourceAction(null).busy) return;
     state.removeError = '';
     state.restart?.clear();
     const result = await state.store.refreshResources();
     if (!result) state.removeError = state.store.resourceAction(null).error || 'Account refresh did not complete';
-    else await state.store.refresh();
+    else void (state.store.observe?.({ afterCurrent: true }) || state.store.refresh());
     renderRows();
 }
 

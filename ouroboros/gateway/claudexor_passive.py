@@ -92,6 +92,9 @@ def _quota_payload(*, model: str | None = None, request_kind: str = "text") -> d
     from ouroboros.claudexor_daemon import owned_config_dir
     from ouroboros.gateways.claudexor import ClaudexorGateway, discover_daemon_at
 
+    from ouroboros.gateway.claudexor_accounts import account_read_revision, coherent_accounts
+
+    revision = account_read_revision()
     start = time.monotonic()
     payload: dict[str, Any] = {
         "view": "quota",
@@ -138,4 +141,4 @@ def _quota_payload(*, model: str | None = None, request_kind: str = "text") -> d
     payload["timings_ms"]["total"] = _elapsed_ms(start)
     log.info("claudexor_passive_quota_read reads=%s read_errors=%s timings_ms=%s",
              payload["reads"], payload["read_errors"], payload["timings_ms"])
-    return payload
+    return coherent_accounts(payload, revision)

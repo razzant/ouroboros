@@ -166,7 +166,7 @@ export function jsonPost(url, payload = {}, options = {}) {
 
 /** Exact-profile refresh; omitted target keeps the existing full refresh. */
 export function refreshAccountResources(target, options = {}) {
-    return jsonPost('/api/claudexor/quota/refresh', target ? { target } : {}, options);
+    return jsonPost(`/api/claudexor/quota/refresh${options.automatic ? '?lazy=1' : ''}`, target ? { target } : {}, options);
 }
 
 /** The caller retains BOTH request and key until this logical operation settles. */

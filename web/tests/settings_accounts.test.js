@@ -2,7 +2,7 @@
 // settings_secrets.js; docs/DESIGN.md "Settings"): the list, a provider's page, a key's page and the stored keys, each
 // mounted the way the shell mounts it, against a server that answers like the settings server with its receipt.
 // What must never happen by itself is proved in both directions: showing the list reads no status, starts no daemon
-// and calls no provider, while showing a provider's page reads once.
+// and calls no provider, while a provider's page observes accounts/quota independently of full discovery and wake.
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -115,7 +115,14 @@ function server(t, { values = {}, status = statusAnswer(), skills = [] } = {}) {
             return response({ status: 'saved', saved: true, changes, ...(state.references ? { connection_references: state.references } : {}) });
         }
         if (path === '/api/extensions') return response({ skills, live: { settings_sections: [] } });
-        if (path === '/api/claudexor/status') return response(state.status);
+        if (path === '/api/claudexor/status') {
+            if (new URL(String(url), 'http://fixture').searchParams.get('view') === 'quota') {
+                const { profiles, quota, quota_absences, unified_accounts, reads } = state.status;
+                return response({ view: 'quota', profiles, quota, quota_absences, unified_accounts,
+                    reads: { catalog: 'not_read', accounts: reads.accounts, quota: reads.quota }, read_errors: {}, timings_ms: {} });
+            }
+            return response(state.status);
+        }
         if (path === '/api/claudexor/wake') { state.wakes += 1; return response(statusAnswer()); }
         if (path === '/api/claudexor/maintenance/harnesses') return response({ harnesses: [] });
         if (path === '/api/providers/test') { state.askedTests.push(body); return response({ ok: false, error: 'No credits' }); }
@@ -129,8 +136,15 @@ function server(t, { values = {}, status = statusAnswer(), skills = [] } = {}) {
     const opened = [];
     const ctx = { readSettings, openSettings: (path) => { opened.push(path); return true; },
         ask: async (question) => { asked.push(question); return state.answer ?? true; } };
-    const show = (path) => globalThis.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path } });
+    let mountedPath = '';
+    const show = (path) => {
+        // The shell makes the mounted provider visible; the text-only DOM has no layout engine.
+        const groups = container.querySelector('#harness-accounts-groups');
+        if (groups) groups.offsetParent = path === mountedPath ? container : null;
+        return globalThis.window.dispatchEvent({ type: 'ouro:settings-page-shown', detail: { path } });
+    };
     const mount = async (path) => {
+        mountedPath = path;
         const handle = await settingsPageFor(path).mount(container, { path, row: '', ctx });
         show(path);
         await settle();
@@ -140,7 +154,7 @@ function server(t, { values = {}, status = statusAnswer(), skills = [] } = {}) {
     return { ...state, state, container, ctx, asked, opened, mount, show, posts,
         find: (selector) => container.querySelector(selector), all: (selector) => container.querySelectorAll(selector) };
 }
-const starts = (world) => world.state.calls.filter((call) => STARTS.includes(call.path)).map((call) => `${call.method} ${call.path}`);
+const starts = (world) => world.state.calls.filter((call) => STARTS.includes(call.path)).map((call) => `${call.method} ${call.url}`);
 
 test('the family is registered, and every path of it names its page', () => {
     assert.equal(settingsPageFor('accounts')?.prefix, 'accounts');
@@ -212,7 +226,7 @@ test('the glance is one bar per account from windows that were read; the account
     assert.doesNotMatch(html, /title="/, 'no fact lives in a hover title');
 });
 
-test('showing the list reads no status, starts no daemon and calls no provider; showing a provider\'s page reads once', async (t) => {
+test('showing the list reads no status, starts no daemon and calls no provider; a provider observes independently and wakes once', async (t) => {
     const world = server(t, { status: statusAnswer({ daemon: { state: 'stale', runtime: { state: 'ready' } }, reads: 'not_read' }) });
     t.after(() => { destroyHarnessAccounts(); });
     const before = { subscribers: claudexorStatus.subscriberCount, polling: claudexorStatus.polling };
@@ -230,12 +244,15 @@ test('showing the list reads no status, starts no daemon and calls no provider; 
         'only the settings document and the skills are read');
     list.unmount();
 
-    // The provider's page: its showing is the owner's act. One status read, one program read, and the idle daemon it
-    // found provisioned is started once.
+    // The provider's page starts one full discovery and one independent passive observation.
+    // The passive envelope carries no lifecycle: activation rechecks stale lifecycle before waking once.
     world.state.calls.length = 0;
     const page = await world.mount('accounts/codex');
-    assert.deepEqual(starts(world).filter((line) => line.includes('status')), ['GET /api/claudexor/status']);
+    assert.deepEqual(starts(world).filter((line) => line.includes('status')), [
+        'GET /api/claudexor/status', 'GET /api/claudexor/status?view=quota', 'GET /api/claudexor/status']);
     assert.deepEqual(starts(world).filter((line) => line.includes('wake')), ['POST /api/claudexor/wake']);
+    assert.deepEqual(starts(world).filter((line) => !/\/claudexor\/(status|wake|maintenance\/harnesses)(\?|$)/.test(line)), [],
+        'opening the provider starts no provider refresh, login, model catalog or review-pool read');
     const programs = world.state.calls.filter((call) => call.path === '/api/claudexor/maintenance/harnesses' && /checkLatest=true/.test(call.url));
     assert.equal(programs.length, 1, 'the program is read once, with its latest version');
     assert.equal(world.all('.harness-account-row').length, 18, 'this provider\'s accounts, and no other\'s');

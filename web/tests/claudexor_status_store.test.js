@@ -9,6 +9,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { accountGroups } from '../modules/harness_accounts.js';
 
 import { readFileSync } from 'node:fs';
 
@@ -627,7 +628,7 @@ test('any bound surface can keep the poll armed — not only the accounts panel'
     // section that is on screen catches up, and the hidden one costs nothing.
     win.fire('ouro:settings-page-shown');
     await flush();
-    assert.equal(reads, 3, 'reaching the surface reads immediately, without a reload');
+    assert.equal(reads, 4, 'activation reads the narrow observation and upgrades missing models independently');
 
     // Hide it: the last visible surface leaving disarms the timer.
     elements['reviewer-triad-rows'].offsetParent = null;
@@ -922,4 +923,211 @@ test('claudexorPreparationLine phases by runtime state and daemon liveness', () 
     assert.equal(claudexorPreparationLine({
         daemon: { state: 'running', runtime: {} },
     }), 'Checking Claudexor…');
+});
+
+// Fast observations and controls keep working while discovery is blocked.
+const accountPayload = enabled => ({ ...RUNNING,
+    reads: { catalog: 'ok', accounts: 'ok', quota: 'ok' },
+    profiles: { profiles: [{ profile: { harness_id: 'codex', profile_id: 'one', enabled } }], accountPools: [] },
+});
+const passivePayload = enabled => ({ view: 'quota', profiles: accountPayload(enabled).profiles,
+    reads: { catalog: 'not_read', accounts: 'ok', quota: 'ok' }, quota: [], quota_absences: [],
+    resources: [{ target: { harness: 'codex', profile_id: 'one' }, balances: { observed_at: '2026-11-13T19:00:00Z' } }] });
+
+const rawMixedRoster = () => ({ profiles: [
+    { profile: { harness_id: 'openrouter', profile_id: 'key', kind: 'api_key', enabled: true } },
+    { profile: { harness_id: 'codex', profile_id: 'one', kind: 'native_session', enabled: false } },
+    { profile: { harness_id: 'new-native', profile_id: 'session', kind: 'native_session', enabled: true } },
+], accountPools: [] });
+const mixedPassive = () => ({ ...passivePayload(false), profiles: rawMixedRoster() });
+const loginPolicyStatus = (ids = ['codex', 'new-native']) => ({ ...accountPayload(true),
+    // Catalog absence is NOT policy: this native harness is intentionally missing there.
+    harnesses: [{ id: 'codex' }],
+    profiles: { ...accountPayload(true).profiles, login_capable_harnesses: ids },
+});
+
+test('raw passive roster keeps the full producer login policy in shared account rows and groups', async () => {
+    const raw = mixedPassive();
+    const store = createClaudexorStatusStore({ doc: null, fetchImpl: async url =>
+        okResponse(url.includes('view=quota') ? raw : loginPolicyStatus()) });
+    await store.refresh(); await store.observe();
+    assert.deepEqual(accountRows(store.snapshot).map(row => row.harness), ['codex', 'new-native']);
+    assert.equal(accountRows(store.snapshot)[0].enabled, false, 'legitimate rows still update');
+    assert.equal(accountGroups(store.snapshot).some(group => group.harness === 'openrouter'), false,
+        'the raw API profile must not create a fake login family');
+    assert.equal(raw.profiles.profiles.length, 3, 'the passive envelope stays unchanged');
+    store.dispose();
+});
+
+test('initial passive waits for policy, then an older full read projects the newer raw roster', async () => {
+    let finishFull;
+    const store = createClaudexorStatusStore({ doc: null, fetchImpl: async url =>
+        url.includes('view=quota') ? okResponse(mixedPassive())
+            : new Promise(resolve => { finishFull = resolve; }) });
+    const full = store.refresh();
+    await store.observe();
+    assert.deepEqual(accountRows(store.snapshot), [], 'no login eligibility was read yet');
+    assert.equal(store.accountsKnown, false, 'raw membership alone is not Accounts presentation');
+    finishFull(okResponse(loginPolicyStatus())); await full;
+    assert.deepEqual(accountRows(store.snapshot).map(row => row.harness), ['codex', 'new-native']);
+    assert.equal(store.accountsKnown, true, 'the completed policy admits the current raw roster');
+    assert.equal(accountRows(store.snapshot)[0].enabled, false, 'older full roster cannot roll it back');
+    store.dispose();
+});
+
+test('explicit unknown policy and legacy full status retain the established fail-open behavior', async () => {
+    for (const full of [loginPolicyStatus(null), accountPayload(true)]) {
+        const store = createClaudexorStatusStore({ doc: null, fetchImpl: async url =>
+            okResponse(url.includes('view=quota') ? mixedPassive() : full) });
+        await store.refresh(); await store.observe();
+        assert.deepEqual(accountRows(store.snapshot).map(row => row.harness),
+            ['openrouter', 'codex', 'new-native']);
+        store.dispose();
+    }
+});
+
+test('new manifest policy survives a failed roster read and reprojects the next raw observation', async () => {
+    let full = loginPolicyStatus(['codex', 'new-native']);
+    const store = createClaudexorStatusStore({ doc: null, fetchImpl: async url =>
+        okResponse(url.includes('view=quota') ? mixedPassive() : full) });
+    await store.refresh(); await store.observe();
+    full = { ...loginPolicyStatus(['codex']), reads: { catalog: 'ok', accounts: 'failed', quota: 'ok' } };
+    await store.refresh(); await store.observe();
+    assert.deepEqual(accountRows(store.snapshot).map(row => row.harness), ['codex']);
+    store.dispose();
+});
+
+test('explicit policy and hidden raw rows survive PATCH then a stale full completion', async () => {
+    let phase = 'first', finishFull, finishPatch;
+    const store = createClaudexorStatusStore({ doc: null, fetchImpl: async (url, init = {}) => {
+        if (init.method === 'PATCH') return new Promise(resolve => { finishPatch = resolve; });
+        if (url.includes('view=quota')) return okResponse(mixedPassive());
+        return phase === 'first' ? okResponse(loginPolicyStatus())
+            : new Promise(resolve => { finishFull = resolve; });
+    } });
+    await store.refresh(); await store.observe(); phase = 'stale';
+    const full = store.refresh(); const patch = store.setEnabled('codex', 'one', false);
+    finishPatch(okResponse({ ok: true, harness: 'codex', profile_id: 'one', enabled: false }));
+    await patch;
+    finishFull(okResponse(loginPolicyStatus())); await full; await flush();
+    assert.deepEqual(accountRows(store.snapshot).map(row => [row.harness, row.enabled]),
+        [['codex', false], ['new-native', true]]);
+    assert.equal(accountGroups(store.snapshot).some(group => group.harness === 'openrouter'), false);
+    store.dispose();
+});
+
+test('confirmed toggle fences reads begun before and during PATCH without waiting for discovery', async () => {
+    let finishFull, finishPatch, finishPassive;
+    let mode = 'initial';
+    const requests = [];
+    const store = createClaudexorStatusStore({ doc: fakeDoc(), fetchImpl: async (url, init = {}) => {
+        requests.push([url, init.method]);
+        if (init.method === 'PATCH') return new Promise(resolve => { finishPatch = resolve; });
+        if (url.includes('view=quota')) {
+            if (mode === 'during') return new Promise(resolve => { finishPassive = resolve; });
+            return okResponse(passivePayload(false));
+        }
+        if (mode === 'initial') return okResponse(accountPayload(true));
+        return new Promise(resolve => { finishFull = resolve; });
+    } });
+    await store.refresh();
+    mode = 'during';
+    const full = store.refresh();
+    const write = store.setEnabled('codex', 'one', false);
+    await flush();
+    assert.ok(finishPatch, 'PATCH dispatch did not wait for full discovery');
+    const during = store.observe();
+    assert.equal(store.profileAction('codex', 'one').busy, true);
+    finishPatch(okResponse({ ok: true, harness: 'codex', profile_id: 'one', enabled: false }));
+    await write;
+    assert.equal(accountRows(store.snapshot)[0].enabled, false);
+    mode = 'after';
+    finishFull(okResponse(accountPayload(true)));
+    finishPassive(okResponse(passivePayload(true)));
+    await Promise.all([full, during]); await flush();
+    assert.equal(accountRows(store.snapshot)[0].enabled, false);
+    assert.equal(store.profileAction('codex', 'one').busy, false);
+    assert.equal(store.snapshot.resources[0].balances.observed_at, '2026-11-13T19:00:00Z');
+    assert.ok(requests.some(([url]) => url.includes('view=quota')));
+    store.dispose();
+});
+
+test('passive failures retain roster and catalog without claiming membership; successful empty clears it', async () => {
+    let body = passivePayload(false);
+    const store = createClaudexorStatusStore({ doc: fakeDoc(), fetchImpl: async url =>
+        okResponse(url.includes('view=quota') ? body : accountPayload(true)) });
+    await store.refresh({ includeModels: true });
+    await store.observe();
+    assert.equal(store.catalogKnown, true);
+    assert.equal(store.snapshot.resources.length, 1);
+    body = { ...passivePayload(false), profiles: {}, reads: { catalog: 'not_read', accounts: 'failed', quota: 'ok' } };
+    await store.observe();
+    assert.equal(accountRows(store.snapshot).length, 1);
+    assert.equal(store.accountsKnown, false);
+    assert.equal(store.catalogKnown, true);
+    body = { ...passivePayload(false), profiles: { profiles: [], accountPools: [] } };
+    await store.observe();
+    assert.equal(accountRows(store.snapshot).length, 0);
+    store.dispose();
+});
+
+test('fast facets recover beside failed discovery without clearing its catalog error', async () => {
+    let fail = false;
+    const store = createClaudexorStatusStore({ doc: null, fetchImpl: async url => {
+        if (url.includes('view=quota')) return okResponse(passivePayload(false));
+        return fail ? { ok: false, status: 503, json: async () => ({ error: 'catalog held' }) }
+            : okResponse(accountPayload(true));
+    } });
+    await store.refresh(); fail = true; await store.refresh();
+    assert.equal(store.accountsKnown, false);
+    await store.observe();
+    assert.equal(store.accountsKnown, true);
+    assert.equal(store.quotaKnown, true);
+    assert.equal(store.catalogKnown, false);
+    assert.match(store.unavailableNote('catalog').text, /catalog held/);
+    assert.equal(store.unavailableNote('accounts'), null);
+    store.dispose();
+});
+
+test('resource-only completion leaves an overlapping roster eligible; omitted resources keep their own date', async () => {
+    let finishProvider, finishRoster;
+    const resource = { target: { harness: 'codex', profile_id: 'one' }, balances: { observed_at: '2026-11-13T19:00:00Z' } };
+    const store = createClaudexorStatusStore({ doc: null, fetchImpl: async url => {
+        if (url.includes('/quota/refresh')) return new Promise(resolve => { finishProvider = resolve; });
+        if (url.includes('view=quota')) return new Promise(resolve => { finishRoster = resolve; });
+        return okResponse(accountPayload(true));
+    } });
+    await store.refresh();
+    const provider = store.refreshResources();
+    const roster = store.observe();
+    finishProvider(okResponse({ snapshots: [], absences: [], resources: [resource] }));
+    await provider;
+    const body = passivePayload(false); delete body.resources;
+    finishRoster(okResponse(body)); await roster;
+    assert.equal(accountRows(store.snapshot)[0].enabled, false);
+    assert.deepEqual(store.snapshot.resources, [resource]);
+    assert.equal(store.catalogKnown, true);
+    store.dispose();
+});
+
+test('visible cadence reads snapshots frequently, refreshes provider separately and leaves discovery lazy', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let clock = 1000;
+    t.mock.method(Date, 'now', () => clock);
+    const urls = [];
+    const store = createClaudexorStatusStore({ doc: fakeDoc(), fetchImpl: async url => {
+        urls.push(url);
+        return okResponse(url.includes('/quota/refresh') ? { snapshots: [], absences: [] }
+            : url.includes('view=quota') ? passivePayload(true) : accountPayload(true));
+    } });
+    await store.refresh();
+    const off = store.subscribe(() => {}, { visible: () => true });
+    for (let tick = 1; tick <= 24; tick++) { clock += 5000; t.mock.timers.tick(5000); await flush(); }
+    assert.equal(urls.filter(url => url === '/api/claudexor/status').length, 2);
+    assert.equal(urls.filter(url => url.includes('view=quota')).length, 24);
+    assert.equal(urls.filter(url => url.includes('/quota/refresh?lazy=1')).length, 2);
+    off(); const before = urls.length;
+    clock += 120000; t.mock.timers.tick(120000); await flush();
+    assert.equal(urls.length, before);
+    store.dispose();
 });

@@ -41,6 +41,8 @@ class ClaudexorStatusResponse(TypedDict, total=False):
     daemon: Dict[str, Any]
     config_dir: str
     harnesses: List[Dict[str, Any]]
+    # Full Accounts adds profiles.login_capable_harnesses (list[str] | None):
+    # manifest eligibility, None retains the existing unread-manifest fail-open.
     profiles: Dict[str, Any]
     quota: List[Dict[str, Any]]
     quota_absences: List[Dict[str, Any]]

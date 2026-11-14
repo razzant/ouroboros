@@ -556,3 +556,282 @@ def test_maintenance_and_resources_share_refresh_without_losing_pending_reset(re
     frame_section(row.locator(".account-resource-panel"))
     capture(page, f"combined-maintenance-recovered-{width}-{theme}")
     assert not any("/login" in path or path == "/api/settings" for path, _ in ui["posts"])
+
+
+class ObservationTransport:
+    """Delay real SPA transports independently, capturing each reply at dispatch."""
+
+    def __init__(self, ui):
+        self.ui = ui
+        self.hold = set()
+        self.pending = {name: [] for name in ("full", "passive", "patch")}
+        self.calls = []
+        self.full_status = 200
+        self.passive_accounts = "ok"
+        self.passive_quota = "ok"
+        self.include_resources = True
+        ui["page"].route("**/api/claudexor/status**", self.status)
+        ui["page"].route("**/api/claudexor/credential-profiles/**", self.patch)
+
+    def status(self, route):
+        from urllib.parse import parse_qs
+
+        passive = parse_qs(urlparse(route.request.url).query).get("view") == ["quota"]
+        kind = "passive" if passive else "full"
+        self.calls.append(kind)
+        body = copy.deepcopy(self.ui["fixture"]["status"])
+        code = 200 if passive else self.full_status
+        if passive:
+            body = {key: body[key] for key in ("profiles", "quota", "resources", "quota_absences") if key in body}
+            body.update(view="quota", reads={"accounts": self.passive_accounts, "quota": self.passive_quota})
+            if not self.include_resources:
+                body.pop("resources", None)
+        elif code != 200:
+            body = {"error": "fixture full discovery unavailable"}
+        if kind in self.hold:
+            self.pending[kind].append((route, body, code))
+        else:
+            route.fulfill(status=code, json=body)
+
+    def patch(self, route):
+        self.calls.append("patch")
+        assert route.request.method == "PATCH"
+        wanted = route.request.post_data_json
+        self.ui["posts"].append((urlparse(route.request.url).path, wanted))
+        body = {"ok": True, **TARGET, "enabled": wanted["enabled"]}
+        if "patch" in self.hold:
+            self.pending["patch"].append((route, body, 200))
+        else:
+            route.fulfill(json=body)
+
+    def release(self, kind):
+        route, body, code = self.pending[kind].pop(0)
+        route.fulfill(status=code, json=body)
+
+
+def store_call(page, expression, *, wait=True):
+    """Use the actual singleton mounted by Accounts; never replace its implementation."""
+    return page.evaluate("async () => { const {claudexorStatus: s} = await import("
+                         "'/static/modules/claudexor_status_store.js'); "
+                         + (f"return await ({expression});" if wait else f"void ({expression});") + " }")
+
+
+def wait_pending(page, transport, kind):
+    # Sync Playwright dispatches route callbacks while the browser makes progress.
+    for _ in range(100):
+        if transport.pending[kind]:
+            return
+        page.wait_for_timeout(10)
+    assert transport.pending[kind], f"No {kind} request; observed {transport.calls}"
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_requested_switch_survives_rerender_patch_and_older_full(resources_ui, theme):
+    from playwright.sync_api import expect
+
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, row = open_accounts(ui, width=1440, theme=theme)
+    switch = row.locator("[data-harness-toggle]")
+    expect(switch).not_to_be_checked()
+    row.locator("[data-resources]").click()
+    expect(row).to_contain_text("24.60 USD")
+    transport.hold.update({"full", "patch"})
+    store_call(page, "s.refresh()", wait=False)
+    wait_pending(page, transport, "full")
+    row.locator(".ui-switch-track").click()
+    wait_pending(page, transport, "patch")
+    expect(switch).to_be_checked()
+    expect(switch).to_be_disabled()
+    expect(switch).to_have_attribute("aria-busy", "true")
+    # A separate quota observation repaints the actual Accounts controls while PATCH waits.
+    store_call(page, "s.observe()")
+    expect(switch).to_be_checked()
+    expect(switch).to_be_disabled()
+    expect(row.locator("[data-resources]")).to_have_attribute("aria-expanded", "true")
+    frame_section(row)
+    capture(page, f"staged-accounts-{theme}-pending-switch")
+    # The engine has saved enabled=true; the held full reply still contains false.
+    ui["fixture"]["status"]["profiles"]["profiles"][0]["profile"]["enabled"] = True
+    transport.release("patch")
+    expect(switch).to_be_enabled()
+    expect(switch).to_be_checked()
+    transport.release("full")
+    page.wait_for_function("async () => !(await import('/static/modules/claudexor_status_store.js')).claudexorStatus.loading")
+    expect(switch).to_be_checked()
+    assert transport.calls.count("patch") == 1
+    capture(page, f"staged-accounts-{theme}-confirmed-switch")
+
+
+def test_fast_observation_recovers_facets_without_certifying_failed_catalog(resources_ui):
+    from playwright.sync_api import expect
+
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, row = open_accounts(ui, width=1440)
+    transport.full_status = 503
+    store_call(page, "s.refresh()")
+    assert store_call(page, "s.reads") == {"catalog": "transport", "accounts": "transport", "quota": "transport"}
+    full_count = transport.calls.count("full")
+    store_call(page, "s.observe()")
+    assert store_call(page, "s.reads") == {"catalog": "transport", "accounts": "ok", "quota": "ok"}
+    expect(row.locator("[data-harness-toggle]")).to_be_enabled()
+    assert transport.calls.count("full") == full_count
+    assert "fixture full discovery unavailable" in store_call(page, "s.unavailableNote('catalog').text")
+    assert store_call(page, "s.unavailableNote('accounts')") is None
+    transport.passive_accounts = "failed"
+    store_call(page, "s.observe()")
+    assert store_call(page, "s.reads") == {"catalog": "transport", "accounts": "failed", "quota": "ok"}
+
+
+def test_provider_refresh_does_not_block_or_fence_passive_roster(resources_ui):
+    from playwright.sync_api import expect
+
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, row = open_accounts(ui, width=1440)
+    row.locator("[data-resources]").click()
+    ui["hold_refresh"].append(True)
+    row.locator("[data-refresh-account]").click()
+    expect(row.locator("[data-refresh-account]")).to_have_attribute("aria-busy", "true")
+    transport.hold.add("passive")
+    sibling = ui["fixture"]["status"]["profiles"]["profiles"][1]
+    sibling["profile"]["display_name"] = "Roster changed during provider refresh"
+    sibling["identity"]["label"] = "Roster changed during provider refresh"
+    store_call(page, "s.observe()", wait=False)
+    wait_pending(page, transport, "passive")
+    # Provider completion must merge into current state without dating the roster/catalog.
+    ui["wire"]["quota"]["snapshots"][0]["constraints"][0]["used_ratio"] = 0.17
+    ui["pending_refresh"][0].fulfill(json=ui["wire"]["quota"])
+    expect(row.locator(".resource-window").first).to_contain_text("17% used")
+    transport.release("passive")
+    expect(page.locator('.harness-account-row[data-profile="account-01"]')).to_contain_text("Roster changed during provider refresh")
+    expect(row.locator(".resource-window").first).to_contain_text("17% used")
+    assert ui["refresh_calls"] == [{"target": TARGET}]
+
+
+def test_passive_omission_retains_resources_but_explicit_empty_replaces_them(resources_ui):
+    from playwright.sync_api import expect
+
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, row = open_accounts(ui, width=1440)
+    row.locator("[data-resources]").click()
+    transport.include_resources = False
+    store_call(page, "s.observe()")
+    expect(row).to_contain_text("24.60 USD")
+    transport.include_resources = True
+    ui["fixture"]["status"]["resources"] = []
+    store_call(page, "s.observe()")
+    expect(row).not_to_contain_text("24.60 USD")
+
+
+def test_account_polling_stops_when_hidden_unmounted_and_disposed(resources_ui):
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page = ui["page"]
+    page.clock.install()
+    page, _ = open_accounts(ui, width=1440)
+    store_call(page, "s.refresh()")  # Let initial full discovery settle and arm its timer first.
+    page.clock.fast_forward(5100)
+    page.wait_for_timeout(50)
+    count = transport.calls.count("passive")
+    assert count >= 2  # Initial observation and the visible-page poll.
+    # Browser visibility is controlled, but the real document listener/predicate/timer runs.
+    page.evaluate("Object.defineProperty(document, 'hidden', {configurable: true, get: () => true}); document.dispatchEvent(new Event('visibilitychange'))")
+    page.clock.fast_forward(15000)
+    assert transport.calls.count("passive") == count
+    page.evaluate("Object.defineProperty(document, 'hidden', {configurable: true, get: () => false}); document.dispatchEvent(new Event('visibilitychange'))")
+    page.wait_for_timeout(20)
+    assert transport.calls.count("passive") > count
+    # A wide Settings home restores its last page; explicitly choose Ouroboros
+    # so Accounts really unmounts instead of remounting beside the home rail.
+    page.locator('[data-settings-overview-row]').click()
+    page.locator('[data-settings-page="accounts/claude"]').wait_for(state="detached")
+    assert store_call(page, "s.polling") is False
+    count = transport.calls.count("passive")
+    page.clock.fast_forward(15000)
+    assert transport.calls.count("passive") == count
+    store_call(page, "s.dispose()")
+    assert store_call(page, "s.polling") is False
+    page.clock.fast_forward(15000)
+    assert transport.calls.count("passive") == count
+    assert not any("/wake" in path or "/login" in path for path, _ in ui["posts"])
+
+
+@pytest.mark.parametrize("full_code", [200, 503])
+def test_activation_waits_for_fresh_full_before_any_daemon_write(resources_ui, full_code):
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, _ = open_accounts(ui, width=1440)
+    # Remember an installed-but-idle daemon without triggering an activation.
+    ui["fixture"]["status"]["daemon"] = {"state": "stale", "runtime": {"state": "ready"}}
+    store_call(page, "s.refresh()")
+    ui["fixture"]["status"]["daemon"] = {"state": "running", "runtime": {"state": "ready"}}
+    transport.full_status = full_code
+    transport.hold.add("full")
+    page.evaluate("window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', {detail: {path: 'accounts/claude'}}))")
+    wait_pending(page, transport, "full")
+    assert not any(path == "/api/claudexor/wake" for path, _ in ui["posts"])
+    transport.release("full")
+    page.wait_for_function("async () => !(await import('/static/modules/claudexor_status_store.js')).claudexorStatus.loading")
+    assert not any(path == "/api/claudexor/wake" for path, _ in ui["posts"])
+    assert store_call(page, "s.snapshot.daemon.state") == ("running" if full_code == 200 else "stale")
+
+
+def test_failed_switch_restores_saved_state_and_keeps_its_error(resources_ui):
+    from playwright.sync_api import expect
+
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, row = open_accounts(ui, width=1440)
+    transport.hold.add("patch")
+    row.locator(".ui-switch-track").click()
+    wait_pending(page, transport, "patch")
+    switch = row.locator("[data-harness-toggle]")
+    expect(switch).to_be_checked()
+    expect(switch).to_be_disabled()
+    route, _, _ = transport.pending["patch"].pop()
+    route.fulfill(status=503, json={"error": "Fixture write refused"})
+    expect(switch).not_to_be_checked()
+    expect(switch).to_be_enabled()
+    expect(page.locator("#page-settings")).to_contain_text("Fixture write refused")
+    assert transport.calls.count("patch") == 1
+
+
+def test_dispose_ignores_already_dispatched_passive_reply(resources_ui):
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page, _ = open_accounts(ui, width=1440)
+    store_call(page, "s.refresh()")
+    before = store_call(page, "({generation: s.generation, snapshot: s.snapshot})")
+    transport.hold.add("passive")
+    ui["fixture"]["status"]["profiles"]["profiles"] = []
+    page.evaluate("async () => { const {claudexorStatus: s} = await import('/static/modules/claudexor_status_store.js'); "
+                  "s.observe().then(() => window.__lateObservationSettled = true); }")
+    wait_pending(page, transport, "passive")
+    store_call(page, "s.dispose()")
+    transport.release("passive")
+    page.wait_for_function("window.__lateObservationSettled === true")
+    assert store_call(page, "({generation: s.generation, snapshot: s.snapshot})") == before
+    assert store_call(page, "s.polling") is False
+
+
+def test_visible_program_inspection_runs_while_full_discovery_waits(resources_ui):
+    ui = resources_ui
+    transport = ObservationTransport(ui)
+    page = ui['page']
+    page.clock.install()
+    page, _ = open_accounts(ui, width=1440)
+    store_call(page, 's.refresh()')
+    inventory_path = '/api/claudexor/maintenance/harnesses'
+    before = sum(urlparse(url).path == inventory_path for url in ui['reads'])
+    transport.hold.add('full')
+    store_call(page, 's.refresh()', wait=False)
+    wait_pending(page, transport, 'full')
+    page.clock.fast_forward(121000)
+    store_call(page, 's.observe()')
+    page.wait_for_timeout(50)
+    after = sum(urlparse(url).path == inventory_path for url in ui['reads'])
+    assert after > before, 'visible program maintenance must not await slow full discovery'
+    transport.release('full')
