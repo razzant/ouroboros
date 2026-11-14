@@ -482,28 +482,35 @@ def read_versions(ctx: Any, address: Any, version: Any, start: Any, fingerprint:
     except OSError as exc:
         return failed("TOOL_REPORTED_FAILURE", f"⚠️ TOOL_ERROR: {address} unreadable: {type(exc).__name__}")
     current = revision_of(raw) if raw is not None else ""
+    try:
+        live = raw.decode("utf-8") if raw is not None else None
+    except UnicodeDecodeError:  # bytes that are not text: read and replaced whole, never edited or reverted over
+        live = None
     shown = f"current revision {current}" if raw is not None else "the text does not exist now"
     if version is not None:
         try:
-            text, row = knowledge_versions.find_version(source, version)
+            text, row = knowledge_versions.find_version(source, version, live)
         except knowledge_versions.VersionUnavailable as exc:
             if version != current:
                 return failed("TOOL_REPORTED_FAILURE", f"⚠️ TOOL_ERROR: version_unavailable: {exc}")
-            try:
-                text, row = raw.decode("utf-8"), {}
-            except UnicodeDecodeError:
+            if live is None:
                 return failed("TOOL_REPORTED_FAILURE",
                               f"⚠️ TOOL_ERROR: not_text: {_not_text(source, len(raw), current)}")
+            text, row = live, {}
         which = "the current text" if version == current else "an earlier version, not the current text"
         written = knowledge_versions.written_text(knowledge_versions.row_facts(row), source.outside)
         head = f"[{source.name} version {version}: {which}; {written}; {shown}; {len(text)} chars]"
         return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=_page(
             head, text, start, lambda end: f"memory_read(source={source.name!r}, version={version!r}, start={end})"),
             meta={"operation_outcome": "completed_no_effect"}))
+    if raw is not None and live is None:  # a revert over bytes that are not text is refused: none is offered
+        undo, blocked = None, (f"the current {source.noun} is not UTF-8 text",
+                               f"mode=overwrite and expected_revision={current!r}")
+    else:
+        undo, blocked = (lambda old: write_call(source, mode="revert", version=old, expected_revision=current)), None
     listing = knowledge_versions.render_listing(
         source, current or "none (the text does not exist now)", f"History of {source.name} ({source.noun})",
-        read_call(source, "<revision>").replace("'<revision>'", "<revision>"),
-        (lambda old: write_call(source, mode="revert", version=old, expected_revision=current)) if current else None)
+        read_call(source, "<revision>").replace("'<revision>'", "<revision>"), undo if current else None, blocked)
     digest = sha256(listing.encode("utf-8")).hexdigest()[:16]
     if (start or fingerprint) and fingerprint != digest:
         return failed("TOOL_REPORTED_FAILURE", "⚠️ TOOL_ERROR: position_mismatch: that page belongs to another list of "

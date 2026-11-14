@@ -668,3 +668,42 @@ def test_a_fingerprint_without_the_read_it_continues_names_both_reads(tmp_path, 
                             "versions"), reply
     fingerprint = re.search(r"fingerprint='([0-9a-f]{16})'", _read(ctx, source="identity"))[1]
     assert _read(ctx, source="identity", fingerprint=fingerprint).startswith("[identity: versions newest first")
+
+
+@pytest.mark.parametrize("name", ["identity", "world", "workpad"])
+def test_a_list_over_bytes_that_are_not_text_offers_no_revert_and_its_overwrite_brings_a_version_back(
+        tmp_path, monkeypatch, name):
+    """R1: while the current bytes of identity, the map or a workpad are not UTF-8 text, a revert cannot run over them
+    (not_text). The door's list then prints no mode='revert' call, on its rows or in its footer: it says the current
+    bytes are not text and gives the recovery that works, which this test follows (read the version, write it with
+    mode=overwrite and the printed expected_revision) to get that version's bytes back. Over text, the rows keep their
+    revert calls."""
+    from ouroboros.tools.control_runtime import _update_world
+    from ouroboros.tools.project_journal import _workpad_write
+
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "data")
+    monkeypatch.setattr("ouroboros.world_profiler.measured_block",
+                        lambda repo_dir="", data_dir="": "<!-- measured -->\n- probe\n<!-- /measured -->")
+    ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path, task_id="focus-1", project_id="atlas")
+    write, path, noun = {"identity": (_update_identity, Memory(tmp_path).identity_path(), "identity"),
+                         "world": (_update_world, Memory(tmp_path).world_path(), "world map"),
+                         "workpad": (_workpad_write, tmp_path / "data" / "projects" / "atlas" / "workpad.md",
+                                     "workpad")}[name]
+    assert write(ctx, content="# Notes\n\n- first\n").startswith("OK:")
+    first = path.read_bytes()
+    assert write(ctx, content=first.decode("utf-8").replace("first", "second"),
+                 expected_revision=_sha(first)).startswith("OK:")
+    assert f"mode='revert', version='{_sha(first)}'" in _read(ctx, source=name)  # over text: the row's revert call
+    bad = "# Notes\n\n- caf\xe9\n".encode("latin-1")
+    path.write_bytes(bad)  # an outside write of bytes that are not UTF-8
+    listing, current = _read(ctx, source=name), _sha(bad)
+    assert "mode='revert'" not in listing and "revert(" not in listing, listing
+    row = next(line for line in listing.splitlines() if f" · replaced {_sha(first)} · " in line)
+    assert (f" · undo: the current {noun} is not UTF-8 text, so read that version and write it with mode=overwrite and "
+            f"expected_revision='{current}'") in row, row
+    assert (f"Put one back: the current {noun} is not UTF-8 text, so mode=revert cannot run: read a version and write "
+            f"it with mode=overwrite and expected_revision='{current}'.") in listing, listing
+    printed = re.search(r"expected_revision='([0-9a-f]{64})'", row)[1]
+    text = _read(ctx, source=name, version=_sha(first)).split("\n", 2)[2]  # the version, after the head and its window
+    back = write(ctx, content=text, mode="overwrite", expected_revision=printed)
+    assert back.startswith(f"OK: {noun} updated (overwrite") and path.read_bytes() == first, back
