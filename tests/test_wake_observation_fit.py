@@ -465,8 +465,8 @@ def test_a_rescued_start_keeps_the_core_and_the_words_a_whole_start_shows(tmp_pa
     (*core_whole, room_whole), (*core_rescued, room_rescued) = (
         [block["text"] for block in messages[0]["content"]] for messages in (whole, rescued))
     assert core_rescued == core_whole
-    assert section(room_rescued, "## This room (Main)") == section(room_whole, "## This room (Main)")
-    assert "next please" in section(room_rescued, "## This room (Main)")
+    assert section(room_rescued, "## This room (Main [chat_id=1])") == section(room_whole, "## This room (Main [chat_id=1])")
+    assert "next please" in section(room_rescued, "## This room (Main [chat_id=1])")
     assert section(room_rescued, "## Other conversations") == section(room_whole, "## Other conversations")
 
 

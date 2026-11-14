@@ -91,7 +91,7 @@ def test_the_request_keeps_my_story_before_the_changing_tail_and_the_book_separa
     a, d, b, c = (block["text"] for block in content)
     assert d.startswith("## DEVELOPMENT.md\n") and "## DEVELOPMENT.md\n" not in a
     assert "## My story" in b and "## My story" not in a + d + c
-    for heading in ("## Shared understanding", "## Knowledge base", "## This room (Main)", "## Other conversations"):
+    for heading in ("## Shared understanding", "## Knowledge base", "## This room (Main [chat_id=1])", "## Other conversations"):
         assert heading in c and heading not in a + b, heading
     for gone in ("## Dialogue History", "## Recent chat", "## Project owner origins", "## Legacy Dialogue Summary"):
         assert gone not in a + b + c, gone
@@ -108,13 +108,13 @@ def test_b_is_byte_identical_for_main_another_room_and_a_wake(tmp_path):
     assert len({view[0] for view in views.values()}) == 1  # A': common governance
     assert len({view[2] for view in views.values()}) == 4  # C: each one's own rooms
     main_c, wake_c = views["main"][2], views["wake"][2]
-    assert section(wake_c, "## This room (Main)") == section(main_c, "## This room (Main)")
-    assert "## This room (Main)" not in views["alpha"][2]
+    assert section(wake_c, "## This room (Main [chat_id=1])") == section(main_c, "## This room (Main [chat_id=1])")
+    assert "## This room (Main [chat_id=1])" not in views["alpha"][2]
     assert section(wake_c, "## Other conversations") == section(main_c, "## Other conversations")
     for words in ("alpha again", "beta again"):
-        assert words in section(wake_c, "## Other conversations") and words not in section(main_c, "## This room (Main)")
+        assert words in section(wake_c, "## Other conversations") and words not in section(main_c, "## This room (Main [chat_id=1])")
     assert "memory_read(room_id=" in section(wake_c, "## Other conversations")
-    assert section(main_c, "## This room (Main)") in main_c.split("## Other conversations", 1)[0]  # the room first
+    assert section(main_c, "## This room (Main [chat_id=1])") in main_c.split("## Other conversations", 1)[0]  # the room first
 
 
 def test_the_shared_blocks_do_not_depend_on_the_capture(tmp_path, monkeypatch):
@@ -416,10 +416,10 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
     """The real path: the schemas come from the task's registry under the owner's mode, as the agent
     passes them (``initial_tool_schemas``), and the plan's Nano projection is the request. A read-only
     child carries enable_tools in every mode (#1860), so a Nano the window chose for the owner's Max
-    sends it too, as the owner's Nano and a root always do: their floor says memory_read is reachable
-    through it. A child whose contract disables enable_tools sends list_available_tools and its own
-    fold (compact_context, in every restricted profile and mode since #2846) alone: its floor names
-    list_available_tools and the parent, never enable_tools or chronicle_write."""
+    sends it too, as the owner's Nano and a root always do: their floor says enable_tools loads
+    memory_read if permitted. A child whose contract disables enable_tools sends list_available_tools
+    and its own fold (compact_context, in every restricted profile and mode since #2846) alone: its
+    floor names list_available_tools, never enable_tools, chronicle_write or a parent's reading."""
     from types import SimpleNamespace
 
     from ouroboros import context
@@ -474,10 +474,166 @@ def test_a_nano_floor_names_only_the_path_its_own_request_sends(tmp_path, monkey
     assert "chronicle_write kind=page" not in floor
     if actor == "child_without_selector":
         assert sent == ("compact_context", "list_available_tools")
-        assert floor.rstrip().endswith("list_available_tools shows what this task can call, and my parent task can "
-                                       "read any address I name to it)")
+        assert floor.rstrip().endswith("(memory_read was not among my tools when this view was rendered; "
+                                       "list_available_tools shows what this task can call)")
     else:
-        assert "enable_tools" in sent and floor.rstrip().endswith("(memory_read is reachable through enable_tools)")
+        assert "enable_tools" in sent and floor.rstrip().endswith("(enable_tools loads memory_read if permitted)")
+
+
+@pytest.mark.parametrize("actor", ["root", "child", "child_without_selector", "root_without_reader",
+                                   "child_without_reader", "root_loading_it_first", "child_loading_it_first"])
+def test_an_owners_nano_that_cuts_nothing_names_its_reader_path_and_a_selection_keeps_it(tmp_path, monkeypatch, actor):
+    """The owner's choice for Nano: memory_read stays on demand, with a cue. The owner's Nano in a roomy window cuts
+    nothing, and the request's own schemas (``initial_tool_schemas`` under the actor's constraint) still name the
+    reader's path under ``### Memory check`` -- a quiet Nano had no note at all. The owner's Max of the same work
+    says nothing in Max or Low: the path is a Nano note, and those requests send memory_read wherever it is permitted.
+    Then the mind selects a shorter form (compact_context with view_address) and the loop's boundary applies it
+    (``_run_round_compaction``): the request that follows names the same path, where before the selection's note had
+    lost it. Nano's schemas stay its own. The cue is a condition, not a grant: through the loop's own binding,
+    enable_tools loads the reader for a root and a read-only child alike, and where the task's contract disables
+    memory_read (``root_without_reader``, ``child_without_reader``) refuses it as hidden by policy, as the same
+    contract refuses a direct read. A reader loaded before the selection (``*_loading_it_first``) is among the
+    schemas the request after it sends, so that note, read from them rather than the start's, carries no cue."""
+    from types import SimpleNamespace
+
+    from ouroboros import context, loop
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.loop_round_limits import _CompactionRoundContext, _run_round_compaction
+    from ouroboros.memory_floor import view_inventory
+    from ouroboros.tool_policy import initial_tool_schemas, select_tool_schemas
+    from ouroboros.tools.compact_context import record_context_view
+    from ouroboros.tools.registry import ToolRegistry
+
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "nano")
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
+    env, memory, _rooms = world(tmp_path)
+    root, permitted = actor.startswith("root"), not actor.endswith("_without_reader")
+    first = actor.endswith("_loading_it_first")
+    task = {"type": "task", "text": "hi", **(MAIN if root else {
+        "id": "kid", "chat_id": 1, "delegation_role": "subagent", "parent_task_id": "bound", "root_task_id": "bound",
+        "configured_subagent": {"id": "h", "route": {"kind": "api_model"}}})}
+    (tmp_path / "registry").mkdir()
+    registry = ToolRegistry(repo_dir=tmp_path / "registry", drive_root=tmp_path / "registry")
+    if not root:
+        registry._ctx.task_constraint = TaskConstraint(mode="local_readonly_subagent")
+    if actor == "child_without_selector" or not permitted:
+        registry._ctx.task_contract = {"disabled_tools": ["enable_tools" if permitted else "memory_read"]}
+    assert registry._is_local_readonly_subagent() is not root  # each actor is the role its name says
+    schemas = initial_tool_schemas(registry, context_mode="nano")
+    sent = list(select_tool_schemas(schemas, context_mode="nano").schemas)
+    names = [schema["function"]["name"] for schema in sent]
+    catalog = [schema["function"]["name"] for schema in registry.schemas()]
+    assert "memory_read" not in names and ("memory_read" in catalog) is permitted
+    assert ("enable_tools" in names) is (actor != "child_without_selector")  # every other actor takes the seam below
+    path = ("(enable_tools loads memory_read if permitted)" if "enable_tools" in names else
+            "(memory_read was not among my tools when this view was rendered; list_available_tools shows what this "
+            "task can call)")
+    evidence = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=10_000_000)
+    core = context._capture_context_core(env, memory, task, None, None)
+
+    def start(owner, tools):
+        return context._build_context_fit_plan(env, core, task, preferred_mode=owner, tool_schemas=tools,
+            route_resolver=lambda *_a, **_kw: ({"model": "m", "provider": "p"}, evidence))
+
+    plan = start("nano", schemas)
+
+    def floor(messages):  # the note closing the room block, to the next blank line
+        text = "\n\n".join(block["text"] for block in messages[0]["content"])
+        start = max(text.find("### Memory check"), text.find("### Physical floor"))
+        end = text.find("\n\n", start)
+        return "" if start < 0 else text[start:] if end < 0 else text[start:end]
+
+    assert plan.initial_mode == "nano" and not plan.projection("nano").memory_facts["floor"]["mode_switch"]
+    assert floor(plan.messages_for("nano")) == f"### Memory check\nAddresses this view shows read with memory_read.\n{path}"
+    maxed = start("max", initial_tool_schemas(registry, context_mode="max"))
+    assert maxed.initial_mode == "max" and floor(maxed.messages_for("max")) == floor(maxed.messages_for("low")) == ""
+    ctx = registry._ctx
+    ctx.context_fit_plan, ctx.active_context_mode = plan, "nano"
+    messages = plan.messages_for("nano")
+    if first:  # the mind loads the permitted reader, then selects in a round that sent it
+        loop._setup_dynamic_tools(registry, sent, [], context_mode="nano")
+        assert "Call schemas loaded" in registry.execute_result("enable_tools", {"tools": "memory_read"}).text
+    record_context_view(ctx, messages, sent)
+    eligible = [row["view_address"] for row in view_inventory(plan, "nano")
+                if row["kind"] == "memory" and row["eligible"] and not row["selected"]]
+    address = next(found for step in ("F2", "F5", "F4", "F3", "F6g", "F6w") for found in eligible
+                   if found.split(":", 1)[0] == step)  # a real cut, never an owner row (it needs an authored note)
+    assert registry.execute("compact_context", {"view_address": [address]}).startswith("Working view requested")
+    after = _run_round_compaction(json.loads(json.dumps(messages)), _CompactionRoundContext(
+        registry, tmp_path / "registry", tmp_path / "registry" / "logs", str(task.get("id")), 2, None,
+        lambda *_a, **_kw: None, sent, lambda _candidate, _selected: {"accepted": True}))
+    assert ctx._context_view_receipt["status"] == "applied", ctx._context_view_receipt
+    note = floor(after)
+    assert note.startswith("### Physical floor\nNano cuts for "), (address, note)
+    assert note.endswith("\n" + path) is not first, (address, note)
+    if first:  # the request after the selection sends memory_read: no path is left to name
+        assert path not in note and "was not among my tools" not in note, note
+    assert [schema["function"]["name"] for schema in sent] == names + ["memory_read"] * first  # else still on demand
+    if "enable_tools" in names and not first:  # the cue's condition both ways, through the loop's binding
+        loop._setup_dynamic_tools(registry, sent, [], context_mode="nano")
+        loaded = registry.execute_result("enable_tools", {"tools": "memory_read"})
+        assert ("memory_read" in [schema["function"]["name"] for schema in sent]) is permitted, loaded.text
+        assert ("Call schemas loaded" in loaded.text) is permitted and (loaded.status == "blocked") is not permitted
+        if not permitted:  # hidden by policy; a direct read with valid arguments is refused by it too, never read
+            assert "memory_read — disabled by this task's contract (disabled_tools)" in loaded.text
+            direct = registry.execute_result("memory_read", {"room_id": "1", "rows": True})
+            assert (direct.status, direct.code) == ("blocked", "RESOURCE_CONSTRAINT_BLOCKED"), direct.text
+            assert "task_contract.disabled_tools withholds 'memory_read'" in direct.text
+
+
+def test_a_schema_only_change_leaves_the_nano_cue_true_of_the_view_it_was_rendered_with(tmp_path, monkeypatch):
+    """A schema-only change redraws no view (compact_context with schema_names and no view_address). A read-only Nano
+    child whose contract disables enable_tools loads memory_read that way: the request after it sends the reader,
+    while its system block keeps the note its view was rendered with. That note states the absence as a fact of the
+    tools of that rendering, which the start's schemas bear out, never of the request carrying it or of reach."""
+    from types import SimpleNamespace
+
+    from ouroboros import context, loop
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.loop_round_limits import _CompactionRoundContext, _run_round_compaction
+    from ouroboros.tool_policy import initial_tool_schemas, select_tool_schemas
+    from ouroboros.tools.compact_context import record_context_view
+    from ouroboros.tools.registry import ToolRegistry
+
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "nano")
+    monkeypatch.setattr(loop, "_emit_checkpoint_event", lambda *_a, **_kw: None)
+    env, memory, _rooms = world(tmp_path)
+    task = {"type": "task", "text": "hi", "id": "kid", "chat_id": 1, "delegation_role": "subagent",
+            "parent_task_id": "bound", "root_task_id": "bound",
+            "configured_subagent": {"id": "h", "route": {"kind": "api_model"}}}
+    (tmp_path / "registry").mkdir()
+    registry = ToolRegistry(repo_dir=tmp_path / "registry", drive_root=tmp_path / "registry")
+    registry._ctx.task_constraint = TaskConstraint(mode="local_readonly_subagent")
+    registry._ctx.task_contract = {"disabled_tools": ["enable_tools"]}
+    schemas = initial_tool_schemas(registry, context_mode="nano")
+    sent = list(select_tool_schemas(schemas, context_mode="nano").schemas)
+    names = [schema["function"]["name"] for schema in sent]
+    assert names == ["compact_context", "list_available_tools"]
+    evidence = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=10_000_000)
+    plan = context._build_context_fit_plan(env, context._capture_context_core(env, memory, task, None, None), task,
+        preferred_mode="nano", tool_schemas=schemas,
+        route_resolver=lambda *_a, **_kw: ({"model": "m", "provider": "p"}, evidence))
+    ctx = registry._ctx
+    ctx.context_fit_plan, ctx.active_context_mode = plan, "nano"
+    messages = plan.messages_for("nano")
+    cue = ("### Memory check\nAddresses this view shows read with memory_read.\n(memory_read was not among my tools "
+           "when this view was rendered; list_available_tools shows what this task can call)")
+
+    def system(rows):
+        return "\n\n".join(block["text"] for block in rows[0]["content"])
+
+    assert cue in system(messages)
+    record_context_view(ctx, messages, sent)
+    assert registry.execute("compact_context", {"working_note": "Loading the reader for one address.",
+                                                "schema_names": [*names, "memory_read"]}).startswith("Working view")
+    after = _run_round_compaction(json.loads(json.dumps(messages)), _CompactionRoundContext(
+        registry, tmp_path / "registry", tmp_path / "registry" / "logs", "kid", 2, None,
+        lambda *_a, **_kw: None, sent, lambda _candidate, _selected: {"accepted": True}))
+    assert ctx._context_view_receipt["status"] == "applied", ctx._context_view_receipt
+    assert sorted(schema["function"]["name"] for schema in sent) == sorted([*names, "memory_read"])  # sent next
+    assert system(after) == system(messages)  # no view redrawn: the note its view was rendered with
+    rendered = select_tool_schemas(json.loads(plan.start_tool_schemas_json), context_mode="nano").chosen
+    assert "memory_read" not in rendered and "not among this request's tools" not in system(after)
 
 
 def test_the_task_trace_keeps_the_view_fact_of_its_request(tmp_path, monkeypatch):

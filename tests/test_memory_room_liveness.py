@@ -316,8 +316,8 @@ def test_a_finish_that_folds_what_it_read_stands_for_it_elsewhere_and_leaves_it_
     if fold:
         assert item["folded"]["count"] == 1 and _addr(rows[14]) in item["folded"]["to"]
         assert f"[{_addr(rows[14])}] «Read Beta's thread; nothing owed.»: 1 words read and folded" in beta_section
-        assert ("Read row addresses with memory_read(room_id=<room from address>, rows=true, "
-                "from=<first>, to=<last>)") in text  # one reader for this block, the source coordinates in the row
+        assert ("Read row addresses with memory_read(room_id=<the room showing them, not always the chat in the "
+                "address>, rows=true, from=<first>, to=<last>)") in text  # one reader for this block: the projection
     else:
         assert not item["folded"] and "read and folded" not in text
     assert ChronicleStore(tmp_path).sealed_row_refs(beta) == set()  # a fold seals nothing
