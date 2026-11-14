@@ -9071,7 +9071,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    color: var(--text-meta);
+    color: var(--text-secondary);  /* one step under the name's meta ink, so the two lines stay apart */
     font-size: var(--type-meta);
     line-height: var(--line-meta);
 }
