@@ -249,11 +249,12 @@ class _MessageShapingMixin:
         Where C takes the slot and resident memory's block declares its shared head
         (``SHARED_HEAD_KEY``), that block is sent as two text blocks, head then story,
         whose texts concatenate to its bytes. It keeps its one breakpoint: at the end
-        of the head when the story was narrowed for this work (only the head can then
-        be another work's bytes; the work itself reads its story through C's
-        breakpoint, so a request whose C moved under the same narrowed story writes
-        that story again), at its own end when the story is whole (a head entry
-        another work wrote is still read from there, one position back).
+        of the head when the story was narrowed for this work (another work usually
+        repeats the head and seldom the narrowed story), at its own end when the
+        story is whole (a head entry another work wrote is still read from there,
+        one position back). The narrowed place has a price: a request whose C moved
+        under the same narrowed story, and a work whose story was narrowed to the
+        very bytes of another's, read to the head and write that story again.
         Nothing is added: never a fifth breakpoint.
 
         Called only by direct/OR Anthropic builders on their fresh payload, before

@@ -51,7 +51,12 @@ _EXPECTED = (1, 5, 11, 15, 17, 20, 24, 30)
 _MARKED = ("anthropic", "openrouter-anthropic", "openrouter-openai")
 _PLAIN = ("openrouter-grok", "openai", "claudexor", "local", "gigachat")
 _OPENROUTER = {"openrouter-anthropic": "anthropic/claude-fable-5", "openrouter-openai": "openai/gpt-6.1-sol",
-               "openrouter-grok": "x-ai/grok-4.7"}
+               "openrouter-grok": "x-ai/grok-4.7", "openrouter-gemini": "google/gemini-3.5-flash"}
+_DIRECT = {"openai": {"provider": "openai", "resolved_model": "gpt-5.5", "usage_model": "openai/gpt-5.5",
+                      "supports_openrouter_extensions": False},
+           "openai-compatible": {"provider": "openai-compatible", "resolved_model": "kimi-k3",
+                                 "usage_model": "openai-compatible/kimi-k3", "base_url": "https://gateway.example/v1",
+                                 "supports_openrouter_extensions": False, "supports_generation_cost": False}}
 
 
 def _system(book: bool, whole_story: bool | None = None) -> dict:
@@ -112,9 +117,7 @@ def _payload(lane: str, messages: list, monkeypatch) -> dict:
         return client._build_local_candidate(messages, _TOOLS, 512, "auto")[1]
     if lane == "gigachat":
         return {"messages": LLMClient._gigachat_messages(messages)}
-    target = (_openrouter_target(_OPENROUTER[lane]) if lane in _OPENROUTER else
-              {"provider": "openai", "resolved_model": "gpt-5.5", "usage_model": "openai/gpt-5.5",
-               "supports_openrouter_extensions": False})
+    target = _openrouter_target(_OPENROUTER[lane]) if lane in _OPENROUTER else copy.deepcopy(_DIRECT[lane])
     payload = client._build_remote_kwargs(target, messages, "high", 512, "auto", None, _TOOLS,
                                           skip_capability_fetch=True)
     client._normalize_payload_cache_ttl(target, payload)
@@ -339,7 +342,8 @@ def test_system_context_endpoint_respects_declared_budget_and_uncached_inputs(mo
 
     assert as_input(actual) == as_input(before), "only cache metadata changes, never input bytes or routing"
     assert messages == original, "canonical messages and their declarations stay intact"
-    assert SHARED_HEAD_KEY not in json.dumps(actual), "the declaration is the host's own"
+    leaked = SHARED_HEAD_KEY in json.dumps(actual)  # a bare bool: a failure must not draw the whole payload
+    assert not leaked, "the declaration is the host's own"
     system = actual.get("system", actual["messages"][0].get("content"))
     if shape in {"head", "whole-story"}:
         assert [block["text"] for block in system] == ["governance " * 900, "identity and ", "story", "runtime facts"]
@@ -375,7 +379,8 @@ def test_compaction_preserves_a_written_endpoint_for_the_whole_system(monkeypatc
     assert messages == original
 
 
-@pytest.mark.parametrize("lane", ["openrouter-openai", "openrouter-grok", "openai", "claudexor", "local", "gigachat"])
+@pytest.mark.parametrize("lane", ["openrouter-openai", "openrouter-grok", "openrouter-gemini", "openai",
+                                  "openai-compatible", "claudexor", "local", "gigachat"])
 def test_other_lanes_never_reallocate_system_context_cache_markers(monkeypatch, lane):
     messages = [_system(False), {"role": "user", "content": "task"}]
     seal_task_transcript(messages)

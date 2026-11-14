@@ -572,8 +572,9 @@ def _window_refusals() -> List[Dict[str, Any]]:
 
 def _second_work(world: World, first: Any) -> Dict[str, Any]:
     """Another room's new work, its start captured and fitted by the same producers, sealed as the loop seals a first
-    request and sent once on the same key. ``narrowed``: the story steps each work's view names (``first``, then it)."""
-    from ouroboros import memory_view as mv
+    request and sent once on the same key. ``narrowed``: the story steps each work's level names (``first``, then
+    it), read as the product reads them (``memory_view._story_key``: of F7, its story quotes alone)."""
+    from ouroboros import memory_floor as mf, memory_view as mv
     from ouroboros.context_fit import seal_task_transcript
     from ouroboros.tool_policy import initial_tool_schemas
 
@@ -584,8 +585,9 @@ def _second_work(world: World, first: Any) -> Dict[str, Any]:
     messages = plan.messages_for(plan.initial_mode)
     seal_task_transcript(messages)
     world.ctx.llm.chat(messages, world.primary.model, tools=schemas, model_role="main")
-    narrowed = [sorted(set(built.projection(built.initial_mode).memory_facts["floor"]["steps"]) & set(mv.STORY_STEPS))
-                for built in (first, plan)]
+    narrowed = [sorted(step for step, _ids in mv._story_key(mf.kept_level(
+        mv.snapshot_from_json(built.core.memory_view_json), built.projection(built.initial_mode).memory_facts)))
+        for built in (first, plan)]
     return {**world.provider.log[-1], "narrowed": narrowed}
 
 

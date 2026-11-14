@@ -305,9 +305,12 @@ def test_anthropic_preserves_the_message_seal_and_gives_schemas_only_a_free_slot
     assert messages == canonical and tools == _tools()
 
 
+_STORY_PAGE = ("Story. " * 34_000).strip()  # 238,000 characters: a window of 160,000 tokens cannot hold it whole
+
+
 def _story_start(tmp_path, monkeypatch, window, mode="low", **task):
-    """``(sealed messages, cap)`` of a first request in ``mode`` on a route of ``window`` tokens; one page of 238,000
-    characters in my story, which a window of 160,000 tokens cannot hold whole."""
+    """``(sealed messages, cap)`` of a first request in ``mode`` on a route of ``window`` tokens, with ``_STORY_PAGE``
+    as one page of my story."""
     from types import SimpleNamespace
 
     from ouroboros.chronicle_store import ChronicleStore
@@ -317,7 +320,7 @@ def _story_start(tmp_path, monkeypatch, window, mode="low", **task):
     monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", mode)
     env, memory, _rooms = world(tmp_path)
     ChronicleStore(memory.drive_root).ensure_activated()
-    _page(memory.drive_root, "1", 10, 11, text="Story. " * 34_000)
+    _page(memory.drive_root, "1", 10, 11, text=_STORY_PAGE)
     evidence = SimpleNamespace(route_fp="r", status="asserted", stale=False, window_tokens=window)
     messages, cap = _messages(env, memory, {**MAIN, **task},
                               route_resolver=lambda *_a, **_kw: ({"model": "m", "provider": "p"}, evidence))
@@ -349,9 +352,8 @@ def test_resident_memory_keeps_its_breakpoint_where_another_work_agrees_with_it(
     (#3231). B's head (identity, the catalogue, the maps) holds nothing of my story, so works whose stories were cut
     differently still agree on it; the story after it is one text only while no work had it narrowed for its window.
     So B goes as its head and its story, and its one breakpoint ends the story while that is whole and the head once
-    it was narrowed: behind a narrowed story it ended bytes no other work repeats. Nothing is added: four breakpoints,
-    A' and C keep theirs, the texts are B's."""
-    from ouroboros import memory_view as mv
+    it was narrowed: another work usually repeats the head and seldom a narrowed story. Nothing is added: four
+    breakpoints, A' and C keep theirs, the texts are B's."""
     from ouroboros.llm import LLMClient
     from ouroboros.llm_messages import SHARED_HEAD_KEY
     from tests.test_review_prompt_caching import _deep_markers
@@ -360,15 +362,15 @@ def test_resident_memory_keeps_its_breakpoint_where_another_work_agrees_with_it(
     canonical = copy.deepcopy(messages)
     a, b, c = messages[0]["content"]
     declared = b[SHARED_HEAD_KEY]
-    narrowed = set(cap["memory_view"]["floor"]["steps"]) & set(mv.STORY_STEPS)
-    assert declared["story_whole"] is whole and bool(narrowed) is (not whole)  # the fit's level alone decides
     head, story = b["text"][:declared["chars"]], b["text"][declared["chars"]:]
+    assert declared["story_whole"] is whole and (_STORY_PAGE in story) is whole  # whole: the page's every word is in it
     assert head.endswith("\n\n") and story.startswith("## My story\n") and "## My story" not in head
     system, payload = _anthropic_system(monkeypatch, provider, messages)
     assert [block["text"] for block in system] == [a["text"], head, story, c["text"]]
     assert ["cache_control" in block for block in system] == [True, not whole, whole, True]
     assert len(LLMClient._payload_cache_breakpoints(payload)) == len(_deep_markers(payload)) == 4
-    assert SHARED_HEAD_KEY not in json.dumps(payload), "the declaration is the host's own"
+    leaked = SHARED_HEAD_KEY in json.dumps(payload)  # a bare bool: a failure must not draw the whole payload
+    assert not leaked, "the declaration is the host's own"
     assert messages == canonical
 
 
@@ -392,8 +394,8 @@ def test_resident_memory_stays_one_block_where_the_allocator_does_not_act(tmp_pa
     assert any(block["text"].startswith("## DEVELOPMENT.md\n") for block in content) == (case == "handbook")
     system, payload = _anthropic_system(monkeypatch, provider, messages)
     assert [block["text"] for block in system] == [block["text"] for block in content]
-    marks = ["cache_control" in block for block in system]
-    assert marks == [True] * (len(content) - 1) + [case == "child"] and SHARED_HEAD_KEY not in json.dumps(payload)
+    marks, leaked = ["cache_control" in block for block in system], SHARED_HEAD_KEY in json.dumps(payload)
+    assert marks == [True] * (len(content) - 1) + [case == "child"] and not leaked
 
 
 def test_the_view_fact_reaches_the_cap_info_the_task_context_and_one_event(tmp_path):
