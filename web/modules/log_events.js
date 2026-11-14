@@ -733,12 +733,13 @@ function taskOutcomeMeta(evt) {
 
 export function summarizeLogEvent(evt) {
     const t = evt.type || evt.event || 'unknown';
-    // An event's name (`headline`: what it is, in words; empty where its words say it), its words (`body`; `full` is
-    // their whole text where the list shows a cut, `markdown` when they are authored prose) and its facts (`meta`). A
-    // machine reference (an id, a hash, a path, a run's source) is neither: its record has it.
+    // An event's name (`headline`: what it is, in words, `about` the model or tool it concerns; empty where its words
+    // say it), its words (`body`; `full` their whole text where the list shows a cut, `markdown` for authored prose) and
+    // its facts (`meta`). A machine reference (an id, a hash, a path, a run's source) is neither: its record has it.
     const view = (phase, headline, { body = '', full = '', meta = [], markdown = false } = {}) => ({
         phase, headline, body, full, meta: meta.filter(Boolean), markdown,
     });
+    const about = (name, subject) => [name, subject].filter(Boolean).join(' · ');
 
     if (evt.is_progress || t === 'send_message') {
         // A delegated run's observation reads from its typed fields (delegated_activity.js), never from its text: what
@@ -797,7 +798,7 @@ export function summarizeLogEvent(evt) {
     }
 
     if (t === 'llm_round_started') {
-        return view('calling', `Calling ${evt.model || 'model'}`, {
+        return view('calling', `Calling ${compactModel(evt.model) || 'model'}`, {
             meta: [
                 evt.round ? `r${evt.round}` : '',
                 evt.attempt ? `try ${evt.attempt}` : '',
@@ -808,10 +809,9 @@ export function summarizeLogEvent(evt) {
     }
 
     if (t === 'llm_round_finished' || t === 'llm_round') {
-        return view('done', `LLM round ${evt.round || ''} finished`.trim(), {
+        return view('done', about(`LLM round ${evt.round || ''} finished`.trim(), compactModel(evt.model)), {
             body: effortEvidenceText(evt),
             meta: [
-                evt.model || '',
                 formatUsageTokens(evt),
                 // Backfill uses accounted upper bounds; live frames may carry cost.
                 formatLogMoney(accountedUpperBound(evt) ?? evt.cost),
@@ -822,24 +822,24 @@ export function summarizeLogEvent(evt) {
 
     if (t === 'llm_round_empty' || t === 'llm_empty_response' || t === 'provider_content_refusal') {
         const refused = t === 'provider_content_refusal';  // no content, the filter's finish; its words are the provider's
-        return view('empty', refused ? "The provider's content filter stopped this request" : 'Model returned empty response', {
+        const name = refused ? "The provider's content filter stopped this request" : 'Model returned empty response';
+        return view('empty', about(name, compactModel(evt.model)), {
             body: refused && evt.provider_message ? `The provider said: "${shortText(evt.provider_message, 260)}"` : '',
-            meta: [evt.model || '', evt.round ? `r${evt.round}` : '', refused ? evt.response_provider || '' : ''],
+            meta: [evt.round ? `r${evt.round}` : '', refused ? evt.response_provider || '' : ''],
         });
     }
 
     if (t === 'llm_round_error' || t === 'llm_api_error') {
-        return view('error', 'LLM call failed', {
+        return view('error', about('LLM call failed', compactModel(evt.model)), {
             body: shortText(evt.error, 260),
-            meta: [evt.model || '', evt.round ? `r${evt.round}` : ''],
+            meta: [evt.round ? `r${evt.round}` : ''],
         });
     }
 
     if (t === 'llm_usage') {
-        return view('usage', 'LLM usage recorded', {
+        return view('usage', about('LLM usage recorded', compactModel(evt.model)), {
             body: effortEvidenceText(evt),
             meta: [
-                evt.model || '',
                 formatUsageTokens(evt),
                 formatLogMoney(accountedUpperBound(evt) ?? evt.cost),
             ],
@@ -1053,7 +1053,7 @@ export function summarizeLogEvent(evt) {
     // unknown name that carries no typed fact: it keeps a genuine producer-side failure with
     // only a name visible under Errors, and it is pinned as a remainder, not a taxonomy.
     const level = String(evt.level || '').toLowerCase();
-    const name = [machineWords(t), evt.tool].filter(Boolean).join(' · ');
+    const name = about(machineWords(t), evt.tool || compactModel(evt.model));  // its subject: the tool, else the model
     const body = shortText(
         evt.error || evt.message || evt.text || evt.result_preview || effortEvidenceText(evt)
             || compactJson(evt.args || evt.task || evt.checks, 260), 260,
@@ -1062,7 +1062,7 @@ export function summarizeLogEvent(evt) {
     if (evt.ok === false || level === 'error' || level === 'critical' || level === 'fatal') return view('error', name, { body });
     if (level === 'warning' || level === 'warn') return view('warn', name, { body });
     if (t.includes('error') || t.includes('crash') || t.includes('fail')) return view('error', name, { body });
-    return view('info', name, { body, meta: [evt.model || '', formatLogMoney(accountedUpperBound(evt) ?? evt.cost)] });
+    return view('info', name, { body, meta: [evt.tool ? compactModel(evt.model) : '', formatLogMoney(accountedUpperBound(evt) ?? evt.cost)] });
 }
 
 function chatView({

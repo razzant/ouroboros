@@ -105,15 +105,15 @@ test('a provider content refusal reads as the filter stopping the request, with 
         response_provider: 'Amazon Bedrock', provider_message: 'This request was blocked.',
     });
     assert.equal(refusal.phase, 'empty');
-    assert.equal(refusal.headline, "The provider's content filter stopped this request");
+    assert.equal(refusal.headline, "The provider's content filter stopped this request · claude-opus-5.5", 'its model is its subject');
     assert.equal(refusal.body, 'The provider said: "This request was blocked."');
-    // Its facts: the model, the round, the provider. The task's id is a machine reference: its record has it.
-    assert.deepEqual(refusal.meta, ['anthropic/claude-opus-5.5', 'r7', 'Amazon Bedrock']);
+    // Its facts: the round, the provider. The task's id is a machine reference: its record has it.
+    assert.deepEqual(refusal.meta, ['r7', 'Amazon Bedrock']);
     assert.equal(summarizeLogEvent({ type: 'provider_content_refusal', model: 'm' }).body, '');  // no words: none claimed
     // A model call's own outcome: the LLM filter shows it beside the empty response (before: filed under System).
     assert.equal(categorizeLogEvent({ type: 'provider_content_refusal', model: 'm', round: 7 }), 'llm');
     const empty = summarizeLogEvent({ type: 'llm_empty_response', model: 'm', round: 2, provider_message: 'x' });
-    assert.equal(empty.headline, 'Model returned empty response');
+    assert.equal(empty.headline, 'Model returned empty response · m');
     assert.equal(empty.body, '');
 });
 
@@ -164,4 +164,24 @@ test('a checkpoint or a safety row that names a tool is not read as that tool\'s
     assert.equal(categorizeLogEvent({ type: 'safety_verdict', tool: 'mcp_superset__call_tool' }), 'tools');
     // An untyped durable tools.jsonl row still reads as its call.
     assert.equal(summarizeLogEvent({ tool: 'read_file', is_error: false, result_preview: 'ok' }).headline, 'read_file result');
+});
+
+// The owner's sheets (14.11): "delegate_run_started" carried "gemini-4-carbon-high" on its line; its words ("Delegate run
+// started") had filed the model as a fact behind a press. An event about a model or a tool names it as its subject on
+// its head, the tool first; the model a fact only beside a tool.
+test('an event about a model or a tool names it on its head as its subject, not among its facts', () => {
+    const started = summarizeLogEvent({ type: 'delegate_run_started', task_id: 'presence-4c11a22b', model: 'gemini-4-carbon-high',
+        route: 'agy', run_id: 'run-747107dcc4de' });
+    assert.equal(started.headline, 'Delegate run started · gemini-4-carbon-high');
+    assert.ok(!started.meta.some((fact) => fact.includes('gemini')), JSON.stringify(started.meta));
+    for (const type of ['llm_usage', 'llm_round', 'llm_round_error']) {
+        const view = summarizeLogEvent({ type, model: 'anthropic/claude-opus-5.5', round: 2 });
+        assert.match(view.headline, / · claude-opus-5\.5$/, type);
+        assert.ok(!view.meta.some((fact) => fact.includes('claude')), type);
+    }
+    assert.equal(summarizeLogEvent({ type: 'llm_round_started', model: 'anthropic/claude-opus-5.5' }).headline, 'Calling claude-opus-5.5');
+    const both = summarizeLogEvent({ type: 'safety_verdict', tool: 'run_command', model: 'openai/gpt-6' });
+    assert.match(both.headline, /^Safety verdict · /);
+    assert.deepEqual(both.meta, ['gpt-6'], 'beside a tool, the model stays a fact');
+    assert.equal(summarizeLogEvent({ type: 'maintenance', phase: 'started' }).headline, 'Maintenance', 'nothing to name: its name alone');
 });

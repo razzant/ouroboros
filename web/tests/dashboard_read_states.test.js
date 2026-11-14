@@ -665,6 +665,12 @@ test('Logs prints an event\'s name once and names a task card by its short id wi
     const plain = entries.children.find((node) => !node.dataset.taskGroup);
     assert.equal(plain.querySelector('.log-name').textContent, 'Worker ready', 'its name is what the event is, in words');
     assert.equal(plain.querySelector('.log-words').textContent, '', 'and is not printed again as its words (U028)');
+    // An event of a task with no card of its own says its task after its name, as a card does; never alone at the
+    // line's end, where it read as the event's own number.
+    ws.emit('log', { data: { type: 'storage_pack', task_id: '26e6d6ba00112233', ts: '2026-09-16T12:00:01Z' } });
+    const own = entries.children.find((node) => node.dataset.category === 'system' && node !== plain);
+    assert.deepEqual(['.log-name', '.log-task', '.log-count'].map((part) => own.querySelector(part).textContent), ['Storage pack', '26e6d6ba', '']);
+    assert.equal(own.querySelector('.log-title').children.map((part) => part.className).join(' '), 'log-name log-task log-count');
     ws.emit('log', { data: { type: 'task_heartbeat', task_id: '55d180783850458f', phase: 'running', ts: '2026-09-16T12:00:02Z',
         runtime_sec: 61 } });
     const card = entries.children.find((node) => node.dataset.taskGroup === '55d180783850458f');

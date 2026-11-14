@@ -469,7 +469,7 @@ test('log events read the shared cost names; in Logs a cost of nothing says noth
     const pending = summarizeLogEvent({ type: 'task_done', status: 'completed', accounted_upper_bound_usd: 0.0004, cost_final: false });
     assert.ok(pending.meta.includes('$0.0004 (pending)'), JSON.stringify(pending.meta));
     const delegated = summarizeLogEvent({ type: 'delegate_run_settled', task_id: 't', model: 'claude-opus-5-5', cost_usd: 0 });
-    assert.deepEqual(delegated.meta, ['claude-opus-5-5']);
+    assert.deepEqual([delegated.headline, delegated.meta], ['Delegate run settled · claude-opus-5-5', []], 'its model is its subject');
 });
 
 test('llm round rows show money from BOTH the honest backfill name and the live frame', () => {

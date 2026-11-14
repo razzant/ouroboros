@@ -300,7 +300,7 @@ export function initLogs({ ws, state, mount }) {
         }
 
         const view = summarizeLogEvent(evt);
-        // An event of a task that has no card of its own says its task, so two runs side by side read apart.
+        // An event of a task with no card of its own says its task after its name, as a card does: runs side by side part.
         const entry = addEntry({
             kind: 'standalone', evt, view, ts, repeat: 1, dedupeKey, at: now, omitted: omittedNote(evt),
             category: categorizeLogEvent(evt, view), execution: executorChip(evt), task: shortTaskId(evt.subagent_task_id || evt.task_id),
@@ -468,8 +468,8 @@ export function initLogs({ ws, state, mount }) {
         const { node, view } = entry;
         setData(node, 'category', entry.category);
         setData(node, 'logTime', String(entry.at));
-        paintEvent(node, { ...eventParts(view, entry.ts), count: [entry.repeat > 1 ? `×${entry.repeat}` : '', entry.task]
-            .filter(Boolean).join(' · '), execution: entry.execution, omitted: entry.omitted });
+        paintEvent(node, { ...eventParts(view, entry.ts), task: entry.task, count: entry.repeat > 1 ? `×${entry.repeat}` : '',
+            execution: entry.execution, omitted: entry.omitted });
         raw.changed(node);
     }
 
