@@ -10204,6 +10204,13 @@ html[data-layout="stack"] .project-panel {
     margin-left: auto;
     flex: none;
 }
+/* In a narrow tab body (the pane beside the section's list) the name, the date and Restore leave the subject a few
+   words ("Merge pull request #..."), so the subject takes the row's second line under them, Restore at the end. */
+@container dashboard (max-width: 34rem) {
+    .updates-restore-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px var(--space-2); }
+    .updates-restore-msg { grid-column: 1 / 3; grid-row: 2; }
+    .updates-restore-row .btn { grid-column: 3; grid-row: 1 / span 2; }
+}
 .updates-empty {
     font-size: var(--type-meta);
     color: var(--text-meta);
