@@ -300,7 +300,8 @@ def _mode_refusal(ctx: ToolContext, mode: object) -> str:
     value is refused as received, never trimmed, case-folded or matched to the nearest operation.
     """
     return publish_no_effect(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
-        f"⚠️ TOOL_ARG_ERROR: {mode_received(mode)}. knowledge_write has no default operation: pass mode as exactly one of "
+        f"⚠️ TOOL_ARG_ERROR: {mode_received(mode)}. knowledge_write has no default operation: pass mode as exactly "
+        "one of "
         "overwrite (content replaces the whole body), append (content goes at the end), edit (old_str with "
         "content, or edits, replaces exact text; summary may go alone), revert (puts back the earlier version "
         "named by version), archive or restore (the archive state only; archive requires reason). version names "

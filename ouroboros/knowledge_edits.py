@@ -25,7 +25,8 @@ from typing import Any, Mapping
 def mode_received(mode: Any, null: str = "missing or null") -> str:
     """A ``mode`` that is not exactly an operation, as a refusal names it: as received, never trimmed, case-folded or
     matched to the nearest operation. ``null`` is what a ``None`` is to the caller: knowledge_write has no default, so
-    a missing mode is the same refusal; the plain texts' writers keep overwrite for an OMITTED mode, so theirs is a null."""
+    a missing mode is the same refusal; the plain texts' writers keep overwrite for an OMITTED mode, so theirs is a
+    null."""
     from ouroboros.tools.arg_feedback import ignored_argument_note
 
     if mode is None:

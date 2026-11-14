@@ -464,7 +464,8 @@ def render_listing(source: Any, current: str, title: str, read: str, revert: Cal
     if not rows:
         lines.append(f"(no rows: this {what} was written before the journal recorded it, or outside the writer)")
     put_back = (revert("<revision>").replace("'<revision>'", "<revision>") if revert is not None else
-                f"the {what} does not exist now, so mode=revert cannot run: read a version and write it with mode=overwrite")
+                f"the {what} does not exist now, so mode=revert cannot run: read a version and write it with "
+                "mode=overwrite")
     lines.append(f"Read one: {read}. Put one back: {put_back}. Each line is the {what} after its write; its undo puts "
                  "back the version that write replaced, which is not always the line below.")
     return "\n".join(lines) + "\n"

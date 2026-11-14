@@ -247,7 +247,8 @@ def publication_notices(mode: str, sent: str, old: str, published: str) -> list:
     and a marker line the published map holds outside it, for which every later edit is refused until it goes."""
     notices = []
     if mode == "overwrite" and measured_block_was_edited(sent, old):
-        notices.append("The measured block is the host's: your edits inside it were not applied; it refreshes at startup.")
+        notices.append("The measured block is the host's: your edits inside it were not applied; it refreshes at "
+                       "startup.")
     strays = _stray_lines(published, _FENCE_RE.search(published))
     if strays:
         notices.append("The map now holds a marker line outside the host's measured block at line "

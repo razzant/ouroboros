@@ -54,7 +54,7 @@ class TextSource:
     host: Optional[tuple] = None  # the map's (repo_dir, data_dir): the measured block stays the host's
     mirror: Optional[Path] = None  # a forked drive's copy refreshed after each publication (the map)
     resident: str = ""  # where the text rides whole, said in every receipt (the workpad)
-    shown: str = ""  # the resident section that carries it with its revision line: a missing revision does not resend it
+    shown: str = ""  # the resident section carrying it with its revision line: a missing revision does not resend it
     footer: str = ""  # a line every answer ends with (identity's canonical reader)
     where: str = ""  # where the text lives, said by a refusal of a missing or stale revision (the map, beside a fork's copy)
     outside: str = "an outside edit, or a write before history"  # what changes the text without a row
@@ -485,7 +485,8 @@ def read_versions(ctx: Any, address: Any, version: Any, start: Any, fingerprint:
             try:
                 text, row = raw.decode("utf-8"), {}
             except UnicodeDecodeError:
-                return failed("TOOL_REPORTED_FAILURE", f"⚠️ TOOL_ERROR: not_text: {_not_text(source, len(raw), current)}")
+                return failed("TOOL_REPORTED_FAILURE",
+                              f"⚠️ TOOL_ERROR: not_text: {_not_text(source, len(raw), current)}")
         which = "the current text" if version == current else "an earlier version, not the current text"
         written = knowledge_versions.written_text(knowledge_versions.row_facts(row), source.outside)
         head = f"[{source.name} version {version}: {which}; {written}; {shown}; {len(text)} chars]"
