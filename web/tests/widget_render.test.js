@@ -40,6 +40,16 @@ test('a URL from data is accepted only under the context\'s own route prefix; a 
     assert.match(routed, /Radar: no safe media source\./);
 }));
 
+test('a component\'s own inline src draws where the state is an object; a path into the state still wins', () => withOrigin(() => {
+    const image = (spec, state) => imageSrc(renderComponent(noSkillRoute, { type: 'image', ...spec }, view(state), 'components.0'));
+    assert.equal(image({ src: DATA_PNG }, { result: {} }), DATA_PNG, 'a card: its data is an object and the image names no path');
+    assert.equal(image({ src: DATA_PNG }), DATA_PNG, 'no state yet');
+    assert.equal(image({ src: 'shots/dock.png' }, { result: {} }), null, 'a file name is not a source');
+    assert.equal(image({ path: 'shot', src: 'shots/dock.png' }, { result: { shot: DATA_PNG } }), DATA_PNG);
+    assert.equal(image({ path: 'missing', src: DATA_PNG }, { result: {} }), DATA_PNG, 'a path that reads nothing falls back to src');
+    assert.equal(image({ src: 'shots/dock.png' }, { result: DATA_PNG }), DATA_PNG, 'a state that is the media itself');
+}));
+
 test('every rendered root carries its identity and the view learns which components are visible', () => withOrigin(() => {
     const v = view({ result: { temp: 21 } });
     const html = renderComponent(widgetsPage('weather'), { type: 'group', components: [

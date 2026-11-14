@@ -22,7 +22,10 @@ function safeMediaSrc(ctx, spec, state, effectiveTarget = '') {
         }
         return ctx.routePath(route, params);
     }
-    const value = getPath(state[effectiveTarget || spec.target || 'result'], spec.path || '', spec.src || '');
+    // A `path` reads the target's state; without one the component's own `src` is the source (a state that is
+    // itself the media string still wins, as before).
+    const root = state[effectiveTarget || spec.target || 'result'];
+    const value = spec.path ? getPath(root, spec.path, spec.src || '') : (typeof root === 'string' && root ? root : spec.src || '');
     const text = String(value || '').trim();
     if (/^data:(image\/(?:png|jpeg|jpg|gif|webp)|audio\/(?:mpeg|wav|ogg)|video\/(?:mp4|webm|ogg));base64,[A-Za-z0-9+/=]+$/i.test(text)) {
         return text;

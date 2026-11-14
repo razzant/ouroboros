@@ -13,9 +13,12 @@ only by the owner's Send. ``core.get_tools`` registers the entry.
 
 from __future__ import annotations
 
+import base64
+import copy
 import json
 import pathlib
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 from ouroboros.tools.arg_feedback import argument_refusal
 from ouroboros.tools.registry import ToolContext
@@ -25,6 +28,11 @@ _MAX_TITLE_CHARS = 120
 _MAX_FALLBACK_CHARS = 4000
 _MAX_BODY_BYTES = 256 * 1024  # a components tree with its data, or a widget's input
 _NOT_SHOWN = "The card was not shown."
+# The images one card reads from files, together: the card record and a Widgets pin carry them inline.
+_MAX_CARD_IMAGE_BYTES = 2 * 1024 * 1024
+# The only media a card draws (``safeMediaSrc`` in web/modules/widget_render.js): an inline data: URI.
+_DRAWABLE_MEDIA = re.compile(
+    r"data:(image/(?:png|jpeg|jpg|gif|webp)|audio/(?:mpeg|wav|ogg)|video/(?:mp4|webm|ogg));base64,[A-Za-z0-9+/=]+", re.I)
 
 SHOW_CARD_TOOL_SCHEMA: Dict[str, Any] = {
     "name": "show_card",
@@ -36,7 +44,9 @@ SHOW_CARD_TOOL_SCHEMA: Dict[str, Any] = {
         "Exactly one body. components: a declarative tree the host draws (markdown, metric, callout, kv, "
         "key_value, table, chart, progress, code, json, status, group, tabs, map, calendar, kanban, image, "
         "audio, video, gallery, action, form; no routes); each action and form binds submit: {id, once?} "
-        "and data fills the path-reading components. widget: {skill, tab_id, input?} shows an installed "
+        "and data fills the path-reading components. An image takes file: the path of a PNG, JPEG, GIF or "
+        "WebP you wrote (absolute, or relative to your workspace; a card's images at most 2 MiB together), "
+        "which the host copies into the card; other media is src: an inline data: URI. widget: {skill, tab_id, input?} shows an installed "
         "live skill's widget inline. app: {path} or {html} of a self-contained HTML page (at most 512 KiB) "
         "that runs sandboxed: it cannot fetch or load resources, and loading another page closes it. On most "
         "devices it shares the owner's page thread: keep heavy computation in a blob: Worker, never a long "
@@ -107,6 +117,84 @@ def _live_widget_problem(skill: str, tab_id: str) -> str:
     return ""
 
 
+def _media_nodes(components: Any, where: str = "components") -> Iterator[Tuple[str, Dict[str, Any], str]]:
+    """``(path, node, type)`` of every image, audio and video in the tree, a gallery's listed items included."""
+    for idx, node in enumerate(components if isinstance(components, list) else []):
+        if not isinstance(node, dict):
+            continue
+        here, kind = f"{where}[{idx}]", str(node.get("type") or "")
+        if kind in ("image", "audio", "video"):
+            yield here, node, kind
+        for item_idx, item in enumerate(node.get("items") if kind == "gallery" and isinstance(node.get("items"), list) else []):
+            if isinstance(item, dict):
+                yield f"{here}.items[{item_idx}]", item, str(item.get("type") or "image")
+        yield from _media_nodes(node.get("components"), f"{here}.components")
+        for tab_idx, tab in enumerate(node.get("tabs") if isinstance(node.get("tabs"), list) else []):
+            if isinstance(tab, dict):
+                yield from _media_nodes(tab.get("components"), f"{here}.tabs[{tab_idx}].components")
+
+
+def _inline_image_files(ctx: ToolContext, components: Any) -> Tuple[Any, int]:
+    """The tree with each image's ``file`` read into its inline ``src``, and how many characters that added."""
+    from ouroboros.tools.core_artifacts import _detect_image_mime
+
+    if not any("file" in node for _, node, _ in _media_nodes(components)):
+        return components, 0
+    tree, left, added = copy.deepcopy(components), _MAX_CARD_IMAGE_BYTES, 0
+    for where, node, kind in _media_nodes(tree):
+        if "file" not in node:
+            continue
+        name = node.pop("file")
+        if kind != "image":
+            raise ValueError(f"{where}.file: only an image is read from a file; give {kind} as src, an inline data: URI")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"{where}.file must be the path of an image file")
+        file = pathlib.Path(name).expanduser()
+        file = file if file.is_absolute() else pathlib.Path(ctx.active_repo_dir()) / file
+        if not file.is_file():
+            raise ValueError(f"{where}.file not found: {name}")
+        if file.stat().st_size > left:
+            raise ValueError(f"{where}.file is {file.stat().st_size} bytes; a card's images take at most "
+                             f"{_MAX_CARD_IMAGE_BYTES} bytes together (send_photo sends a larger image)")
+        data = file.read_bytes()
+        mime = _detect_image_mime(data)
+        if not mime.startswith("image/"):
+            raise ValueError(f"{where}.file is not a PNG, JPEG, GIF or WebP image: {name}")
+        left -= len(data)
+        node.pop("path", None)  # a path reads `data`; the file is this image's source
+        node["src"] = f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+        added += len(node["src"])
+    return tree, added
+
+
+def _data_value(data: Any, path: str) -> Any:
+    """What a component's ``path`` reads from the card's ``data`` (``getPath`` in web/modules/widget_chart.js)."""
+    current = data
+    for part in (part for part in path.split(".") if part):
+        if isinstance(current, dict):
+            current = current.get(part)
+        elif isinstance(current, list) and part.isdigit() and int(part) < len(current):
+            current = current[int(part)]
+        else:
+            return None
+    return current
+
+
+def _undrawable_media(components: Any, data: Any) -> str:
+    """The first image, audio or video the card could not draw, worded for its author; empty when all draw."""
+    for where, node, kind in _media_nodes(components):
+        path = node.get("path") if isinstance(node.get("path"), str) else ""
+        value = _data_value(data if isinstance(data, dict) else {}, path) if path.strip() else None
+        value = node.get("src") if value is None else value
+        if isinstance(value, str) and _DRAWABLE_MEDIA.fullmatch(value.strip()):
+            continue
+        way = "file: the path of a PNG, JPEG, GIF or WebP you wrote, or src: an inline data: URI" if kind == "image" \
+            else "src: an inline data: URI (audio mpeg, wav or ogg; video mp4, webm or ogg)"
+        note = f"; path {path!r} reads a value of data, not a file" if path.strip() else ""
+        return f"{where}: this {kind} has no source a card can draw{note}. Give it {way}"
+    return ""
+
+
 def _card_body(ctx: ToolContext, components: Any, data: Any, widget: Any, app: Any) -> tuple[str, Dict[str, Any], bool]:
     """``(kind, body, interactive)`` for the one supplied body; ValueError names the problem in it."""
     from ouroboros.contracts.plugin_api import ExtensionRegistrationError
@@ -114,6 +202,7 @@ def _card_body(ctx: ToolContext, components: Any, data: Any, widget: Any, app: A
 
     supplied = [name for name, value in (("components", components), ("widget", widget), ("app", app))
                 if value not in (None, [], {}, "")]
+    inlined = 0  # characters of the images read from files, which the body bound does not count
     if len(supplied) != 1:
         raise ValueError(f"give exactly one body (components, widget or app); got {supplied or 'none'}")
     if data is not None and supplied != ["components"]:
@@ -121,10 +210,13 @@ def _card_body(ctx: ToolContext, components: Any, data: Any, widget: Any, app: A
     if components not in (None, [], {}, ""):
         if data is not None and not isinstance(data, dict):
             raise ValueError("data must be an object")
+        components, inlined = _inline_image_files(ctx, components)
         try:
             checked = validate_card_components(components)
         except ExtensionRegistrationError as exc:
             raise ValueError(str(exc)) from None
+        if problem := _undrawable_media(checked["components"], data):
+            raise ValueError(problem)
         body = {"components": checked["components"], **({"data": data} if data is not None else {})}
     elif widget not in (None, {}, ""):
         if not isinstance(widget, dict) or not all(isinstance(widget.get(k), str) and widget.get(k) for k in ("skill", "tab_id")):
@@ -138,7 +230,7 @@ def _card_body(ctx: ToolContext, components: Any, data: Any, widget: Any, app: A
         if not isinstance(app, dict):
             raise ValueError("app must be an object with path or html")
         return "app", {"app_bytes": _app_bytes(ctx, app)}, True
-    if len(json.dumps(body, ensure_ascii=False).encode("utf-8")) > _MAX_BODY_BYTES:
+    if len(json.dumps(body, ensure_ascii=False).encode("utf-8")) - inlined > _MAX_BODY_BYTES:
         raise ValueError(f"the {supplied[0]} body exceeds {_MAX_BODY_BYTES} bytes as JSON")
     return supplied[0], body, supplied[0] == "widget" or bool(checked["actions"])
 

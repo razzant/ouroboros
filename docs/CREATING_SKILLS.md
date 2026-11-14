@@ -2602,6 +2602,10 @@ compact height, since a message gives it less room than the Widgets page.
 Ouroboros's own component cards (`show_card(components=...)`) reuse this
 catalog without routes: their `action`/`form` controls bind
 `submit: {id, once?}`, and a press returns to Ouroboros as owner input.
+A card draws only inline `data:` media, so the tool copies an image named
+by `file` (a PNG, JPEG, GIF or WebP; a card's images at most 2 MiB
+together) into the card as its `src`, and refuses a card whose image,
+audio or video has no such source instead of showing it without one.
 
 ### Async job error contract
 
