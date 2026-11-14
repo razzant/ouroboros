@@ -1,6 +1,6 @@
 """The engine daemon runs on a Node this installation keeps, not on the app's own copy.
 
-The daemon outlives the app that started it and spawns its children with ``process.execPath`` (browser MCP
+The daemon can outlive its app (a Restart keeps it) and spawns its children with ``process.execPath`` (browser MCP
 launcher, delegation belt, harness CLI, setup runners, its own respawn). A Node inside the app bundle is gone
 once the app is moved, replaced or deleted, or its AppImage mount ends, and every such spawn then fails until the
 daemon restarts. ``claudexor_runtime`` therefore ranks an exact managed Node, complete or Node-only, before the

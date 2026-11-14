@@ -104,6 +104,10 @@ on:
       - 'ouroboros/config.py'
       - 'scripts/claudexor_platform_smoke.py'
       - 'scripts/claudexor_lifecycle_smoke.py'
+      - 'scripts/claudexor_quit_witness.py'
+      - 'launcher.py'
+      - 'ouroboros/launcher_*.py'
+      - 'tests/test_launcher_quit_engine.py'
       - 'scripts/claudexor_toolchain_smoke.py'
       - 'scripts/fetch_claudexor_runtime.py'
       - 'Ouroboros.spec'
@@ -137,6 +141,10 @@ on:
       - 'ouroboros/config.py'
       - 'scripts/claudexor_platform_smoke.py'
       - 'scripts/claudexor_lifecycle_smoke.py'
+      - 'scripts/claudexor_quit_witness.py'
+      - 'launcher.py'
+      - 'ouroboros/launcher_*.py'
+      - 'tests/test_launcher_quit_engine.py'
       - 'scripts/claudexor_toolchain_smoke.py'
       - 'scripts/fetch_claudexor_runtime.py'
       - 'Ouroboros.spec'
@@ -155,6 +163,11 @@ on:
         type: boolean
         required: false
         default: true
+      quit_witness_base:
+        description: 'Also run the Quit witness on this base commit, expecting its engine to keep the home held'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -212,14 +225,18 @@ jobs:
           PY
 
   # Production custody and real-engine continuation, without vendor credentials.
+  # The same job's Quit witness: the pinned engine, a fake run as another client's work, a run whose
+  # stand-in harness CLI keeps a child in its project folder, a foreign installation's engine, and the
+  # checkout's own launcher recycle and headless Quit; Windows proves both folders held before Quit
+  # and renamed after it (handle.exe's version and SHA-256 are in witness.json).
   lifecycle:
-    name: lifecycle · ${{ matrix.os }} · custody, cancel, crash, continue, retire
+    name: lifecycle · ${{ matrix.os }} · custody, cancel, crash, continue, retire, Quit
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
         with:
@@ -231,6 +248,68 @@ jobs:
         run: |
           py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
           "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" -- "$py" scripts/claudexor_lifecycle_smoke.py
+      # The Quit witness runs even after an unrelated red step above, and the base replay even after a red
+      # candidate witness: each leaves its own verdict and full outputs, never a skipped native QA.
+      - name: Sysinternals handle.exe, the Windows holder source
+        if: ${{ !cancelled() && matrix.os == 'windows-latest' }}
+        shell: pwsh
+        env:
+          # Handle 5.0 (each executable's FileVersion), the archive this unversioned official URL served on
+          # 2026-11-14 (Last-Modified 2022-10-26): a re-release fails here, before extraction, until pinned again.
+          HANDLE_SHA256: 279aaf8eccb6f79147f4dcc6ba091fb895c4cb8b199a0dd186a4c76bc519d2cd
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'Handle.zip'
+          Invoke-WebRequest -Uri 'https://download.sysinternals.com/files/Handle.zip' -OutFile $zip
+          $digest = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($digest -ne $env:HANDLE_SHA256) { throw "Handle digest mismatch: $digest != $env:HANDLE_SHA256" }
+          Expand-Archive -Path $zip -DestinationPath (Join-Path $env:RUNNER_TEMP 'handle')
+      - name: Quit releases the engine home and the harness's project folder; recycle and planned restart keep them
+        if: ${{ !cancelled() }}
+        run: |
+          py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
+          "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" -- "$py" scripts/claudexor_quit_witness.py \
+            --expect release --evidence-dir "$RUNNER_TEMP/quit-witness-candidate" \
+            --handle-exe "$RUNNER_TEMP/handle/handle64.exe"
+      - name: A Windows retirement returns only after its real Job members are gone
+        # The native test that portable fakes cannot replace: exactly its two cases must pass, never skip.
+        if: ${{ !cancelled() && matrix.os == 'windows-latest' }}
+        run: |
+          py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
+          out="$RUNNER_TEMP/quit-native-tests"
+          mkdir -p "$out"
+          "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" -- "$py" -m pytest -p no:cacheprovider -rA \
+            --junitxml="$out/junit.xml" \
+            tests/test_launcher_quit_engine.py::test_windows_retirement_returns_only_after_its_real_job_members_are_gone \
+            2>&1 | tee "$out/pytest.log"
+          "$py" - "$out/junit.xml" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          cases = list(ET.parse(sys.argv[1]).getroot().iter("testcase"))
+          ran = [case.get("name") for case in cases if not {"failure", "error", "skipped"} & {c.tag for c in case}]
+          print("passed:", ran)
+          sys.exit(0 if len(cases) == len(ran) == 2 else "the native real-Job test did not pass both cases")
+          PY
+      - name: The same scenario on the named base keeps the home held
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.quit_witness_base != '' }}
+        env:
+          BASE_SHA: ${{ inputs.quit_witness_base }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          mkdir -p "$RUNNER_TEMP/quit-base"
+          git archive "$BASE_SHA" | tar -x -C "$RUNNER_TEMP/quit-base"
+          py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
+          "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" -- "$py" scripts/claudexor_quit_witness.py \
+            --checkout "$RUNNER_TEMP/quit-base" --expect hold --quit-seconds 30 \
+            --evidence-dir "$RUNNER_TEMP/quit-witness-base" --handle-exe "$RUNNER_TEMP/handle/handle64.exe"
+      - name: Keep the witness outputs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: quit-witness-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/quit-witness-candidate
+            ${{ runner.temp }}/quit-witness-base
+            ${{ runner.temp }}/quit-native-tests
+          if-no-files-found: warn
 
   # ────────────────────────────────────────────────────────────────────────────
   # Toolchain lane — free, credential-free. Real managed Node/npm for the CLI.
