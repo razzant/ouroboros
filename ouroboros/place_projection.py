@@ -81,15 +81,16 @@ def consciousness_off(root) -> bool:
 
 
 def place_view(root, place, *, declarations: list[dict] | None = None, allowance: dict | None = None,
-               brief: bool = False, records=None, off: bool | None = None) -> dict[str, Any]:
+               brief: bool = False, records=None, off: bool | None = None, facts=None) -> dict[str, Any]:
     """Stored facts for status/launch; the owner surface also resolves connector capabilities. ``records`` is one
     ``places.place_records`` read shared by a list; its circle and description facts join the place here, the
     circle's words only in a brief view (the list names them once, ``places_view``). ``off`` is one
     ``consciousness_off`` read shared by a list (read here when absent): while it holds, a place that is not Paused
-    only hears, and its view says so as ``only_hears`` (derived on every read, never stored)."""
+    only hears, and its view says so as ``only_hears`` (derived on every read, never stored). ``facts`` is one
+    ``place_arrivals.place_facts`` read shared by a list (rooms only for a brief one; read here when absent)."""
     from ouroboros.consciousness_allowance import allowance_window
-    from ouroboros.place_arrivals import account_candidates
-    from ouroboros.places import place_model_route, place_room_index
+    from ouroboros.place_arrivals import place_facts
+    from ouroboros.places import place_model_route
     from ouroboros.route_choice import following_route
     if allowance is None and not brief:
         allowance = allowance_window(root, allow_stale=True)
@@ -115,11 +116,8 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
     cause = "place:" + place.place_id
     spend = next((item.get("usd") for item in (allowance or {}).get("spend_by_cause") or []
                   if item.get("cause") == cause), None)
-    try:
-        rooms = place_room_index(root, place.place_id)
-    except Exception:
-        log.warning("Place room index unavailable for %s", place.place_id, exc_info=True)
-        rooms = None
+    facts = (place_facts(root, [place], full=not brief) if facts is None else facts)[place.place_id]
+    rooms = facts["rooms"]
     if brief:
         # Status and launch need labels, notes and open turns: one index pass, counts unknown when it is unavailable.
         counts = [room.get("unanswered_count") for room in rooms or []]
@@ -128,10 +126,9 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
                       last_activity_at=max((str(room.get("last_at") or "") for room in rooms or []), default=""),
                       activity_coverage="captured_place_events", spent_24h_usd=spend)
         return result
-    activity = place_activity(root, place)
     result.update(label=said_once(place.label or place.provider),
-                  rooms=rooms, unanswered=activity["unanswered"] if rooms is not None else None,
-                  last_activity_at=activity["last_activity_at"],
+                  rooms=rooms, unanswered=facts["unanswered"] if rooms is not None else None,
+                  last_activity_at=facts["last_activity_at"],
                   activity_coverage="captured_place_events", spent_24h_usd=spend)
     rows = place_declarations(root) if declarations is None else declarations
     row = next((r for r in rows if r["skill"] == place.connector and (
@@ -144,7 +141,7 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
     from ouroboros.safety_config import get_safety_mode
     result.update(safety_mode=get_safety_mode("consciousness"), labels=row.get("labels") or {})
     result.update({key: row[key] for key in ("facts", "source", "settings") if key in row})
-    result["account_candidates"] = account_candidates(root, place.place_id)
+    result["account_candidates"] = facts["account_candidates"]
     # Accounts another place of this bot or app confirms count here too (``places.counted_owner_accounts``): named
     # with where they were confirmed, removed there.
     result["shared_owner_accounts"] = [
@@ -165,11 +162,13 @@ def places_view(root) -> dict:
     declarations = place_declarations(root)
     records = place_records(root)
     from ouroboros.consciousness_allowance import allowance_window
+    from ouroboros.place_arrivals import place_facts
     allowance = allowance_window(root, allow_stale=True) or {}
     off = consciousness_off(root)
+    facts = place_facts(root, records.places.values())
     return {"migration_problems": migration_problems(root),
-            "places": [place_view(root, p, declarations=declarations, allowance=allowance, records=records, off=off)
-                       for p in records.places.values()],
+            "places": [place_view(root, p, declarations=declarations, allowance=allowance, records=records, off=off,
+                                  facts=facts) for p in records.places.values()],
             "circles": [circle_summary(circle) for circle in records.circles],
             "connectors": [{"connector": r["skill"],
                             "label": r["label"], "icon": r.get("icon_spec") or {}, "destination": r["destination"],
@@ -178,8 +177,3 @@ def places_view(root) -> dict:
                             "wakes": r.get("wakes") or [], "connected": any(p.connector == r["skill"] for p in records.places.values())}
                            for r in declarations]}
 
-
-def place_activity(root, place) -> dict:
-    """Indexed newest arrival and nonterminal focus count; no historical row walk."""
-    from ouroboros.place_arrivals import activity
-    return activity(root, place)

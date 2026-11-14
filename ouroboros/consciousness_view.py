@@ -274,12 +274,14 @@ def describe_consciousness(clock, *, supervisor_failed: bool = False) -> dict:
 def place_views(drive_root, allowance=None) -> list[dict]:
     """Stored PlaceSummary facts with each place's circle (one store read), the caller's allowance and one read of the
     switch, no connector discovery."""
+    from ouroboros.place_arrivals import place_facts
     from ouroboros.place_projection import consciousness_off, place_view
     from ouroboros.places import place_records
 
     records = place_records(drive_root)
     off = consciousness_off(drive_root)
-    return [place_view(drive_root, place, allowance=allowance, brief=True, records=records, off=off)
+    facts = place_facts(drive_root, records.places.values(), full=False)
+    return [place_view(drive_root, place, allowance=allowance, brief=True, records=records, off=off, facts=facts)
             for place in records.places.values()]
 
 
