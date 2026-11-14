@@ -6968,10 +6968,13 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 }
 /* A headline card's Details follow the hero. Under a finger every control and summary reaches out to the touch minimum
    (ui.css "Touch reach"); a disclosure that follows the headline's actions (or the letter's last line) keeps the two
-   reaches apart, so neither covers the other. */
+   reaches apart, so neither covers the other. A disclosure's summary is itself the minimum tall there, so under the
+   headline's actions it parts from them only by a small capsule's reach below them: a wider step left a band as tall
+   as a row between the button and Details. */
 .dashboard-hero + .ui-disclosure { margin-top: var(--space-3); }
 @media (pointer: coarse) {
-    .dashboard-hero + .ui-disclosure, .updates-letter-details { margin-top: var(--space-5); }
+    .dashboard-hero + .ui-disclosure { margin-top: calc((var(--touch-target-min) - var(--control-h-sm)) / 2); }
+    .updates-letter-details { margin-top: var(--space-5); }
 }
 
 /* P4: Activity subtab — what runs now, the background mind, scheduled tasks: three cards on the Dashboard tab body.
