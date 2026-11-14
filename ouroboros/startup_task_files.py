@@ -5,31 +5,36 @@ from pathlib import Path
 def startup_tree_exclusions(root):
     """Follow only current recovery candidates and their own child-result stores.
 
-    An unreadable/missing link leaves destructive housekeeping owed. Completed
+    Returns ``(ids, "")``, or ``(None, link)`` naming the first link that could not be
+    followed: an unreadable/missing link leaves destructive housekeeping owed. Completed
     results outside this closure are never enumerated to construct exclusions.
+    An identity the import set aside (``task_results.set_aside``: no row, its file
+    refused or quarantined) has no canonical record to read: it is held by its own
+    id, and its own child stores are followed like any member's.
     """
     from ouroboros.obligations import members
     from ouroboros.task_custody import own_child_drives
-    from ouroboros.task_results import list_task_results, load_task_result
+    from ouroboros.task_results import list_task_results, load_task_result, set_aside
 
-    protected = set()
+    protected, task_id = set(), "recovery sets"
     try:
+        aside = set_aside(root)
         pending = set(members(root, "nonterminal")) | set(members(root, "pending_drives"))
-        for facts in members(root, "unknowns").values():
+        for identity, facts in members(root, "unknowns").items():
             if not facts.get("task_id"):
-                return None
+                return None, f"{identity}: no task id"
             pending.add(str(facts["task_id"]))
         while pending:
             task_id = pending.pop()
             if task_id in protected:
                 continue
             protected.add(task_id)
-            canonical = load_task_result(root, task_id, strict=True)
+            canonical = None if task_id in aside else load_task_result(root, task_id, strict=True)
             rows = [canonical] if canonical else []
             for child in own_child_drives(root, task_id):
                 rows.extend(list_task_results(child, strict=True))
-            if not rows:
-                return None
+            if not rows and task_id not in aside:
+                return None, f"{task_id}: no record"
             for row in rows:
                 metadata = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
                 for field in ("task_id", "parent_task_id", "root_task_id", "retry_task_id", "superseded_by",
@@ -37,9 +42,9 @@ def startup_tree_exclusions(root):
                     linked = str(row.get(field) or metadata.get(field) or "")
                     if linked and linked not in protected:
                         pending.add(linked)
-    except Exception:
-        return None
-    return protected
+    except Exception as exc:
+        return None, f"{task_id}: {type(exc).__name__}"
+    return protected, ""
 
 
 def _drive_stamps(root, task_id):
@@ -62,7 +67,10 @@ def _drive_stamps(root, task_id):
 def recover_terminal_task_files(drive_root, protected):
     """Recover terminal files of addressed ``pending_drives``. A settled member whose last pass found only
     facts a restart cannot change -- no own drive left, or a child whose result never settled -- rests
-    (``obligations.DutyRest``) on its row and its drives' store identities, reported as it was found."""
+    (``obligations.DutyRest``) on its row and its drives' store identities, reported as it was found.
+    So does a member whose identity the import set aside (``task_results.set_aside``): it has no result
+    this recovery could complete from, which is neither an error nor a gap of this start. That fact is
+    one of the rest's own inputs, so an identity no longer set aside is examined again."""
     from ouroboros import obligations as o
     from ouroboros.cancel_intents import cancel_pending
     from ouroboros.headless import (
@@ -73,7 +81,7 @@ def recover_terminal_task_files(drive_root, protected):
     )
     from ouroboros.observability import _has_pending_ref_promotion
     from ouroboros.task_custody import own_child_drives
-    from ouroboros.task_results import load_task_result, validate_task_id, write_task_result
+    from ouroboros.task_results import load_task_result, set_aside, validate_task_id, write_task_result
     from ouroboros.task_status import SETTLED_STATUSES, effective_task_result
 
     root = Path(drive_root)
@@ -84,10 +92,15 @@ def recover_terminal_task_files(drive_root, protected):
         report["errors"].append(str(exc))
         report["unresolved"].append("*")
         return report
+    try:
+        aside = set_aside(root)
+    except Exception:
+        aside = {}  # unknown: each member is read below, which reports why
     stamps = {}
     for task_id in candidates:
         try:
-            stamps[task_id] = {"drives": _drive_stamps(root, validate_task_id(task_id))}
+            stamps[task_id] = {"drives": _drive_stamps(root, validate_task_id(task_id)),
+                               **({"set_aside": aside[task_id]} if task_id in aside else {})}
         except (OSError, ValueError):
             continue  # examined below, which reports why
     rest = o.DutyRest(root, "drive_recovery", stamps)
@@ -103,6 +116,9 @@ def recover_terminal_task_files(drive_root, protected):
             if rested and not (canonical and rested.get("waits_on") == ["child_drive_absent"]):
                 if (rested.get("report") or {}).get("unresolved"):
                     report["unresolved"].append(task_id)
+                continue
+            if task_id in aside:
+                rest.wait(task_id, "result_set_aside", absent=True, report={"unresolved": False})
                 continue
             current = load_task_result(root, task_id, strict=True) or {}
             for child_root in own_child_drives(root, task_id):
