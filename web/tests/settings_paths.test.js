@@ -320,6 +320,36 @@ test('a door from one page of the list to another chooses the other\'s row and h
     assert.deepEqual([pages(), chosen(), views.length], [['test-from'], ['test-from'], 2]);
 });
 
+test('a row chosen under the rail\'s bottom fade comes just clear of it; a row clear of both fades never moves', async (t) => {
+    const { content, state, showPage } = world(t);
+    registerSettingsPage('test-low', { title: 'Low', mount() {} });
+    registerSettingsPage('test-mid', { title: 'Mid', mount() {} });
+    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    layout(t, controls, content, { on: true });
+    const home = content.querySelector('[data-settings-home]');
+    // The owner's window: a rail 678 px tall from y 66, its list 1168 px, scrolled to 457 (33 px more wait below).
+    Object.assign(home, { scrollHeight: 1168, clientHeight: 678, scrollTop: 457 });
+    home.getBoundingClientRect = () => ({ top: 66, bottom: 744, width: 300 });
+    await content.querySelector('.settings-shell').fire('scroll', { target: home });  // the shell keeps where the rail was left
+    const row = (path, at) => {
+        const node = new Stub('button');
+        node.setAttribute('data-settings-open', path);
+        node.getBoundingClientRect = () => ({ top: 66 + at - home.scrollTop, bottom: 66 + at + 46 - home.scrollTop });
+        home.querySelector('[data-settings-list]').appendChild(node);
+        return node;
+    };
+    // Its bottom 4 px inside the rail, under the 32 px fade: pressed, it comes 24 px clear of the edge (FADE_CLEARANCE).
+    const low = row('test-low', 1085);
+    await home.fire('click', { target: low });
+    await settle();
+    assert.equal(home.scrollTop, 477);
+    assert.equal(low.getBoundingClientRect().bottom, 744 - 24);
+    const mid = row('test-mid', 700);
+    await home.fire('click', { target: mid });
+    await settle();
+    assert.equal(home.scrollTop, 477, 'a row in the clear stays where it is');
+});
+
 test('Settings pressed again in the sidebar: two panes keep a first-level page and return from a deeper one; one column shows the list', async (t) => {
     const { env, content, state, showPage } = world(t);
     const drawn = { first: 0, deeper: 0 };

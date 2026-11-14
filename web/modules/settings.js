@@ -357,11 +357,13 @@ export function initSettings(ctx = {}) {
         const chosen = homeEl.querySelector('[aria-current="page"]');
         if (!chosen) return;
         // `block: 'nearest'` by hand (the rail alone scrolls): a row already in the rail's view never moves; one out of
-        // it comes in just past the scroll-edge fade.
+        // it, or under the fade of an edge where more waits, comes in just past that fade.
         const rail = homeEl.getBoundingClientRect();
         const box = chosen.getBoundingClientRect();
-        if (box.top >= rail.top && box.bottom <= rail.bottom) return;
-        if (box.top < rail.top) homeEl.scrollTop += box.top - rail.top - FADE_CLEARANCE;
+        const above = homeEl.scrollTop > 1 ? FADE_CLEARANCE : 0;
+        const below = homeEl.scrollHeight - homeEl.clientHeight - homeEl.scrollTop > 1 ? FADE_CLEARANCE : 0;
+        if (box.top >= rail.top + above && box.bottom <= rail.bottom - below) return;
+        if (box.top < rail.top + above) homeEl.scrollTop += box.top - rail.top - FADE_CLEARANCE;
         else homeEl.scrollTop += box.bottom - rail.bottom + FADE_CLEARANCE;
         places.set(homeEl, homeEl.scrollTop);
     }
