@@ -265,8 +265,13 @@ class ScopeStub extends Stub {
     }
 }
 
-test('a door pressed inside Settings leads back to it: a Dashboard tab by its path, a page of its own by its header Back', async (t) => {
+test('a Settings door keeps its path and places its header Back only in stack, following layout changes', async (t) => {
     const { env, content, state, shown, showPage } = world(t);
+    const layout = (name) => {
+        env.window.ouroLayout = { layout: name };
+        env.window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout: name } }));
+    };
+    layout('docked');
     env.document.createElement = (tag) => new ScopeStub(tag);
     const dashboard = [];
     const layered = [];
@@ -309,6 +314,8 @@ test('a door pressed inside Settings leads back to it: a Dashboard tab by its pa
     // Circles: Back stands in its header's Back slot, never as a row of its own, with its one layer.
     await press('page:circles');
     assert.deepEqual(shown.at(-1), ['circles']);
+    assert.deepEqual(backOf(circles), none, 'the sidebar is the way back while docked');
+    layout('stack');
     assert.deepEqual(backOf(circles), back);
     assert.equal(layered.at(-1), 'push settings-door-back', 'Escape and the system\'s Back return to Settings too');
     // Its press returns to Settings, and the slot is emptied and its layer gone.
@@ -319,6 +326,10 @@ test('a door pressed inside Settings leads back to it: a Dashboard tab by its pa
 
     // Skills: in its header's slot as well; the page's own parts stay as they were.
     await press('page:skills');
+    assert.deepEqual(backOf(skills), back);
+    layout('docked');
+    assert.deepEqual(backOf(skills), none);
+    layout('stack');
     assert.deepEqual(backOf(skills), back);
     assert.deepEqual(partsOf(skills), skillsParts);
     // Leaving that page any other way empties the slot.
