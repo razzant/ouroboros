@@ -33,7 +33,7 @@ test('an undated store orders by activity; rows with no time at all follow, by i
 // field is not shown; never the page body (the Projects header's toggle, the old target, is no longer drawn).
 const appSource = readFileSync(new URL('../app.js', import.meta.url), 'utf8').replace(/\r\n?/g, '\n');
 function liftApp(name) {
-    const from = appSource.search(new RegExp(`\\nfunction ${name}\\(`));
+    const from = appSource.search(new RegExp(`\\n(?:async )?function ${name}\\(`));
     const until = appSource.indexOf('\n}\n', from + 1);
     assert.ok(from >= 0 && until > from, `${name} is a top-level function in app.js`);
     return appSource.slice(from + 1, until + 2);
@@ -128,6 +128,24 @@ test('the list\'s keyboard home is Find a project, or New project without the fi
     assert.equal(menuContext.openProjectMenu(item), true);
     assert.equal(fallback, input);
     nav.destroy();
+});
+
+test('pressing an already open Project closes its drawer, while callers may keep the drawer', async () => {
+    const calls = [];
+    const context = vm.createContext({ projectNavigationGeneration: 0,
+        navState: { activeProjectId: 'p1', mobileDrawerOpen: true },
+        setMobileDrawerOpen: (open) => { calls.push(open); context.navState.mobileDrawerOpen = open; },
+        closeProjectPanel: () => calls.push('project'),
+    });
+    vm.runInContext(liftApp('openProjectPanel'), context);
+    await context.openProjectPanel({ id: 'p1' }, { openOnly: true });
+    assert.equal(context.navState.mobileDrawerOpen, false);
+    assert.deepEqual(calls, [false]);
+    calls.length = 0;
+    context.navState.mobileDrawerOpen = true;
+    await context.openProjectPanel({ id: 'p1' }, { openOnly: true, closeDrawer: false });
+    assert.equal(context.navState.mobileDrawerOpen, true);
+    assert.deepEqual(calls, []);
 });
 
 // Show more says how many rooms it adds wherever that is known (the owner's sweep of 14.11: one control, one wording):

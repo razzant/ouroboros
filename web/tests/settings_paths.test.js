@@ -415,17 +415,23 @@ test('app.js: Settings pressed again goes to pressedAgain and closes the open dr
         showPage: (name) => calls.push(`show:${name}`),
     });
     vm.runInContext(source.slice(from + 1, until + 2), context);
-    context.pressNavPage('settings');
+    // Execute the actual registration too: an unused correct helper is no protection against an old callback.
+    const binding = source.match(/document.querySelectorAll\('\[data-nav-page\]'\)\.forEach\(btn => \{[\s\S]*?\n\}\);/)[0];
+    const buttons = ['settings', 'dashboard'].map((name) => ({ dataset: { navPage: name },
+        addEventListener(type, callback) { assert.equal(type, 'click'); this.click = callback; } }));
+    context.document = { querySelectorAll: () => buttons };
+    vm.runInContext(binding, context);
+    buttons[0].click();
     assert.deepEqual(calls, ['again', 'drawer:false']);
     // No drawer open (two panes, or the drawer already closed): nothing else happens.
     calls.length = 0;
-    context.pressNavPage('settings');
+    buttons[0].click();
     assert.deepEqual(calls, ['again']);
     // Away from Settings, or another page: the ordinary showing, which closes the drawer itself.
     calls.length = 0;
     context.state.activePage = 'chat';
-    context.pressNavPage('settings');
-    context.pressNavPage('dashboard');
+    buttons[0].click();
+    buttons[1].click();
     assert.deepEqual(calls, ['show:settings', 'show:dashboard']);
 });
 

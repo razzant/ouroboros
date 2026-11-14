@@ -759,6 +759,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
     if (!project?.id) return;
     const navigation = ++projectNavigationGeneration;
     if (navState.activeProjectId === project.id) {
+        if (closeDrawer && navState.mobileDrawerOpen) setMobileDrawerOpen(false);
         if (!openOnly) closeProjectPanel();
         else if (taskId && quizId) await revealProjectQuestion(freshProjectRow(project), projectInstances.get(project.id), taskId, quizId);
         return;
