@@ -19,7 +19,6 @@ log = logging.getLogger(__name__)
 SERVER_LOCK_NAME = "server.lock"
 _admission: dict = {}  # {"root": realpath, "fd": descriptor} of the one data root this process serves
 _admission_lock = threading.Lock()
-SERVER_SWITCH_INTERVAL_SEC = 0.001  # CPython's default is 0.005
 SERVER_GC_THRESHOLD0 = 20_000  # CPython's default is 700
 
 
@@ -250,11 +249,13 @@ def shorten_switch_interval() -> None:
     the lock back after each SQLite step or file call only when its holder yields: beside one busy thread the
     extensions index took 4.7 s at 5 ms and 1.9 s at 1 ms (0.1 s alone). It is a requested interval, not a bound: a
     long C call that holds the lock (a large JSON decode, a fork), other waiters and the OS scheduler can stretch a
-    wait; on Windows the wait rounds to the timer tick, so the gain there is small. A thread nobody waits for is never
-    asked, so an uncontended interpreter pays nothing; a contended computing thread hands over more often, at a cost
-    that grows with the waiters (beside one thread making file calls it ran about 14 % slower while those calls ran 2.8
-    times faster; beside twelve, about 25 %). Children started by spawn, forkserver or exec keep CPython's default; a
-    forked one inherits this. No setting."""
+    wait; Windows waits in whole milliseconds at its timer tick, so the gain there is small and 1 ms is its floor. A
+    thread nobody waits for is never asked, so an uncontended interpreter pays nothing; a contended computing thread
+    hands over more often, at a cost that grows with the waiters (beside one thread making file calls it ran about
+    14 % slower while those calls ran 2.8 times faster; beside twelve, a quarter to a half slower). Children started by
+    spawn, forkserver or exec keep CPython's default; a forked one inherits this. No setting."""
+    from ouroboros.runtime_limits import SERVER_SWITCH_INTERVAL_SEC
+
     sys.setswitchinterval(SERVER_SWITCH_INTERVAL_SEC)
     log.info("Interpreter switch interval %.1f ms", sys.getswitchinterval() * 1000)
 
