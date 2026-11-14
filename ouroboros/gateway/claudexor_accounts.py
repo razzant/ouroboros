@@ -287,9 +287,9 @@ def _engine_time(value: Any) -> Optional[str]:
         return None
     try:
         moment = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
+        return moment.astimezone(datetime.timezone.utc).isoformat() if moment.tzinfo else None
+    except (ValueError, OverflowError):  # unparseable, or past what UTC can hold
         return None
-    return moment.astimezone(datetime.timezone.utc).isoformat() if moment.tzinfo else None
 
 
 def _read_status_payload(include_models: bool) -> Dict[str, Any]:
