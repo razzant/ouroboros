@@ -441,3 +441,34 @@ def test_an_empty_expected_revision_on_an_existing_page_says_it_creates_only(tmp
     assert "Reconcile your change" not in empty
     stale = _workpad_write(own, "# Mine\n", expected_revision="0" * 64)
     assert "Reconcile your change with what came since" in stale and "creates a missing text only" not in stale
+
+
+def test_a_missing_revision_on_identity_or_the_map_answers_with_the_revision_not_the_text(tmp_path, identity, monkeypatch):
+    """K15: identity and the map ride resident with their revision line, so a write that sent no revision gets the head,
+    the revision and the exact read, not the whole text again; a stale revision still gets the text (or what changed),
+    and the workpad, resident only in its own project's requests, still resends its page."""
+    import types
+
+    from ouroboros import world_profiler as wprof
+    from ouroboros.tools.control_runtime import _update_world
+    from ouroboros.tools.project_journal import _workpad_write
+
+    ctx, current = _ctx(tmp_path), _sha(identity.read_bytes())
+    missing = _update_identity(ctx, "Mine.")
+    assert missing.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED: revision_required") and IDENTITY not in missing, missing
+    assert ("Its text is not resent: the resident ## Identity section carries it with this revision; "
+            f"memory_read(source='identity', version='{current}') reads it.") in missing, missing
+    stale = _update_identity(ctx, "Mine.", "0" * 64)
+    assert "revision_conflict" in stale and IDENTITY in stale and "not resent" not in stale, stale
+    world = tmp_path / "memory" / "WORLD.md"
+    world.write_bytes(f"{wprof.TITLE}\n\n{wprof.MEASURED_START}\n- probe\n{wprof.MEASURED_END}\n\n- a note\n".encode())
+    refused = _update_world(ctx, "# Mine\n")
+    assert "revision_required" in refused and "- a note" not in refused and "The map lives at " in refused, refused
+    assert f"the resident ## My World section carries it with this revision; memory_read(source='world', version=" \
+           f"'{_sha(world.read_bytes())}') reads it." in refused
+    assert "- a note" in _update_world(ctx, "# Mine\n", "0" * 64)  # stale: the whole map, as before
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path / "data")
+    pad = types.SimpleNamespace(project_id="atlas", task_id="t-1", drive_root=tmp_path, task_metadata={})
+    _workpad_write(pad, "# Plan\n\n- one\n")
+    edit = _workpad_write(pad, mode="edit", old_str="- one", content="- two")
+    assert "revision_required" in edit and edit.endswith("# Plan\n\n- one\n") and "not resent" not in edit, edit

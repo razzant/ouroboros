@@ -54,6 +54,7 @@ class TextSource:
     host: Optional[tuple] = None  # the map's (repo_dir, data_dir): the measured block stays the host's
     mirror: Optional[Path] = None  # a forked drive's copy refreshed after each publication (the map)
     resident: str = ""  # where the text rides whole, said in every receipt (the workpad)
+    shown: str = ""  # the resident section that carries it with its revision line: a missing revision does not resend it
     footer: str = ""  # a line every answer ends with (identity's canonical reader)
     where: str = ""  # where the text lives, said by a refusal of a missing or stale revision (the map, beside a fork's copy)
     outside: str = "an outside edit, or a write before history"  # what changes the text without a row
@@ -75,7 +76,7 @@ def identity_source(root: Path, footer: str = "") -> TextSource:
 
     memory = Memory(drive_root=root)
     return TextSource("identity", "identity", memory.identity_path(), memory.identity_journal_path(), "update_identity",
-                      footer=footer)
+                      footer=footer, shown="the resident ## Identity section")
 
 
 def world_source(root: Path, repo_dir: str = "", drive_root: Any = None) -> TextSource:
@@ -85,7 +86,7 @@ def world_source(root: Path, repo_dir: str = "", drive_root: Any = None) -> Text
     copy = Memory(drive_root=Path(drive_root)).world_path() if drive_root is not None else None
     mirror = copy if copy is not None and copy.resolve(strict=False) != memory.world_path().resolve(strict=False) else None
     return TextSource("world", "world map", memory.world_path(), memory.world_journal_path(), "update_world",
-                      host=(repo_dir, str(root)), mirror=mirror,
+                      host=(repo_dir, str(root)), mirror=mirror, shown="the resident ## My World section",
                       where=f"The map lives at {memory.world_path()}; a forked drive holds only a copy of it.",
                       outside="a change outside the writer, such as the host's refresh of its measured block at "
                               "startup, which writes no row, or a write before history")
@@ -261,8 +262,12 @@ def _refusal(ctx: Any, source: TextSource, mode: str, publication: Publication, 
                    else "An empty expected_revision creates a missing text only; this one exists" if expected == ""
                    else "Reconcile your change with what came since") + f": pass expected_revision={current!r}."
                 + (f" {source.where}" if source.where else ""))
-        return _answer(ctx, source, _current(source, publication, head), status="blocked",
-                       code="RESOURCE_CONSTRAINT_BLOCKED")
+        if reason == "revision_required" and source.shown and not publication.not_text:  # resident: not resent
+            head += (f" Its text is not resent: {source.shown} carries it with this revision; "
+                     f"{read_call(source, current)} reads it.")
+        else:
+            head = _current(source, publication, head)
+        return _answer(ctx, source, head, status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED")
     if reason == "history_unavailable":
         return _answer(ctx, source, (
             f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: history_unavailable; current_revision={current!r}. Its history journal "
