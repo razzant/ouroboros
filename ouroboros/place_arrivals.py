@@ -317,8 +317,8 @@ def _room_entry(chat_id, counts):
 
 
 def room_index(root, place, *, details=False):
-    """Polls (/api/state, consciousness) read index entries only. ``details`` is the owner's
-    rooms read: the room's latest arrival by time, one seek per room (and, in a room holding
+    """One place's index entries (the views of a list read them through ``place_facts``). ``details`` is the
+    owner's rooms read: the room's latest arrival by time, one seek per room (and, in a room holding
     imported messages, a walk of its time index down to the newest one, past only the room's
     own non-arrival rows), the body decoded after the transaction closes."""
     if not _dialogue_indexes(root):
@@ -378,7 +378,7 @@ def place_facts(root, places, *, full=True):
                                                         exc_info=True)
                 if full:
                     newest = conn.execute(_NEWEST, (place.place_id,)).fetchone()
-                    fact.update(unanswered=None if held is None else sum(held.values()),
+                    fact.update(unanswered=None if held is None or fact['rooms'] is None else sum(held.values()),
                                 last_activity_at=newest[0] if newest else '',
                                 account_candidates=_people(conn.execute(_CANDIDATES, (place.place_id,)).fetchall()))
     except Exception:

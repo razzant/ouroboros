@@ -254,13 +254,23 @@ def test_brief_view_reads_one_index_pass_and_keeps_words_when_the_store_is_busy(
     rooms[1]["unanswered_count"] = 1
     assert place_projection.place_view(tmp_path, place, allowance={}, brief=True)["unanswered"] == 3
 
-    def busy(*_args):
-        raise RuntimeError("store busy")
+    from contextlib import contextmanager
+    from ouroboros import dialogue_store
+    from ouroboros.store import StoreBusy
+    dialogue_store.ensure(tmp_path)  # a dialogue store that is busy, not one that holds nothing
+
+    @contextmanager
+    def busy(*_args, **_kwargs):
+        raise StoreBusy("store busy")
+        yield  # pragma: no cover
     monkeypatch.setattr("ouroboros.place_arrivals.place_facts", read_facts)
-    monkeypatch.setattr("ouroboros.place_arrivals._dialogue_indexes", busy)
+    monkeypatch.setattr(dialogue_store, "transaction", busy)
     view = place_projection.place_view(tmp_path, place, allowance={}, brief=True)
     assert view["label"] == "Inbox" and view["notes"][0]["text"] == "Answer politely."
     assert view["rooms"] is None and view["unanswered"] is None and view["last_activity_at"] == ""
+    # The owner's full view raises with its store, as before: an unreadable list is no answer there.
+    with pytest.raises(StoreBusy):
+        place_projection.place_view(tmp_path, place, allowance={}, declarations=[])
 
 
 @pytest.mark.parametrize("mode", ["off", "light", "full"])
