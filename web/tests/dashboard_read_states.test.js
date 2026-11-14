@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { initActivity } from '../modules/activity.js';
 import { initLogs } from '../modules/logs.js';
@@ -574,18 +575,29 @@ test('Logs reads oldest to newest, gives every event one anatomy, and shows the 
     // kind shows; a kind pressed is lit beside the others chosen and All goes out; All pressed clears the choice. The
     // strip has no Clear of its own: its last item is the list's own action, Clear list.
     const chips = mount.querySelectorAll('.filter-chip');
-    assert.deepEqual(chips.map((chip) => chip.textContent), ['All', 'Tools', 'LLM', 'Errors', 'Tasks', 'System', 'Consciousness']);
+    const label = (chip) => chip.textContent.slice(0, chip.textContent.length - chip.lastChild.textContent.length);
+    assert.deepEqual(chips.map(label), ['All', 'Tools', 'LLM', 'Errors', 'Tasks', 'System', 'Consciousness']);
+    // Skills' strip whole (owner 14.11: every rule reused, not duplicated): its chip and its count, and no chip size,
+    // padding or touch rule of Logs' own. Each kind says how many entries the list holds of it, as "All 82" does on
+    // Skills, and one it holds none of is hidden until chosen: at rest the strip says what the list holds, a failure too.
+    assert.ok(chips.every((chip) => chip.classList.contains('skills-category') && chip.lastChild.className === 'skills-category-count'));
+    const logsOwn = readFileSync(new URL('../style.css', import.meta.url), 'utf8').match(/[^{}]*\.logs-(?:filters|kinds)\b[^{]*\{[^}]*\}/g)
+        .filter((rule) => !rule.includes('.skills-'));
+    assert.ok(logsOwn.length && logsOwn.every((rule) => !/--control-|pointer: coarse/.test(rule)), logsOwn.join('\n'));
+    const said = () => chips.filter((chip) => !chip.hidden).map((chip) => `${label(chip)} ${chip.lastChild.textContent}`);
+    assert.deepEqual(said(), ['All 2', 'System 2']);
     const strip = mount.querySelector('.logs-filters');
     assert.equal(strip.children.at(-1), mount.querySelector('#btn-clear-logs'), 'Clear list ends the strip');
     assert.equal(mount.querySelector('#btn-clear-logs').textContent, 'Clear list');
     assert.equal(mount.querySelectorAll('.btn').filter((button) => button.textContent === 'Clear').length, 0, 'no Clear for the filter');
     const lit = () => chips.filter((chip) => chip.classList.contains('active') && chip.getAttribute('aria-pressed') === 'true')
-        .map((chip) => chip.textContent);
+        .map(label);
     assert.deepEqual(lit(), ['All'], 'at rest All is lit');
     assert.ok(entries.children.every((entry) => !entry.hidden), 'at rest every kind shows');
     const [all, tools, , , , system] = chips;  // both events here are System's
     await tools.fire('click');
     assert.deepEqual(lit(), ['Tools'], 'a kind pressed is lit and All goes out');
+    assert.deepEqual(said(), ['All 2', 'Tools 0', 'System 2'], 'a kind chosen stays in the strip with nothing in it');
     assert.equal(all.getAttribute('aria-pressed'), 'false');
     assert.ok(entries.children.every((entry) => entry.hidden), 'a chosen kind shows alone');
     assert.equal(empty.hidden, false);
@@ -605,6 +617,7 @@ test('Logs reads oldest to newest, gives every event one anatomy, and shows the 
     // Clear list says when, and that new events appear (U033).
     await mount.querySelector('#btn-clear-logs').fire('click');
     assert.match(empty.textContent, /^Cleared at \d\d:\d\d\. New events appear here\.$/);
+    assert.deepEqual(said(), ['All 0']);
     ws.emit('log', { data: { ...live, ts: '2026-09-09T12:01:00Z' } });
     assert.equal(empty.hidden, true);
 });
@@ -648,8 +661,9 @@ for (const [name, stored, lit, shown] of [
         ws.emit('log', { data: { type: 'tool_call_finished', tool: 'read_file', is_error: false, ts: '2026-09-16T12:00:00Z' } });
         ws.emit('log', { data: { type: 'llm_usage', model: 'm', ts: '2026-09-16T12:00:01Z' } });
         const chips = mount.querySelectorAll('.filter-chip');
-        assert.deepEqual(chips.filter((chip) => chip.classList.contains('active')).map((chip) => chip.textContent), lit);
-        assert.deepEqual(chips.filter((chip) => chip.getAttribute('aria-pressed') === 'true').map((chip) => chip.textContent), lit);
+        const label = (chip) => chip.textContent.replace(/\d+$/, '');
+        assert.deepEqual(chips.filter((chip) => chip.classList.contains('active')).map(label), lit);
+        assert.deepEqual(chips.filter((chip) => chip.getAttribute('aria-pressed') === 'true').map(label), lit);
         const entries = mount.querySelector('#log-entries').children;
         assert.deepEqual(entries.filter((entry) => !entry.hidden).map((entry) => entry.dataset.category), shown);
     });

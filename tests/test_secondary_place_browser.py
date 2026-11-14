@@ -206,7 +206,7 @@ def test_hidden_logs_take_a_burst_without_drawing_and_shown_keep_filters_raw_sel
             raw = entry.locator(".log-raw")
             assert raw.evaluate("pre => pre.textContent") == ""
             entry.locator(":scope > summary").click()
-            expect(entry.locator(".log-raw-status")).to_contain_text("bytes")
+            expect(entry.locator(".log-raw-status")).to_contain_text("Received event")
             assert json.loads(raw.inner_text())["type"].startswith("burst_note_")
             entry.locator(":scope > summary").click()
             assert raw.evaluate("pre => pre.textContent") == ""

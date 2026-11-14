@@ -89,14 +89,14 @@ export function initLogs({ ws, state, mount }) {
     const shows = (category) => !narrowed() || Boolean(state.activeFilters[category]);
 
     // One Dashboard tab body is the tab's root and its one scroller; the strip stays at its top while the list, one card
-    // of trays, scrolls under it. The strip is the filter (Skills' strip: it wraps, and on a phone it is one line that
-    // scrolls sideways), then the list's own action at its end; the history line and the empty line live in the card.
+    // of trays, scrolls under it. The strip is Skills' filter strip whole (style.css .skills-category), then the list's
+    // own quiet action at its end; the history line and the empty line live in the card.
     const page = document.createElement('div');
     page.id = 'page-logs';
     page.className = 'dashboard-body settings-logs-panel';
     page.innerHTML = `
         <div class="logs-filters"><div class="logs-kinds" id="log-filters" role="group" aria-label="Show" data-scroll-x>${
-            Object.entries({ '': 'All', ...LOG_CATEGORIES }).map(([key, label]) => `<button type="button" class="filter-chip" data-log-kind="${key}">${label}</button>`).join('')
+            Object.entries({ '': 'All', ...LOG_CATEGORIES }).map(([key, label]) => `<button type="button" class="filter-chip skills-category" data-log-kind="${key}">${label}<span class="skills-category-count"></span></button>`).join('')
         }</div><button type="button" class="btn btn-ghost btn-sm logs-clear-list" id="btn-clear-logs">Clear list</button></div>
         <section class="ui-card logs-card">
             <div class="ui-status logs-history-status" role="status"></div>
@@ -181,6 +181,7 @@ export function initLogs({ ws, state, mount }) {
     let emptyWords = null;
     function updateEmptyState() {
         if (!isLogsVisible()) return;
+        syncFilterChips();
         const quiet = [...entries.values()].some((entry) => shows(entry.category))
             || (historyLoading && !entries.size);
         if (emptyLine.hidden !== quiet) emptyLine.hidden = quiet;
@@ -192,32 +193,32 @@ export function initLogs({ ws, state, mount }) {
         else emptyLine.innerHTML = 'The filters hide every event. <button type="button" class="btn btn-ghost btn-sm" data-log-show-all>Show all</button>';
     }
 
-    // The shared filter chips (ui.css `.filter-chip`, as Skills' strip): All leads, lit while no kind is chosen; a kind
-    // pressed is lit beside the others chosen and All goes out; All pressed clears the choice.
+    // Skills' chips: All leads, lit while no kind is chosen; a kind pressed is lit beside the others chosen, All pressed
+    // clears the choice. Each counts the entries held of it ("Errors 2"), one with none hides unless chosen; while the
+    // first history read is in flight with nothing held, no count is said and nothing hides.
     const chips = new Map([...filtersDiv.querySelectorAll('[data-log-kind]')].map((chip) => [chip.dataset.logKind, chip]));
     function syncFilterChips() {
+        const known = !historyLoading || entries.size > 0;
+        const counts = { '': entries.size };
+        for (const entry of entries.values()) counts[entry.category] = (counts[entry.category] || 0) + 1;
         chips.forEach((chip, key) => {
             const lit = key ? Boolean(state.activeFilters[key]) : !narrowed();
             chip.classList.toggle('active', lit);
             chip.setAttribute('aria-pressed', String(lit));
+            setText(chip.querySelector('.skills-category-count'), known ? String(counts[key] || 0) : '');
+            chip.hidden = known && Boolean(key) && !counts[key] && !lit;
         });
-    }
-
-    function applyFilters() {
-        syncFilterChips();
-        entries.forEach(updateVisibility);
-        updateEmptyState();
-        follow();
     }
 
     function choose(key) {
         if (key) state.activeFilters[key] = !state.activeFilters[key];
         else KINDS.forEach((kind) => { state.activeFilters[kind] = false; });
-        applyFilters();
+        entries.forEach(updateVisibility);
+        updateEmptyState();
+        follow();
     }
 
     chips.forEach((chip, key) => chip.addEventListener('click', () => choose(key)));
-    syncFilterChips();
 
     // The empty line's Show all is All pressed: every kind shown.
     emptyLine.addEventListener('click', (event) => {

@@ -133,7 +133,7 @@ function setup(t) {
         // The card's words (its latest headline, or its newest failure's own words while it holds one) and its failure
         // chip's word ('' while it holds no failure): the first of each in the card is its own.
         headline: () => card().querySelector('.log-words').textContent,
-        choose: (label) => mount.querySelectorAll('.filter-chip').find((chip) => chip.textContent === label).dispatchEvent({ type: 'click' }),
+        choose: (kind) => mount.querySelectorAll('.filter-chip').find((chip) => chip.dataset.logKind === kind).dispatchEvent({ type: 'click' }),
         failure: () => (card().querySelector('.log-failure').hidden ? '' : card().querySelector('.log-failure-word').textContent),
         // A Timeline's rows exist while it is open: opened the way the browser does (its `toggle` reaches the list).
         timelineRows: () => {
@@ -218,8 +218,8 @@ test('a card holding a failure shows the failure\'s own words under every filter
     assert.deepEqual([logs.headline(), logs.failure()], said, 'still, when 37 later steps came after it');
     assert.equal(logs.timelineRows(), 30, 'the failure\'s row has left the rows the card keeps');
     assert.doesNotMatch(logs.card().textContent, /older than|is not below/, 'and nothing apologises for it');
-    await logs.choose('Errors');
+    await logs.choose('errors');
     assert.deepEqual([logs.headline(), logs.failure()], said, 'the same words under Errors');
-    await logs.choose('All');
+    await logs.choose('');
     assert.deepEqual([logs.headline(), logs.failure()], said);
 });

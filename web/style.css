@@ -6092,25 +6092,21 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     padding-top: 0;
     overflow-anchor: none; /* logs.js owns the entry anchor while chunks are inserted or moved */
 }
-/* The strip: the kinds as Skills' strip lays them out (style.css .skills-filter-strip: they wrap, and on a phone they are
-   one line that scrolls sideways), the first word on the list's edge; the list's own action at its right end. */
+/* The strip: Skills' filter strip whole (its chips, their counts and its layout, .skills-filter-strip below: they wrap,
+   and on a phone they are one line that scrolls sideways), the first word on the list's edge; at its end the list's own
+   action, quiet: an unchosen filter's ink, not the strip's brightest word. */
 .logs-filters {
-    --control-h: var(--control-h-sm);
     position: sticky;
     top: 0;
     z-index: 1;
     display: flex;
-    align-items: flex-start;
+    align-items: baseline;
     gap: var(--space-2);
     padding: var(--space-4) 0 var(--space-2);
     background: var(--bg-primary);
 }
 .logs-kinds { flex: 1 1 0; margin-left: calc(-1 * var(--space-2)); }
-.logs-kinds > .filter-chip { --control-pad-x: var(--space-2); white-space: nowrap; }
-/* Under a finger the strip's capsules take the touch minimum as their own height (ui.css "Touch and containment"). */
-@media (pointer: coarse) {
-    .logs-filters { --control-h: var(--touch-target-min); --control-h-sm: var(--touch-target-min); }
-}
+.logs-clear-list { color: var(--text-secondary); }
 
 .logs-card { display: grid; gap: var(--space-2); min-width: 0; }
 .logs-empty { margin: 0; color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
