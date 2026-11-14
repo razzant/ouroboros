@@ -19,7 +19,6 @@ log = logging.getLogger(__name__)
 SERVER_LOCK_NAME = "server.lock"
 _admission: dict = {}  # {"root": realpath, "fd": descriptor} of the one data root this process serves
 _admission_lock = threading.Lock()
-SERVER_GC_THRESHOLD0 = 20_000  # CPython's default is 700
 
 
 class ServerAdmissionRefused(RuntimeError):
@@ -269,5 +268,7 @@ def raise_gc_threshold() -> None:
     still die by reference counting at once; only cyclic garbage waits longer for its collection (at most about 20,000
     young objects, a few MB). The older generations keep CPython's thresholds; children keep CPython's default. No
     setting."""
+    from ouroboros.runtime_limits import SERVER_GC_THRESHOLD0
+
     gc.set_threshold(SERVER_GC_THRESHOLD0, *gc.get_threshold()[1:])
     log.info("Garbage collector thresholds %s", gc.get_threshold())
