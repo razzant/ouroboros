@@ -388,7 +388,8 @@ def _map_with_block(tmp_path, stamp="host", tail="## What lives here\n- old note
     canonical = tmp_path / "canonical"
     (canonical / "memory").mkdir(parents=True)
     world = canonical / "memory" / "WORLD.md"
-    world.write_text(f"{wprof.TITLE}\n\n{_measured(stamp)}\n\n{tail}", encoding="utf-8")
+    # Bytes, not text mode: write_text would store CRLF on Windows, and the edits' multi-line anchors are LF.
+    world.write_bytes(f"{wprof.TITLE}\n\n{_measured(stamp)}\n\n{tail}".encode("utf-8"))
     return canonical, world
 
 
