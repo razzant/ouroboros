@@ -304,7 +304,9 @@ def _step(tmp_path, episode, usage, notes, deadline_at=None, error_kind="transpo
 def test_periodic_note_words_the_unsent_request_and_the_kept_model(tmp_path, monkeypatch):
     monkeypatch.setattr(loop_transport, "interruptible_wait_sleep", lambda _sec, _wake: False)
     usage, notes = {"_last_llm_error_kind": "transport_unavailable", "_last_llm_failure": _daemon_row()}, []
-    episode = TransportWaitEpisode(started_monotonic=time.monotonic() - 180, engine_unanswered=True, redials=4)
+    now = time.monotonic()  # no defined zero (on a fresh Linux VM, its uptime): the last note lies long before now
+    episode = TransportWaitEpisode(started_monotonic=now - 180, last_note_monotonic=now - 10_000.0,
+                                   engine_unanswered=True, redials=4)
     assert _step(tmp_path, episode, usage, notes) is True
     assert notes == ["🌐 Still waiting for the local Claudexor engine — 3 min elapsed, 4 retries; the latest request "
                      "was not sent; the work keeps its model; will resume automatically."]
@@ -348,7 +350,7 @@ def test_a_later_dispatch_or_refusal_clears_the_engine_words(tmp_path, monkeypat
     if later == "dispatched_unknown":  # the unknown rail's own custody and words
         assert episode.outcome_custody["operation_id"] == "op-1"
         assert notes[-1].startswith("🌐 Provider connection was lost after dispatch.")
-    episode.last_note_monotonic = 0.0
+    episode.last_note_monotonic = time.monotonic() - 10_000.0  # force a periodic note, whatever the host's uptime
     assert _step(tmp_path, episode, usage, notes, error_kind=kind) is True
     waiting_for = "a provider connection" if later == "dispatched_unknown" else "the primary provider"
     assert notes[-1] == f"🌐 Still waiting for {waiting_for} — 0 min elapsed, 0 redials; will resume automatically."
