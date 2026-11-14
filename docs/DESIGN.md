@@ -2927,7 +2927,8 @@ stops clear of them.
 ### Settings
 
 **A row is a question with its current answer, and a setting has one row** (§6); its one line says what it
-means and what a change did, and a paragraph waits behind `More`. Settings is a section with pages (§10): its
+means and what a change did; before its value is first read it says Reading… (Could not be read after a failed read)
+and the control waits, and a paragraph waits behind `More`. Settings is a section with pages (§10): its
 list is search, Ouroboros's card and groups of navigation rows (§10), each a page's name over its current answer;
 the list and an open page stand together, and a page is always open, Models the first time and later the last
 one. A row opens its page or is a door: what lives elsewhere (a Dashboard page beside its live state, Main's

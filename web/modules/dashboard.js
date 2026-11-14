@@ -102,7 +102,6 @@ export function mountTabSettings(host, tab, { state, cards = null, custom = null
         (cards ? Array.from(host.children) : [host]).forEach((card) => {
             card.hidden = !Array.from(card.querySelectorAll('[data-setting-row]')).some((node) => !node.hidden);
         });
-        onPaint?.(settings);
     };
     const read = async () => {
         const mine = ++reads;

@@ -518,6 +518,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     // Off screen: the reads in flight are dropped and free their connections; none starts until it is shown again.
     function hide() {
         hidden = true;
+        at = '';
         flights.forEach((flight) => flight.controller.abort());
         flights.clear();
     }
@@ -577,17 +578,16 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         const { page, row } = event.detail || {};
         renew(['settings', ...(rowAt(page ?? [...ROWS, ...HAND_WRITTEN].find((each) => each.id === row)?.page)?.reads || [])]);
     };
-    // Where the owner is: a page of Settings, a Dashboard tab or a section. The row of the page left reads its sources.
+    // Where the owner is in Settings. A door leaves Settings before its destination is shown, so its source is not
+    // read from here; the destination owns its own read.
     let at = '';
     const onWhere = (event) => {
-        const { path, tab, page } = event.detail || {};
-        const where = event.type === 'ouro:settings-page-shown' ? String(path || '').split('/')[0]
-            : event.type === 'ouro:dashboard-subtab-shown' ? `dashboard:${tab}` : `page:${page}`;
+        const where = String(event.detail?.path || '').split('/')[0];
         const left = where === at ? null : rowAt(at);
         at = where;
         if (left) renew(left.reads);
     };
-    const WHERE = ['ouro:settings-page-shown', 'ouro:dashboard-subtab-shown', 'ouro:page-shown'];
+    const WHERE = ['ouro:settings-page-shown'];
     const onPlaces = () => renew(['places']);
     // A choice of this device made on a page beside the list (the theme's strip, a notification switch) is the list's
     // answer at once. Their own modules store it from the document's handlers (theme.js, notifications.js); the window

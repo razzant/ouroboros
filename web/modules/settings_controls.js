@@ -133,7 +133,7 @@ function rowState(row) {
     return ROW_STATES.get(row.id);
 }
 const repaintRow = (id) => BOUND.get(id)?.forEach((paint) => paint());
-const repaintAll = () => BOUND.forEach((paints) => paints.forEach((paint) => paint()));
+const repaintAll = (read = false) => BOUND.forEach((paints) => paints.forEach((paint) => paint(read)));
 
 // The composer's list and the circle and place Model fields learn the tiers and keys from the newest document
 // (model_catalog_store.js): a read, or a row's landed write.
@@ -158,7 +158,7 @@ export async function readSettings() {
         if (state.busy || state.outcome?.state !== 'unknown' || !sameValue(currentValue(state.row, data), state.sent)) return;
         Object.assign(state, { outcome: { ...state.outcome, state: 'saved', message: '', details: '' }, reread: false, typed: null, seen: false });
     });
-    repaintAll();
+    repaintAll(true);
     return data;
 }
 let firstRead = null;  // writes that come before any read wait on one read
@@ -739,7 +739,7 @@ function paintRow(node, row) {
     const running = state.outcome?.running ?? CODECS[row.codec]?.running?.(lastSettings, row)
         ?? lastSettings?._meta?.restart_state?.running?.[row.keys[0]];
     const waits = running !== undefined && stored !== undefined && !sameValue(running, stored);
-    const unread = row.keys.length ? settingsReadMessage() : '';  // no read has answered: nothing here is a value yet
+    const unread = row.keys.length && row.writer !== 'host' ? settingsReadMessage() : '';  // host rows have their own read
     if (row.hiddenWhen) node.hidden = Boolean(HIDDEN_WHEN[row.hiddenWhen]?.(lastSettings));
     if (isTyped(row)) {
         const text = (value) => (value === undefined ? undefined : control.kind === 'secret' || (control.noLimit && isUnlimited(value)) ? '' : String(value ?? ''));
@@ -853,14 +853,14 @@ export function bindSettingRows(container, ctx = {}) {
     container.querySelectorAll('[data-setting-row]').forEach((node) => {
         const row = find(node.dataset.settingRow);
         if (!row) return;
-        const paint = () => {
+        const paint = (read = false) => {
             if (node.isConnected === false) { BOUND.get(row.id)?.delete(paint); return; }
             paintRow(node, row);
-            if (row.control?.kind === 'custom') ctx.onPaint?.(lastSettings);  // a page's own control, by its own painter
+            if (read && row.control?.kind === 'custom') ctx.onPaint?.(lastSettings);  // a page's own control, by its own painter
         };
         paintWithRow(row.id, paint);
         bindings.push({ row, node, paint });
-        paint();
+        paint(true);
         if (CODECS[row.codec]?.host && !HOST_STATES.has(row.codec)) void readHost(row);
     });
     const of = (event) => {

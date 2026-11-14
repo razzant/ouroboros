@@ -18,6 +18,7 @@ import { NodeStub, setup } from './dashboard_dom_fixture.js';
 const MY_PAGES = ['permissions', 'rules', 'appearance', 'notifications', 'voice', 'computer', 'computer/advanced', 'computer/about'];
 const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => structuredClone(data) });
 const settle = async (rounds = 10) => { for (let i = 0; i < rounds; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 const EFFECTS = { OUROBOROS_RUNTIME_MODE: 'restart', OUROBOROS_SERVER_HOST: 'restart', OUROBOROS_SAFETY_MODE: 'next_task',
     OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'next_task', OUROBOROS_TASK_REVIEW_MODE: 'next_task', OUROBOROS_NETWORK_PASSWORD: 'now',
     OUROBOROS_SAFETY_OWNER_RULES: 'next_task', OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: 'now', OUROBOROS_UI_DIR: 'restart',
@@ -495,6 +496,49 @@ test('a stored network password is a stored key\'s row: Replace, Show the stored
     assert.equal(shut.line('OUROBOROS_NETWORK_PASSWORD'), 'Saved');
     assert.deepEqual([part('[data-secret-open]', shut).textContent, part('[data-secret-remove]', shut).hidden], ['Add', true]);
     assert.match(shut.meta('OUROBOROS_NETWORK_PASSWORD'), /^Not set\./);
+});
+
+test('a stored network password starts neutral until its first settings read', async (t) => {
+    forgetSettingRows();
+    forgetUnsavedRules();
+    const env = setup(t);
+    const server = fakeServer(env.routes, { OUROBOROS_NETWORK_PASSWORD: 'old horse' });
+    const originalSettings = env.routes.get('/api/settings');
+    const held = deferred();
+    env.routes.set('/api/settings', async (url, init = {}) => init.method ? originalSettings(url, init) : held.promise);
+    const container = new NodeStub();
+    const ctx = { readSettings, openSettings() {}, ask: async () => true };
+    const handle = await settingsPageFor('computer').mount(container, { path: 'computer', row: '', ctx });
+    t.after(() => {
+        const previousWindow = globalThis.window;
+        globalThis.window = env.window;
+        handle?.unmount?.();
+        globalThis.window = previousWindow;
+    });
+    env.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'computer' } }));
+    await settle();
+    const row = () => container.querySelector('[data-setting-row="OUROBOROS_NETWORK_PASSWORD"]');
+    const part = (hook) => row().querySelector(hook);
+    const hostRow = () => container.querySelector('[data-setting-row="OUROBOROS_DESKTOP_KEEP_RUNNING"]');
+    assert.deepEqual([part('[data-secret-state]').textContent, part('[data-secret-open]').textContent,
+        part('[data-secret-open]').disabled, part('[data-secret-show]').disabled, part('[data-secret-remove]').hidden],
+    ['Reading…', 'Reading…', true, true, true]);
+    assert.equal(hostRow().querySelector('[data-background-toggle]').disabled, false, 'the host-owned switch stays usable');
+    assert.equal(hostRow().querySelector('[data-setting-meta]').textContent, rowById('OUROBOROS_DESKTOP_KEEP_RUNNING').meta);
+    assert.doesNotMatch(hostRow().textContent, /Reading|Could not be read/);
+    held.resolve(response({ error: 'settings unavailable' }, 500));
+    await settle();
+    assert.deepEqual([part('[data-secret-state]').textContent, part('[data-secret-open]').textContent,
+        part('[data-secret-open]').disabled, part('[data-secret-remove]').hidden],
+    ['Could not be read', 'Could not be read', true, true]);
+    assert.equal(hostRow().querySelector('[data-background-toggle]').disabled, false, 'a failed settings read does not lock the host switch');
+    env.routes.set('/api/settings', originalSettings);
+    env.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'computer' } }));
+    await settle();
+    assert.deepEqual([part('[data-secret-state]').textContent, part('[data-secret-open]').textContent,
+        part('[data-secret-open]').disabled, part('[data-secret-show]').disabled, part('[data-secret-remove]').hidden],
+    ['Saved', 'Replace', false, false, false]);
+    assert.equal(server.values.OUROBOROS_NETWORK_PASSWORD, 'old horse');
 });
 
 test('Advanced holds what an installation rarely changes, and About the reset in its fold, asked first', async (t) => {

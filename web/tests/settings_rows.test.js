@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { bindSettingRows, commitSetting, forgetSettingRows, outcomeLine, readSettings, settingsRow, writeEntry } from '../modules/settings_controls.js';
-import { HAND_WRITTEN, ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
+import { HAND_WRITTEN, HOME_ROWS, ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 
 const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => structuredClone(data) });
@@ -520,6 +520,9 @@ test('the rows are data: they survive JSON, ids are unique, and every key has ex
     assert.deepEqual(rowsOf('dashboard:costs', { fold: true }).map((row) => row.id), ['OUROBOROS_MAX_ROUNDS', 'OUROBOROS_TASK_ABS_CEILING_SEC']);
     assert.equal(rowById('TOTAL_BUDGET').control.from, 'setup:totalBudget', 'the setup contract describes the budget fields');
     assert.equal(rowById('nope'), null);
+    assert.deepEqual(HOME_ROWS.filter((row) => ['dashboard:consciousness', 'dashboard:evolution', 'page:circles', 'dashboard:costs',
+        'page:skills', 'dashboard:updates', 'dashboard:storage'].includes(row.to)).map((row) => row.reads),
+    [undefined, undefined, undefined, undefined, undefined, undefined, undefined], 'doors leave Settings before their pages are shown');
 });
 
 test('a choices row is a radio group of options with their lines; a restart that waits marks the one in force and the chosen one', async (t) => {

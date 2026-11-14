@@ -19,6 +19,7 @@ import { NodeStub, setup } from './dashboard_dom_fixture.js';
 const { contract } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url), 'utf8'));
 const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => structuredClone(data) });
 const settle = async (rounds = 12) => { for (let i = 0; i < rounds; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 
 const SERVERS = [
     { id: 'slack', name: 'Slack', enabled: true, transport: 'streamable_http', url: 'https://mcp.example.com/slack', auth_header: 'Authorization', auth_token: 'sk-...', auth_configured: true },
@@ -335,6 +336,47 @@ test('Web search saves only what the owner changed: the source or the model chos
     await save();
     assert.equal(page.server.posts.length, 2);
     assert.equal(page.container.querySelector('[data-editor-result]').textContent, 'Nothing to save.');
+});
+
+test('Web search starts neutral before its first read, then keeps the last read on a return', async (t) => {
+    forgetSettingRows();
+    const env = setup(t);
+    const server = fakeServer(env.routes);
+    const originalSettings = env.routes.get('/api/settings');
+    const first = deferred();
+    env.routes.set('/api/settings', async (url, init = {}) => init.method ? originalSettings(url, init) : first.promise);
+    const state = { activePage: 'settings', settingsPath: 'models/role/websearch' };
+    const mount = async () => {
+        const container = new NodeStub();
+        const handle = await settingsPageFor('models/role/websearch').mount(container, { path: state.settingsPath,
+            row: '', ctx: { readSettings, openSettings() {}, state } });
+        return { container, handle };
+    };
+    const firstPage = await mount();
+    t.after(() => firstPage.handle?.unmount?.());
+    await settle();
+    const fields = (container) => [container.querySelector('#s-websearch-source'), container.querySelector('#s-websearch-model'),
+        container.querySelector('#s-websearch-key'), container.querySelector('[data-editor-save]'), container.querySelector('[data-editor-discard]')];
+    assert.deepEqual(fields(firstPage.container).map((control) => [control.value || '', control.disabled]),
+        [['', true], ['', true], ['', true], ['', true], ['', true]], 'nothing is shown or operable before the read');
+    first.resolve(await originalSettings('/api/settings', {}));
+    await settle();
+    assert.deepEqual(fields(firstPage.container).slice(0, 2).map((control) => [control.value || '', control.disabled]),
+        [['auto', false], ['', false]], 'the read paints and unlocks the fields');
+    firstPage.handle.unmount();
+
+    const second = deferred();
+    env.routes.set('/api/settings', async (url, init = {}) => init.method ? originalSettings(url, init) : second.promise);
+    const secondPage = await mount();
+    t.after(() => secondPage.handle?.unmount?.());
+    await settle();
+    assert.deepEqual(fields(secondPage.container).slice(0, 2).map((control) => [control.value || '', control.disabled]),
+        [['auto', false], ['', false]], 'a return starts from the last read instead of a blank choice');
+    second.resolve(await originalSettings('/api/settings', {}));
+    await settle();
+    assert.deepEqual(fields(secondPage.container).slice(0, 2).map((control) => [control.value || '', control.disabled]),
+        [['auto', false], ['', false]], 'the returning read leaves the choice in place');
+    assert.equal(server.values.OUROBOROS_WEBSEARCH_BACKEND, 'auto');
 });
 
 test('the fallbacks keep their per-role entries through an order change, a removal and one fallback\'s own Save', () => {

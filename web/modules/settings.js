@@ -400,8 +400,8 @@ export function initSettings(ctx = {}) {
     }
     function announce(again = false) {
         if (!shown()) return;
-        look(again);
         window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: state.settingsPath } }));
+        look(again);
     }
 
     // From outside Settings (app.js `openSettings`): Settings is shown first, and refused when the page left vetoes.

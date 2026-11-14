@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createClaudexorStatusStore } from '../modules/claudexor_status_store.js';
+import { getContributions } from '../modules/contributions.js';
 import { renderPageHeader } from '../modules/page_header.js';
 import { initSettings } from '../modules/settings.js';
 import { readSettings, writeEntry } from '../modules/settings_controls.js';
@@ -460,6 +461,15 @@ test('the list reads when it comes on screen: never at a press beside it, again 
     proto.prepend = function prepend(node) { this.insertBefore(node, this.children[0] || null); };
     t.after(() => { globalThis.ResizeObserver = kept.observer; Object.assign(proto, { getBoundingClientRect: kept.box, prepend: kept.prepend }); });
     const controls = initSettings({ state, ws: env.ws, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    t.after(() => {
+        const previousWindow = globalThis.window;
+        const previousDocument = globalThis.document;
+        globalThis.window = env.window;
+        globalThis.document = env.document;
+        env.window.dispatchEvent({ type: 'pagehide', persisted: false });
+        globalThis.window = previousWindow;
+        globalThis.document = previousDocument;
+    });
     // The sheets: two panes show the list beside the page; one column shows the list alone, or a page alone.
     const wide = { on: true };
     const shell = content.querySelector('.settings-shell');
@@ -500,6 +510,92 @@ test('the list reads when it comes on screen: never at a press beside it, again 
     wide.on = true;
     await resized();
     assert.equal(reads(), 5 * LIST.length, 'the list beside the page again: read');
+});
+
+test('the Settings shell drops held list reads off screen, keeps a press beside it, and renews only its live sources', async (t) => {
+    const { env, content, state, showPage } = world(t);
+    const held = new Map();
+    const hold = (url) => {
+        const request = { signal: null, ...deferred() };
+        const previous = held.get(url) || [];
+        held.set(url, [...previous, request]);
+        return request;
+    };
+    for (const url of ['/api/extensions', '/api/update/status', '/api/desktop/autostart']) {
+        env.routes.set(url, async (_url, init = {}) => {
+            const request = hold(url);
+            request.signal = init.signal;
+            return request.promise;
+        });
+    }
+    const controls = initSettings({ state, ws: env.ws, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const proto = Object.getPrototypeOf(Stub.prototype);
+    const beforeRects = Stub.prototype.getClientRects;
+    Stub.prototype.getClientRects = () => [];
+    t.after(() => { Stub.prototype.getClientRects = beforeRects; });
+    const beforeRect = proto.getBoundingClientRect;
+    proto.getBoundingClientRect = () => ({ top: 0, bottom: 10, width: 300 });
+    t.after(() => { proto.getBoundingClientRect = beforeRect; });
+    controls.page.getBoundingClientRect = () => ({ top: 0, bottom: 10, width: 1000 });
+    const homeRoot = content.querySelector('[data-settings-home]');
+    homeRoot.getClientRects = () => [{ width: 1, height: 1 }];
+    homeRoot.getBoundingClientRect = () => ({ top: 0, bottom: 10, width: 300 });
+    await controls.open('models');
+    await settle();
+    for (const url of ['/api/extensions', '/api/update/status', '/api/desktop/autostart']) {
+        assert.equal(held.get(url)?.length, 1, `${url} was held by the shell's list read`);
+        assert.equal(held.get(url)[0].signal?.aborted, false, `${url} is live while the list is shown`);
+    }
+
+    // A Settings page beside the list is a press inside the same screen: it must leave the held sources alone.
+    await controls.open('agents');
+    await settle();
+    for (const [url, requests] of held) assert.equal(requests[0].signal.aborted, false, `${url} stays live beside a page`);
+
+    // The shell's own page path hides the list, and therefore aborts every source it started for that screen.
+    state.activePage = 'chat';
+    env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'chat' } }));
+    await settle();
+    for (const [url, requests] of held) assert.equal(requests[0].signal.aborted, true, `${url} is aborted when Settings is left`);
+    for (const requests of held.values()) requests[0].resolve(reply({}));
+    await settle();
+
+    // Back on the list, each live source has one subscription and each subscription is quiet after the list leaves.
+    const counts = new Map();
+    const live = (url, body) => {
+        env.routes.set(url, async () => { counts.set(url, (counts.get(url) || 0) + 1); return reply(body); });
+    };
+    live('/api/extensions', ANSWERS['/api/extensions']);
+    live('/api/places', ANSWERS['/api/places']);
+    live('/api/update/status', ANSWERS['/api/update/status']);
+    env.routes.set('/api/ui/contributions', async () => reply({}));
+    state.activePage = 'settings';
+    env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'settings' } }));
+    await settle();
+    const detach = getContributions().attach({ ws: env.ws, target: env.window });
+    t.after(detach);
+    await settle();
+    const count = (url) => counts.get(url) || 0;
+    const renews = [['/api/extensions', () => env.ws.emit('extension_lifecycle')],
+        ['/api/places', () => env.window.dispatchEvent(new CustomEvent('ouro:places-changed'))],
+        ['/api/update/status', () => env.ws.emit('update_status_ready')]];
+    for (const [url, signal] of renews) {
+        const before = count(url);
+        signal();
+        await settle();
+        assert.ok(count(url) > before, `${url} renews while the list is on screen`);
+    }
+    state.activePage = 'chat';
+    env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'chat' } }));
+    await settle();
+    await settle(); // finish the source refreshes requested just before the list left the screen
+    const quiet = new Map([...counts].map(([url, value]) => [url, value]));
+    env.ws.emit('extension_lifecycle');
+    env.window.dispatchEvent(new CustomEvent('ouro:places-changed'));
+    env.ws.emit('update_status_ready');
+    await settle();
+    assert.deepEqual([...counts], [...quiet], 'live-source subscriptions are quiet when the list is hidden');
+    env.window.dispatchEvent({ type: 'pagehide', persisted: false });
 });
 
 test('one read of a source at a time: asked again in flight it starts no second request and runs once more after; off screen it is dropped', async (t) => {
@@ -566,11 +662,10 @@ test('the row of a page that is left reads its sources again, a setting\'s row a
     assert.deepEqual([answer('models'), since()], ['glm-5.3', []], 'a page of the same row: nothing is left, nothing read');
     await go('ouro:settings-page-shown', { path: 'agents' });
     assert.deepEqual([answer('models'), since()], ['gpt-5', ['/api/settings 1']], 'Models left: its one source, nothing else of the list');
-    // Circles is a section, not a setting: leaving it reads its places.
-    await go('ouro:page-shown', { page: 'circles' });
-    now.places = [{}];
-    await go('ouro:page-shown', { page: 'chat' });
-    assert.equal(answer('page:circles'), '1 place');
+    const beforeAgents = count('/api/settings');
+    await go('ouro:settings-page-shown', { path: 'rules' });
+    assert.equal(count('/api/settings'), beforeAgents + 1, 'Agents left: its settings source is read once');
+    // A door leaves Settings before its destination is shown, so the home does not own that page's read.
     // A server switched on the Tools page is one entry of MCP_SERVERS written; its event names the row, not the page.
     // The document and the servers' status are read again: the row's two sources.
     env.routes.set('/api/settings', async (_url, init = {}) => (init.method === 'POST'
