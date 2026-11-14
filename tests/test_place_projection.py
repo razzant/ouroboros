@@ -219,8 +219,6 @@ def test_a_place_says_it_only_hears_while_consciousness_is_off(tmp_path, monkeyp
     monkeypatch.setattr("supervisor.state.read_state", read_state)
     monkeypatch.setattr("ouroboros.consciousness.panic_blocks_wake", lambda root: checks.append(root) or switch == "panic")
     monkeypatch.setattr(projection, "place_declarations", lambda _root: [])
-    monkeypatch.setattr("ouroboros.place_arrivals._activities", lambda _root, rows: {
-        place.place_id: {"unanswered": 0, "last_activity_at": "", "account_candidates": []} for place in rows})
     hearing = {"active", "silent"} if switch in (False, "panic") else set()
     listed = projection.places_view(tmp_path)["places"]
     brief = place_views(tmp_path, {})
@@ -241,11 +239,14 @@ def test_brief_view_reads_one_index_pass_and_keeps_words_when_the_store_is_busy(
     place = places.connect_place(tmp_path, connector="bridge", provider="chat", label="Inbox")
     places.edit_place(tmp_path, place.place_id, "add_note", author="owner", text="Answer politely.")
     place = places.get_place(tmp_path, place.place_id)  # the stored record carries the note
-    monkeypatch.setattr("ouroboros.place_arrivals._activities",
-                        lambda root, rows: pytest.fail("the brief view must not read activity"))
+    from ouroboros.place_arrivals import place_facts as read_facts
     rooms = [{"room_chat_id": 7, "unanswered_count": 2, "last_at": "2027-01-01T00:00:00Z"},
              {"room_chat_id": 8, "unanswered_count": None, "last_at": ""}]
-    monkeypatch.setattr("ouroboros.place_arrivals._room_lists", lambda root, rows: {p.place_id: rooms for p in rows})
+
+    def brief_facts(root, rows, full=True):
+        assert full is False, "the brief view must not read activity"
+        return {p.place_id: {"rooms": rooms} for p in rows}
+    monkeypatch.setattr("ouroboros.place_arrivals.place_facts", brief_facts)
     view = place_projection.place_view(tmp_path, place, allowance={}, brief=True)
     assert view["label"] == "Inbox" and view["notes"][0]["text"] == "Answer politely."
     assert view["unanswered"] is None, "an unknown room count makes the total unknown, never a smaller number"
@@ -253,9 +254,10 @@ def test_brief_view_reads_one_index_pass_and_keeps_words_when_the_store_is_busy(
     rooms[1]["unanswered_count"] = 1
     assert place_projection.place_view(tmp_path, place, allowance={}, brief=True)["unanswered"] == 3
 
-    def busy(root, rows):
+    def busy(*_args):
         raise RuntimeError("store busy")
-    monkeypatch.setattr("ouroboros.place_arrivals._room_lists", busy)
+    monkeypatch.setattr("ouroboros.place_arrivals.place_facts", read_facts)
+    monkeypatch.setattr("ouroboros.place_arrivals._dialogue_indexes", busy)
     view = place_projection.place_view(tmp_path, place, allowance={}, brief=True)
     assert view["label"] == "Inbox" and view["notes"][0]["text"] == "Answer politely."
     assert view["rooms"] is None and view["unanswered"] is None and view["last_activity_at"] == ""

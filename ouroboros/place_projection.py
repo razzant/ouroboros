@@ -116,8 +116,8 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
     cause = "place:" + place.place_id
     spend = next((item.get("usd") for item in (allowance or {}).get("spend_by_cause") or []
                   if item.get("cause") == cause), None)
-    facts = (place_facts(root, [place], full=not brief) if facts is None else facts)[place.place_id]
-    rooms = facts["rooms"]
+    own = (place_facts(root, [place], full=not brief) if facts is None else facts)[place.place_id]
+    rooms = own["rooms"]
     if brief:
         # Status and launch need labels, notes and open turns: one index pass, counts unknown when it is unavailable.
         counts = [room.get("unanswered_count") for room in rooms or []]
@@ -127,8 +127,8 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
                       activity_coverage="captured_place_events", spent_24h_usd=spend)
         return result
     result.update(label=said_once(place.label or place.provider),
-                  rooms=rooms, unanswered=facts["unanswered"] if rooms is not None else None,
-                  last_activity_at=facts["last_activity_at"],
+                  rooms=rooms, unanswered=own["unanswered"] if rooms is not None else None,
+                  last_activity_at=own["last_activity_at"],
                   activity_coverage="captured_place_events", spent_24h_usd=spend)
     rows = place_declarations(root) if declarations is None else declarations
     row = next((r for r in rows if r["skill"] == place.connector and (
@@ -141,7 +141,7 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
     from ouroboros.safety_config import get_safety_mode
     result.update(safety_mode=get_safety_mode("consciousness"), labels=row.get("labels") or {})
     result.update({key: row[key] for key in ("facts", "source", "settings") if key in row})
-    result["account_candidates"] = facts["account_candidates"]
+    result["account_candidates"] = own["account_candidates"]
     # Accounts another place of this bot or app confirms count here too (``places.counted_owner_accounts``): named
     # with where they were confirmed, removed there.
     result["shared_owner_accounts"] = [

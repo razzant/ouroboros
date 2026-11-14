@@ -54,13 +54,14 @@ def test_places_context_has_every_place_and_room_without_reading_history(monkeyp
     places.edit_place(tmp_path, "mail", "add_note", author="owner", text="Watch releases.\nKeep the exact second line.")
     monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [])
     calls = []
-    def rooms(root, rows, details=False):
-        calls.append((root, [place.place_id for place in rows]))
-        return {place.place_id: {"mail": [{"room_chat_id": -1, "unanswered_count": 2},
-                                          {"room_chat_id": -2, "unanswered_count": 1}], "quiet": [],
-                                 "paused": [{"room_chat_id": -3, "unanswered_count": None}]}[place.place_id]
+    def facts(root, rows, full=True):
+        rows = list(rows)
+        calls.append((root, [place.place_id for place in rows], full))
+        return {place.place_id: {"rooms": {"mail": [{"room_chat_id": -1, "unanswered_count": 2},
+                                                    {"room_chat_id": -2, "unanswered_count": 1}], "quiet": [],
+                                           "paused": [{"room_chat_id": -3, "unanswered_count": None}]}[place.place_id]}
                 for place in rows}
-    monkeypatch.setattr("ouroboros.place_arrivals._room_lists", rooms)
+    monkeypatch.setattr("ouroboros.place_arrivals.place_facts", facts)
     rows = view.place_views(tmp_path)
     assert [row["unanswered"] for row in rows] == [3, None, 0]
     text = view.places_text(tmp_path, rows)
@@ -70,7 +71,8 @@ def test_places_context_has_every_place_and_room_without_reading_history(monkeyp
     assert "Quiet room [quiet]: silent; open turns: 0; no captured room" in text
     assert "Paused room [paused]: paused; open turns: unknown; rooms: 1" in text
     assert "note (owner): Watch releases." in text and "note (owner): Keep the exact second line." in text
-    assert calls == [(tmp_path, sorted(place.place_id for place in configured))], "one rooms read for the list"
+    listed = [place.place_id for place in places.place_records(tmp_path).places.values()]
+    assert calls == [(tmp_path, listed, False)], "one brief read of the stores for the whole list"
     for place in configured:
         places.edit_place(tmp_path, place.place_id, "disconnect", author="owner")
     assert view.places_text(tmp_path, view.place_views(tmp_path)) == "none"
@@ -96,7 +98,8 @@ def test_my_map_names_each_circle_once_with_its_whole_words_and_my_placements(mo
     """The own-clock map groups places under their circles (each circle's words whole, once), then the places in no
     circle; a place I put in a circle says that my human's words there still restrict it, without their consent."""
     monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [])
-    monkeypatch.setattr("ouroboros.place_arrivals._room_lists", lambda _root, rows: {place.place_id: [] for place in rows})
+    monkeypatch.setattr("ouroboros.place_arrivals.place_facts",
+                        lambda _root, rows, full=True: {place.place_id: {"rooms": []} for place in rows})
     rows = [places.connect_place(tmp_path, connector="bridge", provider="chat", conversation_id=cid, label=label)
             for cid, label in (("a", "Team chat"), ("b", "Team mail"), ("c", "Family"))]
     team = places.create_circle(tmp_path, name="Team", text="Shared words, line one.\nLine two.", author="owner")
@@ -119,7 +122,9 @@ def test_unavailable_index_does_not_claim_zero(monkeypatch, tmp_path):
     monkeypatch.setattr("ouroboros.place_projection.place_declarations", lambda _root: [])
     def unavailable(*_args):
         raise OSError("room index unavailable")
-    monkeypatch.setattr("ouroboros.place_arrivals._room_lists", unavailable)
+    from ouroboros import dialogue_store
+    dialogue_store.ensure(tmp_path)  # a dialogue store whose room read fails, not one that holds no room
+    monkeypatch.setattr("ouroboros.place_arrivals._place_rooms", unavailable)
     assert view.place_views(tmp_path)[0]["unanswered"] is None
     text = view.places_text(tmp_path, view.place_views(tmp_path))
     assert "rooms unknown" in text and "no captured room" not in text  # unknown never reads as zero

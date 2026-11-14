@@ -86,7 +86,6 @@ def test_corrupt_place_store_is_unavailable_not_absent(owner_client, focus):
     assert 'rooms' not in response.json()
 
 
-
 def _arrive(root, place_id, chat_id, n):
     from ouroboros import dialogue_store
     dialogue_store.append(root, 'chat', {'ts': f'2026-11-14T10:00:{n:02d}+00:00', 'direction': 'in', 'type': 'place_arrival',
@@ -143,6 +142,7 @@ def test_a_place_list_reads_its_stores_in_fixed_transactions_and_a_place_s_rooms
     assert rows[second.place_id]['last_activity_at'] == '2026-11-14T10:00:03+00:00'
     assert [p['platform_actor_id'] for p in rows[first.place_id]['account_candidates']] == ['person-2', 'person-1', 'person-0']
     assert room_statements == 2, 'one rooms statement per place, whatever its rooms'
+    assert opened.count('dialogue') == 2, 'the index check and one read of the dialogue for the whole list'
     for n, chat in enumerate((905, 906, 907, 908), start=4):
         _arrive(tmp_path, first.place_id, chat, n)
     third = places.connect_place(tmp_path, connector='bridge', provider='chat', account_id='c')
@@ -150,6 +150,7 @@ def test_a_place_list_reads_its_stores_in_fixed_transactions_and_a_place_s_rooms
     grown, more_transactions, more_room_statements = read()
     assert [room['room_chat_id'] for room in grown[first.place_id]['rooms']] == [901, 902, 903, 905, 906, 907, 908]
     assert grown[third.place_id]['rooms'] == [{'room_chat_id': 909, 'unanswered_count': 0, 'address': 'chat:909'}]
+    assert list(grown[third.place_id]['rooms'][0]) == ['room_chat_id', 'unanswered_count', 'address'], 'wire order'
     assert more_transactions == transactions, 'as many store transactions for the list, whatever its places'
     assert more_room_statements == 3
     # The list's bindings ride one parameter: no SQL variable ceiling however many places an install keeps.
@@ -157,3 +158,15 @@ def test_a_place_list_reads_its_stores_in_fixed_transactions_and_a_place_s_rooms
     from ouroboros.place_arrivals import _open_counts
     many = [SimpleNamespace(place_id=f'many-{n}', legacy_binding_ids=()) for n in range(40_000)]
     assert _open_counts(tmp_path, many) == {place.place_id: {} for place in many}
+    # One place's failed room read leaves that place unknown and its neighbours as they are.
+    from ouroboros import place_arrivals
+    real_rooms = place_arrivals._place_rooms
+
+    def failing(conn, place_id):
+        if place_id == first.place_id:
+            raise ValueError('unreadable room index entry')
+        return real_rooms(conn, place_id)
+    monkeypatch.setattr(place_arrivals, '_place_rooms', failing)
+    isolated = {row['place_id']: row for row in place_projection.places_view(tmp_path)['places']}
+    assert isolated[first.place_id]['rooms'] is None and isolated[first.place_id]['unanswered'] is None
+    assert isolated[second.place_id]['rooms'] == grown[second.place_id]['rooms']
