@@ -1425,7 +1425,8 @@ html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
 /* Levels and returns share the shell's leading capsule. The writer supplies presence and placement. */
 .app-page-return { display: flex; align-items: center; min-width: 0; max-width: 40%; order: -1; }
 .app-page-return:empty { display: none; }
-.shell-back { width: auto; max-width: 100%; gap: var(--space-1); padding-inline: var(--space-2); }
+.shell-back { width: auto; max-width: 100%; gap: var(--space-1); padding-inline: var(--space-2);
+    font: 600 var(--type-body) / var(--line-title) var(--font-sans); }
 .shell-back > svg { flex: none; }
 .shell-back-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 html[data-layout="stack"] .shell-back { width: auto; }

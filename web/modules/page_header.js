@@ -108,7 +108,8 @@ export function bindPageBack({ layers, currentHeader, doc = document, win = wind
         if (!header) return;
         const slot = header.querySelector('[data-page-return]');
         const back = layers.page()?.back;
-        header.toggleAttribute('data-return', Boolean(back));
+        if (back) header.setAttribute('data-return', slot?.closest('.section-lead-page') ? 'column' : 'leading');
+        else header.removeAttribute('data-return');
         if (!slot) return;
         if (!back) { slot.replaceChildren(); return; }
         const title = `Back to ${back.title || back.label}`;

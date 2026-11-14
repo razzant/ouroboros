@@ -3408,8 +3408,9 @@ draws one close glyph and one More glyph (`web/modules/page_icons.js`).
 
 ### Page header
 
-One component (`web/modules/page_header.js`) draws every page's header and the Project panel's, as one row
-except the narrow toolbar below. No decorative icon. On docked, a section without pages that the column already
+One component (`web/modules/page_header.js`) draws the page's row, including a Project's. Its first capsule is the
+top page layer's named return, before controls: ‹ Settings, ‹ Main, or a level's parent. The word ellipsizes before
+controls yield; its chevron stays. Two panes place it over the page; one column replaces the leading picture. On docked, a section without pages that the column already
 names shows no title: its tabs or Files' location take that place and its actions the end, on Main's line, so the
 bar has two ends as Main's does; tabs wrap and never scroll, a location that does not fit scrolls inside it (it
 rests at the folder you are in, no folder wider than the bar's start), and in the macOS window its empty parts
