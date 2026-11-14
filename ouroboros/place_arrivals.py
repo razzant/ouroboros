@@ -286,9 +286,9 @@ def _open_counts(root, places):
         rows = txn.conn.execute(
             "SELECT t.presence_binding_id AS binding,json_extract(b.body,'$.chat_id') AS room,COUNT(*) AS count "
             "FROM tasks t INDEXED BY tasks_place_open JOIN task_bodies b ON b.task_id=t.task_id WHERE " + _OPEN +
-            " AND t.presence_binding_id IN (" + ','.join('?' for _ in owners) + ") "
+            " AND t.presence_binding_id IN (SELECT value FROM json_each(?)) "
             "AND json_extract(b.body,'$.metadata.wake_cause')='focus' "
-            "AND COALESCE(t.parent_task_id,'')='' GROUP BY binding,room", tuple(owners)).fetchall()
+            "AND COALESCE(t.parent_task_id,'')='' GROUP BY binding,room", (json.dumps(list(owners)),)).fetchall()
     for row in rows:
         if row['room'] is not None:
             for place_id in owners[row['binding']]:
@@ -320,7 +320,7 @@ def room_index(root, place, *, details=False):
 
 
 def _room_lists(root, places, *, details=False):
-    """``room_index`` of each of ``places`` by place id, in one read of each store for them all."""
+    """``room_index`` of each of ``places`` by place id: as many store transactions for any number of places."""
     if not _dialogue_indexes(root):
         return {place.place_id: [] for place in places}
     counts = _open_counts(root, places)
@@ -355,9 +355,9 @@ def _latest_arrival(conn, place_id, chat_id):
 
 
 def _activities(root, places):
-    """Each place's open focuses, newest arrival and account candidates, by place id: one read of each store for them
-    all. O(log arrivals + open focuses) per place, not O(all historical arrivals): the newest row is an index-only
-    LIMIT 1 and the counts decode no task documents."""
+    """Each place's open focuses, newest arrival and account candidates, by place id, in as many store transactions
+    for any number of places. O(log arrivals + open focuses) per place, not O(all historical arrivals): the newest
+    row is an index-only LIMIT 1 and the counts decode no task documents."""
     if not _dialogue_indexes(root):
         return {place.place_id: {'unanswered': 0, 'last_activity_at': '', 'account_candidates': []} for place in places}
     counts = _open_counts(root, places)
@@ -372,9 +372,10 @@ def _activities(root, places):
 
 
 def place_facts(root, places, *, full=True):
-    """What place views read from the stores, for all of ``places`` in one read of each store: ``{place_id: facts}``
-    with ``rooms`` (``room_index``; None when that read failed, logged), and for the owner's ``full`` view
-    ``unanswered``, ``last_activity_at`` and ``account_candidates``, whose failed read raises. No place, no read."""
+    """What place views read from the stores, for all of ``places`` in a fixed number of store transactions:
+    ``{place_id: facts}`` with ``rooms`` (``room_index``; None when that read failed, logged), and for the owner's
+    ``full`` view ``unanswered``, ``last_activity_at`` and ``account_candidates``, whose failed read raises. No
+    place, no read."""
     places = list(places)
     if not places:
         return {}

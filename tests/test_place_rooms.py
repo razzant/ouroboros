@@ -94,11 +94,11 @@ def _arrive(root, place_id, chat_id, n):
                                          'sender_session_id': f'person-{n}', 'sender_label': f'Person {n}', 'place_id': place_id})
 
 
-def test_a_place_list_reads_each_store_once_and_a_place_s_rooms_in_one_statement(tmp_path, monkeypatch):
+def test_a_place_list_reads_its_stores_in_fixed_transactions_and_a_place_s_rooms_in_one_statement(tmp_path, monkeypatch):
     """#3399 (14.11): a place view opened ten store transactions per place and stepped one statement per captured
     room, and every step hands the interpreter lock over and waits to take it back: on the owner's busy server 31
-    places with 2,169 rooms took 4 to 20 seconds. A list reads each store once, a place's rooms in one statement,
-    and answers the same rooms, counts, activity and candidates."""
+    places with 2,169 rooms took 4 to 20 seconds. A list opens as many store transactions for any number of places,
+    reads a place's rooms in one statement, and answers the same rooms, counts, activity and candidates."""
     from contextlib import contextmanager
     from ouroboros import dialogue_store, place_projection, store
     from tests._store_shared import seed_result
@@ -150,5 +150,10 @@ def test_a_place_list_reads_each_store_once_and_a_place_s_rooms_in_one_statement
     grown, more_transactions, more_room_statements = read()
     assert [room['room_chat_id'] for room in grown[first.place_id]['rooms']] == [901, 902, 903, 905, 906, 907, 908]
     assert grown[third.place_id]['rooms'] == [{'room_chat_id': 909, 'unanswered_count': 0, 'address': 'chat:909'}]
-    assert more_transactions == transactions, 'one read of each store for the whole list, whatever its places'
+    assert more_transactions == transactions, 'as many store transactions for the list, whatever its places'
     assert more_room_statements == 3
+    # The list's bindings ride one parameter: no SQL variable ceiling however many places an install keeps.
+    from types import SimpleNamespace
+    from ouroboros.place_arrivals import _open_counts
+    many = [SimpleNamespace(place_id=f'many-{n}', legacy_binding_ids=()) for n in range(40_000)]
+    assert _open_counts(tmp_path, many) == {place.place_id: {} for place in many}
