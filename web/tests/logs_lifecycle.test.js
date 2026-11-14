@@ -81,7 +81,7 @@ test('a hidden panel writes no node and reads no history; shown, it catches up a
     assert.equal(logs.list.children.length, 3);
     const busy = logs.card('busy');
     assert.equal(busy.dataset.category, 'errors', 'the failure earned while hidden still files the card under Errors');
-    assert.equal(busy.querySelector('.log-words').textContent, 'Still working');
+    assert.equal(busy.querySelector('.log-words').textContent, 'run_command failed', 'a card holding a failure says it in its words');
     assert.equal(busy.querySelector('.log-count').textContent, '2 events', 'a task\'s count says what it counts');
     assert.equal(busy.querySelector('.log-failure-word').textContent, '1 step failed', 'and its failure in words');
     assert.match(logs.list.textContent, /Test backfilled event|earlier/i);

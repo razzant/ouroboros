@@ -193,8 +193,7 @@ export function initLogs({ ws, state, mount }) {
     }
 
     // The shared filter chips (ui.css `.filter-chip`, as Skills' strip): All leads, lit while no kind is chosen; a kind
-    // pressed is lit beside the others chosen and All goes out; All pressed clears the choice. A card that holds a
-    // failure says it in the failure's own words while Errors is chosen, so a change of choice redraws those cards.
+    // pressed is lit beside the others chosen and All goes out; All pressed clears the choice.
     const chips = new Map([...filtersDiv.querySelectorAll('[data-log-kind]')].map((chip) => [chip.dataset.logKind, chip]));
     function syncFilterChips() {
         chips.forEach((chip, key) => {
@@ -206,8 +205,7 @@ export function initLogs({ ws, state, mount }) {
 
     function applyFilters() {
         syncFilterChips();
-        entries.forEach((entry) => { if (entry.failure) stale.add(entry); updateVisibility(entry); });
-        paint();
+        entries.forEach(updateVisibility);
         updateEmptyState();
         follow();
     }
@@ -351,15 +349,14 @@ export function initLogs({ ws, state, mount }) {
         // it stays a timeline row and never reopens or rewrites the settled
         // headline. Until then the headline follows the latest frame.
         const settles = evt.type === 'task_done';
-        // A task's words are its latest event's (a settled task's are its outcome); while Errors is chosen they are its
-        // newest failure's, which the card keeps even after its row leaves the timeline.
+        // A task's words are its latest event's (a settled task's are its outcome). While it holds a failure they are its
+        // newest failure's own words under every filter (its error, or its name where it has none; a failed ending's
+        // name is its chip), kept even after the failure's row leaves the timeline.
         if (settles || (!record.terminal && !behind)) record.words = wordsOf(view, view.headline || view.body) || 'Task activity';
         if (settles) { record.terminal = true; record.failed = view.phase === 'error'; }
         const failed = FAILED_PHASES.has(view.phase);
         if (failed && !settles) record.failures = (record.failures || 0) + 1;
-        if (failed && at >= (record.failure?.at || 0)) {
-            record.failure = { at, ts, words: [view.headline, wordsOf(view, view.body)].filter(Boolean).join('\n') };
-        }
+        if (failed && at >= (record.failure?.at || 0)) record.failure = { at, words: wordsOf(view, view.body) || (settles ? '' : view.headline) };
         const execution = executorChip(evt), review = formatReviewProjection(evt.review_projection);
         record.execution = (behind ? record.execution || execution : execution || record.execution);
         record.review = (behind ? record.review || review : review || record.review);
@@ -400,8 +397,7 @@ export function initLogs({ ws, state, mount }) {
         + '<span class="log-words"></span></span></summary>'
         + '<div class="log-facts" hidden></div><div class="log-note log-executor-detail" hidden></div>';
     const RECORD_HTML = `<div class="log-note" data-log-omitted hidden></div>${LOG_RAW_HTML}`;
-    const TIMELINE_HTML = '<div class="log-note log-task-review" hidden></div><div class="log-note" data-log-gone hidden></div>'
-        + '<div class="log-task-timeline"></div>';
+    const TIMELINE_HTML = '<div class="log-note log-task-review" hidden></div><div class="log-task-timeline"></div>';
     const partsOf = new WeakMap();  // an event's node → its parts, found once when it is made
     const wordsOfNode = new WeakMap();  // an event's node → its words and their whole text, where its view cut them
 
@@ -481,12 +477,11 @@ export function initLogs({ ws, state, mount }) {
         if (!entry.node) {
             const node = entry.node = createEvent('log-entry log-task-card', TIMELINE_HTML);
             node.dataset.taskGroup = entry.groupId;
-            entry.dom = { review: node.querySelector('.log-task-review'), gone: node.querySelector('[data-log-gone]'),
-                timeline: node.querySelector('.log-task-timeline') };
+            entry.dom = { review: node.querySelector('.log-task-review'), timeline: node.querySelector('.log-task-timeline') };
             entry.rows = new Map();
             entryOf.set(node, entry);
         }
-        const { node, dom, failure } = entry;
+        const { node, dom } = entry;
         setData(node, 'category', entry.category);
         // A card stands where its newest event does (`at`); an older event never dates it back.
         setData(node, 'logTime', String(entry.at));
@@ -494,8 +489,7 @@ export function initLogs({ ws, state, mount }) {
         // Failed (DESIGN §4: a local failure does not relabel a working task). Its count is its events, not repeats.
         const failed = entry.failed ? taskPresentation('error').headline : entry.failures ? `${plural(entry.failures, 'step')} failed` : '';
         paintEvent(node, { ts: entry.ts, name: entry.name, task: shortTaskId(entry.groupId), failure: failed,
-            count: plural(entry.events, 'event'), words: failure && state.activeFilters.errors ? failure.words : entry.words,
-            execution: entry.execution });
+            count: plural(entry.events, 'event'), words: failed ? entry.failure.words : entry.words, execution: entry.execution });
         // The task's review sentence opens with its timeline.
         setText(dom.review, entry.review || '');
         dom.review.hidden = !entry.review;
@@ -503,14 +497,9 @@ export function initLogs({ ws, state, mount }) {
     }
 
     // An open Timeline's rows follow the task's recent events in place: a new event appends its row, the oldest
-    // past MAX_TASK_EVENTS leaves, a collapsed repeat redraws only its own row. A failure older than the rows kept is
-    // said, so the timeline never looks healthy for want of its row.
+    // past MAX_TASK_EVENTS leaves, a collapsed repeat redraws only its own row.
     function renderTaskTimeline(entry) {
-        const { rows, failure } = entry;
-        const gone = Boolean(failure) && entry.recent[0].at > failure.at;  // the rows kept are in time order
-        setText(entry.dom.gone, gone ? `The newest failure (${timeOf(failure.ts).exact}) is older than the ${MAX_TASK_EVENTS} latest`
-            + ' events this card keeps, so its row is not below.' : '');
-        entry.dom.gone.hidden = !gone;
+        const { rows } = entry;
         for (const [item, row] of rows) {
             if (!entry.recent.includes(item)) { raw.remove(row); row.remove(); rows.delete(item); }
         }
