@@ -1,4 +1,4 @@
-"""CLI, data-root admission and port-binding helpers extracted from server.py."""
+"""CLI, data-root admission, port-binding and interpreter switch-interval helpers extracted from server.py."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ import logging
 import os
 import pathlib
 import socket
+import sys
 import threading
 import time
 
@@ -17,6 +18,7 @@ log = logging.getLogger(__name__)
 SERVER_LOCK_NAME = "server.lock"
 _admission: dict = {}  # {"root": realpath, "fd": descriptor} of the one data root this process serves
 _admission_lock = threading.Lock()
+SERVER_SWITCH_INTERVAL_SEC = 0.001  # CPython's default is 0.005
 
 
 class ServerAdmissionRefused(RuntimeError):
@@ -238,3 +240,14 @@ def bound_service_socket(drive_root: pathlib.Path, service: str, host: str, port
                 clear_service_binding(drive_root, service, binding)
             except Exception:
                 log.warning("Could not retire %s service binding", service, exc_info=True)
+
+
+def shorten_switch_interval() -> None:
+    """The server's interpreter hands over between threads every 1 ms instead of CPython's 5 ms (owner, 14.11.2026,
+    #3399). A hundred threads share one interpreter, and a read takes the interpreter lock back after each SQLite step
+    or file call only when the thread holding it yields, which a computing thread does once per switch interval: beside
+    one busy thread the extensions index took 4.7 s at 5 ms and 1.9 s at 1 ms (0.1 s alone). A thread nobody waits for
+    is never asked to yield, so an idle server pays nothing; a busy one hands over more often (beside a thread making
+    file calls it ran about 15 % slower while those calls ran 2.8 times faster). No setting."""
+    sys.setswitchinterval(SERVER_SWITCH_INTERVAL_SEC)
+    log.info("Interpreter switch interval %.1f ms", sys.getswitchinterval() * 1000)
