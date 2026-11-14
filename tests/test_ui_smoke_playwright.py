@@ -2495,7 +2495,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         assert expanded["titleWidth"] >= min(expanded["titleScrollWidth"], 150) - 1, expanded
         assert long_url in expanded["text"], expanded
 
-    def assert_jump_geometry(page, scope_selector, *, require_overflow=True):
+    def assert_jump_geometry(page, scope_selector, *, require_overflow=True, placement="line"):
         page.evaluate(
             """({scopeSelector, requireOverflow}) => {
                 const messages = document.querySelector(scopeSelector).querySelector('.chat-messages, #chat-messages');
@@ -2506,7 +2506,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
         )
         page.wait_for_timeout(250)
         facts = page.evaluate(
-            """({scopeSelector, forceVisible}) => {
+            """({scopeSelector, forceVisible, placement}) => {
                 const scope = document.querySelector(scopeSelector);
                 const messages = scope.querySelector('.chat-messages, #chat-messages');
                 const button = scope.querySelector('.chat-scroll-bottom-btn');
@@ -2525,9 +2525,13 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                     remaining: messages.scrollHeight - messages.scrollTop - messages.clientHeight,
                     visible: button.classList.contains('visible'),
                     width: b.width, height: b.height,
-                    endInset: w.right - b.right,
-                    gap: w.top - b.bottom,
+                    endInset: (placement === 'phone' ? w : t).right - b.right,
+                    gap: (placement === 'phone' ? w : t).top - b.bottom,
+                    lineCentre: t.bottom - 16 - (b.top + b.height / 2),
                     toolbarOverlap: overlap(b, t),
+                    controlOverlap: Math.max(0, ...Array.from(toolbar.children)
+                        .filter(node => node !== button && getComputedStyle(node).visibility !== 'hidden')
+                        .map(node => overlap(b, node.getBoundingClientRect()))),
                     previewOverlap: preview ? overlap(b, preview.getBoundingClientRect()) : 0,
                     boxShadow: getComputedStyle(button).boxShadow,
                 };
@@ -2535,15 +2539,20 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 else button.style.removeProperty('transition');
                 return facts;
             }""",
-            {"scopeSelector": scope_selector, "forceVisible": not require_overflow},
+            {"scopeSelector": scope_selector, "forceVisible": not require_overflow, "placement": placement},
         )
         assert facts["visible"], facts
         if require_overflow:
             assert facts["remaining"] > 48, facts
-        assert abs(facts["width"] - 32) <= 1 and abs(facts["height"] - 32) <= 1, facts
-        # ↓ latest stands at the composer's end, never over the middle of the column.
-        assert abs(facts["endInset"] - 8) <= 1 and abs(facts["gap"] - 8) <= 1, facts
-        assert facts["toolbarOverlap"] == 0 and facts["previewOverlap"] == 0, facts
+        # Approved shell (79fac1cf4): chrome-sized at the line's end, above it on a phone or narrow panel.
+        size = 44 if placement == "phone" else 30
+        assert abs(facts["width"] - size) <= 1 and abs(facts["height"] - size) <= 1, facts
+        assert abs(facts["endInset"] - 8) <= 1, facts
+        if placement == "line":
+            assert abs(facts["lineCentre"]) <= 1 and facts["toolbarOverlap"] == size * size, facts
+        else:
+            assert abs(facts["gap"] - 8) <= 1 and facts["toolbarOverlap"] == 0, facts
+        assert facts["controlOverlap"] == 0 and facts["previewOverlap"] == 0, facts
         assert facts["boxShadow"] != "none", facts
         return facts
 
@@ -2565,7 +2574,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 mobile = mobile_context.new_page()
                 mobile.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 assert_mobile_geometry(mobile)
-                assert_jump_geometry(mobile, "#page-chat")
+                assert_jump_geometry(mobile, "#page-chat", placement="phone")
                 mobile.screenshot(
                     path=str(diagnostic_directory(data_dir.parent, "ui-smoke", publish=True) / f"live-card-depth-10-{browser_engine}.png"),
                     full_page=True,
@@ -2670,6 +2679,10 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 for key in ("x", "y", "width", "height"):
                     assert abs(before_hover[key] - after_hover[key]) <= 1, (before_hover, after_hover)
                 jump.focus()
+                # Keyboard focus owns the ring; WebKit on macOS reaches buttons with Option-Tab.
+                wide.keyboard.press("Alt+Shift+Tab" if browser_engine == "webkit" else "Shift+Tab")
+                wide.keyboard.press("Alt+Tab" if browser_engine == "webkit" else "Tab")
+                assert jump.evaluate("node => node === document.activeElement && node.matches(':focus-visible')")
                 focus = jump.evaluate(
                     "node => ({style: getComputedStyle(node).outlineStyle, "
                     "width: parseFloat(getComputedStyle(node).outlineWidth)})"
@@ -2739,7 +2752,7 @@ def test_ui_smoke_live_cards_keep_usable_geometry_at_depth_and_in_project_panel(
                 assert abs(panel_facts["mainTop"] - panel_facts["sideTop"]) <= 2, panel_facts
                 assert panel_facts["titleTop"] >= max(panel_facts["mainBottom"], panel_facts["sideBottom"]) - 1, panel_facts
                 assert_jump_geometry(
-                    wide, "#panel-pchat-layout-project", require_overflow=False
+                    wide, "#panel-pchat-layout-project", require_overflow=False, placement="panel"
                 )
                 wide.screenshot(
                     path=str(diagnostic_directory(data_dir.parent, "ui-smoke", publish=True) / f"live-card-project-panel-{browser_engine}.png"),
