@@ -1,4 +1,5 @@
-import { accountedUpperBound, accountedUpperBoundWithChildren, formatUsd4, isoMicros, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
+import { accountedUpperBound, accountedUpperBoundWithChildren, isoMicros, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
+import { formatUsd } from './storage_format.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
 import { DETAIL_ONLY_WARNINGS, TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
     failedStepHeadline, heldCallPhrase, heldCallsLine } from './task_reason_words.js';
@@ -313,8 +314,10 @@ export function childReportLabel(childStatus) {
         ? tr('subagent.report_to_parent', 'Report to parent') : '';
 }
 
+// A cost in Logs reads as every call's cost on the Dashboard (storage_format.formatUsd); a zero says nothing and is
+// not shown (an absent amount neither), so only a real cost takes a place on the event's line.
 export function formatLogMoney(value) {
-    return formatUsd4(value);
+    return value !== null && value !== undefined && value !== '' && Number(value) ? formatUsd(value) : '';
 }
 
 export function formatLogDuration(sec) {
@@ -959,9 +962,8 @@ export function summarizeLogEvent(evt) {
         // C13: the SHARED accessor and its null policy — same alias precedence as
         // chat.js and the Python seams, and a REAL $0 prints instead of vanishing.
         const ownValue = accountedUpperBound(evt) ?? (evt.cost ?? null);
-        const ownCost = unavailable
-            ? 'cost unavailable'
-            : (ownValue != null ? `${formatLogMoney(ownValue)}${evt.cost_final === false ? ' (pending)' : ''}` : '');
+        const money = formatLogMoney(ownValue);
+        const ownCost = unavailable ? 'cost unavailable' : money && `${money}${evt.cost_final === false ? ' (pending)' : ''}`;
         return view(presentation.phase, presentation.headline, {
             body: reviewDetails,
             meta: taskMeta(
