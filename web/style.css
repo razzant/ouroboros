@@ -230,15 +230,12 @@ html[data-layout="stack"] .shell-icon-control {
 
 /* The sections, quiet items three to a line on a desk in three columns, each as wide as its widest item: the first
    column starts where the Project names start, the last ends where the column ends, and within a column the items start
-   on one line, so the glyphs of the two rows stand under each other. A name is never cut: a column is never narrower
-   than its widest name, and where three columns do not fit the column stands them two to a line, the phone drawer
-   always (a finger high there), and a column too narrow even for two stands them one to a line. An engine without
-   container queries keeps the one-to-a-line base. The steps are the English names' widths at the body size (328 px
-   holds three, 226 px two); a longer translation that passes a step's width overflows instead of being cut. The chosen
-   one is the crimson capsule. */
+   on one line, so the glyphs of the two rows stand under each other. The column's existing steps keep three at 328 px,
+   two at 226 px (and in the drawer), otherwise one. Longer names wrap within those columns: Navigation keeps their
+   names whole, never clipped or reduced to an unlabelled icon. The chosen one is the crimson capsule. */
 .nav-tools {
     display: grid;
-    grid-template-columns: minmax(max-content, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     justify-content: space-between;
     gap: var(--space-1) 0;
     padding-top: var(--space-3);
@@ -254,14 +251,14 @@ html[data-layout="stack"] .shell-icon-control {
     font-size: var(--type-body);
     font-weight: 400;
 }
-.nav-tools > .nav-row > .nav-row-label { overflow: visible; text-overflow: clip; }
+.nav-tools > .nav-row > .nav-row-label { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere; }
 .nav-tools > .nav-row:not(.active) > svg { color: var(--text-meta); }
 .nav-tools > .nav-row { justify-self: start; }
 @container (min-width: 226px) {
-    .nav-tools { grid-template-columns: repeat(2, minmax(max-content, 1fr)); }
+    .nav-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @container (min-width: 328px) {
-    html:not([data-layout="stack"]) .nav-tools { grid-template-columns: repeat(3, max-content); }
+    html:not([data-layout="stack"]) .nav-tools { grid-template-columns: repeat(3, minmax(0, max-content)); }
 }
 /* A finger's target in the docked layout too (a tablet, a touch laptop): the row is the touch minimum tall; a mouse
    keeps the quieter row. */

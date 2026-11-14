@@ -73,3 +73,15 @@ test('the Projects header is the New project button alone, with the shell\'s plu
     const section = shell.match(/<section id="nav-projects"[^>]*>/)?.[0] || '';
     assert.match(section, / aria-label="Projects"/);
 });
+
+test('section names wrap whole in the existing one, two and three column steps', () => {
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.match(css, /\.nav-tools\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/);
+    assert.match(css, /@container \(min-width: 226px\)\s*\{\s*\.nav-tools\s*\{\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+    assert.match(css, /@container \(min-width: 328px\)\s*\{\s*html:not\(\[data-layout="stack"\]\) \.nav-tools\s*\{\s*grid-template-columns: repeat\(3, minmax\(0, max-content\)\)/);
+    const label = css.match(/\.nav-tools > \.nav-row > \.nav-row-label\s*\{([^}]+)\}/)?.[1];
+    for (const declaration of ['white-space: normal', 'overflow-wrap: anywhere', 'overflow: visible', 'text-overflow: clip']) {
+        assert.ok(label?.includes(declaration), declaration);
+    }
+    assert.doesNotMatch(readFileSync(new URL('../modules/pages.js', import.meta.url), 'utf8'), /measureNavTools|ResizeObserver|MutationObserver|createRange/);
+});
