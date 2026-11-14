@@ -109,3 +109,48 @@ test('the list\'s keyboard home is Find a project, or New project without the fi
     assert.equal(fallback, input);
     nav.destroy();
 });
+
+// Show more says how many rooms it adds wherever that is known (the owner's sweep of 14.11: one control, one wording):
+// before the complete list is read too, from the state's count of listable rooms. Only a state that counts none (an
+// older server) leaves the number unsaid.
+function listOf(t, { listableCount = 3, reserved = [] } = {}) {
+    setup(t);
+    // What the list's painting asks of a node beyond the shared stub, for this test's life.
+    const added = {
+        insertAdjacentHTML(_where, html) {
+            const glyph = new NodeStub('svg');
+            glyph.html = html;
+            this.insertBefore(glyph, this.children[0] || null);
+        },
+        prepend(node) { this.insertBefore(node, this.children[0] || null); },
+        toggleAttribute(name, on) { if (on) this.setAttribute(name, ''); else this.removeAttribute(name); return on; },
+        getBoundingClientRect() { return { top: 0, bottom: 48, left: 0, right: 300, width: 300, height: 48 }; },
+    };
+    for (const [name, fn] of Object.entries(added)) {
+        if (name in NodeStub.prototype) continue;
+        NodeStub.prototype[name] = fn;
+        t.after(() => { delete NodeStub.prototype[name]; });
+    }
+    const header = new NodeStub('div');
+    header.prepend = function prepend(node) { this.insertBefore(node, this.children[0] || null); };
+    const list = new NodeStub('div');
+    list.getBoundingClientRect = () => ({ top: 0, bottom: 600, left: 0, right: 300, width: 300, height: 600 });
+    const feed = ['a', 'b', 'c'].map((id, at) => ({ id, name: `Room ${id}`, chat_id: 10 + at,
+        last_message_at: `2026-11-1${at}T00:00:00Z` }));
+    const nav = createProjectsNav({ header, list, feed: () => feed, feedOrder: () => 0, nextOrder: () => 1,
+        reserved: () => reserved, listableCount: () => listableCount, activeId: () => null, isUnread: () => false,
+        readList: async () => ({ projects: feed }), onListRead() {}, onShown() {}, open() {}, openMenu() {}, pin() {},
+        isPinPending: () => false });
+    t.after(() => nav.destroy());
+    const commands = () => list.children.filter((node) => node.className.includes('nav-projects-more'))
+        .map((node) => [node.textContent.trim(), node.firstElementChild?.html || ''].filter(Boolean));
+    return { nav, header, commands };
+}
+
+test('Show more names how many it adds before the list is read, as after', (t) => {
+    const count = (options) => { const { nav, commands } = listOf(t, options); nav.paint(); return commands().map(([words]) => words); };
+    assert.deepEqual(count({ listableCount: 60 }), ['Show 50 more'], 'a page of fifty');
+    assert.deepEqual(count({ listableCount: 5 }), ['Show 2 more'], 'the last two');
+    assert.deepEqual(count({ listableCount: 3 }), [], 'nothing beyond the feed');
+    assert.deepEqual(count({ listableCount: null, reserved: [10, 11, 12, 13] }), ['Show more'], 'a state that counts no rooms');
+});
