@@ -3,7 +3,7 @@
 The existing shell server supplies assets and non-project APIs. Project list/update
 requests exercise the real gateway and registry in a private TestClient drive.
 Pin and Unpin are the first actions of a row's menu (its ⋯ under a mouse, a long press on touch) and the row's own
-glyph left of its name for a hovering pointer or the keyboard; pinned rows lead the one keyed list and one step of
+glyph over its time for a hovering pointer or the keyboard; pinned rows lead the one keyed list and one step of
 air parts them from the rest, with no caption or column and no glyph at rest.
 Find a project and Show more reach every room beyond the feed; a reference opens its own room by its id.
 """
@@ -569,8 +569,15 @@ def test_many_pins_order_within_groups_long_names_and_short_windows(pins_ui, tmp
 def test_menu_repositions_after_a_hidden_pin_is_revealed(pins_ui, tmp_path):
     ui, page, control = pins_ui, pins_ui["page"], pins_ui["control"]
     choose(page, "newer", "Pin")
-    page.locator('#nav-projects-toggle').click()
+    # The approved feed has pins and fifty recent rooms, with no collapse. An older room outside that feed
+    # is revealed by another window's pin, while the first pin's menu stays open.
+    for index in range(50):
+        registry.create_project(ui["root"], f"recent-{index:02}", name=f"Recent room {index:02}", origin="owner_ui")
+    refresh(page)
+    expect()(page.locator('.nav-project-item')).to_have_count(51)
     expect()(row(page, "older")).to_be_hidden()
+    before = shown_ids(page)
+    assert before[0] == "newer"
     anchor = open_menu(page, "newer")
     original_anchor, original_popup = anchor.bounding_box(), menu(page).bounding_box()
     # Another window pins the older room, which has spoken since (this fixture's store is not dated yet: activity
@@ -581,7 +588,8 @@ def test_menu_repositions_after_a_hidden_pin_is_revealed(pins_ui, tmp_path):
     assert response.status_code == 200
     refresh(page)
     expect()(row(page, "older")).to_be_visible()
-    assert order(page) == ["older", "newer"]
+    assert shown_ids(page) == ["older", *before]
+    expect()(page.locator('.nav-project-item')).to_have_count(52)
     expect()(menu(page)).to_be_visible()
     moved, popup = anchor.bounding_box(), menu(page).bounding_box()
     assert moved['y'] != original_anchor['y']
@@ -680,7 +688,7 @@ def test_local_pin_reveal_respects_input_and_visible_scroll_region(pins_ui, heig
 
 
 # A row's own Pin as it stands: drawn, a target, what it does and says, its ink beside the row's, and the boxes of
-# the Pin, the name and the Projects header's glyph (the icon column the Pin sits in).
+# the Pin, the name and the time it replaces on the approved row's first line.
 PIN = """(pid) => {
     const item = document.querySelector(`.nav-project-item[data-nav-project-id="${pid}"]`);
     const pin = item.querySelector(':scope > .nav-project-pin'), row = item.querySelector('.nav-project-row');
@@ -690,8 +698,9 @@ PIN = """(pid) => {
             name: pin.getAttribute('aria-label'), title: pin.title, ink: style.color, ring: style.outlineStyle,
             rowInk: getComputedStyle(row).color, rowFill: getComputedStyle(row).backgroundColor,
             focused: pin === document.activeElement, keyboard: pin.matches(':focus-visible'),
-            first: item.firstElementChild === pin, pin: box(pin), label: box(row.querySelector('.nav-row-label')),
-            icon: box(document.querySelector('#nav-projects-toggle svg'))};
+            first: item.firstElementChild === pin, item: box(item), pin: box(pin), label: box(row.querySelector('.nav-row-label')),
+            time: box(row.querySelector('.nav-project-time')), line: box(row.querySelector('.nav-project-line1')),
+            timeDrawn: getComputedStyle(row.querySelector('.nav-project-time')).visibility !== 'hidden'};
 }"""
 # Records what the next click in the document lands on (`window.__landed`): a row's Pin, its row or something else,
 # with that row's id.
@@ -707,7 +716,7 @@ def middle(box):
 
 
 def test_row_pin_glyph_serves_a_hovering_pointer_and_the_keyboard_never_a_finger(pins_ui, tmp_path):
-    """The row's own Pin or Unpin, left of its name in the icon column: drawn and pressable only while a pointer
+    """The row's own Pin or Unpin over its time: drawn and pressable only while a pointer
     hovers the row or the keyboard is on it. A finger there presses the row, on a phone and on a screen that also
     hovers; the ⋯ and the long press keep Pin and Unpin."""
     ui, page, control = pins_ui, pins_ui["page"], pins_ui["control"]
@@ -718,8 +727,12 @@ def test_row_pin_glyph_serves_a_hovering_pointer_and_the_keyboard_never_a_finger
     rest = pin("older")
     assert rest["first"] and rest["action"] == "pin" and not rest["drawn"] and not rest["target"], rest
     assert (rest["name"], rest["title"]) == (f"Pin {LONG}", "Pin")
-    assert rest["pin"]["right"] < rest["label"]["left"], rest  # in the gutter, short of the name, at every size
-    assert abs(middle(rest["pin"])[0] - middle(rest["icon"])[0]) <= 0.5, rest
+    assert rest["label"]["right"] == pytest.approx(rest["time"]["left"] - 8, abs=0.01), rest
+    assert rest["pin"]["left"] <= middle(rest["time"])[0] <= rest["pin"]["right"], rest
+    assert rest["pin"]["right"] == pytest.approx(rest["time"]["right"] + 5, abs=0.5), rest
+    assert rest["pin"]["top"] == pytest.approx(rest["item"]["top"] + 3, abs=0.5), rest
+    assert rest["pin"]["bottom"] - rest["pin"]["top"] == pytest.approx(24, abs=0.5), rest
+    assert rest["timeDrawn"], rest
     assert_flat_and_unlabelled(page)
     if coarse(page):
         assert page.evaluate("matchMedia('(hover: none)').matches")
@@ -751,6 +764,7 @@ def test_row_pin_glyph_serves_a_hovering_pointer_and_the_keyboard_never_a_finger
     page.mouse.move(*middle(rest["label"]))
     hovered = pin("older")
     assert hovered["drawn"] and hovered["target"] and hovered["label"] == rest["label"], hovered
+    assert not hovered["timeDrawn"] and hovered["time"] == rest["time"], hovered
     assert hovered["ink"] != hovered["rowInk"], hovered  # quieter than the name it serves
     assert not pin("newer")["drawn"]
     page.locator('#primary-sidebar').screenshot(path=str(evidence / f"hover-pin-{ui['tag']}.png"), animations="disabled")
@@ -795,10 +809,12 @@ def test_row_pin_glyph_serves_a_hovering_pointer_and_the_keyboard_never_a_finger
     assert control["writes"] == [{"pinned": True}, {"pinned": False}], control["writes"]
     assert registry.get_project(ui["root"], "newer")["pinned"] is False
     assert page.locator('.nav-project-row.active').count() == 0 and page.locator('#project-panel').is_hidden()
-    # The keyboard: Tab from the find field reaches the first row's Pin before its name; it is drawn with the one
+    # The keyboard: Find leads through New project to the first row's Pin before its name; it is drawn with the one
     # ring, Enter pins, and the moved row keeps it, drawn.
     page.mouse.move(ui["width"] - 40, 300)
     page.locator('.nav-find-input').focus()
+    page.keyboard.press("Tab")
+    assert page.evaluate("document.activeElement.id") == "nav-projects-add"
     page.keyboard.press("Tab")
     keyed = pin("newer")
     assert keyed["focused"] and keyed["keyboard"] and keyed["drawn"] and keyed["ring"] == "solid", keyed
