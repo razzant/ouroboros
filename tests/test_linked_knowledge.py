@@ -995,11 +995,12 @@ def test_a_version_equal_to_the_calls_expected_revision_asks_for_nothing_outside
                        "version": first.revision},  # an earlier revision: a revert, not this edit
                       {"mode": "append", "content": "Four.\n", "version": third.revision}):  # no expected_revision
         reply = write(**arguments)
-        # The one reply names the field with the value received and each repair: omit it for this mode, put an
-        # earlier version back with mode=revert, check the current revision through expected_revision (the host
-        # never moves the value between the fields).
-        assert reply.startswith("⚠️ TOOL_ARG_ERROR") and f"version={arguments['version']!r}" in reply, reply
-        assert f"mode={arguments['mode']}; omit it" in reply and "mode=revert" in reply and "expected_revision" in reply, reply
+        # The one reply names the field with the value received and each repair by intent: an earlier version goes
+        # back with mode=revert, the current revision is checked through expected_revision, otherwise version is
+        # omitted (the host never moves the value between the fields).
+        named = f"version={arguments['version']!r} is not an argument of mode={arguments['mode']}. "
+        assert reply.startswith("⚠️ TOOL_ARG_ERROR") and named in reply, reply
+        assert reply.index("mode=revert") < reply.index("expected_revision is") < reply.index("otherwise omit version"), reply
     assert _files(tmp_path) == before
     same = write(mode="revert", version=third.revision, expected_revision=third.revision)
     assert same.startswith("✅ Knowledge 'same' unchanged (revert)") and "ignored_arguments" not in same, same
