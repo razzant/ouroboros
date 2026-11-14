@@ -3,14 +3,17 @@
 ``test_claudexor_engine_wait_first`` scripts the typed failure row in process. Here a task-owned loopback listener
 plays the install's own control daemon: it first answers a real handshake and route catalog (the descriptor
 generation a model call reuses, ``gateways.claudexor_metadata``), then stops answering the way a stalled daemon does:
-a bound port that no longer listens (macOS drops the SYN: a real connect timeout, the 13.11 shape), a closed port
-(refused), an accepted upload connection closed without a reply, or an accepted upload left unanswered. The real
+a bound port that no longer listens (macOS drops the SYN: a real connect timeout, the 13.11 shape), a closed port,
+an accepted upload connection closed without a reply, or an accepted upload left unanswered. The real
 ``LLMClient`` → ``chat_claudexor`` → ``_ModelInvocation.prepare`` → ``ClaudexorGateway`` path then meets that socket,
 ``call_llm_with_retry`` spends its same-route burst and records the failure row, and that recorded row alone must
 close the configured-route walk and open the engine wait. A live daemon's received refusal on the same socket stays a
 refusal the walk may follow. No daemon is started or dialed: the descriptor names only this test's port, and
 ``ensure_owned_gateway`` (start/probe) refuses if reached. Connect and read bounds are scaled to a fraction of a
 second; the production bounds (5 s connect, 60 s read) and the stalls they meet are not reproduced here.
+
+Prepare's window is read from the transport's own clock (``_PrepareClock``), so how long a runner takes to build a
+client never decides which code a socket failure records; a window spent before the wire is its own case below.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ import pytest
 from ouroboros import claudexor_daemon as owned
 from ouroboros import config
 from ouroboros import llm_claudexor as transport
+from ouroboros import loop_llm_call
 from ouroboros import usage_accounting as ua
 from ouroboros.gateways import claudexor as wire
 from ouroboros.llm import LLMClient
@@ -39,6 +43,39 @@ from tests._usage_store_testing import ledger_rows
 MODEL = "claudexor::codex=exact-model"
 TOKEN = "fixture-loopback-token"
 SCALED_BOUND_SEC = 0.3  # stands in for the gateway's 5 s connect and 60 s read bounds
+CONNECT_FAILED = {"ConnectError", "ConnectTimeout"}  # what a stopped listener answers a connect, by platform
+METHOD = {"/v2/uploads": "POST", "/v2/operations": "GET"}
+
+
+class _PrepareClock:
+    """``llm_claudexor``'s own clock binding (``transport.time``), the one clock replaced here: the ``time`` module,
+    the gateway's timing and every socket bound stay real. Prepare's call window reads it; it stands still while a
+    client is built, and prepare's poll after an unanswered gateway failure ends the window, so each prepare meets the
+    socket once and re-raises what the socket returned. ``spend_on_rebuild`` instead lets the client rebuilt after
+    that poll take what the window has left: the deadline spent before the next wire."""
+
+    def __init__(self):
+        self.now, self.rebuild_spends, self.polled = 0.0, False, False
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds if self.rebuild_spends else seconds + SCALED_BOUND_SEC
+        self.polled = True
+
+    def spend_on_rebuild(self, monkeypatch):
+        build = transport.model_gateway
+
+        def rebuilt(factory):
+            gateway = build(factory)
+            if self.polled:
+                self.now += SCALED_BOUND_SEC
+            self.polled = False
+            return gateway
+
+        self.rebuild_spends = True
+        monkeypatch.setattr(transport, "model_gateway", rebuilt)
 
 
 class _LoopbackDaemon:
@@ -94,8 +131,10 @@ class _LoopbackDaemon:
         self.holder = None
 
     def stop_listening(self, *, keep_port: bool):
-        """Stop serving. Keeping the port bound without listening makes macOS drop each SYN (the client's connect
-        bound expires, as on 13.11) where Linux answers RST; a closed port refuses everywhere."""
+        """Stop serving. A port kept bound without listening makes macOS drop each SYN (the client's connect bound
+        expires, as on 13.11) where Linux answers RST. A closed port is refused at once on Linux and macOS; on
+        Windows CI (14.11) its connect was still unanswered at the scaled bound, so either connect failure is the
+        stopped listener's answer."""
         self.server.shutdown()
         self.server.server_close()
         self.holder = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -137,19 +176,22 @@ def stand(tmp_path, monkeypatch):
     monkeypatch.setattr(transport, "ensure_owned_gateway", no_daemon_start)
     monkeypatch.setattr(wire, "_CONNECT_TIMEOUT_SEC", SCALED_BOUND_SEC)
     monkeypatch.setattr(wire, "_READ_TIMEOUT_SEC", SCALED_BOUND_SEC)
+    # The call window; operations(timeout_sec=remaining) then bounds the catalog read itself by it.
     monkeypatch.setattr(transport, "llm_transport_timeout_sec", lambda _timeout: SCALED_BOUND_SEC)
     monkeypatch.setattr(config, "CLAUDEXOR_MODEL_POLL_INTERVAL_SEC", 0.001)
     from ouroboros import pricing
     monkeypatch.setattr(pricing, "_fetch_live_rows", lambda *_: pytest.fail("Claudexor must not fetch API pricing"))
-    slept = []
-    monkeypatch.setattr(time, "sleep", slept.append)  # the burst's 4 s / 8 s pauses and prepare's polls, recorded
+    pauses, clock = [], _PrepareClock()
+    # The burst's 4 s / 8 s pauses, recorded at their own seam instead of slept (it then returns as after a sleep).
+    monkeypatch.setattr(loop_llm_call, "_sleep_within_deadline", lambda sec, _deadline, **_wake: pauses.append(sec) or True)
+    monkeypatch.setattr(transport, "time", clock)
 
     daemon = _LoopbackDaemon()
     (config_dir / "daemon" / "token").write_text(TOKEN, encoding="utf-8")
     (config_dir / "daemon" / "control-api.json").write_text(json.dumps({
         "host": "127.0.0.1", "port": daemon.port, "tokenPath": str(config_dir / "daemon" / "token")}), encoding="utf-8")
     try:
-        yield SimpleNamespace(root=root, config_dir=config_dir, daemon=daemon, starts=starts, slept=slept)
+        yield SimpleNamespace(root=root, config_dir=config_dir, daemon=daemon, starts=starts, pauses=pauses, clock=clock)
     finally:
         daemon.close()
 
@@ -183,15 +225,44 @@ def _ctx(usage):
                            primary_route={"model": MODEL, "role": "main", "use_local": False})
 
 
+def _opens_the_engine_wait(stand, usage, tmp_path, code):
+    """The recorded row and what the wait-first gate makes of it: three released $0 sends of one request, no create
+    and no daemon start, a typed not-delivered ``code``, the configured-route walk closed, the engine wait open."""
+    # The real burst: three sends of one request, paused 4 s then 8 s, each released unsent ($0, no operation).
+    assert stand.pauses == [4.0, 8.0]
+    rows = ledger_rows(stand.root)
+    assert len(rows) == 3 and {row["state"] for row in rows} == {"released"}
+    assert stand.starts == []  # the proven generation was reused: nothing started or probed a daemon
+    assert ("POST", "/v2/model-operations") not in stand.daemon.seen  # no create ever reached the daemon
+    failure = usage["_last_llm_failure"]
+    assert usage["_last_llm_error_kind"] == "transport_unavailable"
+    assert (failure["not_dispatched_provider"], failure["operation_id"], failure["provider_code"]) == (
+        "claudexor", "", code)
+    assert failure["attempt_custody_state"] == "released"
+    assert daemon_not_delivered(failure) and engine_unanswered(usage)
+
+    # That row alone closes the configured-route walk and opens the engine wait on the same model.
+    ctx = _ctx(usage)
+    assert fallback_chain_allowed(ctx, "transport_unavailable", None, usage) is False
+    notes = []
+    episode = reconcile_transport_wait(None, ctx, msg_present=False, error_kind="transport_unavailable",
+                                       drive_logs=tmp_path, task_id="t-sock", model=MODEL,
+                                       emit_progress=lambda text, *, incident=None: notes.append(text))
+    assert episode is not None and episode.engine_unanswered is True
+    assert notes and notes[0].startswith("🌐 The local Claudexor engine is not answering, so this request was not sent")
+    return failure
+
+
 # Each row: the socket behaviour, whether the catalog was proven too (a cold catalog fails inside prepare's own
 # deadline loop instead of at the upload), the request the daemon last saw, and the HTTPX failure the gateway met.
 @pytest.mark.parametrize("mode,catalog,request_path,causes", [
-    ("not_listening", True, None, {"ConnectTimeout", "ConnectError"}),
-    ("not_listening", False, None, {"ConnectTimeout", "ConnectError"}),
-    ("closed_port", True, None, {"ConnectError"}),
+    ("not_listening", True, None, CONNECT_FAILED),
+    ("not_listening", False, None, CONNECT_FAILED),
+    ("closed_port", True, None, CONNECT_FAILED),
     ("close", True, "/v2/uploads", {"RemoteProtocolError", "ReadError"}),
     ("silent", True, "/v2/uploads", {"ReadTimeout"}),
     ("silent", False, "/v2/operations", {"ReadTimeout"}),
+    ("closed_port", False, None, CONNECT_FAILED),  # appended last, so the earlier rows keep their ids
 ])
 def test_a_silent_own_daemon_on_a_real_socket_closes_the_walk_and_opens_the_engine_wait(
         stand, tmp_path, mode, catalog, request_path, causes):
@@ -205,41 +276,36 @@ def test_a_silent_own_daemon_on_a_real_socket_closes_the_walk_and_opens_the_engi
     usage = _send(stand)
     elapsed = time.monotonic() - started
 
-    # The real burst: three sends of one request, paused 4 s then 8 s, each released unsent ($0, no operation).
-    assert [sec for sec in stand.slept if sec >= 1] == [4.0, 8.0]
-    rows = ledger_rows(stand.root)
-    assert len(rows) == 3 and {row["state"] for row in rows} == {"released"}
-    assert stand.starts == []  # the proven generation was reused: nothing started or probed a daemon
-    assert ("POST", "/v2/model-operations") not in stand.daemon.seen  # no create ever reached the daemon
     if request_path is None:
-        assert stand.daemon.seen == []
+        assert stand.daemon.seen == []  # the stopped listener accepted nothing
     else:
-        # A pre-create retry may re-prove the generation (handshake, catalog) before it meets the failing request;
-        # nothing else reaches the daemon, and a cold catalog still fails before any upload.
-        seen_paths = {path for _method, path in stand.daemon.seen}
-        assert request_path in seen_paths, stand.daemon.seen
-        assert seen_paths <= {"/v2/handshake", "/v2/operations", request_path}, stand.daemon.seen
+        # Each send reused the proven generation (no handshake, no warm catalog) and met the failing request once.
+        assert set(stand.daemon.seen) == {(METHOD[request_path], request_path)}, stand.daemon.seen
+        assert len(stand.daemon.seen) <= 3, stand.daemon.seen
     assert elapsed < 20  # scaled bounds: no real 5 s connect or 60 s read was waited out
 
     # The typed failure row the wait-first gate reads, produced by the real socket failure.
-    failure = usage["_last_llm_failure"]
-    assert usage["_last_llm_error_kind"] == "transport_unavailable"
-    assert (failure["not_dispatched_provider"], failure["operation_id"], failure["provider_code"]) == (
-        "claudexor", "", "daemon_unreachable")
-    assert failure["attempt_custody_state"] == "released"
-    print(f"gateway_error[{mode}, catalog={catalog}]: {failure['error']}")  # captured: the real HTTPX failure met
-    assert any(cause in failure["error"] for cause in causes), failure["error"]
-    assert daemon_not_delivered(failure) and engine_unanswered(usage)
+    print(f"gateway_error[{mode}, catalog={catalog}]: {usage['_last_llm_failure']['error']}")  # the real HTTPX failure
+    failure = _opens_the_engine_wait(stand, usage, tmp_path, "daemon_unreachable")
+    assert failure["error"].rsplit(" ", 1)[-1] in causes, failure["error"]
 
-    # That row alone closes the configured-route walk and opens the engine wait on the same model.
-    ctx = _ctx(usage)
-    assert fallback_chain_allowed(ctx, "transport_unavailable", None, usage) is False
-    notes = []
-    episode = reconcile_transport_wait(None, ctx, msg_present=False, error_kind="transport_unavailable",
-                                       drive_logs=tmp_path, task_id="t-sock", model=MODEL,
-                                       emit_progress=lambda text, *, incident=None: notes.append(text))
-    assert episode is not None and episode.engine_unanswered is True
-    assert notes and notes[0].startswith("🌐 The local Claudexor engine is not answering, so this request was not sent")
+
+def test_a_window_spent_rebuilding_the_client_records_the_same_unanswered_daemon(stand, tmp_path, monkeypatch):
+    """The interleaving behind the red ``not_listening-False`` row on Linux CI (13.11), made deterministic: each
+    prepare's first wire meets the stopped listener, and the client rebuilt for its next attempt takes the rest of
+    the call's window before any wire. Prepare then raises its own deadline code, ``daemon_not_answering``, in place
+    of the socket's ``daemon_unreachable``: the same unanswered own daemon, with every consequence of the first."""
+    _warm_generation(stand, catalog=False)
+    stand.daemon.stop_listening(keep_port=True)
+    stand.clock.spend_on_rebuild(monkeypatch)
+
+    usage = _send(stand)
+
+    assert stand.daemon.seen == []
+    print(f"gateway_error[rebuild_spends]: {usage['_last_llm_failure']['error']}")
+    failure = _opens_the_engine_wait(stand, usage, tmp_path, "daemon_not_answering")
+    assert "Call deadline elapsed before model creation" in failure["error"], failure["error"]
+    assert not any(cause in failure["error"] for cause in CONNECT_FAILED), failure["error"]
 
 
 def test_a_live_daemons_received_refusal_on_the_same_socket_keeps_the_walk(stand):

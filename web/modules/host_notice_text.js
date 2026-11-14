@@ -52,7 +52,8 @@ export const HOST_NOTICE_PREFIXES = new Map(Object.entries({
     host_progress: ['🌐 Connection restored ', '🌐 The new attempt could not reach the provider ',
         '🌐 Provider connection ', '🌐 The primary provider temporarily refused ', '🌐 No local model slot was free',
         '🌐 The local Claudexor engine ', '🌐 The request did not reach the provider ', '🌐 Primary provider answered after ',
-        '🌐 Stopped waiting for ', '🌐 Still waiting for ', '⚡ Fallback: ', '📐 Plan: ', '✅ PR #', '⚠️ PR #',
+        '🌐 Model response received after ', '🌐 Stopped waiting for ', '🌐 Still waiting for ', '⚡ Fallback: ',
+        '📐 Plan: ', '✅ PR #', '⚠️ PR #',
         // web_search legs (`tools/search.py`) and a declared-output baseline (`tools/shell_outputs.py`).
         '🔍 Trying ', '↪ Trying ', '🔍 Searching: ', '🔍 Answer from ', '⚠️ Web search ', '⚠️ Output baseline unavailable: '],
 }));
@@ -70,7 +71,8 @@ export const RETIRED_HOST_NOTICE_PREFIXES = new Map(Object.entries({
     task_admission_notice: ['✅ Repair task ', '⚠️ Cost accounting is unavailable. '],
     task_started: ['🧬 Evolution task ', '🔎 Review task '],
     evolution_notice: ['🛑 Cancelled evolution task(s): ', '🧬⚠️ Evolution paused: ', '💸 Evolution stopped: '],
-    host_progress: ['🌐 Could not establish a provider connection ', '📐 Plan review:', '📐 Plan review so far:'],
+    host_progress: ['🌐 Could not establish a provider connection ', '📐 Plan review:', '📐 Plan review so far:',
+        '🌐 The local Claudexor engine answered again after '],
 }));
 
 const prefixFor = (text, type) => [...(HOST_NOTICE_PREFIXES.get(String(type || '')) || []),
