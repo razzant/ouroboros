@@ -165,11 +165,13 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
     // What a press hands app.js: a row the feed carries opens as it shows, at once; an older row may be as old as the
     // list it came from, so it names only its id and name and its room is read first.
     const pressed = (row) => (feedRows().some(({ id }) => id === row.id) ? row : { id: row.id, name: row.name });
-    // Before the complete list is read: does the state know a Project room the feed does not show?
+    // Before the complete list is read: how many Project rooms the state knows beyond the feed's (the count of the
+    // listable ones it states), or, where it states none, whether its Project rooms name one the feed does not show
+    // (true: some, how many unknown, since a deleted room keeps its place there).
     const roomsBeyond = () => {
         const total = listableCount?.();
         if (Number.isSafeInteger(total) && total >= 0) {
-            return total > feedRows().filter(listable).length;
+            return Math.max(0, total - feedRows().filter(listable).length);
         }
         const shown = new Set(feedRows().map((row) => Number(row.chat_id)));
         return [...(reserved() || [])].some((chat) => !shown.has(Number(chat)));
@@ -224,8 +226,12 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
         button.replaceChildren();
         const words = document.createElement('span');
         fmtInto(words, key, params);
-        if (button === more) {
-            button.insertAdjacentHTML('afterbegin', controlIcon('chevron', 18));
+        // Each command shows what it does in the icon column: Show more and Show all projects open the list further
+        // (the chevron), Clear search empties the field and returns to the resting list (the field's own ×).
+        const glyph = button === clearCommand ? SHELL_ICONS.close
+            : button === more || button === showAll ? controlIcon('chevron', 18) : '';
+        if (glyph) {
+            button.insertAdjacentHTML('afterbegin', glyph);
             button.firstElementChild.setAttribute('aria-hidden', 'true');
         }
         button.append(words);
@@ -243,8 +249,10 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
         if (searching()) return found(rows, all);
         if (state.browse) return browsed(rows, rest, all);
         const ids = new Set(rest.map((row) => row.id));
-        const left = held ? all.filter((row) => !ids.has(row.id)).length : 0;
-        return { shown: rest, after: left ? [moreOf(left)] : !held && roomsBeyond() ? [labelled(more, 'Show more')] : [] };
+        // Show more says how many it adds whenever that is known (owner's sweep 14.11: one control, one wording); only
+        // a state that counts no rooms leaves it unsaid.
+        const left = held ? all.filter((row) => !ids.has(row.id)).length : roomsBeyond();
+        return { shown: rest, after: left === true ? [labelled(more, 'Show more')] : left ? [moreOf(left)] : [] };
     }
 
     // A browse shows every room it has shown, sorted with the list: the feed's rooms (a new one too), the rows Show more

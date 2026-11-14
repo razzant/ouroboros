@@ -272,9 +272,12 @@ FOCUS_TOKENS = ("var(--focus-accent-border)", "var(--focus-accent-ring)")
 
 # A selector that only REACTS to another element's keyboard focus paints no focus of its own: the ring is on the
 # focused element's own selector, named here beside it. The Pin of a Project row hides the row's time while it has
-# keyboard focus, so the time never shows through the Pin that stands in its place.
+# keyboard focus, so the time never shows through the Pin that stands in its place, and the row's mark, so the Pin's
+# ring never lies on it.
 FOCUS_REACTIONS = {
     "web/style.css: .nav-project-pin:focus-visible ~ .nav-project-row .nav-project-time":
+        "web/style.css: .nav-project-pin:focus-visible",
+    "web/style.css: .nav-project-pin:focus-visible ~ .nav-project-row .nav-mark-slot":
         "web/style.css: .nav-project-pin:focus-visible",
 }
 
@@ -361,6 +364,37 @@ def test_the_chosen_sidebar_row_rings_and_marks_in_its_fills_ink() -> None:
     for card_position, card_selector in card_voice:
         assert (_specificity(selector), position) > (_specificity(card_selector), card_position), (
             f"{selector!r} does not outrank {card_selector!r}, so the chosen card keeps the voice's ring")
+
+
+def _declarations(source: str, selector: str) -> dict[str, str]:
+    """Every declaration a sheet gives this exact selector, a later rule over an earlier one."""
+    found: dict[str, str] = {}
+    for selector_list, body in RULE.findall(source):
+        if selector in (" ".join(s.split()) for s in selector_list.split(",")):
+            found.update((name, value.strip()) for name, value in re.findall(r"([\w-]+)\s*:\s*([^;]+)", body))
+    return found
+
+
+def test_the_cards_quiet_label_shows_whole_or_not_at_all() -> None:
+    """`Main Chat` beside Ouroboros's name on the sidebar's card is never cut inside its words (docs/DESIGN.md
+    "Navigation"; the owner's sweep of 14.11 found "Main C…" at the default width, "M…" with Main's count): its box is
+    one line tall and wraps past a zero-wide first item of that height, so words that do not fit go to a second line
+    the box hides. Both heights are lengths: a line token is a unitless factor (`--line-meta: 1.35`), and as a height
+    it is dropped, which lets the box grow to show the wrapped line, cut at its edge."""
+    source = _decommented(_read("web/style.css"))
+    label = _declarations(source, ".nav-ouro-line1 > .nav-row-label")
+    first = _declarations(source, ".nav-ouro-line1 > .nav-row-label::before")
+    assert label.get("display") == "flex" and label.get("flex-wrap") == "wrap", label
+    assert _declarations(source, ".nav-row-label").get("overflow") == "hidden", "the label's box hides what wraps"
+
+    def own(value: str) -> str:  # a custom property the label declares itself, read through once
+        named = re.fullmatch(r"var\((--[\w-]+)\)", value)
+        return label.get(named.group(1), value) if named else value
+
+    height = own(label.get("height", ""))
+    assert first.get("content") in ("''", '""') and own(first.get("height", "")) == height, (first, height)
+    assert not re.fullmatch(r"var\(--line-[\w-]+\)", height), f"{height} is a unitless line factor, not a height"
+    assert re.search(r"--type-[\w-]+|\d(?:px|r?em)\b", height), f"the label's height {height!r} names no length"
 
 
 # ---------------------------------------------------------------------------

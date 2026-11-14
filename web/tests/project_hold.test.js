@@ -282,13 +282,24 @@ test("a named work with a focus line: the summary carries its name and focus, an
     const summary = summarizeRoom({ ...room('waiting'), works: ['same-id'] }, [named]);
     assert.deepEqual(summary, { mark: 'still', owner: false, word: 'Waiting', note: '', line: hold.label,
         name: 'Tidy the release notes', focus: 'Reading the changelog', label: `Waiting · ${hold.label}` });
+    // Another room's work listed first never lends its name: not to a room it speaks for, and not to a room whose
+    // word no work says (there the room's own listed work leads).
+    const elsewhere = work({ activity_id: 'elsewhere', chat_id: 9, kind: 'managed_task' },
+        { activity: 'waiting', because: [{ code: 'project_admission', text: 'Another room' }],
+            name: "Another room's work", focus: { text: 'Somewhere else' } });
+    assert.deepEqual(summarizeRoom({ ...room('waiting'), works: ['same-id'] }, [elsewhere, named]), summary);
+    const unsaid = summarizeRoom({ ...room('paused'), works: ['same-id'] }, [elsewhere, named]);
+    assert.deepEqual([unsaid.word, unsaid.line, unsaid.name, unsaid.focus],
+        ['Paused', '', 'Tidy the release notes', 'Reading the changelog'], 'its own work, though none says Paused');
 
     const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8').replace(/\r\n?/g, '\n');
     const from = app.indexOf('\nfunction paintMainRow(');
     assert.ok(from >= 0, 'paintMainRow is a top-level function in app.js');
     const nodes = { '.nav-mark': { dataset: { shape: 'none', hue: 'ink' }, hidden: true }, '.nav-row-words': { textContent: '' },
         '.nav-ouro-work': { textContent: '', hidden: true } };
-    const context = vm.createContext({ IDLE_SUMMARY, markView, paintStatusMark, projectRooms: new Map(),
+    // A Project room stands before Main in the map: the card reads Main's room ('1'), never the first one.
+    const project = summarizeRoom({ ...room('waiting'), works: ['elsewhere'] }, [elsewhere]);
+    const context = vm.createContext({ IDLE_SUMMARY, markView, paintStatusMark, projectRooms: new Map([['9', project]]),
         navMainRow: { querySelector: (selector) => nodes[selector] || null } });
     vm.runInContext(`${app.slice(from + 1, app.indexOf('\n}\n', from + 1) + 2)}\nglobalThis.paint = paintMainRow;`, context);
     const second = (main) => {

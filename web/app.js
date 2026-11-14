@@ -114,6 +114,8 @@ primarySidebar?.querySelector('.sidebar-head')?.insertAdjacentHTML('beforeend', 
 // 12.11, the fifth round).
 primarySidebar?.querySelector('.sidebar-foot-meta')?.insertAdjacentHTML('beforebegin', `<div class="nav-tools">${renderNavRows('foot')}</div>`);
 measurePinnedBars(primarySidebar);  // a short window's row scroll margin under its pinned head and foot
+// A short window scrolls the whole column: rows that wait past a pinned bar fade under it (style.css), as the list's do.
+if (primarySidebar) bindScrollFade(primarySidebar);
 const navProjectsHeader = primarySidebar?.querySelector('.nav-projects-header');
 if (navProjectsHeader) navProjectsHeader.innerHTML = renderProjectsHeader();
 const navDrawerBackdrop = document.getElementById('nav-drawer-backdrop');
