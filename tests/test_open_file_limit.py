@@ -30,19 +30,26 @@ def test_the_servers_open_file_limit_rises_to_its_hard_limit_at_start(monkeypatc
     assert "raise_open_file_limit()" in inspect.getsource(server.main)
 
 
-def test_the_server_shortens_the_interpreters_switch_interval_at_start():
+def test_the_server_shortens_the_interpreters_switch_interval_at_start(monkeypatch, tmp_path):
     """A read takes the interpreter lock back after each store step only when a computing thread yields, once per
-    switch interval: the server sets 1 ms instead of CPython's 5 ms, once, at start (#3399)."""
-    import inspect
-
+    switch interval: the server asks for 1 ms instead of CPython's 5 ms, in ``main`` before it serves (#3399). The
+    conftest fixture puts the session's own interval back."""
     import server
     from ouroboros import server_entrypoint
 
-    before = sys.getswitchinterval()
-    try:
-        sys.setswitchinterval(0.005)
-        server_entrypoint.shorten_switch_interval()
-        assert sys.getswitchinterval() == pytest.approx(0.001)
-    finally:
-        sys.setswitchinterval(before)
-    assert "shorten_switch_interval()" in inspect.getsource(server.main)
+    class Serving(Exception):
+        pass
+
+    def serving():
+        raise Serving()
+
+    sys.setswitchinterval(0.005)
+    server_entrypoint.shorten_switch_interval()
+    assert sys.getswitchinterval() == pytest.approx(0.001)
+    sys.setswitchinterval(0.005)
+    monkeypatch.setattr(server, "DATA_DIR", tmp_path)
+    monkeypatch.delenv("OUROBOROS_LAUNCH_INTENT", raising=False)
+    monkeypatch.setattr(server, "verify_settings_integrity", serving)  # the first step past the process setup
+    with pytest.raises(Serving):
+        server.main()
+    assert sys.getswitchinterval() == pytest.approx(0.001)
