@@ -24,6 +24,10 @@ LEGACY_FACTS = {"role": "user", HOST_CONTEXT_KIND_KEY: CONTEXT_FACTS_NAME,  # wr
                 "content": "[CONTEXT_FACTS] round 5\n\n---\n\n[Message from my human]: B"}
 PROSE_CALL = {"role": "assistant", "content": "Checking the flag parser next.", "tool_calls": [{
     "id": "four", "type": "function", "function": {"name": "read_file", "arguments": "{\"path\": \"cli.py\"}"}}]}
+# A repetition loop cut at the output limit: arguments nesting past the JSON decoder's depth chose no read.
+DEEP_CALL = [{"role": "assistant", "content": "", "tool_calls": [{"id": "deep", "type": "function", "function": {
+    "name": "read_file", "arguments": '{"path": ' + "[" * 100_000}}]},
+    {"role": "tool", "tool_call_id": "deep", "content": "⚠️ TOOL_ARG_ERROR: Could not parse arguments for 'read_file'"}]
 
 
 def _noted(tmp_path):
@@ -40,7 +44,7 @@ def _noted(tmp_path):
             LEGACY_FACTS, bound_host_row(CONTEXT_FACTS_NAME, "[CONTEXT_FACTS] round 9"),
             *_tool("three", "big body " * 2000),
             {"role": "assistant", "content": "My reasoning since the note."},
-            PROSE_CALL, {"role": "tool", "tool_call_id": "four", "content": "def parse(): ..."},
+            PROSE_CALL, {"role": "tool", "tool_call_id": "four", "content": "def parse(): ..."}, *DEEP_CALL,
             _owner(OWNER_LATER), FEEDBACK,
             {"role": "user", "content": "A plain notice delivered before typing."}]
 

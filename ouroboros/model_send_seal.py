@@ -123,17 +123,17 @@ def _exposure_atoms_manifest(candidate: Dict[str, Any]) -> Dict[str, Any]:
     messages = candidate.get("messages") if isinstance(candidate, dict) else None
     if not isinstance(messages, list) or not messages:
         return {}
-    from ouroboros.context_compaction import _source_atoms
+    from ouroboros.context_compaction import UNENCODABLE_SOURCE_ATOM, _source_atoms
 
     try:
         atoms = _source_atoms([m for m in messages if isinstance(m, dict)])
     except Exception:  # exposure evidence is additive: never fail the send record over it
         log.debug("exposure atoms unavailable for the prepared candidate", exc_info=True)
         return {}
+    atoms = {str(key): int(count) for key, count in atoms.items() if key != UNENCODABLE_SOURCE_ATOM}
     if not atoms:
         return {}
-    return {"exposure_atoms": {str(key): int(count) for key, count in atoms.items()},
-            "exposure_atoms_basis": EXPOSURE_ATOMS_BASIS}
+    return {"exposure_atoms": atoms, "exposure_atoms_basis": EXPOSURE_ATOMS_BASIS}
 
 
 def persist_physical_candidate(

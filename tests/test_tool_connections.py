@@ -318,6 +318,26 @@ def test_a_gateway_call_in_a_batch_runs_as_its_mcp_call_or_is_refused_beside_a_r
         assert sorted(checked) == [("mcp_gitlab__create_issue", False), ("mcp_slack__history", False)]
 
 
+def test_a_call_whose_own_arguments_nest_past_the_decoder_is_refused_beside_a_running_neighbour(
+        registry, monkeypatch, tmp_path):
+    """The rows above nest inside a parsed envelope; here the call's own arguments (a repetition loop cut at the
+    output limit) reach every executor parse: a typed argument error, nothing dispatched, and the batch goes on."""
+    from ouroboros.loop_tool_execution import execute_tool_batch
+
+    sent, checked = _gateway_sends(registry, monkeypatch)
+    calls = [{"id": "deep", "type": "function", "function": {
+                 "name": "call_mcp_tool", "arguments": '{"name": ' + "[" * 100_000}},
+             {"id": "neighbour", "type": "function", "function": {
+                 "name": "call_mcp_tool", "arguments": json.dumps({"name": "mcp_slack__history"})}}]
+    (tmp_path / "logs").mkdir(exist_ok=True)
+    results, control = execute_tool_batch(calls, registry, tmp_path / "logs", "deep-batch", None, {})
+    assert control is None and sent == [("history", {})] and checked == [("mcp_slack__history", False)]
+    rows = {row["tool_call_id"]: row for row in results}
+    assert (rows["neighbour"]["fn_name"], rows["neighbour"]["is_error"]) == ("mcp_slack__history", False)
+    assert (rows["deep"]["fn_name"], rows["deep"]["is_error"]) == ("call_mcp_tool", True)
+    assert rows["deep"]["tool_result"].code == "TOOL_ARG_ERROR"
+
+
 def test_enable_tools_loads_a_whole_server_and_says_what_the_next_request_carries(registry):
     """Any binding but Main's text loop loads (a voice session, Nano, a narrowed child), the gateway resident or not."""
     from ouroboros import loop as loop_module
