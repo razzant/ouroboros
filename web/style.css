@@ -573,6 +573,10 @@ html[data-layout="stack"] .resize-handle { display: none; }
     --focus-accent-border: var(--tone-crimson-ink);
     --mark-unread: var(--tone-crimson-ink);
 }
+/* The chosen Project row's Pin and ⋯ lie on that fill as the row's siblings, where its restatement does not reach:
+   their ring restates the same token the same way. */
+:root .nav-project-pin:has(+ .nav-project-row.active),
+:root .nav-project-row.active ~ .nav-project-kebab { --focus-accent-border: var(--tone-crimson-ink); }
 
 .nav-row:focus,
 .app-tab:focus,

@@ -366,6 +366,41 @@ def test_the_chosen_sidebar_row_rings_and_marks_in_its_fills_ink() -> None:
             f"{selector!r} does not outrank {card_selector!r}, so the chosen card keeps the voice's ring")
 
 
+# The chosen Project row's Pin and ⋯ stand on its fill as the row's siblings (the Pin before it, the ⋯ after it), so the
+# row's own restatement does not reach them: each selector names the control as its subject beside the chosen row.
+CHOSEN_ROW_CONTROLS = {
+    ".nav-project-pin": r"\.nav-project-pin:has\(\+ \.nav-project-row\.active\)$",
+    ".nav-project-kebab": r"\.nav-project-row\.active ~ \.nav-project-kebab$",
+}
+
+
+def _subject(selector: str) -> str:
+    """A selector's last compound, the arguments of its :has()/:is()/:not() left out."""
+    flat = re.sub(r"\((?:[^()]|\([^()]*\))*\)", "()", selector)
+    return re.split(r"\s*[\s>+~]\s*", flat.strip())[-1]
+
+
+def test_the_chosen_rows_pin_and_menu_ring_in_its_fills_ink() -> None:
+    """The Pin and the ⋯ of the chosen Project row lie on its solid crimson outside `.nav-row.active`, where the room's
+    ring reads 1.14:1 in the light theme and 2.02:1 in the dark one: they restate `--focus-accent-border` as
+    `--tone-crimson-ink`, as the chosen row does for its own ring, and the Pin and the ⋯ of a row that is not chosen
+    keep the room's ring."""
+    source = _decommented(_read("web/style.css"))
+    ringed: dict[str, list[str]] = {control: [] for control in CHOSEN_ROW_CONTROLS}
+    unchosen: list[str] = []
+    for selector_list, body in RULE.findall(source):
+        decls = {name: value.strip() for name, value in re.findall(r"(--[\w-]+)\s*:\s*([^;]+)", body)}
+        if decls.get("--focus-accent-border") != CHOSEN_ROW_INKS["--focus-accent-border"]:
+            continue
+        for selector in (" ".join(s.split()) for s in selector_list.split(",")):
+            for control, chosen in CHOSEN_ROW_CONTROLS.items():
+                if control in _subject(selector):
+                    (ringed[control] if re.search(chosen, selector) else unchosen).append(selector)
+    missing = sorted(control for control, selectors in ringed.items() if not selectors)
+    assert not missing, f"the chosen row's {missing} keep the room's ring on its crimson fill"
+    assert not unchosen, f"a Pin or a ⋯ that is not the chosen row's takes the fill's ink for its ring: {unchosen}"
+
+
 def _declarations(source: str, selector: str) -> dict[str, str]:
     """Every declaration a sheet gives this exact selector, a later rule over an earlier one."""
     found: dict[str, str] = {}
