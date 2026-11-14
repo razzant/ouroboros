@@ -134,6 +134,19 @@ class ClaudexorModelNotDispatched(ClaudexorModelError, ProviderNotDispatched):
     """A failed prepare before create, or an engine receipt proving dispatch.state=not_started."""
 
 
+# The install's own control daemon left unanswered before any model create (no status: not a received refusal).
+DAEMON_UNANSWERED_CODES = frozenset({"daemon_unreachable", "daemon_not_answering", "daemon_starting",
+                                     "daemon_descriptor_changed"})
+
+
+def daemon_not_delivered(failure: object) -> bool:
+    """Whether a recorded failure row (``loop_llm_call``'s ``_last_llm_failure``) is a typed Claudexor prepare
+    failure: the own daemon did not answer before create, so no operation exists and nothing was sent or charged.
+    The model did not fail; its same-route repeats and wait-first gate (``loop_transport``) read this one fact."""
+    return (isinstance(failure, dict) and failure.get("not_dispatched_provider") == "claudexor"
+            and failure.get("operation_id") == "" and failure.get("provider_code") in DAEMON_UNANSWERED_CODES)
+
+
 def presence_refusal_unstarted(error: Exception, round_idx: int) -> bool:
     """Positive no-generation receipt for ALL operations in one physical model call.
 
@@ -420,8 +433,8 @@ class _ModelInvocation:
                 except ClaudexorUnavailable as error:
                     # No model create has been attempted. Wait on this call's
                     # own transport deadline; received refusals remain refusals.
-                    unanswered = not error.status_code and (error.observation_timeout or error.code in {
-                        "daemon_unreachable", "daemon_not_answering", "daemon_starting", "daemon_descriptor_changed"})
+                    unanswered = not error.status_code and (error.observation_timeout
+                                                            or error.code in DAEMON_UNANSWERED_CODES)
                     if not unanswered or time.monotonic() >= deadline:
                         raise
                     last_error = error
