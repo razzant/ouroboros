@@ -285,7 +285,7 @@ def test_a_real_question_park_in_a_spawned_carrier_wakes_for_an_untagged_message
     pumper.start()
     events = world.data / "logs" / "events.jsonl"
     try:
-        until(lambda: events.exists() and any('"worker_ready"' in line and f'"pid": {proc.pid}' in line
+        until(lambda: events.exists() and any('"worker_ready"' in line and json.loads(line).get("pid") == proc.pid
                                               for line in events.read_text(encoding="utf-8").splitlines()),
               "the carrier's worker_ready row", 120)
         in_q.put(task)
