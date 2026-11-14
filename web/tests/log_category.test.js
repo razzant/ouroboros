@@ -54,14 +54,14 @@ test('a replayed tools.jsonl row reads the same failure facts as the live frame'
     const replayed = summarizeLogEvent({ type: 'tool_call', tool: 'run_command', is_error: true, duration_sec: 2, result_preview: 'exit 1' });
     assert.equal(replayed.phase, live.phase);
     assert.equal(replayed.phase, 'error');
-    assert.equal(replayed.headline, 'run_command failed');
+    assert.equal(replayed.headline, 'Run command failed');
     assert.equal(categorizeLogEvent({ type: 'tool_call', tool: 'run_command', is_error: true }), 'errors');
     const killed = summarizeLogEvent({ type: 'tool_call', tool: 'run_command', signal: 'SIGKILL' });
     assert.equal(killed.phase, 'error');
-    assert.equal(killed.headline, 'run_command killed (SIGKILL)');
+    assert.equal(killed.headline, 'Run command killed (SIGKILL)');
     const clean = summarizeLogEvent({ type: 'tool_call', tool: 'read_file', is_error: false, result_preview: 'ok' });
     assert.equal(clean.phase, 'result');
-    assert.equal(clean.headline, 'read_file result');
+    assert.equal(clean.headline, 'Read file result');
     assert.equal(categorizeLogEvent({ type: 'tool_call', tool: 'read_file' }), 'tools');
 });
 
@@ -91,7 +91,7 @@ test('a delegated harness run is not labelled as a subagent in the fan-out row (
         type: 'swarm_fanout', role: 'delegated_run', requested_count: 1, task_group_id: 'g1',
     });
     assert.equal(delegated.headline, 'swarm fan-out: delegated run requested');
-    assert.ok(delegated.meta.includes('role=delegated_run'));
+    assert.ok(delegated.meta.includes('role delegated_run'));
     const subagents = summarizeLogEvent({ type: 'swarm_fanout', role: 'researcher', requested_count: 3 });
     assert.equal(subagents.headline, 'swarm fan-out: 3 subagent(s) requested');
     assert.equal(summarizeLogEvent({ type: 'swarm_fanout', task_ids: ['a', 'b'] }).headline,
@@ -155,7 +155,7 @@ test('a checkpoint or a safety row that names a tool is not read as that tool\'s
         task_id: 't', detail: 'Safety check ended', content: 'Safety check ended', text: 'Safety check ended' });
     assert.doesNotMatch(wait.headline, /result/);
     const verdict = summarizeLogEvent({ type: 'safety_verdict', tool: 'mcp_superset__call_tool', task_id: 't' });
-    assert.equal(verdict.headline, 'Safety verdict · mcp_superset__call_tool');
+    assert.equal(verdict.headline, 'Safety verdict · Mcp superset call tool');
     assert.equal(summarizeLogEvent({ type: 'delegate_run_start_requested', task_id: 't' }).headline, 'Delegate run start requested');
     assert.equal(summarizeLogEvent({ type: 'future_worker_crash_recovered', ok: false }).headline, 'Future worker crash recovered');
     // The one shared helper (utils.js): underscores spaced, a capital first letter, nothing invented for an empty name.
@@ -163,7 +163,7 @@ test('a checkpoint or a safety row that names a tool is not read as that tool\'s
         ['Supervisor load', 'Mcp call', 'Worker ready', '', '']);
     assert.equal(categorizeLogEvent({ type: 'safety_verdict', tool: 'mcp_superset__call_tool' }), 'tools');
     // An untyped durable tools.jsonl row still reads as its call.
-    assert.equal(summarizeLogEvent({ tool: 'read_file', is_error: false, result_preview: 'ok' }).headline, 'read_file result');
+    assert.equal(summarizeLogEvent({ tool: 'read_file', is_error: false, result_preview: 'ok' }).headline, 'Read file result');
 });
 
 // The owner's sheets (14.11): "delegate_run_started" carried "gemini-4-carbon-high" on its line; its words ("Delegate run
@@ -184,4 +184,30 @@ test('an event about a model or a tool names it on its head as its subject, not 
     assert.match(both.headline, /^Safety verdict · /);
     assert.deepEqual(both.meta, ['gpt-6'], 'beside a tool, the model stays a fact');
     assert.equal(summarizeLogEvent({ type: 'maintenance', phase: 'started' }).headline, 'Maintenance', 'nothing to name: its name alone');
+});
+
+// The owner's sheets (14.11): "await_messages failed ⚠ TOOL_ARG_ERROR (await_messages): …", "Safety verdict ·
+// run_command", "role=delegated_run". A tool's name in words is said as its event's is (machineWords); a failed call's
+// error loses the host's warning mark, which its chip says (host_notice_text.js), and keeps its words; a fact is words.
+test('a tool\'s name, a failed call\'s error and an event\'s facts read as words', () => {
+    const failed = summarizeLogEvent({ type: 'tool_call', tool: 'await_messages', is_error: true, status: 'argument_error',
+        result_preview: '⚠️ TOOL_ARG_ERROR (await_messages): this task has no continuation owner to sleep under' });
+    assert.deepEqual([failed.headline, failed.body],
+        ['Await messages failed', 'TOOL_ARG_ERROR (await_messages): this task has no continuation owner to sleep under']);
+    // A result that did not fail is its tool's own output, kept as written, its mark too.
+    assert.equal(summarizeLogEvent({ type: 'tool_call', tool: 'read_file', result_preview: '⚠️ TODO in file' }).body, '⚠️ TODO in file');
+    assert.equal(summarizeLogEvent({ type: 'safety_route_fallback', tool: 'run_command' }).headline, 'Safety route fallback · Run command');
+    const facts = [
+        summarizeLogEvent({ type: 'swarm_fanout', role: 'researcher', requested_model_lane: 'fast', depth: 1, requested_count: 2 }),
+        summarizeLogEvent({ type: 'task_message_injected', task_id: 'r', source_task_id: 's', provenance: 'ancestor' }),
+        summarizeLogEvent({ type: 'task_cost_finalized', accounted_upper_bound_usd: 1, accounted_upper_bound_usd_with_children: 2 }),
+        summarizeLogEvent({ type: 'task_done', status: 'completed', accounted_upper_bound_usd: 1, accounted_upper_bound_usd_with_children: 2 }),
+        summarizeLogEvent({ type: 'send_message', is_progress: true, delegation_role: 'subagent', subagent_task_id: 'c',
+            subagent_role: 'scout', model: 'm', write_surface: 'workspace', text: 'x' }),
+    ].flatMap((view) => view.meta);
+    assert.ok(facts.length >= 7, JSON.stringify(facts));
+    assert.ok(facts.every((fact) => !/=/.test(fact)), JSON.stringify(facts));
+    for (const fact of ['role researcher', 'lane fast', 'depth 1', 'provenance ancestor', 'with children $2.00', 'write surface workspace']) {
+        assert.ok(facts.includes(fact), fact);
+    }
 });

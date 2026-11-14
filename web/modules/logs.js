@@ -414,7 +414,6 @@ export function initLogs({ ws, state, mount }) {
 
     const setText = (el, text) => { if (el && el.textContent !== text) el.textContent = text; };
     const setAttr = (el, key, value) => { if (el.getAttribute(key) !== value) el.setAttribute(key, value); };
-    const setData = (el, key, value) => { if (el.dataset[key] !== value) el.dataset[key] = value; };
     const shownHtml = new WeakMap();  // markup a node was last given, so an unchanged one is not rewritten
     const setHtml = (el, html) => { if (el && shownHtml.get(el) !== html) { el.innerHTML = html; shownHtml.set(el, html); } };
     const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -466,8 +465,8 @@ export function initLogs({ ws, state, mount }) {
             entryOf.set(entry.node, entry);
         }
         const { node, view } = entry;
-        setData(node, 'category', entry.category);
-        setData(node, 'logTime', String(entry.at));
+        setAttr(node, 'data-category', entry.category);
+        setAttr(node, 'data-log-time', String(entry.at));
         paintEvent(node, { ...eventParts(view, entry.ts), task: entry.task, count: entry.repeat > 1 ? `×${entry.repeat}` : '',
             execution: entry.execution, omitted: entry.omitted });
         raw.changed(node);
@@ -482,9 +481,9 @@ export function initLogs({ ws, state, mount }) {
             entryOf.set(node, entry);
         }
         const { node, dom } = entry;
-        setData(node, 'category', entry.category);
+        setAttr(node, 'data-category', entry.category);
         // A card stands where its newest event does (`at`); an older event never dates it back.
-        setData(node, 'logTime', String(entry.at));
+        setAttr(node, 'data-log-time', String(entry.at));
         // A task that failed says the outcome's word; one that holds failed steps while it works says how many, never
         // Failed (DESIGN §4: a local failure does not relabel a working task). Its count is its events, not repeats.
         const failed = entry.failed ? taskPresentation('error').headline : entry.failures ? `${plural(entry.failures, 'step')} failed` : '';

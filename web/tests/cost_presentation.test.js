@@ -457,7 +457,7 @@ test('log events read the shared cost names; in Logs a cost of nothing says noth
         accounted_upper_bound_usd_with_children: 1.5,
         post_task_status: 'completed',
     });
-    assert.deepEqual(finalized.meta, ['subtree=$1.50', 'completed']);
+    assert.deepEqual(finalized.meta, ['with children $1.50', 'completed']);
     const done = summarizeLogEvent({
         type: 'task_done', status: 'completed',
         accounted_upper_bound_usd: 0, cost_final: false,

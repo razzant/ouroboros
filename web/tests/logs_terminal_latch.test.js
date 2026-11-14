@@ -151,7 +151,7 @@ test('a finished tool call never settles the card: the next heartbeat keeps it l
     logs.push({ type: 'task_started', task_type: 'task', task_text: 'work' });
     logs.push({ type: 'tool_call_finished', tool: 'read_file', is_error: false, ts: '2026-10-15T00:00:01+00:00' });
     assert.equal(logs.failure(), '', 'a call that did not fail is not coloured');
-    assert.equal(logs.headline(), 'read_file finished');
+    assert.equal(logs.headline(), 'Read file finished');
     logs.push({ type: 'task_heartbeat', phase: 'running', runtime_sec: 12, ts: '2026-10-15T00:00:02+00:00' });
     assert.equal(logs.failure(), '');
     assert.equal(logs.headline(), 'Still working');
@@ -159,7 +159,7 @@ test('a finished tool call never settles the card: the next heartbeat keeps it l
     assert.equal(logs.failure(), '1 step failed', 'a tool error is shown while the task runs, never as the task Failed');
     logs.push({ type: 'task_heartbeat', phase: 'running', runtime_sec: 15, ts: '2026-10-15T00:00:04+00:00' });
     assert.equal(logs.failure(), '1 step failed', 'the next heartbeat does not settle the card, and the failure it holds stays said');
-    assert.equal(logs.headline(), 'run_command failed', 'in its own words');
+    assert.equal(logs.headline(), 'Run command failed', 'in its own words');
     assert.equal(logs.timelineRows(), 5);
 });
 

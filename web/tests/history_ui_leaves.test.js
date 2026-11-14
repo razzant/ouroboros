@@ -95,7 +95,7 @@ test('compact Chat removes internal write/status metadata while preserving execu
     assert.equal(view.activityLead, 'Report to parent');
     assert.equal(view.model, event.model);
     assert.equal(view.executorChip.label, 'Cursor');
-    assert.ok(summarizeLogEvent(event).meta.includes('write=workspace'));
+    assert.ok(summarizeLogEvent(event).meta.includes('write surface workspace'));
     assert.equal(prettyLogEvent(event), JSON.stringify(event, null, 2));
     assert.equal(JSON.stringify(event), before);
     // The card's own details block holds the labelled facts beyond the compact line.

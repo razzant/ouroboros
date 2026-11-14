@@ -12,7 +12,7 @@ import { acceptanceIncidentClauses } from './acceptance_incident_presentation.js
 import { fmt, tr } from './i18n.js';
 import { historyRetentionView } from './history_retention.js';
 import { checkFailureView } from './verification_presentation.js';
-import { hostRowDisplayText, hostTaskMessage } from './host_notice_text.js';
+import { hostRowDisplayText, hostTaskMessage, toolErrorDisplayText } from './host_notice_text.js';
 import { effortEvidenceText } from './effort_evidence.js';
 import { delegatedActivityView } from './delegated_activity.js';
 import { workerShaLogView, workerShaRelation } from './worker_sha_presentation.js';
@@ -744,8 +744,8 @@ export function summarizeLogEvent(evt) {
     if (evt.is_progress || t === 'send_message') {
         // A delegated run's observation reads from its typed fields (delegated_activity.js), never from its text: what
         // its executor said (or its count of technical events) is the words; who said it (an attempt's id), the run,
-        // its range and its source stay in its record.
-        const delegated = delegatedActivityView(evt);
+        // its range, its journal's sequence numbers and its source stay in its record.
+        const delegated = delegatedActivityView(evt, { seq: false });
         if (delegated) {
             return view('progress', '', { body: delegated.body || 'Progress update', markdown: true,
                 full: delegated.fullBody === delegated.body ? '' : delegated.fullBody });
@@ -760,7 +760,7 @@ export function summarizeLogEvent(evt) {
             const role = String(evt.subagent_role || '').trim();
             return view(event === 'completed' ? 'done' : event === 'failed' || event === 'rejected' ? 'warn' : 'progress',
                 subagentHeadline(sid, role, event, evt.model, { full: true }), { ...words, body: narration.preview,
-                    meta: [role ? `role=${role}` : '', evt.model ? `model=${evt.model}` : '', evt.write_surface ? `write=${evt.write_surface}` : ''] });
+                    meta: [evt.write_surface ? `write surface ${evt.write_surface}` : ''] });  // its role and model: its name
         }
         return view('progress', '', words);
     }
@@ -846,15 +846,16 @@ export function summarizeLogEvent(evt) {
         });
     }
 
+    const tool = machineWords(evt.tool || 'tool');  // a tool's name in words, as an event's: "Run command started"
     if (t === 'tool_call_started') {  // processing began; a replayed start alone is no liveness claim
-        return view('start', `Started ${evt.tool || 'tool'}`, {
+        return view('start', `${tool} started`, {
             body: compactJson(evt.args, 260),
             meta: [evt.timeout_sec ? `timeout ${evt.timeout_sec}s` : ''],
         });
     }
 
     if (t === 'tool_call_timeout' || t === 'tool_timeout') {
-        return view('timeout', `${evt.tool || 'tool'} timed out`, {
+        return view('timeout', `${tool} timed out`, {
             body: compactJson(evt.args, 220),
             meta: [evt.timeout_sec ? `limit ${evt.timeout_sec}s` : '', formatLogDuration(evt.duration_sec)],
         });
@@ -870,8 +871,8 @@ export function summarizeLogEvent(evt) {
         const finished = t === 'tool_call_finished';
         const label = signalDeath ? `killed (${evt.signal || evt.exit_code})`
             : failed ? 'failed' : finished ? 'finished' : 'result';
-        return view(held ? 'warn' : failed ? 'error' : finished ? 'done' : 'result', held || `${evt.tool || 'tool'} ${label}`, {
-            body: shortText(evt.result_preview || (finished ? '' : compactJson(evt.args, 220)), 260),
+        return view(held ? 'warn' : failed ? 'error' : finished ? 'done' : 'result', held || `${tool} ${label}`, {
+            body: shortText(toolErrorDisplayText(evt, evt.result_preview) || (finished ? '' : compactJson(evt.args, 220)), 260),
             meta: [formatLogDuration(evt.duration_sec)],
         });
     }
@@ -909,7 +910,7 @@ export function summarizeLogEvent(evt) {
         const source = evt.source_task_id ? String(evt.source_task_id) : 'another task';
         return view('info', hostTaskMessage(evt) ? 'System message' : `Message from task ${source}`, {
             body: shortText(evt.text_preview, 200),
-            meta: [evt.provenance ? `provenance=${evt.provenance}` : ''],
+            meta: [evt.provenance ? `provenance ${evt.provenance}` : ''],
         });
     }
 
@@ -964,7 +965,7 @@ export function summarizeLogEvent(evt) {
                 // v6.57.0 (P6b): show the recursive cost incl. children when it adds up to
                 // more than this task's own spend, so a parent isn't under-reported.
                 (accountedUpperBoundWithChildren(evt) ?? -1) > (ownValue ?? 0)
-                    ? `+children=${formatLogMoney(accountedUpperBoundWithChildren(evt))}${evt.cost_with_children_partial ? ' (partial)' : ''}`
+                    ? `with children ${formatLogMoney(accountedUpperBoundWithChildren(evt))}${evt.cost_with_children_partial ? ' (partial)' : ''}`
                     : '',
                 evt.total_rounds ? `${evt.total_rounds} rounds` : '',
                 formatLogTokens(evt),
@@ -977,7 +978,7 @@ export function summarizeLogEvent(evt) {
         const ownCost = unavailable ? 'cost unavailable' : formatLogMoney(accountedUpperBound(evt));
         const subtreeCost = unavailable ? '' : formatLogMoney(accountedUpperBoundWithChildren(evt));
         return view(unavailable ? 'warn' : 'metrics', 'Task cost finalized', {
-            meta: [ownCost, subtreeCost ? `subtree=${subtreeCost}` : '', evt.post_task_status || ''],
+            meta: [ownCost, subtreeCost ? `with children ${subtreeCost}` : '', evt.post_task_status || ''],
         });
     }
 
@@ -1029,9 +1030,7 @@ export function summarizeLogEvent(evt) {
     }
 
     if (t === 'swarm_fanout') {
-        const n = (evt.requested_count != null)
-            ? evt.requested_count
-            : (Array.isArray(evt.task_ids) ? evt.task_ids.length : 0);
+        const n = evt.requested_count ?? (Array.isArray(evt.task_ids) ? evt.task_ids.length : 0);
         // #318: a delegated harness run rides the same telemetry with the host
         // constant role="delegated_run"; it is not a subagent.
         const headline = evt.role === 'delegated_run'
@@ -1039,9 +1038,9 @@ export function summarizeLogEvent(evt) {
             : `swarm fan-out: ${n} subagent(s) requested`;
         return view('info', headline, {
             meta: [
-                evt.role ? `role=${evt.role}` : '',
-                evt.requested_model_lane ? `lane=${evt.requested_model_lane}` : '',
-                evt.depth != null ? `depth=${evt.depth}` : '',
+                evt.role ? `role ${evt.role}` : '',
+                evt.requested_model_lane ? `lane ${evt.requested_model_lane}` : '',
+                evt.depth != null ? `depth ${evt.depth}` : '',
                 ('fanout_interval_sec' in evt ? evt.fanout_interval_sec : evt.inter_wave_latency_sec) != null
                     ? `since previous fan-out ${'fanout_interval_sec' in evt ? evt.fanout_interval_sec : evt.inter_wave_latency_sec}s` : '',
             ],
@@ -1053,7 +1052,7 @@ export function summarizeLogEvent(evt) {
     // unknown name that carries no typed fact: it keeps a genuine producer-side failure with
     // only a name visible under Errors, and it is pinned as a remainder, not a taxonomy.
     const level = String(evt.level || '').toLowerCase();
-    const name = about(machineWords(t), evt.tool || compactModel(evt.model));  // its subject: the tool, else the model
+    const name = about(machineWords(t), evt.tool ? tool : compactModel(evt.model));  // its subject: the tool, else the model
     const body = shortText(
         evt.error || evt.message || evt.text || evt.result_preview || effortEvidenceText(evt)
             || compactJson(evt.args || evt.task || evt.checks, 260), 260,

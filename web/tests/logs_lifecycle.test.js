@@ -81,7 +81,7 @@ test('a hidden panel writes no node and reads no history; shown, it catches up a
     assert.equal(logs.list.children.length, 3);
     const busy = logs.card('busy');
     assert.equal(busy.dataset.category, 'errors', 'the failure earned while hidden still files the card under Errors');
-    assert.equal(busy.querySelector('.log-words').textContent, 'run_command failed', 'a card holding a failure says it in its words');
+    assert.equal(busy.querySelector('.log-words').textContent, 'Run command failed', 'a card holding a failure says it in its words');
     assert.equal(busy.querySelector('.log-count').textContent, '2 events', 'a task\'s count says what it counts');
     assert.equal(busy.querySelector('.log-failure-word').textContent, '1 step failed', 'and its failure in words');
     assert.match(logs.list.textContent, /Test backfilled event|earlier/i);
@@ -193,10 +193,10 @@ test('a history owed while hidden merges by time: old rows go before the live on
     assert.notEqual(list.at(-1).dataset.taskGroup, 'busy', 'the newest live row stays last');
     const busy = logs.card('busy');
     assert.equal(busy.querySelector('.log-count').textContent, '2 events');
-    assert.equal(busy.querySelector('.log-words').textContent, 'read_file finished', 'the older row does not take over the card');
+    assert.equal(busy.querySelector('.log-words').textContent, 'Read file finished', 'the older row does not take over the card');
     logs.toggle(busy, true);
     const rows = busy.querySelectorAll('.log-task-event').map((row) => row.querySelector('.log-name').textContent);
-    assert.equal(rows.at(-1), 'read_file finished', 'the timeline is in time order');
+    assert.equal(rows.at(-1), 'Read file finished', 'the timeline is in time order');
 });
 
 test('past the bound a merge lets the oldest go by time, never the entries that arrived live', async (t) => {
@@ -246,7 +246,7 @@ test('backfilled rows older than an open Timeline\'s rows take their places in t
     await settle();
     const rows = timeline.querySelectorAll('.log-task-event');
     assert.deepEqual(rows.map((node) => node.querySelector('.log-name').textContent),
-        ['first_tool finished', 'second_tool finished', 'third_tool finished']);
+        ['First tool finished', 'Second tool finished', 'Third tool finished']);
     assert.equal(rows[2], third, 'the row already shown keeps its node');
 });
 
@@ -318,7 +318,9 @@ for (const [unavailable, reason, said] of [[[], '', null], [['source_refs', 'cap
         await settle();
         await settle();
         const status = entry.querySelector('.log-raw-status').textContent;
-        assert.match(status, /^0–\d+ of \d+ bytes · reconstructed/);
+        // A record of one page names no byte range (owner 14.11: "0–100 of 100 bytes · stored"); its kind reads in words.
+        assert.match(status, /^Reconstructed · /);
+        assert.doesNotMatch(status, /bytes/);
         if (said) assert.match(status, said);
         else assert.doesNotMatch(status, /missing/);
         // A record read whole reads as one JSON value, indented as a received event is (one format for raw data).

@@ -358,7 +358,7 @@ def test_backfill_keeps_an_open_timeline_in_time_order_and_discloses_skipped_rec
             status = page.locator(".logs-history-status")
             expect(status).to_have_text("Damaged records skipped in the recent history read: events 1 (malformed line).")
             headlines = card.locator(".log-task-event .log-name")
-            expect(headlines).to_have_text(["first_tool finished", "second_tool finished", "third_tool finished"])
+            expect(headlines).to_have_text(["First tool finished", "Second tool finished", "Third tool finished"])
             assert card.locator(".log-task-event").nth(2).evaluate("node => node === window.thirdRow"), "the shown row keeps its node"
             note = page.locator(".log-entry:not(.log-task-card) [data-log-omitted]")
             expect(note).to_have_text("Left out of this view: error. The record below reads the whole row.")

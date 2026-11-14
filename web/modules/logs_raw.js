@@ -1,5 +1,6 @@
 import { apiFetch, fetchJson } from './api_client.js';
 import { downloadBlobViaHostBridge, shellBridgeApi } from './ui_helpers.js';
+import { machineWords } from './utils.js';
 
 // One explicit opening owns one page. The source is fixed until it is closed: a repeated event must never
 // silently substitute newer bytes. File rows use the gateway's verified reader; unreferenced live events say
@@ -24,9 +25,10 @@ function receiptGap(data) {
     return missing ? ` · ${RECEIPT_GAPS[data.unavailable_reason] || 'receipt not used'}: ${missing} declared ${missing === 1 ? 'field' : 'fields'} missing` : '';
 }
 const digest = (sha) => `${String(sha).slice(0, 12)}…`;  // a glance compares it; a download is checked whole
-// A record read whole is one JSON value: it reads indented, as a received event does. A page of a longer one stays as read.
+// A record of one page reads whole: no paging, no byte range, one JSON value indented. A longer one's page is as read.
+const whole = (data) => data.offset === 0 && !data.has_more;
 function wholeText(data) {
-    if (data.offset !== 0 || data.has_more) return data.text;
+    if (!whole(data)) return data.text;
     try { return JSON.stringify(JSON.parse(data.text), null, 2); } catch { return data.text; }
 }
 
@@ -80,11 +82,11 @@ export function createLogRaw({ visible }) {
         view.pre.scrollTop = 0;
         view.first.disabled = data.offset === 0;
         view.nextButton.disabled = !data.has_more;
-        view.first.hidden = view.nextButton.hidden = data.offset === 0 && !data.has_more;
+        view.first.hidden = view.nextButton.hidden = whole(data);
         view.retry.hidden = true;
         view.download.hidden = false;
-        const identity = view.raw ? `${data.representation}${receiptGap(data)} · Source SHA-256 ${digest(data.source.sha256)}` : 'Received event';
-        status(view, `${data.offset}–${data.next_offset} of ${data.total_bytes} bytes · ${identity}`);
+        const identity = view.raw ? `${machineWords(data.representation)}${receiptGap(data)} · Source SHA-256 ${digest(data.source.sha256)}` : 'Received event';
+        status(view, whole(data) ? identity : `${data.offset}–${data.next_offset} of ${data.total_bytes} bytes · ${identity}`);
         view.loading = false;
     }
     async function read(view, offset = 0) {
