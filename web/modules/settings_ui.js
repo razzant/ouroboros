@@ -81,7 +81,8 @@ function rowsPage(path, { ids, draw, tune = null, bind = null, paint = null, sho
             unbind?.();
             container.innerHTML = draw(row, ctx);
             unbind = bind?.(container, ctx) || null;
-            handle = bindSettingRows(container, { rows, ask: ctx.ask, openDoor: (door) => ctx.openSettings?.(door.control.to) });
+            // A door may name what its page shows first (`view`: Reviewers opens Agents on its reviewers).
+            handle = bindSettingRows(container, { rows, ask: ctx.ask, openDoor: (door) => ctx.openSettings?.(door.control.to, { view: door.control.view || '' }) });
             shape = shapeOf(rows);
         };
         const apply = (settings) => {

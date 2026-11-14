@@ -28,13 +28,13 @@ export function languageBlockHtml({ onboarding = false } = {}) {
             <section class="ui-card settings-card" aria-labelledby="settings-language-title">
                 <h3 class="settings-card-title" id="settings-language-title">Everywhere</h3>
                 <div class="settings-rows">
-                    <div class="ui-row settings-row" data-setting-row="OUROBOROS_UI_LANGUAGE" data-kind="custom">
+                    <div class="ui-row settings-row" data-setting-row="OUROBOROS_UI_LANGUAGE" data-kind="custom" data-wide>
                         <label class="ui-row-title" for="ui-language-select">Language</label>
                         <div class="ui-row-meta"><span id="ui-language-help">Menus and system messages, on every device. Ouroboros answers in the language you write.</span>
                             <span class="settings-row-fact" id="ui-language-status" data-i18n-status data-i18n-skip role="status" aria-live="polite"></span></div>
                         <div class="ui-row-actions"><select id="ui-language-select" class="ui-control" data-i18n-select data-i18n-skip aria-describedby="ui-language-help ui-language-status"></select></div>
                     </div>
-                    <div class="ui-row settings-row" data-kind="custom" data-i18n-other hidden>
+                    <div class="ui-row settings-row" data-kind="custom" data-wide data-i18n-other hidden>
                         <label class="ui-row-title" for="ui-language-other">Other language</label>
                         <div class="ui-row-meta"><span id="ui-language-other-help">A code such as pt-BR, a name, or a description of a language to invent.</span></div>
                         <div class="ui-row-actions">
@@ -49,7 +49,7 @@ export function languageBlockHtml({ onboarding = false } = {}) {
                 <details class="ui-disclosure" data-settings-fold>
                     <summary>More: translations</summary>
                     <div class="settings-rows">
-                        <div class="ui-row settings-row" data-setting-row="appearance:translations" data-kind="custom">
+                        <div class="ui-row settings-row" data-setting-row="appearance:translations" data-kind="custom" data-wide>
                             <p class="ui-row-title">Translations</p>
                             <div class="ui-row-meta"><span>The light model writes them and they are kept with this installation. A label without one stays English.</span></div>
                             <div class="ui-row-actions">

@@ -13,7 +13,7 @@
 import { apiClient, fetchJson } from './api_client.js';
 import { confirmAndSendRestart, headerBudgetPresentation } from './chat_activity.js';
 import { routeSource, shortName } from './chat_model_routes.js';
-import { accountName, accountRows, claudexorStatus, familyLabel, READ_OK } from './claudexor_status_store.js';
+import { accountName, accountRows, claudexorStatus, facetReadState, familyLabel, READ_OK } from './claudexor_status_store.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { normalizeConsciousness, parseRoster } from './consciousness_api.js';
 import { headlineView } from './consciousness_dashboard.js';
@@ -151,7 +151,11 @@ function toolsWords(tools) {
 function updateWords(update) {
     const verdict = updateVerdict(update);
     const words = { unchecked: NOT_CHECKED, check_failed: 'Could not check', unmanaged: 'Managed updates unavailable' }[verdict.state];
-    return { text: words ? fmt(words) : String(verdict.headline || '').replace(/\.$/, ''), owner: ['available', 'available_unsafe'].includes(verdict.state) };
+    const waits = ['available', 'available_unsafe'].includes(verdict.state);
+    // An update that waits says what it brings (`163 new changes`, `7.10.2 → 7.11.0`): the row's name says Updates and
+    // its mark that it waits, so a list's one line keeps the number whole.
+    const headline = String(verdict.headline || '').replace(/\.$/, '');
+    return { text: words ? fmt(words) : waits ? headline.replace(/^Update available:\s*/, '') : headline, owner: waits };
 }
 
 const START_WORDS = { on: 'Starts at sign-in', off: 'Starts by hand', other_copy: 'Another copy starts at sign-in', disabled_by_os: 'Start at sign-in is off in the system' };
@@ -449,10 +453,15 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     }
     const paint = () => { paintCard(); paintList(); };
 
-    // The accounts store as it stands: this subscriber is never a visible surface, so it arms no poll and reads nothing.
+    // The accounts store as it stands: this subscriber is never a visible surface, so it arms no poll and asks it nothing.
+    // Until a page has read the accounts there, the home's own passive roster says them (`roster`), so the Accounts row
+    // and the card say the same beside every page.
+    const storeRead = () => store.reads?.accounts === READ_OK;
     const readAccounts = (view = { reads: store.reads, snapshot: store.snapshot, everSettled: store.everSettled }) => {
-        facts.accounts = { read: view.reads?.accounts, snapshot: view.snapshot, rows: accountRows(view.snapshot),
-            kind: view.everSettled ? refreshActionKind(view.snapshot) : 'refresh' };
+        const own = view.reads?.accounts !== READ_OK && facts.roster;
+        facts.accounts = own ? { read: facetReadState(facts.roster, 'accounts'), snapshot: facts.roster, rows: accountRows(facts.roster), kind: 'refresh' }
+            : { read: view.reads?.accounts, snapshot: view.snapshot, rows: accountRows(view.snapshot),
+                kind: view.everSettled ? refreshActionKind(view.snapshot) : 'refresh' };
     };
     const READS = {
         settings: () => ctx.readSettings(),
@@ -462,9 +471,12 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         update: () => apiClient.updateStatus(),
         storage: () => fetchJson('/api/storage', { cache: 'no-store' }),
         autostart: () => apiClient.desktopAutostart(),
+        // The roster and the windows the engine last observed, as Costs reads them: it starts and refreshes nothing.
+        roster: async () => (storeRead() ? facts.roster : fetchJson('/api/claudexor/status?view=quota', { cache: 'no-store' })),
     };
     async function read(name, run) {
         try { facts[name] = (await READS[name]()) ?? null; } catch { facts[name] = null; }
+        if (name === 'roster') readAccounts();
         if (run === serial) paint();
     }
     async function readState(run) {
@@ -476,10 +488,12 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         facts.state = snapshots?.latest?.() ?? null;
         if (run === serial) paint();
     }
+    const readDevice = () => {
+        facts.device = { theme: globalThis.window?.ouroTheme?.choice, notify: readNotifyPrefs(globalThis.localStorage), dictation: dictationWord() };
+    };
     function refresh() {
         const run = ++serial;
-        const storage = globalThis.localStorage;
-        facts.device = { theme: globalThis.window?.ouroTheme?.choice, notify: readNotifyPrefs(storage), dictation: dictationWord() };
+        readDevice();
         facts.state = ctx.stateSnapshots?.latest?.() || facts.state;
         readAccounts();
         paint();
@@ -535,15 +549,28 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     const onType = () => { handed = ''; paintList(); };
     // A setting saved while the home is on screen may start or end a wait for a restart: the document is read again.
     const onSaved = () => { if (root.getClientRects?.().length) void read('settings', serial); };
+    // A choice of this device made on a page beside the list (the theme's strip, a notification switch) is the list's
+    // answer at once. Their own modules store it from the document's handlers (theme.js, notifications.js); the window
+    // hears the same press after the document, so the choice is stored by then.
+    const DEVICE_CONTROLS = '[data-theme-control], [data-notify-pref]';
+    const onDevice = (event) => {
+        if (!event.target?.closest?.(DEVICE_CONTROLS)) return;
+        readDevice();
+        paintRows();
+    };
     const offStore = store.subscribe((view) => { readAccounts(view); paintCard(); paintRows(); }, { visible: () => false });
     root.addEventListener('click', onClick);
     cardEl?.addEventListener('click', onClick);
     searchEl.addEventListener('input', onType);
     globalThis.window?.addEventListener?.('ouro:settings-updated', onSaved);
+    const DEVICE_EVENTS = ['click', 'keydown', 'change'];
+    DEVICE_EVENTS.forEach((type) => globalThis.window?.addEventListener?.(type, onDevice));
     paint();
     return {
-        mark(path) {
-            current = String(path || '').split('/')[0];
+        // The row of the page that is open: of the open levels (top first), the first whose page the list has a row for.
+        mark(paths) {
+            const heads = [paths].flat().map((path) => String(path || '').split('/')[0]);
+            current = heads.find((head) => HOME_ROWS.some((row) => row.to === head)) ?? heads[0] ?? '';
             paintRows();
         },
         search(words) {
@@ -559,6 +586,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
             cardEl?.removeEventListener('click', onClick);
             searchEl.removeEventListener('input', onType);
             globalThis.window?.removeEventListener?.('ouro:settings-updated', onSaved);
+            DEVICE_EVENTS.forEach((type) => globalThis.window?.removeEventListener?.(type, onDevice));
         },
     };
 }

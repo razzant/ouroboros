@@ -87,13 +87,15 @@ export function initSettings(ctx = {}) {
     const beside = () => levels.length > 0 && visible(homeEl);
     const pageCtx = { openSettings: (path, options) => go(path, options), openDashboardTab, showPage, layers, ws, state, readSettings };
     // Landing (owner 13.11, "1. C"): from 40rem the list and an open page always stand together, never an empty pane;
-    // a second press of the chosen row keeps its page when that page is on top, and returns to it from a deeper level.
+    // a second press of the chosen row keeps its page when that page is on top, and returns to it from a deeper level
+    // (the chosen row is the open page's own: a door from one page of the list to another chooses the other).
     let ownChosen = false;   // the owner pressed the list's Ouroboros row: his page stays until another row is pressed
     let lastFirst = readLastFirst();  // the first-level page last opened on this device
     const pressed = (path, options = {}) => {
         ownChosen = !path;
-        if (path && !options.row && beside() && levels[0]?.path === path) {
-            if (levels.length > 1) closeLevels(1);
+        const at = path && !options.row && beside() ? levels.findIndex((level) => level.path === path) : -1;
+        if (at >= 0) {
+            if (levels.length > at + 1) closeLevels(at + 1);
             return true;
         }
         return go(path, { ...options, fresh: true });
@@ -174,7 +176,8 @@ export function initSettings(ctx = {}) {
         return left;
     }
 
-    function go(path = '', { row = '', back = null, fresh = false, opener = null } = {}) {
+    // `view` is what a door asks its page to show first (Permissions' Reviewers: the Agents list on its reviewers).
+    function go(path = '', { row = '', back = null, fresh = false, opener = null, view = '' } = {}) {
         const target = String(path || '');
         if (isDoorId(target)) return leave(target, { row, back: state.settingsPath });
         if (target && !settingsPageFor(target)) {
@@ -185,13 +188,13 @@ export function initSettings(ctx = {}) {
         const at = back || fresh ? -1 : levels.findIndex((level) => level.path === target);
         if (!target) closeLevels(0);
         else if (at >= 0) closeLevels(at + 1, { row });
-        else open(target, { row, back, under: back || fresh ? 0 : levels.length, opener });
+        else open(target, { row, back, under: back || fresh ? 0 : levels.length, opener, view });
         return true;
     }
 
     // `opener` is the control that opened the level, where focus returns: WebKit does not focus a pressed button.
     // A level put aside with unsaved words (`close`) comes back as it was left; any other is drawn anew.
-    function open(path, { row, back, under, opener }) {
+    function open(path, { row, back, under, opener, view = '' }) {
         if (!under && path !== lastFirst) {
             lastFirst = path;
             try { globalThis.localStorage?.setItem(LAST_PAGE_KEY, path); } catch { /* storage blocked: kept for this load */ }
@@ -200,7 +203,7 @@ export function initSettings(ctx = {}) {
         const focused = document.activeElement === document.body ? null : document.activeElement;
         const kept = aside.get(path);
         aside.delete(path);
-        const level = Object.assign(kept || { path, id: `settings-level-${++serial}` }, { back, opener: opener || focused });
+        const level = Object.assign(kept || { path, id: `settings-level-${++serial}`, view }, { back, opener: opener || focused });
         if (!kept) {
             level.el = document.createElement('section');
             level.el.className = 'settings-page scroll-fade-y';
@@ -229,7 +232,7 @@ export function initSettings(ctx = {}) {
             setResult(line, { text: `This page could not be shown: ${err?.message || err}`, tone: 'danger' });
         };
         try {
-            Promise.resolve(found.mount(body, { path: level.path, row, ctx: pageCtx })).then((handle) => {
+            Promise.resolve(found.mount(body, { path: level.path, row, view: level.view || '', ctx: pageCtx })).then((handle) => {
                 if (level.closed) { handle?.unmount?.(); return; }
                 level.handle = handle;
                 // A page that learns its name while it draws (a skill's form) is named again.
@@ -332,7 +335,7 @@ export function initSettings(ctx = {}) {
         column.scrollTop = places.get(column) || 0;
         if (beside() || overview || !level) homeEl.scrollTop = places.get(homeEl) || 0;
         besideBefore = beside();
-        home.mark(levels[0]?.path || '');
+        home.mark(levels.map((each) => each.path).reverse());  // the open page's own row, else the nearest under it
         // The home narrowed into the rail at once: the pressed row is brought into the rail's view.
         if ((opened && beside()) || overview) revealInRail();
         syncLayers();
@@ -354,11 +357,13 @@ export function initSettings(ctx = {}) {
         const chosen = homeEl.querySelector('[aria-current="page"]');
         if (!chosen) return;
         // `block: 'nearest'` by hand (the rail alone scrolls): a row already in the rail's view never moves; one out of
-        // it comes in just past the scroll-edge fade.
+        // it, or under the fade of an edge where more waits, comes in just past that fade.
         const rail = homeEl.getBoundingClientRect();
         const box = chosen.getBoundingClientRect();
-        if (box.top >= rail.top && box.bottom <= rail.bottom) return;
-        if (box.top < rail.top) homeEl.scrollTop += box.top - rail.top - FADE_CLEARANCE;
+        const above = homeEl.scrollTop > 1 ? FADE_CLEARANCE : 0;
+        const below = homeEl.scrollHeight - homeEl.clientHeight - homeEl.scrollTop > 1 ? FADE_CLEARANCE : 0;
+        if (box.top >= rail.top + above && box.bottom <= rail.bottom - below) return;
+        if (box.top < rail.top + above) homeEl.scrollTop += box.top - rail.top - FADE_CLEARANCE;
         else homeEl.scrollTop += box.bottom - rail.bottom + FADE_CLEARANCE;
         places.set(homeEl, homeEl.scrollTop);
     }
@@ -428,15 +433,23 @@ export function initSettings(ctx = {}) {
     const offReconnect = ws?.on?.('open', () => announce());
     // A width that puts the home beside the page, or takes it away: the layers follow, and the home comes back
     // where it was left.
-    const resize = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
+    const resized = () => {
         if (panes() !== panesBefore) { paint({ quiet: true }); return; }
         if (beside() === besideBefore) return;
         besideBefore = beside();
         if (besideBefore) homeEl.scrollTop = places.get(homeEl) || 0;
         paintLead();
         syncLayers();
+    };
+    // The shell's box repaints at once. A change of the root font moves the two panes' 40rem while the box keeps its
+    // width: the pane gains or loses the list beside it and the list's rows resize, and those repaint at the next frame
+    // (the repaint resizes them again, a loop the observer would refuse).
+    let frame = 0;
+    const resize = typeof ResizeObserver === 'function' ? new ResizeObserver((entries) => {
+        if (entries.some((entry) => entry.target === shell)) resized();
+        else frame ||= requestAnimationFrame(() => { frame = 0; resized(); });
     }) : null;
-    resize?.observe(shell);
+    [shell, levelsEl, homeEl.querySelector('[data-settings-list]')].forEach((box) => box && resize?.observe(box));
     const disposeFade = bindScrollFade(homeEl);
     shell.addEventListener('scroll', onScroll, { capture: true, passive: true });
     window.addEventListener('ouro:page-shown', onPageShown);
@@ -450,6 +463,7 @@ export function initSettings(ctx = {}) {
         resetSecretReveals(page);
         if (event.persisted) return;
         resize?.disconnect();
+        if (frame) cancelAnimationFrame(frame);
         disposeFade();
         disposeOverviewFade?.();
         offReconnect?.();

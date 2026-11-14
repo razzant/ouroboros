@@ -286,6 +286,70 @@ test('the list\'s chosen row returns to its page from a deeper level, and keeps 
     assert.equal(firstEl.hidden, false);
 });
 
+test('a door from one page of the list to another chooses the other\'s row and hands it the door\'s view', async (t) => {
+    const { content, state, showPage } = world(t);
+    const views = [];
+    let doorCtx = null;
+    registerSettingsPage('test-from', { title: 'From', mount(body, { ctx, view }) { views.push(['test-from', view ?? '']); doorCtx = ctx; } });
+    registerSettingsPage('test-to', { title: 'To', mount(body, { view }) { views.push(['test-to', view ?? '']); } });
+    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    layout(t, controls, content, { on: true });
+    const home = content.querySelector('[data-settings-home]');
+    const rows = Object.fromEntries(['test-from', 'test-to'].map((path) => {
+        const row = new Stub('button');
+        row.setAttribute('data-settings-open', path);
+        home.querySelector('[data-settings-list]').appendChild(row);
+        return [path, row];
+    }));
+    const chosen = () => Object.keys(rows).filter((path) => rows[path].getAttribute('aria-current') === 'page');
+    const pages = () => content.querySelectorAll('.settings-page').map((el) => el.dataset.settingsPage).filter(Boolean);
+    await controls.open('test-from');
+    await settle();
+    assert.deepEqual([chosen(), views], [['test-from'], [['test-from', '']]]);
+    // The door opens its page over the one it was pressed on (Back returns there), and the list marks the page that is open.
+    doorCtx.openSettings('test-to', { view: 'reviewers' });
+    await settle();
+    assert.deepEqual([pages(), chosen()], [['test-from', 'test-to'], ['test-to']]);
+    assert.deepEqual(views.at(-1), ['test-to', 'reviewers']);
+    // The chosen row pressed again keeps its page as it stands; the row under it returns to its own page.
+    await home.fire('click', { target: rows['test-to'] });
+    await settle();
+    assert.deepEqual([pages(), chosen(), views.length], [['test-from', 'test-to'], ['test-to'], 2]);
+    await home.fire('click', { target: rows['test-from'] });
+    await settle();
+    assert.deepEqual([pages(), chosen(), views.length], [['test-from'], ['test-from'], 2]);
+});
+
+test('a row chosen under the rail\'s bottom fade comes just clear of it; a row clear of both fades never moves', async (t) => {
+    const { content, state, showPage } = world(t);
+    registerSettingsPage('test-low', { title: 'Low', mount() {} });
+    registerSettingsPage('test-mid', { title: 'Mid', mount() {} });
+    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    layout(t, controls, content, { on: true });
+    const home = content.querySelector('[data-settings-home]');
+    // The owner's window: a rail 678 px tall from y 66, its list 1168 px, scrolled to 457 (33 px more wait below).
+    Object.assign(home, { scrollHeight: 1168, clientHeight: 678, scrollTop: 457 });
+    home.getBoundingClientRect = () => ({ top: 66, bottom: 744, width: 300 });
+    await content.querySelector('.settings-shell').fire('scroll', { target: home });  // the shell keeps where the rail was left
+    const row = (path, at) => {
+        const node = new Stub('button');
+        node.setAttribute('data-settings-open', path);
+        node.getBoundingClientRect = () => ({ top: 66 + at - home.scrollTop, bottom: 66 + at + 46 - home.scrollTop });
+        home.querySelector('[data-settings-list]').appendChild(node);
+        return node;
+    };
+    // Its bottom 4 px inside the rail, under the 32 px fade: pressed, it comes 24 px clear of the edge (FADE_CLEARANCE).
+    const low = row('test-low', 1085);
+    await home.fire('click', { target: low });
+    await settle();
+    assert.equal(home.scrollTop, 477);
+    assert.equal(low.getBoundingClientRect().bottom, 744 - 24);
+    const mid = row('test-mid', 700);
+    await home.fire('click', { target: mid });
+    await settle();
+    assert.equal(home.scrollTop, 477, 'a row in the clear stays where it is');
+});
+
 test('Settings pressed again in the sidebar: two panes keep a first-level page and return from a deeper one; one column shows the list', async (t) => {
     const { env, content, state, showPage } = world(t);
     const drawn = { first: 0, deeper: 0 };
@@ -439,4 +503,33 @@ test('the header Back is hidden beside the list, leads to the list in one column
     await back().fire('click');
     await settle();
     assert.deepEqual([pages(), back().hidden], [[], true]);
+});
+
+test('a root font that moves the two panes\' 40rem repaints Settings: the pane and the list are watched beside the shell', async (t) => {
+    const { env, content, state, showPage } = world(t);
+    env.document.createElement = (tag) => new DescendantStub(tag);
+    const observers = [];
+    const before = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class { constructor(fn) { Object.assign(this, { fn, seen: [] }); observers.push(this); } observe(box) { this.seen.push(box); } disconnect() {} };
+    t.after(() => { globalThis.ResizeObserver = before; });
+    let font = 16;
+    env.window.getComputedStyle = () => ({ fontSize: `${font}px` });
+    registerSettingsPage('test-font', { title: 'Font', mount() {} });
+    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    layout(t, controls, content, { on: true });
+    controls.page.getBoundingClientRect = () => ({ top: 0, bottom: 10, width: 735 });  // the owner's window
+    await controls.open('test-font');
+    await settle();
+    const back = content.querySelector('.app-page-header [data-settings-back]');
+    assert.equal(back.hidden, true, 'beside the list: no Back');
+    // The browser's font grows to 20 px: 40rem is 800 px, the sheets draw one column and hide the list, the shell keeps
+    // its width. The pane, which loses the list beside it, says so, and the page leads back to the list.
+    font = 20;
+    content.querySelector('[data-settings-home]').getClientRects = () => [];
+    const heard = (box) => observers.find((observer) => observer.seen.includes(box));
+    const pane = content.querySelector('.settings-levels');
+    assert.ok(heard(pane), 'the pane is watched');
+    assert.ok(heard(content.querySelector('[data-settings-list]')), 'the list is watched');
+    heard(pane).fn([]);
+    assert.equal(back.hidden, false);
 });

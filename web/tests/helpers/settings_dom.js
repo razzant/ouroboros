@@ -31,6 +31,9 @@ export const ANSWERS = {
     '/api/update/status': { managed: true, check_ok: true, current_version: '7.10.2' },
     '/api/storage': { count: null },
     '/api/desktop/autostart': { state: 'unavailable' },
+    // The engine's roster and windows as last observed, the passive view Costs reads too: it starts and refreshes
+    // nothing. Every other read of the status (the full one, with models) is a start below.
+    '/api/claudexor/status?view=quota': { view: 'quota', profiles: {}, quota: [], reads: { catalog: 'not_read', accounts: 'not_read', quota: 'not_read' } },
 };
 export const STARTS = ['/api/model-catalog', '/api/review-pool', '/api/claudexor/wake', '/api/claudexor/status', '/api/mcp/refresh', '/api/providers/test',
     '/api/update/check', '/api/storage/measure'];

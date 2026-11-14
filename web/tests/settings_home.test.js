@@ -158,6 +158,11 @@ test('This computer and Updates answer on every host: who can open it where the 
     assert.equal(updates({ state: {} }), undefined, 'no version, no claim');
     assert.equal(updates({ state: { version: '7.10.2' }, update: { managed: true, check_ok: true, current_version: '7.10.2' } }), 'Up to date · 7.10.2');
     assert.equal(updates({ state: { version: '7.10.2' }, update: null }), 'Not checked', 'a status read that failed says so');
+    // An update that waits says what it brings, in the owner's colour: the row's name already says Updates, and the
+    // list's one line keeps the number whole ("Update available: 163 ne…" lost it).
+    const waiting = { managed: true, check_ok: true, available: true, safe_to_apply: true, current_version: '7.10.2' };
+    assert.deepEqual(homeAnswers({ update: { ...waiting, latest_version: '7.10.2', behind: 163 } })['dashboard:updates'], { text: '163 new changes', owner: true });
+    assert.equal(updates({ update: { ...waiting, latest_version: '7.11.0' } }), '7.10.2 → 7.11.0');
 });
 
 test('the card says who it is and its state, never that nothing waits', () => {
@@ -176,7 +181,8 @@ test('showing the home reads only what is passive: no catalogue, no review pool,
     await home.refresh();
     await settle();
     assert.deepEqual([...new Set(env.calls)].sort(), Object.keys(ANSWERS).sort(), 'the home\'s own reads, each a GET that starts nothing');
-    for (const url of STARTS) assert.ok(!env.calls.some((call) => String(call).startsWith(url)), url);
+    // A start is any read under these addresses but the passive ones the home reads, which ANSWERS lists exactly.
+    for (const url of STARTS) assert.ok(!env.calls.some((call) => String(call).startsWith(url) && !Object.hasOwn(ANSWERS, String(call))), url);
     assert.deepEqual(statusReads, [], 'the accounts store is read as it stands, never asked');
     assert.equal(store.subscriberCount, 1);
     assert.equal(store.polling, false, 'the home is no visible surface of the store: it arms no poll');
@@ -204,7 +210,7 @@ test('a page reads when it is shown, not when Settings is', async (t) => {
     await controls.open('');
     await settle();
     const atHome = reads.length;
-    assert.ok(atHome >= 1 && !env.calls.some((call) => STARTS.some((url) => String(call).startsWith(url))));
+    assert.ok(atHome >= 1 && !env.calls.some((call) => STARTS.some((url) => String(call).startsWith(url) && !Object.hasOwn(ANSWERS, String(call)))));
     assert.equal(content.querySelectorAll('.settings-page').length, 0);
     // The skill sources page (settings_extension_forms.js): its own read fires for its own path only.
     assert.ok(settingsPageFor('skill-sources'));
@@ -336,4 +342,91 @@ test('Ask Ouroboros puts the words into Main as an unsent draft and replaces no 
     await askOuroboros('quiet', { showPage: async () => true, doc });
     assert.deepEqual([input.value, events], ['half a thought', ['input']], 'a draft already there stays, and nothing is written');
     assert.equal(await askOuroboros('x', { showPage: async () => false, doc }), false, 'a vetoed leave shows nothing');
+});
+
+test('a choice of this device made beside the list is its row\'s answer at once, read after its own module stored it', async (t) => {
+    const { env, content } = world(t);
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    const kept = new Map();
+    const before = globalThis.localStorage;
+    globalThis.localStorage = { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => { kept.set(key, String(value)); } };
+    t.after(() => { globalThis.localStorage = before; });
+    env.window.ouroTheme = { choice: 'dark' };
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws: { isConnected: () => true }, stateSnapshots: { latest: () => ({}) } } });
+    t.after(() => home.dispose());
+    await home.refresh();
+    await settle();
+    const answer = (to) => content.querySelector(`[data-settings-open="${to}"]`).querySelector('[data-settings-answer]').textContent;
+    assert.deepEqual([answer('appearance'), answer('notifications')], ['Dark', 'Off on this device']);
+    const inside = (attr, value = '') => { const control = new Stub('div'); control.setAttribute(attr, value); const hit = new Stub('button'); control.appendChild(hit); return hit; };
+    // The theme's strip: theme.js stored the choice from the document's handler, and the window hears the press after it.
+    env.window.ouroTheme.choice = 'light';
+    env.window.dispatchEvent({ type: 'click', target: inside('data-theme-control') });
+    assert.equal(answer('appearance'), 'Light');
+    env.window.ouroTheme.choice = 'system';
+    env.window.dispatchEvent({ type: 'keydown', target: inside('data-theme-control') });
+    assert.equal(answer('appearance'), 'System', 'an arrow in the strip chooses too');
+    // A notification switch: the notifier stored its prefs on the change.
+    kept.set('ouroboros.notifications', JSON.stringify({ enabled: true, sound: false }));
+    env.window.dispatchEvent({ type: 'change', target: inside('data-notify-pref', 'enabled') });
+    assert.equal(answer('notifications'), 'On, silent');
+    // A press anywhere else reads nothing again.
+    env.window.ouroTheme.choice = 'dark';
+    env.window.dispatchEvent({ type: 'click', target: inside('data-other') });
+    assert.equal(answer('appearance'), 'System');
+    home.dispose();
+    env.window.dispatchEvent({ type: 'click', target: inside('data-theme-control') });
+    assert.equal(answer('appearance'), 'System', 'a disposed home hears nothing');
+});
+
+test('the list marks the page that is open: the top level\'s own row, else the nearest level under it that has one', async (t) => {
+    const { content } = world(t);
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws: { isConnected: () => true }, stateSnapshots: { latest: () => ({}) } } });
+    t.after(() => home.dispose());
+    const chosen = () => content.querySelectorAll('[data-settings-open]').filter((row) => row.getAttribute('aria-current') === 'page')
+        .map((row) => row.dataset.settingsOpen);
+    home.mark(['agents', 'permissions']);
+    assert.deepEqual(chosen(), ['agents'], 'Permissions\' Reviewers door opened Agents over it');
+    home.mark(['agents/reviewer', 'agents', 'permissions']);
+    assert.deepEqual(chosen(), ['agents'], 'an agent\'s page is Agents\'');
+    home.mark(['skill/voice-form', 'voice']);
+    assert.deepEqual(chosen(), ['voice'], 'a skill\'s form has no row: the page under it keeps its own');
+    home.mark('models');
+    assert.deepEqual(chosen(), ['models']);
+    home.mark([]);
+    assert.deepEqual(chosen(), []);
+});
+
+test('the Accounts row counts the accounts beside every page: the home\'s passive roster until a page read them', async (t) => {
+    const { env, content } = world(t);
+    const roster = (n) => ({ profiles: Array.from({ length: n }, (_, i) => ({ profile: { harness_id: 'codex', profile_id: `p${i}`,
+        display_name: `p${i}`, enabled: true }, status: { verification: 'passed' }, identity: {} })) });
+    env.routes.set('/api/settings', async () => ({ ok: true, status: 200,
+        json: async () => ({ ...ANSWERS['/api/settings'], _meta: { connections: [{ configured: true }, { configured: true }] } }) }));
+    env.routes.set('/api/claudexor/status?view=quota', async () => ({ ok: true, status: 200,
+        json: async () => ({ view: 'quota', profiles: roster(3), quota: [], reads: { catalog: 'not_read', accounts: 'ok', quota: 'ok' } }) }));
+    const statusReads = [];
+    const store = createClaudexorStatusStore({ fetchImpl: async (url) => { statusReads.push(url); return { ok: true, status: 200,
+        json: async () => ({ daemon: { state: 'running' }, harnesses: [], profiles: roster(4), quota: [], reads: { catalog: 'ok', accounts: 'ok', quota: 'ok' } }) }; } });
+    t.after(() => store.dispose());
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws: { isConnected: () => true }, stateSnapshots: { latest: () => ({}) } } });
+    t.after(() => home.dispose());
+    await home.refresh();
+    await settle();
+    const answer = () => content.querySelector('[data-settings-open="accounts"]').querySelector('[data-settings-answer]').textContent;
+    const passive = () => env.calls.filter((call) => call === '/api/claudexor/status?view=quota').length;
+    // Beside Models, before any page read the shared store: the roster the home read itself, never the store asked.
+    assert.deepEqual([answer(), statusReads], ['3 accounts, 2 API keys', []]);
+    // A page that shows the accounts read the store (Agents, a provider's page): its roster answers, and the home stops
+    // reading its own.
+    await store.refresh();
+    await settle();
+    assert.equal(answer(), '4 accounts, 2 API keys');
+    const before = passive();
+    await home.refresh();
+    await settle();
+    assert.deepEqual([answer(), passive()], ['4 accounts, 2 API keys', before]);
 });

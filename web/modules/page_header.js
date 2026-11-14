@@ -97,31 +97,18 @@ export function renderBackControl({ to = '', attrs = '' } = {}) {
 /**
  * The header's Back slot (renderPageHeader writes it before the lead): `control` stands there, so it never scrolls
  * away with a lead that is a scroller (Dashboard's tabs, Files' location). On a desk the slot stands before the lead;
- * in the stack layout it starts the row under ☰: the page's tab strip when it has one, else a row of the header's own.
- * Returns the disposer, which takes the control away and puts the slot back.
+ * in the stack layout it is the header's one leading control where ☰ stood (style.css, `.app-page-header[data-back]`),
+ * so a page that leads back (Skills opened from Settings) has one leading control in one row, its tabs under it as
+ * they were. Returns the disposer, which takes the control away.
  */
 export function placePageBack(header, control) {
     const slot = header?.querySelector?.('[data-page-back]');
     if (!slot || !control) return () => {};
-    const block = slot.parentElement;
-    const lead = block.querySelector(':scope > .app-page-lead');
-    const tabs = header.nextElementSibling?.classList?.contains('app-page-tabs') ? header.nextElementSibling : null;
     slot.replaceChildren(control);
     header.setAttribute('data-back', '');
-    const place = (layout) => {
-        const stack = (typeof layout === 'string' ? layout : currentLayout()) !== 'docked';
-        if (stack && tabs) tabs.prepend(slot);
-        else if (slot.parentElement !== block) block.insertBefore(slot, lead);
-        tabs?.toggleAttribute('data-back', stack);
-    };
-    place();
-    const offLayout = onLayoutChange(place);
     return () => {
-        offLayout();
         slot.replaceChildren();
-        if (slot.parentElement !== block) block.insertBefore(slot, lead);
         header.removeAttribute('data-back');
-        tabs?.removeAttribute('data-back');
     };
 }
 
