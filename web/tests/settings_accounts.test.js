@@ -206,8 +206,12 @@ test('the glance is one bar per account from windows that were read; the account
     assert.equal([...stale.matchAll(/data-profile="([^"]+)"/g)][0][1], 'studio-01');
     // A row's place in rotation is a switch; what is rare waits behind More; the program's row stands above.
     assert.equal((html.match(/role="switch" data-harness-toggle/g) || []).length, 18);
-    assert.match(html, /data-harness-login>Sign in<\/button>\s*<label class="ui-switch">/, 'Sign in stands in the row of the account that needs it');
+    assert.match(html, /data-harness-login>Sign in<\/button><button[^>]*data-harness-remove data-rare>/, 'Sign in stands on the line under the words of the account that needs it, the switch keeps the row\'s end');
     assert.equal((html.match(/data-harness-login data-rare>Sign in again</g) || []).length, 17);
+    const actionsOf = [...html.matchAll(/<div class="harness-account-actions">([\s\S]*?)<\/div>/g)].map((hit) => hit[1]);
+    assert.equal(actionsOf.length, 18);
+    assert.ok(actionsOf.every((part) => /data-harness-toggle/.test(part) && /data-resources/.test(part) && !/data-harness-login|data-harness-remove/.test(part)),
+        'every row keeps only its switch and More at its end, whether or not it needs sign-in');
     assert.equal((html.match(/data-harness-remove data-rare>Remove</g) || []).length, 18);
     assert.doesNotMatch(html, /title="/, 'no fact lives in a hover title');
 });

@@ -611,16 +611,19 @@ def test_a_level_is_priced_by_its_pieces_exactly_as_its_drawn_text(note):
         assert mv.room_chars(snapshot, level, floor_note=note) == mv.json_chars(mv.render_room(fresh, level, floor_note=note))
 
 
-def test_a_level_holds_the_whole_story_only_when_its_text_is_the_whole_story():
-    """Equal prices alone prove nothing for a level naming story steps: those texts decide, and the whole view needs no text."""
+def test_a_level_names_a_whole_story_exactly_when_it_names_no_story_step():
+    """``story_is_whole`` reads the level alone, as ``render_story`` does: of F7 its story quotes count, a room row's
+    address and a note's do not. A level it calls whole draws the whole story's text; no text is drawn to learn it."""
     snapshot = _snapshot()
     table = mf._elements(snapshot)
     story_step = next(step for step in mv.STORY_STEPS if table.ids.get(step))
-    assert mv.whole_story_at(snapshot, mv.FULL_VIEW)
-    assert not mv.whole_story_at(snapshot, table.level({(story_step, table.ids[story_step][0])}))
+    named = table.level({(story_step, table.ids[story_step][0])})
+    rows = mv.FloorLevel(addressed=(("F7", ("a-room-row",)), ("F8", ("a-note",))))
     with measured_sections():
-        assert mv.whole_story_at(snapshot, mv.FloorLevel(addressed=(("F5", ("no-such-page",)),)))
-        assert section_spans()["work"]["view_renders"] == 2  # the two texts an equal price left to compare
+        assert mv.story_is_whole(mv.FULL_VIEW) and mv.story_is_whole(rows) and not mv.story_is_whole(named)
+        assert not mv.story_is_whole(mv.FloorLevel(addressed=(("F7", ("quote:1",)),)))
+        assert not section_spans()["work"].get("view_renders")
+    assert mv.render_story(snapshot, rows) == mv.render_story(snapshot) != mv.render_story(snapshot, named)
 
 
 def test_an_unactivated_snapshot_is_priced_without_the_floor_note():

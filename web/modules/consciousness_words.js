@@ -175,16 +175,20 @@ export function placeScopeText(place) {
 /** A dollar amount as Costs writes it (grouped); an absent amount is the dash, never $0.00. */
 export const usdText = formatUsd;
 
-/** The money line of the chip's Shade and the Dashboard's headline card: «$1.50 of $20.00 in the last 24 hours»; a
- *  floor (≥) while some calls have no price; '' when either amount is unknown. */
+/** The money line of the chip's Shade and the Dashboard's headline card: «$2 of $20 in the last 24 hours», in the
+ *  limit's money; what it leaves out (calls without a known price, calls in progress) said after it, or "so far" while
+ *  only calls in progress may add more; '' when either amount is unknown. */
 export function allowanceText(snapshot) {
     const { spentUsd, dailyUsd } = snapshot;
     if (spentUsd === null || dailyUsd === null) return '';
     // The money of the limit's card (storage_format.js `formatLimitUsd`), and what the number leaves out said after it
     // in words, where a floor sign stood before it.
-    const out = snapshot.unknownUnmetered > 0 ? `; ${number(snapshot.unknownUnmetered)} calls without a known price are not counted` : '';
-    // Open accounting keeps "so far" (DESIGN): a call still open may add more, so even $0.00 is no final total.
-    const sofar = !out && snapshot.allowanceOpenRows > 0 ? ' so far' : '';
+    // Open accounting keeps "so far" (DESIGN): a call still open may add more, so even $0 is no final total. Beside calls
+    // without a known price it is named among what is not counted, in the words of the meter's note (costs.js).
+    const open = snapshot.allowanceOpenRows > 0;
+    const out = snapshot.unknownUnmetered > 0
+        ? `; ${number(snapshot.unknownUnmetered)} calls without a known price${open ? ' and calls in progress' : ''} are not counted` : '';
+    const sofar = !out && open ? ' so far' : '';
     const degraded = snapshot.integrityDegraded ? ' (ledger integrity degraded)' : '';
     return `${formatLimitUsd(spentUsd, dailyUsd)}${sofar} of ${formatLimitUsd(dailyUsd, dailyUsd, 'limit')} in the last 24 hours${out}${degraded}`;
 }
