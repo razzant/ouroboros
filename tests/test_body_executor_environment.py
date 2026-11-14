@@ -10,6 +10,9 @@ import subprocess
 import pytest
 
 from ouroboros import body_candidate, workspace_executor as executor
+# The executor imports this lazily; it subclasses ``subprocess.Popen`` at import, so it must be imported before
+# the transport double below replaces ``subprocess.Popen`` with a function.
+from ouroboros.tools import shell_process  # noqa: F401
 from tests.body_candidate_support import isolate, make_ctx, make_serving
 
 
