@@ -931,10 +931,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .chat-messages,
 #log-entries,
 .log-entry,
-.log-main,
-.log-body,
-.log-headline,
-.log-task-summary,
+.log-words,
 .log-task-timeline,
 .chat-bubble,
 .chat-bubble .message,
@@ -945,9 +942,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
     min-width: 0;
 }
 
-.log-body,
-.log-headline,
-.log-pill,
 .log-raw,
 .chat-bubble .message,
 .skills-card,
@@ -6110,8 +6104,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 
 /* Logs (U026-U035, U140): the tab body scrolls; its filters stay at its top on the room's colour (the stream lives
    at its newest end, the filters must stay in reach) while the list, one card whose events are trays, scrolls under
-   them. A task's event is the same tray with its kind and its timeline. The system face reads the sentences;
-   monospace keeps only the time and the raw record. */
+   them. Every event has one anatomy (logs.js createEvent): its first line in the meta size (the time in the meta ink,
+   what it is in its kind's colour, its level chip, its repeat count at the line's end), its words in body text, its
+   facts in one meta line, and one shared fold (details.ui-disclosure) for the rest. A task's timeline rows are the same
+   events inside its fold. The system face reads it all; monospace keeps only the raw record. */
 /* The body's top inset rides on the bar, so the bar sticks flush at the scroller's edge (a sticky box keeps clear of
    its scroller's padding, which let rows show above it). */
 #page-logs {
@@ -6159,42 +6155,38 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     display: grid;
     gap: var(--space-2);
     min-width: 0;
-    font-size: var(--type-body);
-    line-height: var(--line-body);
 }
 
-/* A log row is a tray inside the Logs object: the soft neutral fill, the inner radius, no outline. */
+/* An event is a tray inside the Logs object: the soft neutral fill, the inner radius, no outline. Inside a task's
+   tray its timeline rows part by space alone: a tray inside a tray drops its fill. */
 .log-entry {
-    padding: 10px 12px;
-    border-radius: var(--radius-inner);
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    border: 1px solid transparent;
-    background: var(--surface-tray);
+    gap: var(--space-1);
     min-width: 0;
+    padding: var(--space-3);
+    border: 1px solid transparent;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
 }
+.log-task-event { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.log-task-timeline { display: flex; flex-direction: column; gap: var(--space-4); }
 
-.log-main {
+/* The first line: on a narrow card it wraps (the time and the kind, then the chip and the count). */
+.log-head {
     display: flex;
-    gap: 8px;
-    align-items: baseline;
     flex-wrap: wrap;
-}
-
-.log-entry .log-ts {
-    color: var(--text-muted);
-    flex-shrink: 0;
-    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    align-items: baseline;
+    gap: var(--space-1) var(--space-2);
+    min-width: 0;
     font-size: var(--type-meta);
-    font-variant-numeric: tabular-nums;
+    line-height: var(--line-meta);
 }
-
-.log-entry .log-type {
-    font-weight: 700;
-    flex-shrink: 0;
-    font-size: var(--type-meta);
-}
+.log-ts { color: var(--text-meta); font-variant-numeric: tabular-nums; }
+.log-type { min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.log-type[hidden] { display: none; }
+.log-repeat { margin-left: auto; color: var(--text-meta); font-variant-numeric: tabular-nums; }
+.log-repeat[hidden] { display: none; }
 
 /* A level chip lies flat; the default `info` level says nothing and is not drawn (U028). */
 .log-entry .log-phase {
@@ -6212,51 +6204,46 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     background: var(--accent-10);
 }
 
-.log-entry .log-headline {
+/* The words read: the body size, the regular weight, the primary ink, at most three lines in the list; the whole
+   text is the fold's. */
+.log-words {
     color: var(--text-primary);
-    font-weight: 600;
-    word-break: break-word;
-    flex: 1 1 auto;
-    min-width: 0;
+    font-size: var(--type-body);
+    line-height: var(--line-body);
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
 }
-/* The headline, its count and Raw are one lead (logs.js logMainHtml): it shares the time's line where it fits whole,
-   else it takes the next line, and the headline wraps inside it only when it is longer than a line. Raw stays at the
-   end of the headline's own line instead of dropping to a line of its own. */
-.log-main > .log-lead { display: flex; flex: 1 1 auto; align-items: baseline; gap: 8px; min-width: 0; }
-
-.log-entry .log-repeat {
-    margin-left: auto;
-    color: var(--text-muted);
+.log-words[hidden] { display: none; }
+.log-facts {
+    color: var(--text-meta);
     font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    overflow-wrap: anywhere;
 }
+.log-facts[hidden] { display: none; }
+.log-facts > .log-executor-chip { margin-right: var(--space-2); }
 
-/* Raw is the line's last, quiet control (.btn.btn-ghost.btn-sm); after a count it follows it, else it takes the end.
-   Its word stands on the headline's baseline, as the line's other words do. */
-.log-raw-toggle { flex: none; }
-.log-lead > .log-repeat[hidden] + .log-raw-toggle { margin-left: auto; }
-
-.log-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-}
-
-.log-pill {
-    display: inline-flex;
-    align-items: center;
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: rgba(var(--neutral-rgb), 0.05);
-    color: var(--text-secondary);
-    border: 1px solid transparent;
-    font-size: var(--type-meta);
-}
-
-.log-body {
-    color: var(--text-secondary);
-    word-break: break-word;
+/* The fold's sections: the whole words as written, then notes in the meta ink, then the raw record. */
+.log-whole {
+    color: var(--text-primary);
+    font-size: var(--type-body);
+    line-height: var(--line-body);
     white-space: pre-wrap;
+    overflow-wrap: anywhere;
 }
+.log-note {
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+:is(.log-whole, .log-note)[hidden] { display: none; }
 
 .log-raw {
     margin: 0;
@@ -6276,33 +6263,13 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .log-raw-status { overflow-wrap: anywhere; }
 .log-raw-pages { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 
+/* What an event is, in its kind's colour; System has none, so its kind reads in the ink of the words. */
 .log-type.tools { color: var(--status-info-fg); }
 .log-type.llm { color: var(--accent); }
 .log-type.errors { color: var(--status-error-fg); }
 .log-type.tasks { color: var(--status-warn-fg); }
-.log-type.system { color: var(--text-muted); }
+.log-type.system { color: var(--text-primary); }
 .log-type.consciousness { color: var(--project); }
-
-.log-task-summary {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-}
-
-.log-task-review { margin-top: var(--space-2); }
-
-/* Inside the task's tray its timeline rows part by space alone: a tray inside a tray drops its fill. */
-.log-task-timeline {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-}
-
-.log-task-event {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
 
 /* `width` is the vertical bar, `height` the horizontal one: without the height
    a horizontal bar falls back to the 16-17px UA default and paints thick. */

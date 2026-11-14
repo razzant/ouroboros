@@ -712,14 +712,14 @@ def test_batch1_unknown_controls_and_tool_history_reach_the_real_spa(batch1_clon
                                            arg=[a_id, b_id, c_id], timeout=60000)
                     logs_view = page.evaluate("""ids => Object.fromEntries(ids.map(id => {
                         const card = document.querySelector(`[data-task-group="${id}"]`);
-                        return [id, {headline: card.querySelector('[data-task-headline]').textContent,
-                                     phase: card.querySelector('[data-task-phase]').textContent,
-                                     timeline: [...card.querySelectorAll('.log-task-event .log-headline, .log-task-event .log-main')]
+                        return [id, {headline: card.querySelector('.log-words').textContent,
+                                     phase: card.querySelector('.log-phase').textContent,
+                                     timeline: [...card.querySelectorAll('.log-task-event .log-head, .log-task-event .log-words')]
                                         .map(node => node.textContent.replace(/\\s+/g, ' ').trim())}];
                     }))""", [a_id, b_id, c_id])
                     for task in (a_id, b_id):
                         group = page.locator(f'[data-task-group="{task}"]')
-                        group.locator("details.log-task-details").evaluate("d => { d.open = true; }")
+                        group.locator("details.log-fold").first.evaluate("d => { d.open = true; }")
                     page.locator(f'[data-task-group="{b_id}"]').scroll_into_view_if_needed()
                     page.screenshot(path=str(shots / "12-boot2-logs-backfill.png"), full_page=True, animations="disabled")
                     receipt["logs_view"] = logs_view

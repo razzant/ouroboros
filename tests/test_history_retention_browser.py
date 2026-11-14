@@ -126,7 +126,7 @@ def test_retention_details_and_problem_only_card(engine, width):
                 playwright.expect(page.locator('#log-entries')).to_contain_text('Task history needs attention')
                 playwright.expect(page.locator('#log-entries')).to_contain_text('Saving task history')
                 playwright.expect(page.locator('#log-entries .log-body').filter(has_text='OSError: disk full')).to_contain_text('2 × OSError: disk full')
-                page.locator('.log-entry').filter(has_text='Task history needs attention').get_by_role('button', name='Raw', exact=True).click()
+                page.locator('.log-entry').filter(has_text='Task history needs attention').locator('summary', has_text='Record').click()
                 playwright.expect(page.locator('.log-raw:visible')).to_contain_text('retained-source')
                 capture("logs")
                 assert not errors

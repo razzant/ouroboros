@@ -129,15 +129,16 @@ function setup(t) {
     return {
         settled,
         push: (evt) => ws.emit('log', { data: { ts: '2026-10-15T00:00:00+00:00', task_id: 't', ...evt } }),
-        headline: () => card().querySelector('[data-task-headline]').textContent,
-        phase: () => card().querySelector('[data-task-phase]').textContent,
-        tone: () => card().querySelector('[data-task-phase]').dataset.chipTone,
+        // The card's words (its latest headline) and its level chip: the first of each in the card is its own.
+        headline: () => card().querySelector('.log-words').textContent,
+        phase: () => card().querySelector('.log-phase').textContent,
+        tone: () => card().querySelector('.log-phase').dataset.chipTone,
         // A Timeline's rows exist while it is open: opened the way the browser does (its `toggle` reaches the list).
         timelineRows: () => {
             const details = card().querySelector('details');
             details.open = true;
             mount.querySelector('#log-entries').dispatchEvent({ type: 'toggle', target: details });
-            return card().querySelector('[data-task-timeline]').querySelectorAll('.log-task-event').length;
+            return card().querySelector('.log-task-timeline').querySelectorAll('.log-task-event').length;
         },
     };
 }

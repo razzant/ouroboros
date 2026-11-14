@@ -531,7 +531,7 @@ test('Logs reports partial history without losing live rows or deduplication, th
     assert.equal(calls.length, 8, 'only existing init/reconnect backfill runs');
 });
 
-test('Logs reads oldest to newest, says why it is empty, and shows the kinds chosen or, at rest, every kind', async (t) => {
+test('Logs reads oldest to newest, gives every event one anatomy, and shows the kinds chosen or, at rest, every kind', async (t) => {
     const { mount, routes, ws } = setup(t);
     const live = { type: 'test_live_event', ts: '2026-09-09T12:00:00Z', message: 'live' };
     const earlier = { type: 'test_earlier_event', ts: '2026-09-09T11:59:00Z', message: 'earlier' };
@@ -548,22 +548,22 @@ test('Logs reads oldest to newest, says why it is empty, and shows the kinds cho
     const entries = mount.querySelector('#log-entries');
     // History that arrives after a live event takes its place by its own time (U035).
     assert.deepEqual(entries.children.map((entry) => entry.dataset.logTime), [String(Date.parse(earlier.ts)), String(Date.parse(live.ts))]);
-    // The event's one line: Raw at its end as the quiet small capsule, never a row of its own (U027, U032).
-    const main = entries.children[0].querySelector('.log-main');
-    const raw = main.querySelector('.log-raw-toggle');
-    assert.equal(raw.className, 'btn btn-ghost btn-sm log-raw-toggle');
-    assert.equal(entries.children[0].querySelector('.log-actions'), null);
-    // Raw wraps with its headline as one lead, so a narrow pane never leaves it alone on a line under the headline;
-    // the time stays outside the lead, so the lead takes the next line whole when it does not fit beside the time.
-    const lead = raw.parentElement;
-    assert.equal(lead.className, 'log-lead');
-    assert.equal(lead.parentElement, main);
-    assert.equal(lead.querySelector('.log-headline').parentElement, lead);
-    assert.equal(main.querySelector('.log-ts').parentElement, main);
-    // Raw is one delegated component (logs_raw.js): the browser's click reaches the list, which opens the record.
-    entries.dispatchEvent({ type: 'click', target: raw });
-    assert.equal(entries.children[0].querySelector('.log-raw').hidden, false);
-    assert.equal(raw.getAttribute('aria-expanded'), 'true');
+    // One anatomy (U027, U028): the first line holds the time, what the event is (an unknown event's name) and its
+    // level; its words follow in body text; its one fold, last, is the shared disclosure named for what it holds.
+    const [first] = entries.children;
+    const head = first.querySelector('.log-head');
+    assert.deepEqual(first.children.map((part) => part.className), ['log-head', 'log-words', 'log-facts', 'ui-disclosure log-fold']);
+    assert.equal(head.querySelector('.log-ts').parentElement, head);
+    assert.equal(head.querySelector('.log-type').textContent, 'test_earlier_event');
+    assert.equal(first.querySelector('.log-words').textContent, 'earlier');
+    const fold = first.children.at(-1);
+    assert.equal(fold.querySelector('summary').textContent, 'Record');
+    assert.equal(first.querySelectorAll('details').length, 1, 'one fold, and no Raw beside the words');
+    assert.equal(first.querySelector('.log-raw-toggle'), null);
+    // The record is one delegated component (logs_raw.js): the fold's toggle reaches the list, which reads the record.
+    fold.open = true;
+    entries.dispatchEvent({ type: 'toggle', target: fold });
+    assert.equal(fold.querySelector('.log-raw').hidden, false);
     // The filter is the shared chips with one state model (U031): at rest none is lit and every kind shows, and Clear
     // keeps its place at the row's end unseen; a chosen chip shows its kind, and only the chosen chips are lit.
     const chips = mount.querySelectorAll('.filter-chip');
@@ -634,25 +634,31 @@ test('Logs prints an event\'s name once and names a task card by its short id wi
     ws.emit('log', { data: { type: 'worker_ready', ts: '2026-09-16T12:00:00Z' } });
     const entries = mount.querySelector('#log-entries');
     const plain = entries.children.find((node) => !node.dataset.taskGroup);
-    const headline = plain.querySelector('.log-headline').textContent;
-    const type = plain.querySelector('.log-type');
-    assert.ok(!type || type.textContent !== headline, 'the type is not printed again beside the same headline (U028)');
+    assert.equal(plain.querySelector('.log-type').textContent, 'worker_ready', 'its name is what the event is');
+    assert.equal(plain.querySelector('.log-words').textContent, '', 'and is not printed again as its words (U028)');
     ws.emit('log', { data: { type: 'task_heartbeat', task_id: '55d180783850458f', phase: 'running', ts: '2026-09-16T12:00:02Z',
         runtime_sec: 61 } });
     const card = entries.children.find((node) => node.dataset.taskGroup === '55d180783850458f');
-    assert.equal(card.querySelector('[data-task-kind]').textContent, 'task 55d18078', 'eight characters, as every row');
-    const pills = card.querySelector('[data-task-summary]').querySelectorAll('.log-pill').map((pill) => pill.textContent);
-    assert.ok(!pills.some((pill) => pill.startsWith('task=') || pill === 'task'), `no repeated id: ${pills}`);
+    assert.equal(card.querySelector('.log-type').textContent, 'task 55d18078', 'eight characters, as every row');
+    assert.equal(card.querySelector('.log-facts').textContent, '1m 1s', 'its facts say no id and no repeated type');
     // A Timeline's rows exist while it is open (logs.js): opened the way the browser does, its `toggle` reaching the list.
     const details = card.querySelector('details');
     details.open = true;
     entries.dispatchEvent({ type: 'toggle', target: details });
-    const timeline = card.querySelector('[data-task-timeline]').querySelectorAll('.log-pill').map((pill) => pill.textContent);
-    assert.ok(timeline.includes('task=55d180783850458f'), 'the timeline keeps the full id');
+    const [row] = card.querySelector('.log-task-timeline').querySelectorAll('.log-task-event');
+    assert.doesNotMatch(row.querySelector('.log-facts').textContent, /task=|55d18078/, 'an id is no fact of the list');
+    // A machine reference stands in the record: the row's own fold holds the full id.
+    const record = row.querySelector('details');
+    assert.equal(record.querySelector('summary').textContent, 'Record');
+    record.open = true;
+    entries.dispatchEvent({ type: 'toggle', target: record });
+    await settle();
+    await settle();
+    assert.match(row.querySelector('.log-raw').textContent, /"task_id": "55d180783850458f"/, 'the record keeps the full id');
     // An older frame delivered later (history after the live stream) neither dates the card back nor moves it.
-    const shownAt = card.querySelector('[data-task-ts]').textContent;
+    const shownAt = card.querySelector('.log-ts').textContent;
     ws.emit('log', { data: { type: 'task_heartbeat', task_id: '55d180783850458f', phase: 'running', ts: '2026-09-16T11:59:00Z' } });
-    assert.equal(card.querySelector('[data-task-ts]').textContent, shownAt);
+    assert.equal(card.querySelector('.log-ts').textContent, shownAt);
     assert.equal(card.dataset.logTime, String(Date.parse('2026-09-16T12:00:02Z')));
 });
 
@@ -812,9 +818,9 @@ test('Logs files a wake-up group under Consciousness with its label, from the or
     const entries = mount.querySelector('#log-entries');
     const card = (id) => entries.children.find((node) => node.dataset.taskGroup === id);
     assert.equal(card('wake-1').dataset.category, 'consciousness');
-    assert.equal(card('wake-1').querySelector('[data-task-kind]').textContent, 'Consciousness');
+    assert.equal(card('wake-1').querySelector('.log-type').textContent, 'Consciousness');
     assert.equal(card('turn-2').dataset.category, 'tasks');
-    assert.equal(card('turn-2').querySelector('[data-task-kind]').textContent, 'task turn-2');
+    assert.equal(card('turn-2').querySelector('.log-type').textContent, 'task turn-2');
 });
 
 test('Logs keeps the executor chip quiet and prints its detail sentence as text (#360 A)', async (t) => {
@@ -830,12 +836,13 @@ test('Logs keeps the executor chip quiet and prints its detail sentence as text 
     await settle();
     const entries = mount.querySelector('#log-entries');
     const card = entries.children.find((node) => node.dataset.taskGroup === 'child-x');
-    const chip = card.querySelector('[data-task-executor]');
-    assert.equal(chip.hidden, false);
+    const chip = card.querySelector('.log-executor-chip');
+    assert.equal(chip.parentElement, card.querySelector('.log-facts'), 'the quiet chip stands among the card\'s facts');
     assert.match(chip.textContent, /Codex · 1 of 2 runs failed$/);
-    const detail = card.querySelector('[data-task-executor-detail]');
+    const detail = card.querySelector('.log-executor-detail');
+    assert.equal(detail.parentElement, card.querySelector('details'), 'its sentence opens with the card\'s fold');
     assert.equal(detail.hidden, false, 'the detail is visible text, not a hover-only title');
-    assert.equal(detail.textContent, chip.title);
+    assert.equal(detail.textContent, chip.getAttribute('title'), 'the sentence is the chip\'s own title, said as text');
     assert.match(detail.textContent, /2 runs settled \(1 ok, 1 failed\)/);
     const standalone = entries.children.find((node) => !node.dataset.taskGroup);
     assert.match(standalone.querySelector('.log-executor-chip').textContent, /Claude Code$/);

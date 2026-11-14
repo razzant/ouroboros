@@ -65,7 +65,7 @@ def test_descendant_is_informational_and_problem_stays_warning(width, tmp_path):
                 problem = page.locator('.log-entry').filter(has_text='Worker checkout is not a descendant of baseline')
                 assert problem.locator('.log-phase').inner_text() == 'warn'
                 assert page.locator('.log-entry').filter(has_text='comparison unavailable').locator('.log-phase').inner_text() == 'warn'
-                descendant.get_by_role('button', name='Raw', exact=True).click()
+                descendant.locator('summary', has_text='Record').click()
                 assert 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' in descendant.locator('.log-raw').inner_text()
                 assert 'Worker SHA mismatch' not in page.locator('#page-logs').inner_text()
                 assert not errors, errors

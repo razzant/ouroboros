@@ -1,12 +1,11 @@
 import { apiFetch, fetchJson } from './api_client.js';
 import { downloadBlobViaHostBridge, shellBridgeApi } from './ui_helpers.js';
 
-// One explicit Raw opening owns one page. The source is fixed until it is closed: a repeated event must never
+// One explicit opening owns one page. The source is fixed until it is closed: a repeated event must never
 // silently substitute newer bytes. File rows use the gateway's verified reader; unreferenced live events say
 // "Received event" and serialize large snapshots off the UI thread. Neither path accumulates pages in the DOM.
-// Raw is the quiet last control of the event's first line (logs.js); the record and its page tools follow the
-// event's facts. The tools are small neutral capsules, as every other Retry is (UI_CONTROL_TEXT_INVENTORY.md).
-export const LOG_RAW_TOGGLE_HTML = '<button class="btn btn-ghost btn-sm log-raw-toggle" type="button" aria-expanded="false">Raw</button>';
+// The record is the last section of the event's one fold (logs.js): opening the fold reads it, closing it lets the
+// page go. The tools are small neutral capsules, as every other Retry is (UI_CONTROL_TEXT_INVENTORY.md).
 export const LOG_RAW_HTML = `<pre class="log-raw" hidden></pre>
     <div class="log-raw-tools" hidden><div class="log-raw-status ui-status" role="status"></div>
         <div class="log-raw-pages"><button class="btn btn-default btn-sm" data-raw-action="first" type="button">First page</button>
@@ -154,7 +153,6 @@ export function createLogRaw({ visible }) {
     function close(view) {
         opened.delete(view); release(view);
         view.pre.hidden = true; view.pre.textContent = ''; view.tools.hidden = true;
-        view.button.textContent = 'Raw'; view.button.setAttribute('aria-expanded', 'false');
     }
     async function download(view) {
         // Packaged launchers accept only their older file routes. An explicit download uses their existing bytes
@@ -180,24 +178,40 @@ export function createLogRaw({ visible }) {
         } finally { if (view.downloadAbort === abort) view.downloadAbort = null; }
     }
     return {
-        bind(root, source) { bindings.set(root.querySelector('.log-raw-toggle'), { root, source }); },
+        bind(root, source) { bindings.set(root.querySelector('.log-fold'), { root, source }); },
         changed(root) {
             for (const view of opened) {
-                if (!root.contains(view.button)) continue;
+                if (!root.contains(view.fold)) continue;
                 const next = view.source();
                 if (next === view.event || (view.raw?.ref && next?._raw?.ref === view.raw.ref && sameSource(next._raw.source, view.raw.source))) continue;
                 release(view); view.invalid = true;
                 view.first.disabled = view.nextButton.disabled = true; view.retry.hidden = view.download.hidden = true;
-                status(view, 'This entry changed. Close and reopen Raw to read its current source.');
+                status(view, 'This entry changed. Close and reopen its record to read its current source.');
             }
         },
-        remove(root) { for (const view of opened) if (root.contains(view.button)) { opened.delete(view); release(view); } },
+        remove(root) { for (const view of opened) if (root.contains(view.fold)) { opened.delete(view); release(view); } },
         exposure() {
             for (const view of opened) {
                 if (view.invalid) continue;
                 if (!shown(view)) { view.owed ||= view.loading || !view.raw; release(view); }
                 else if (view.owed) void read(view, view.offset);
             }
+        },
+        // The record follows its fold: opened, its first page is read; closed, the page is let go.
+        toggled(fold) {
+            const binding = bindings.get(fold);
+            if (!binding) return false;
+            const existing = [...opened].find(view => view.fold === fold);
+            if (!fold.open) { if (existing) close(existing); return true; }
+            if (existing) return true;
+            const { root, source } = binding, event = source();
+            const view = { root, source, fold, event, raw: event?._raw, turn: 0,
+                pre: fold.querySelector('.log-raw'), tools: fold.querySelector('.log-raw-tools'), status: fold.querySelector('.log-raw-status'),
+                first: fold.querySelector('[data-raw-action="first"]'), nextButton: fold.querySelector('[data-raw-action="next"]'),
+                retry: fold.querySelector('[data-raw-action="retry"]'), download: fold.querySelector('.log-raw-download') };
+            opened.add(view); view.pre.hidden = view.tools.hidden = false;
+            void read(view);
+            return true;
         },
         click(target, event) {
             const link = target?.closest?.('.log-raw-download');
@@ -208,24 +222,6 @@ export function createLogRaw({ visible }) {
                     if (!view.invalid && !view.downloadAbort) void download(view);
                     return true;
                 }
-            }
-            const button = target?.closest?.('.log-raw-toggle');
-            if (button) {
-                const binding = bindings.get(button);
-                if (!binding) return false;
-                const existing = [...opened].find(view => view.button === button);
-                if (existing) close(existing);
-                else {
-                    const { root, source } = binding, event = source();
-                    const view = { root, source, button, event, raw: event?._raw, turn: 0,
-                        pre: root.querySelector('.log-raw'), tools: root.querySelector('.log-raw-tools'), status: root.querySelector('.log-raw-status'),
-                        first: root.querySelector('[data-raw-action="first"]'), nextButton: root.querySelector('[data-raw-action="next"]'),
-                        retry: root.querySelector('[data-raw-action="retry"]'), download: root.querySelector('.log-raw-download') };
-                    opened.add(view); view.pre.hidden = view.tools.hidden = false;
-                    button.textContent = 'Hide raw'; button.setAttribute('aria-expanded', 'true');
-                    void read(view);
-                }
-                return true;
             }
             const action = target?.closest?.('[data-raw-action]');
             if (!action) return false;

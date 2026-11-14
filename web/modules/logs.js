@@ -14,29 +14,30 @@ import {
     summarizeLogEvent,
 } from './log_events.js';
 import { outcomeTone } from './task_phase_chip.js';
-import { createLogRaw, LOG_RAW_HTML, LOG_RAW_TOGGLE_HTML } from './logs_raw.js';
+import { createLogRaw, LOG_RAW_HTML } from './logs_raw.js';
 
 /** Dashboard › Logs (docs/ARCHITECTURE.md §3 "Dashboard"). The panel's entries are data first: every live frame and
- * backfilled row updates its entry (task grouping, x-N collapse, the sticky Errors filter, the settled headline) whether
+ * backfilled row updates its entry (task grouping, ×N collapse, the sticky Errors filter, the settled headline) whether
  * or not the panel is on screen, while the DOM follows only a shown panel. Hidden, the panel writes no node and reads no
  * history; shown again it places what changed newest first, RENDER_CHUNK entries a frame, so a burst that arrived
- * meanwhile never becomes one long rebuild. A task's timeline rows exist while its Timeline is open. Raw pins one
- * compact row's source or received event, pages asynchronously, and offers a full download (logs_raw.js). The reader keeps their place across
- * hide and show: following the newest entry, or on the entry they were reading. The compact history says what it left
- * out: the fields a row's view omits (on that row) and the damaged records a read skipped (in the status line).
- * The panel is one Dashboard tab body, its scroller; an event is one line in one card of trays (U026-U035). */
+ * meanwhile never becomes one long rebuild. Every event has one fold: a task's holds its timeline, whose rows exist
+ * while it is open; an event's holds its record, which pins one compact row's source or received event while open,
+ * pages asynchronously and offers a full download (logs_raw.js). The reader keeps their place across hide and show:
+ * following the newest entry, or on the entry they were reading. The compact history says what it left out: the fields
+ * a row's view omits (in its record) and the damaged records a read skipped (in the status line).
+ * The panel is one Dashboard tab body, its scroller; an event is one tray of the list's one card (U026-U035). */
 
 // The kinds of damaged record a compact read skips (`gaps`, ouroboros/gateway/logs.py); an unknown kind is shown as named.
 const GAP_WORDS = { malformed_jsonl: 'malformed line', incomplete_live_line: 'unfinished live line', torn_archive_line: 'torn archive line' };
 
-// What a compact row's view leaves out (`_raw.omitted_fields`, at most 64 names of `omitted_field_count`); Raw has it.
+// What a compact row's view leaves out (`_raw.omitted_fields`, at most 64 names of `omitted_field_count`); its record has it.
 function omittedNote(evt) {
     const names = Array.isArray(evt?._raw?.omitted_fields) ? evt._raw.omitted_fields.map(String) : [];
     const count = Math.max(names.length, Number.isSafeInteger(evt?._raw?.omitted_field_count) ? evt._raw.omitted_field_count : 0);
     if (!count) return '';
     const more = count - names.length;
     const left = names.length ? `${names.join(', ')}${more ? ` and ${more} more` : ''}` : `${count} fields`;
-    return `Left out of this view: ${left}. Raw reads the whole row.`;
+    return `Left out of this view: ${left}. The record below reads the whole row.`;
 }
 
 export function initLogs({ ws, state, mount }) {
@@ -358,13 +359,8 @@ export function initLogs({ ws, state, mount }) {
             record.headline = view.headline || 'Task activity';
         }
         if (settles) record.terminal = true;
-        // The card's facts beside its kind; the ids and the type its kind and lineage already are stay in its
-        // Timeline (U029).
-        if (!behind) {
-            const lineage = new Set([`task=${groupId}`, `task=${evt.task_id || ''}`, `parent=${evt.parent_task_id || ''}`,
-                `root=${evt.root_task_id || ''}`, taskType]);
-            record.meta = view.meta.filter((item) => !lineage.has(item));
-        }
+        // The card's facts under its words; the type its kind already names is not said again (U029).
+        if (!behind) record.meta = view.meta.filter((item) => item !== taskType);
         const execution = executorChip(evt), review = formatReviewProjection(evt.review_projection);
         record.execution = (behind ? record.execution || execution : execution || record.execution);
         record.review = (behind ? record.review || review : review || record.review);
@@ -373,8 +369,8 @@ export function initLogs({ ws, state, mount }) {
         const dedupeKey = duplicateLogEventKey(evt);
         // A row's body and what its view left out come from the same event (an adopted file source changes neither).
         if (!behind && last && last.dupKey && last.dupKey === dedupeKey) {
-            Object.assign(last, { count: last.count + 1, ts, meta: view.meta, body: view.body, omitted: omittedNote(evt), evt, at,
-                rev: last.rev + 1 });
+            Object.assign(last, { count: last.count + 1, ts, meta: view.meta, body: view.body, full: view.full, omitted: omittedNote(evt),
+                evt, at, rev: last.rev + 1 });
         } else {
             const row = {
                 ts,
@@ -382,6 +378,7 @@ export function initLogs({ ws, state, mount }) {
                 headline: view.headline || 'Task event',
                 meta: view.meta,
                 body: view.body,
+                full: view.full,
                 omitted: omittedNote(evt),
                 evt,
                 at,
@@ -406,28 +403,30 @@ export function initLogs({ ws, state, mount }) {
 
     // ---- The panel (DOM): only while shown ------------------------------------------------------------------------
 
-    function metaPills(meta) {
-        if (!meta.length) return '';
-        return `<div class="log-meta">${meta.map((item) => `<span class="log-pill">${escapeHtml(item)}</span>`).join('')}</div>`;
-    }
+    // One anatomy for every event, a task card and a timeline row alike (U027, U028): a first line with its time, what
+    // it is in its kind's colour, its level chip (the default `info` says nothing, CSS hides it) and its repeat count at
+    // the line's end; then its words in body text, at most three lines in the list; its facts in one meta line; and one
+    // fold named for what it holds, in the same place: a task's Timeline, an event's Record. A record holds the whole
+    // words where the list shows them cut, what the compact view left out, and the raw record (logs_raw.js).
+    const RECORD_HTML = `<div class="log-whole" hidden></div><div class="log-note" data-log-omitted hidden></div>${LOG_RAW_HTML}`;
+    const TIMELINE_HTML = '<div class="log-note log-task-review" hidden></div><div class="log-task-timeline"></div>';
+    const partsOf = new WeakMap();  // an event's node → its parts, found once when it is made
+    const wholeOf = new WeakMap();  // an event's node → its whole words, where its summary cut them
 
-    // An event's one first line (U027, U028): its time, its type only when the headline does not already say it
-    // (a task card's kind always: it changes with the card), its level (the default `info` says nothing, CSS hides
-    // it), the headline, the repeat count and, for an event with a record, Raw at the line's end (logs_raw.js). The
-    // headline, its count and Raw are one lead that wraps as a whole, so Raw never stands on a line of its own.
-    function logMainHtml({ ts = '', type = '', phase = 'info', headline = 'Event', repeat = '', attrs = {}, hasRaw = false }) {
-        const attr = (key) => attrs[key] ? ` ${attrs[key]}` : '';
-        const showType = type && (attrs.type || (type.label && type.label !== headline));
-        return `
-            <div class="log-main">
-                <span class="log-ts"${attr('ts')}>${escapeHtml(ts)}</span>
-                ${showType ? `<span class="log-type ${escapeHtml(type.className || '')}"${attr('type')}>${escapeHtml(type.label || '')}</span>` : ''}
-                <span class="log-phase ${escapeHtml(phase)}"${attr('phase')}>${escapeHtml(phase)}</span>
-                <span class="log-lead"><span class="log-headline"${attr('headline')}>${escapeHtml(headline)}</span>
-                <span class="log-repeat"${attr('repeat')}${repeat ? '' : ' hidden'}>${escapeHtml(repeat)}</span>
-                ${hasRaw ? LOG_RAW_TOGGLE_HTML : ''}</span>
-            </div>
-        `;
+    function createEvent(className, fold, foldBody) {
+        const node = document.createElement('div');
+        node.className = className;
+        node.innerHTML = `<div class="log-head"><span class="log-ts"></span><span class="log-type" hidden></span>`
+            + '<span class="log-phase"></span><span class="log-repeat" hidden></span></div>'
+            + '<div class="log-words"><span class="log-headline"></span><span class="log-body"></span></div><div class="log-facts" hidden></div>'
+            + `<details class="ui-disclosure log-fold"><summary>${fold}</summary>`
+            + `<div class="log-note log-executor-detail" hidden></div>${foldBody}</details>`;
+        const find = (selector) => node.querySelector(selector);
+        partsOf.set(node, { ts: find('.log-ts'), kind: find('.log-type'), phase: find('.log-phase'), repeat: find('.log-repeat'),
+            words: find('.log-words'), headline: find('.log-headline'), body: find('.log-body'), facts: find('.log-facts'),
+            fold: find('.log-fold'), detail: find('.log-executor-detail'),
+            whole: find('.log-whole'), omitted: find('[data-log-omitted]') });
+        return node;
     }
 
     const setText = (el, text) => { if (el && el.textContent !== text) el.textContent = text; };
@@ -436,122 +435,79 @@ export function initLogs({ ws, state, mount }) {
     const shownHtml = new WeakMap();  // markup a node was last given, so an unchanged one is not rewritten
     const setHtml = (el, html) => { if (el && shownHtml.get(el) !== html) { el.innerHTML = html; shownHtml.set(el, html); } };
 
+    // An event's parts, each written only when it changed. Its words never repeat the name its kind already says (U028);
+    // a delegated executor is a quiet chip among its facts, and its detail sentence is text in the fold (#360 A).
+    function paintEvent(node, { ts = '', kind = null, phase = 'info', tone = '', repeat = 1, headline = '', body = '', full = '',
+        meta = [], execution = null, omitted = '' }) {
+        const parts = partsOf.get(node);
+        setText(parts.ts, ts);
+        if (kind) { setText(parts.kind, kind.label); setClass(parts.kind, `log-type ${kind.className}`); }
+        parts.kind.hidden = !kind;
+        setText(parts.phase, phase);
+        setClass(parts.phase, `log-phase ${phase}`);
+        if (tone) parts.phase.dataset.chipTone = tone;
+        else delete parts.phase.dataset.chipTone;
+        setText(parts.repeat, repeat > 1 ? `×${repeat}` : '');
+        parts.repeat.hidden = repeat <= 1;
+        // The headline, then the body on its own line: one box of at most three lines (style.css .log-words).
+        const lead = kind?.label === headline ? '' : headline;
+        setText(parts.headline, lead);
+        setText(parts.body, lead && body ? `\n${body}` : body);
+        parts.words.hidden = !lead && !body;
+        wholeOf.set(node, full);
+        const chip = execution ? `<span class="harness-chip log-executor-chip" title="${escapeHtmlAttr(execution.title || '')}">${
+            harnessIdentityMarkup(execution.harness, { label: execution.label || '', className: 'log-executor-identity' })}</span>` : '';
+        setHtml(parts.facts, chip + escapeHtml(meta.join(' · ')));
+        parts.facts.hidden = !chip && !meta.length;
+        setText(parts.detail, execution?.title || '');
+        parts.detail.hidden = !execution?.title;
+        if (parts.omitted) { setText(parts.omitted, omitted); parts.omitted.hidden = !omitted; }
+        if (parts.whole && parts.fold.open) showWhole(node);
+    }
+
+    // An open record starts with the whole words where the list shows a cut: its summary shortened them, or the list
+    // holds them to three lines (one measure, when the owner opens it).
+    function showWhole(node) {
+        const { words, whole } = partsOf.get(node);
+        const full = wholeOf.get(node) || (words.scrollHeight > words.clientHeight + 1 ? words.textContent : '');
+        setText(whole, full);
+        whole.hidden = !full;
+    }
+
     function renderStandalone(entry) {
         if (!entry.node) {
-            const { view, execution } = entry;
-            const node = document.createElement('div');
-            node.className = 'log-entry';
-            node.innerHTML = `
-                ${logMainHtml({
-                    ts: entry.tsText,
-                    type: { className: entry.category, label: view.typeLabel },
-                    phase: view.phase || 'info',
-                    headline: view.headline || 'Event',
-                    hasRaw: true,
-                })}
-                ${execution ? `<div class="harness-chip log-executor-chip" title="${escapeHtmlAttr(execution.title || '')}">${harnessIdentityMarkup(execution.harness, {
-                    label: execution.label || '',
-                    className: 'log-executor-identity',
-                })}</div>` : ''}
-                ${execution?.title ? `<div class="log-body log-executor-detail">${escapeHtml(execution.title)}</div>` : ''}
-                ${metaPills(view.meta)}
-                ${view.body ? `<div class="log-body">${escapeHtml(view.body)}</div>` : ''}
-                ${entry.omitted ? `<div class="log-body" data-log-omitted>${escapeHtml(entry.omitted)}</div>` : ''}
-                ${LOG_RAW_HTML}
-            `;
-            raw.bind(node, () => entry.evt);
-            entry.node = node;
-            entryOf.set(node, entry);
+            entry.node = createEvent('log-entry', 'Record', RECORD_HTML);
+            raw.bind(entry.node, () => entry.evt);
+            entryOf.set(entry.node, entry);
         }
-        const { node } = entry;
+        const { node, view } = entry;
         setData(node, 'category', entry.category);
         setData(node, 'logTime', String(entry.at));
-        setText(node.querySelector('.log-ts'), entry.tsText);
-        const repeat = node.querySelector('.log-repeat');
-        setText(repeat, entry.repeat > 1 ? `x${entry.repeat}` : '');
-        if (repeat) repeat.hidden = entry.repeat <= 1;
+        paintEvent(node, { ts: entry.tsText, kind: { label: view.typeLabel, className: entry.category }, phase: view.phase || 'info',
+            repeat: entry.repeat, headline: view.headline || 'Event', body: view.body, full: view.full, meta: view.meta,
+            execution: entry.execution, omitted: entry.omitted });
         raw.changed(node);
     }
 
-    function createTaskGroupNode(entry) {
-        const node = document.createElement('div');
-        node.className = 'log-entry log-task-card';
-        node.dataset.taskGroup = entry.groupId;
-        node.innerHTML = `
-            ${logMainHtml({
-                type: { className: entry.category, label: entry.kindLabel },
-                phase: 'info',
-                headline: 'Task activity',
-                attrs: {
-                    ts: 'data-task-ts',
-                    type: 'data-task-kind',
-                    phase: 'data-task-phase',
-                    headline: 'data-task-headline',
-                    repeat: 'data-task-count',
-                },
-            })}
-            <div class="log-task-summary" data-task-summary></div>
-            <div class="harness-chip log-executor-chip" data-task-executor hidden></div>
-            <div class="log-body log-executor-detail" data-task-executor-detail hidden></div>
-            <div class="log-body log-task-review" data-task-review hidden></div>
-            <details class="ui-disclosure log-task-details">
-                <summary>Timeline</summary>
-                <div class="log-task-timeline" data-task-timeline></div>
-            </details>
-        `;
-        const find = (selector) => node.querySelector(selector);
-        entry.dom = {
-            ts: find('[data-task-ts]'),
-            kind: find('[data-task-kind]'),
-            phase: find('[data-task-phase]'),
-            headline: find('[data-task-headline]'),
-            count: find('[data-task-count]'),
-            summary: find('[data-task-summary]'),
-            executor: find('[data-task-executor]'),
-            executorDetail: find('[data-task-executor-detail]'),
-            review: find('[data-task-review]'),
-            details: find('details'),
-            timeline: find('[data-task-timeline]'),
-        };
-        entry.rows = new Map();
-        entry.node = node;
-        entryOf.set(node, entry);
-    }
-
     function renderTaskGroup(entry) {
-        if (!entry.node) createTaskGroupNode(entry);
-        const { dom } = entry;
-        setData(entry.node, 'category', entry.category);
+        if (!entry.node) {
+            const node = entry.node = createEvent('log-entry log-task-card', 'Timeline', TIMELINE_HTML);
+            node.dataset.taskGroup = entry.groupId;
+            entry.dom = { ...partsOf.get(node), review: node.querySelector('.log-task-review'), timeline: node.querySelector('.log-task-timeline') };
+            entry.rows = new Map();
+            entryOf.set(node, entry);
+        }
+        const { node, dom } = entry;
+        setData(node, 'category', entry.category);
         // A card stands where its newest event does (`at`); an older event never dates it back.
-        setData(entry.node, 'logTime', String(entry.at));
-        setText(dom.ts, entry.tsText);
-        setText(dom.kind, entry.kindLabel);
-        setClass(dom.kind, `log-type ${entry.category}`);
-        setText(dom.phase, entry.phase);
-        setClass(dom.phase, `log-phase ${entry.phase}`);
-        if (entry.tone) dom.phase.dataset.chipTone = entry.tone;
-        else delete dom.phase.dataset.chipTone;
-        setText(dom.headline, entry.headline);
-        setText(dom.count, `x${entry.events}`);
-        dom.count.hidden = entry.events <= 1;
-        setHtml(dom.summary, metaPills(entry.meta));
-        const execution = entry.execution;
-        if (execution) {
-            if (dom.executor.title !== (execution.title || '')) dom.executor.title = execution.title || '';
-            setHtml(dom.executor, harnessIdentityMarkup(execution.harness, {
-                label: execution.label || '',
-                className: 'log-executor-identity',
-            }));
-            dom.executor.hidden = false;
-            // The chip stays quiet; its detail sentence is text, never only a title.
-            setText(dom.executorDetail, execution.title || '');
-            dom.executorDetail.hidden = !execution.title;
-        }
-        if (entry.review) {
-            setText(dom.review, entry.review);
-            dom.review.hidden = false;
-        }
-        if (dom.details.open) renderTaskTimeline(entry);
+        setData(node, 'logTime', String(entry.at));
+        // A task's words are its latest headline: the body of that event is its timeline row's, said once.
+        paintEvent(node, { ts: entry.tsText, kind: { label: entry.kindLabel, className: entry.category }, phase: entry.phase,
+            tone: entry.tone, repeat: entry.events, headline: entry.headline, meta: entry.meta, execution: entry.execution });
+        // The task's review sentence opens with its timeline.
+        setText(dom.review, entry.review || '');
+        dom.review.hidden = !entry.review;
+        if (dom.fold.open) renderTaskTimeline(entry);
     }
 
     // An open Timeline's rows follow the task's recent events in place: a new event appends its row, the oldest
@@ -568,29 +524,15 @@ export function initLogs({ ws, state, mount }) {
             const item = entry.recent[index];
             let row = rows.get(item);
             if (!row) {
-                row = document.createElement('div');
-                row.className = 'log-task-event';
+                row = createEvent('log-task-event', 'Record', RECORD_HTML);
+                raw.bind(row, () => item.evt);
                 rows.set(item, row);
                 entry.dom.timeline.insertBefore(row, next);
             }
             next = row;
             if (row.dataset.rev === String(item.rev)) continue;
-            if (!row.dataset.rev) {
-                row.innerHTML = `
-                    ${logMainHtml({ ts: item.ts, phase: item.phase || 'info', headline: item.headline, hasRaw: true })}
-                    <div data-row-meta></div><div class="log-body"></div><div class="log-body" data-log-omitted hidden></div>
-                    ${LOG_RAW_HTML}`;
-                raw.bind(row, () => item.evt);
-            }
-            setText(row.querySelector('.log-ts'), item.ts);
-            const repeat = row.querySelector('.log-repeat');
-            setText(repeat, item.count > 1 ? `x${item.count}` : '');
-            repeat.hidden = item.count <= 1;
-            setHtml(row.querySelector('[data-row-meta]'), metaPills(item.meta));
-            setText(row.querySelector('.log-body'), item.body || '');
-            const omitted = row.querySelector('[data-log-omitted]');
-            setText(omitted, item.omitted || '');
-            omitted.hidden = !item.omitted;
+            paintEvent(row, { ts: item.ts, phase: item.phase, repeat: item.count, headline: item.headline, body: item.body,
+                full: item.full, meta: item.meta, omitted: item.omitted });
             row.dataset.rev = String(item.rev);
             raw.changed(row);
         }
@@ -828,16 +770,22 @@ export function initLogs({ ws, state, mount }) {
     logEntries.addEventListener('click', (event) => {
         if (raw.click(event.target, event)) return;
         // A Timeline about to open draws its rows first, so they are there when it opens.
-        const details = event.target?.closest?.('summary')?.parentElement;
-        const entry = details?.classList?.contains('log-task-details') && entryOf.get(details.closest('.log-entry'));
-        if (entry && !details.open) renderTaskTimeline(entry);
+        const fold = event.target?.closest?.('summary')?.parentElement;
+        const entry = fold && entryOf.get(fold.parentElement);
+        if (entry?.kind === 'group' && fold === entry.dom.fold && !fold.open) renderTaskTimeline(entry);
     });
-    // `toggle` does not bubble: caught on its way down. Closed, a Timeline lets its rows go.
+    // `toggle` does not bubble: caught on its way down. An event's record opens and closes with its fold (logs_raw.js),
+    // its whole words with it; a task's Timeline draws its rows open and lets them go closed.
     logEntries.addEventListener('toggle', (event) => {
-        const details = event.target;
-        const entry = details?.classList?.contains('log-task-details') && entryOf.get(details.closest('.log-entry'));
-        if (!entry) return;
-        if (details.open) renderTaskTimeline(entry);
+        const fold = event.target;
+        if (!fold?.classList?.contains('log-fold')) return;
+        if (raw.toggled(fold)) {
+            if (fold.open) showWhole(fold.parentElement);
+            return;
+        }
+        const entry = entryOf.get(fold.parentElement);
+        if (entry?.kind !== 'group') return;
+        if (fold.open) renderTaskTimeline(entry);
         else closeTaskTimeline(entry);
     }, true);
     document.addEventListener('selectionchange', () => {

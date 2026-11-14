@@ -242,7 +242,7 @@ def test_cards_activity_logs_and_budget_speak_the_status_marks(tmp_path, engine)
                             checkpoint_kind: 'context_fit_low_retry', ts: at(6) });
                     }""")
                     def headline(task_id):
-                        phase = page.locator(f'.log-task-card[data-task-group="{task_id}"] [data-task-phase]')
+                        phase = page.locator(f'.log-task-card[data-task-group="{task_id}"] > .log-head > .log-phase')
                         return phase.inner_text(), phase.evaluate("el => getComputedStyle(el).color")
                     assert headline("stopped") == ("cancelled", tokens["--text-secondary"])
                     assert headline("warned") == ("warn", tokens["--status-ok-fg"])
