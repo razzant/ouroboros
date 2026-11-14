@@ -1,4 +1,6 @@
-import { accountedUpperBound, accountedUpperBoundWithChildren, formatUsd4, isoMicros, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
+import { accountedUpperBound, accountedUpperBoundWithChildren, isoMicros, machineWords, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
+import { formatUsd } from './storage_format.js';
+import { compactTokens } from './cost_period.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
 import { DETAIL_ONLY_WARNINGS, TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
     failedStepHeadline, heldCallPhrase, heldCallsLine } from './task_reason_words.js';
@@ -10,7 +12,7 @@ import { acceptanceIncidentClauses } from './acceptance_incident_presentation.js
 import { fmt, tr } from './i18n.js';
 import { historyRetentionView } from './history_retention.js';
 import { checkFailureView } from './verification_presentation.js';
-import { hostRowDisplayText, hostTaskMessage } from './host_notice_text.js';
+import { hostRowDisplayText, hostTaskMessage, toolErrorDisplayText } from './host_notice_text.js';
 import { effortEvidenceText } from './effort_evidence.js';
 import { delegatedActivityView } from './delegated_activity.js';
 import { workerShaLogView, workerShaRelation } from './worker_sha_presentation.js';
@@ -26,17 +28,11 @@ const REVIEW_LIFECYCLE_ERROR_STATUSES = new Set([
 
 export { formatReviewProjection } from './review_presentation.js';
 
-export const LOG_CATEGORIES = {
-    tools: { label: 'Tools', color: 'var(--blue)' },
-    llm: { label: 'LLM', color: 'var(--accent)' },
-    errors: { label: 'Errors', color: 'var(--red)' },
-    tasks: { label: 'Tasks', color: 'var(--amber)' },
-    system: { label: 'System', color: 'var(--text-muted)' },
-    consciousness: { label: 'Consciousness', color: 'var(--accent)' },
-};
+// The Logs kinds and their filter labels. A kind is a filter, never a hue: only a failure is coloured (logs.js).
+export const LOG_CATEGORIES = { tools: 'Tools', llm: 'LLM', errors: 'Errors', tasks: 'Tasks', system: 'System', consciousness: 'Consciousness' };
 
-// The Errors filter follows the same typed failure phases on live and replay rows.
-const ERROR_LOG_PHASES = new Set(['error', 'timeout', 'lifecycle_error']);
+// The Errors filter follows the same typed failure phases on live and replay rows; they are the only coloured ones.
+export const ERROR_LOG_PHASES = new Set(['error', 'timeout', 'lifecycle_error']);
 
 export function categorizeLogEvent(evt, view = summarizeLogEvent(evt)) {
     const t = evt.type || evt.event || '';
@@ -313,8 +309,10 @@ export function childReportLabel(childStatus) {
         ? tr('subagent.report_to_parent', 'Report to parent') : '';
 }
 
+// A cost in Logs reads as every call's cost on the Dashboard (storage_format.formatUsd); a zero says nothing and is
+// not shown (an absent amount neither), so only a real cost takes a place on the event's line.
 export function formatLogMoney(value) {
-    return formatUsd4(value);
+    return value !== null && value !== undefined && value !== '' && Number(value) ? formatUsd(value) : '';
 }
 
 export function formatLogDuration(sec) {
@@ -324,23 +322,26 @@ export function formatLogDuration(sec) {
     return `${num < 10 ? num.toFixed(1) : Math.round(num)}s`;
 }
 
+// A token flow, input → output, in the Costs page's counts (cost_period.js compactTokens): "545k → 391 tokens".
+const tokenFlow = (prompt, completion) => `${prompt} \u2192 ${completion} tokens`;
+
 // task_done ledger totals: a sum no row reported (null) is '?', never 0.
 function formatLogTokens(evt) {
     const count = (n) => (n === null ? '?' : Number(n || 0));
     const prompt = count(evt.prompt_tokens), completion = count(evt.completion_tokens);
     if (![prompt, completion].some((n) => n !== '?' && n)) return '';
-    return `${prompt}\u2192${completion} tok`;
+    return tokenFlow(...[prompt, completion].map((n) => (n === '?' ? n : compactTokens(n))));
 }
 
 // Usage rows only (#1578): v2 null = not reported, 0 = a reported zero; an unstamped/v1 zero stays ambiguous (LEGACY_RULE).
 // A session's input_token_usage total is its whole input, as a direct call's prompt_tokens; its harness's own
 // prompt_tokens may count only the uncached rest, so a split without a total shows the input as unknown.
 function formatUsageTokens(evt) {
-    const count = (n) => (!Number.isSafeInteger(n) || n < 0 ? '?' : n === 0 && evt.record_contract_version !== 2 ? '0?' : String(n));
+    const count = (n) => (!Number.isSafeInteger(n) || n < 0 ? '?' : n === 0 && evt.record_contract_version !== 2 ? '0?' : compactTokens(n));
     const split = evt.input_token_usage && typeof evt.input_token_usage === 'object' ? evt.input_token_usage : null;
     const prompt = count(split ? split.total_tokens : evt.prompt_tokens), completion = count(evt.completion_tokens);
     if (prompt === '?' && completion === '?') return 'tokens not reported';
-    return `${prompt}\u2192${completion} tok${[prompt, completion].includes('0?') ? ' (legacy 0 may be unreported)' : ''}`;
+    return `${tokenFlow(prompt, completion)}${[prompt, completion].includes('0?') ? ' (legacy 0 may be unreported)' : ''}`;
 }
 
 function compactJson(value, maxLen = 220) {
@@ -732,40 +733,42 @@ function taskOutcomeMeta(evt) {
 
 export function summarizeLogEvent(evt) {
     const t = evt.type || evt.event || 'unknown';
-    const view = (phase, headline, { body = '', meta = [], typeLabel = t } = {}) => ({
-        typeLabel,
-        phase,
-        headline,
-        body,
-        meta: meta.filter(Boolean),
+    // An event's name (`headline`: what it is, in words, `about` the model or tool it concerns; empty where its words
+    // say it), its words (`body`; `full` their whole text where the list shows a cut, `markdown` for authored prose) and
+    // its facts (`meta`). A machine reference (an id, a hash, a path, a run's source) is neither: its record has it.
+    const view = (phase, headline, { body = '', full = '', meta = [], markdown = false } = {}) => ({
+        phase, headline, body, full, meta: meta.filter(Boolean), markdown,
     });
-    const taskMeta = (...items) => [evt.task_id ? `task=${evt.task_id}` : '', ...items];
+    const about = (name, subject) => [name, subject].filter(Boolean).join(' · ');
 
     if (evt.is_progress || t === 'send_message') {
-        const narration = describeText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240, { markdown: true });
+        // A delegated run's observation reads from its typed fields (delegated_activity.js), never from its text: what
+        // its executor said (or its count of technical events) is the words; who said it (an attempt's id), the run,
+        // its range, its journal's sequence numbers and its source stay in its record.
+        const delegated = delegatedActivityView(evt, { seq: false });
+        if (delegated) {
+            return view('progress', '', { body: delegated.body || 'Progress update', markdown: true,
+                full: delegated.fullBody === delegated.body ? '' : delegated.fullBody });
+        }
+        // A host note loses only the opening its producer marks it with (host_notice_text.js), as in a chat's timeline.
+        const narration = describeText(hostRowDisplayText({ ...evt, text: String(evt.content || evt.text || '').replace(/^💬\s*/, '') }),
+            240, { markdown: true });
+        const words = { body: narration.preview || 'Progress update', full: narration.full === narration.preview ? '' : narration.full, markdown: true };
         if (isSubagentEvent(evt)) {
             const sid = subagentId(evt);
             const event = String(evt.subagent_event || 'update').toLowerCase();
             const role = String(evt.subagent_role || '').trim();
-            return view(event === 'completed' ? 'done' : event === 'failed' || event === 'rejected' ? 'warn' : 'progress', subagentHeadline(sid, role, event, evt.model, { full: true }), {
-                body: narration.preview,
-                meta: [
-                    sid ? `task=${sid}` : '',
-                    role ? `role=${role}` : '',
-                    evt.model ? `model=${evt.model}` : '',
-                    evt.write_surface ? `write=${evt.write_surface}` : '',
-                    evt.parent_task_id ? `parent=${evt.parent_task_id}` : '',
-                    evt.root_task_id ? `root=${evt.root_task_id}` : '',
-                ],
-            });
+            return view(event === 'completed' ? 'done' : event === 'failed' || event === 'rejected' ? 'warn' : 'progress',
+                subagentHeadline(sid, role, event, evt.model, { full: true }), { ...words, body: narration.preview,
+                    meta: [evt.write_surface ? `write surface ${evt.write_surface}` : ''] });  // its role and model: its name
         }
-        return view('progress', narration.preview || 'Progress update', { meta: taskMeta() });
+        return view('progress', '', words);
     }
 
     if (t === 'task_started') {
         return view('start', `Started ${evt.task_type || 'task'}`, {
             body: shortText(evt.task_text, 220),
-            meta: taskMeta(evt.direct_chat ? 'chat' : 'queued'),
+            meta: [evt.direct_chat ? 'chat' : 'queued'],
         });
     }
 
@@ -773,95 +776,92 @@ export function summarizeLogEvent(evt) {
         const task = evt.task || {};
         return view('queued', `Received ${task.type || 'task'}`, {
             body: shortText(task.text, 220),
-            meta: [task.id ? `task=${task.id}` : '', task.text_len ? `${task.text_len} chars` : ''],
+            meta: [task.text_len ? `${task.text_len} chars` : ''],
         });
     }
 
     if (t === 'context_building_started') {
-        return view('context', 'Building context', { meta: taskMeta(evt.task_type || '') });
+        return view('context', 'Building context');
     }
 
     if (t === 'context_building_finished') {
         return view('ready', 'Context ready', {
-            meta: taskMeta(
+            meta: [
                 evt.message_count != null ? `${evt.message_count} msgs` : '',
                 Number.isFinite(Number(evt.budget_remaining_usd)) ? `$${Number(evt.budget_remaining_usd).toFixed(2)} left` : '',
-            ),
+            ],
         });
     }
 
     if (t === 'task_heartbeat') {
-        return view(evt.phase || 'alive', 'Still working', {
-            meta: taskMeta(evt.task_type || '', formatLogDuration(evt.runtime_sec)),
-        });
+        return view(evt.phase || 'alive', 'Still working', { meta: [formatLogDuration(evt.runtime_sec)] });
     }
 
     if (t === 'llm_round_started') {
-        return view('calling', `Calling ${evt.model || 'model'}`, {
-            meta: taskMeta(
+        return view('calling', `Calling ${compactModel(evt.model) || 'model'}`, {
+            meta: [
                 evt.round ? `r${evt.round}` : '',
                 evt.attempt ? `try ${evt.attempt}` : '',
                 evt.reasoning_effort || '',
                 evt.use_local ? 'local' : '',
-            ),
+            ],
         });
     }
 
     if (t === 'llm_round_finished' || t === 'llm_round') {
-        return view('done', `LLM round ${evt.round || ''} finished`.trim(), {
+        return view('done', about(`LLM round ${evt.round || ''} finished`.trim(), compactModel(evt.model)), {
             body: effortEvidenceText(evt),
-            meta: taskMeta(
-                evt.model || '',
+            meta: [
                 formatUsageTokens(evt),
                 // Backfill uses accounted upper bounds; live frames may carry cost.
                 formatLogMoney(accountedUpperBound(evt) ?? evt.cost),
                 evt.response_kind === 'tool_calls' ? `${evt.tool_call_count || 0} tool calls` : evt.response_kind || '',
-            ),
+            ],
         });
     }
 
     if (t === 'llm_round_empty' || t === 'llm_empty_response' || t === 'provider_content_refusal') {
         const refused = t === 'provider_content_refusal';  // no content, the filter's finish; its words are the provider's
-        return view('empty', refused ? "The provider's content filter stopped this request" : 'Model returned empty response', {
+        const name = refused ? "The provider's content filter stopped this request" : 'Model returned empty response';
+        return view('empty', about(name, compactModel(evt.model)), {
             body: refused && evt.provider_message ? `The provider said: "${shortText(evt.provider_message, 260)}"` : '',
-            meta: taskMeta(evt.model || '', evt.round ? `r${evt.round}` : '', refused ? evt.response_provider || '' : ''),
+            meta: [evt.round ? `r${evt.round}` : '', refused ? evt.response_provider || '' : ''],
         });
     }
 
     if (t === 'llm_round_error' || t === 'llm_api_error') {
-        return view('error', 'LLM call failed', {
+        return view('error', about('LLM call failed', compactModel(evt.model)), {
             body: shortText(evt.error, 260),
-            meta: taskMeta(evt.model || '', evt.round ? `r${evt.round}` : ''),
+            meta: [evt.round ? `r${evt.round}` : ''],
         });
     }
 
     if (t === 'llm_usage') {
-        return view('usage', 'LLM usage recorded', {
+        return view('usage', about('LLM usage recorded', compactModel(evt.model)), {
             body: effortEvidenceText(evt),
-            meta: taskMeta(
-                evt.model || '',
+            meta: [
                 formatUsageTokens(evt),
                 formatLogMoney(accountedUpperBound(evt) ?? evt.cost),
-                evt.category || '',
-            ),
+            ],
         });
     }
 
+    const tool = machineWords(evt.tool || 'tool');  // a tool's name in words, as an event's: "Run command started"
     if (t === 'tool_call_started') {  // processing began; a replayed start alone is no liveness claim
-        return view('start', `Started ${evt.tool || 'tool'}`, {
+        return view('start', `${tool} started`, {
             body: compactJson(evt.args, 260),
-            meta: taskMeta(evt.timeout_sec ? `timeout ${evt.timeout_sec}s` : ''),
+            meta: [evt.timeout_sec ? `timeout ${evt.timeout_sec}s` : ''],
         });
     }
 
     if (t === 'tool_call_timeout' || t === 'tool_timeout') {
-        return view('timeout', `${evt.tool || 'tool'} timed out`, {
+        return view('timeout', `${tool} timed out`, {
             body: compactJson(evt.args, 220),
-            meta: taskMeta(evt.timeout_sec ? `limit ${evt.timeout_sec}s` : '', formatLogDuration(evt.duration_sec)),
+            meta: [evt.timeout_sec ? `limit ${evt.timeout_sec}s` : '', formatLogDuration(evt.duration_sec)],
         });
     }
 
-    if (t === 'tool_call' || t === 'tool_call_finished' || evt.tool) {
+    if (t === 'tool_call' || t === 'tool_call_finished' || (evt.tool && t === 'unknown')) {
         // The durable tools.jsonl row (replay/backfill) carries the same typed
         // failure facts as the live tool_call_finished frame — is_error plus the
         // signal/exit facts — so a failed call reads the same after a reload.
@@ -871,9 +871,9 @@ export function summarizeLogEvent(evt) {
         const finished = t === 'tool_call_finished';
         const label = signalDeath ? `killed (${evt.signal || evt.exit_code})`
             : failed ? 'failed' : finished ? 'finished' : 'result';
-        return view(held ? 'warn' : failed ? 'error' : finished ? 'done' : 'result', held || `${evt.tool || 'tool'} ${label}`, {
-            body: shortText(evt.result_preview || (finished ? '' : compactJson(evt.args, 220)), 260),
-            meta: taskMeta(formatLogDuration(evt.duration_sec)),
+        return view(held ? 'warn' : failed ? 'error' : finished ? 'done' : 'result', held || `${tool} ${label}`, {
+            body: shortText(toolErrorDisplayText(evt, evt.result_preview) || (finished ? '' : compactJson(evt.args, 220)), 260),
+            meta: [formatLogDuration(evt.duration_sec)],
         });
     }
 
@@ -882,13 +882,13 @@ export function summarizeLogEvent(evt) {
         // previously applied configuration — a warning, not an unresolved error.
         return view('warn', 'Settings reload failed at task start', {
             body: shortText(evt.error, 260),
-            meta: taskMeta('runs on the previously applied configuration'),
+            meta: ['runs on the previously applied configuration'],
         });
     }
 
     if (t === 'history_retention') {
         const retention = historyRetentionView(evt);
-        if (retention) return view(retention.phase, retention.headline, { body: retention.body, meta: taskMeta(...retention.meta) });
+        if (retention) return view(retention.phase, retention.headline, { body: retention.body, meta: retention.meta });
     }
 
     if (t === 'owner_hurry') {
@@ -898,12 +898,7 @@ export function summarizeLogEvent(evt) {
         const proj = ownerHurryProjection(evt);
         return view('info', proj.label, {
             body: shortText(evt.detail, 220),
-            meta: taskMeta(
-                evt.request_id ? `request=${evt.request_id}` : '',
-                evt.attempt_key != null ? `attempt=${evt.attempt_key}` : '',
-                evt.effect ? `effect=${evt.effect}` : '',
-                evt.status ? `status=${evt.status}` : '',
-            ),
+            meta: [evt.effect ? `effect ${evt.effect}` : '', evt.status || ''],
         });
     }
 
@@ -915,10 +910,7 @@ export function summarizeLogEvent(evt) {
         const source = evt.source_task_id ? String(evt.source_task_id) : 'another task';
         return view('info', hostTaskMessage(evt) ? 'System message' : `Message from task ${source}`, {
             body: shortText(evt.text_preview, 200),
-            meta: taskMeta(
-                evt.provenance ? `provenance=${evt.provenance}` : '',
-                evt.relayed_from_task_id ? `relayed=${evt.relayed_from_task_id}` : '',
-            ),
+            meta: [evt.provenance ? `provenance ${evt.provenance}` : ''],
         });
     }
 
@@ -929,14 +921,13 @@ export function summarizeLogEvent(evt) {
         const written = String(evt.status || '') === 'written';
         return view(written ? 'info' : 'warn', written ? `Message sent to task ${target}` : `Message to task ${target} refused`, {
             body: written ? '' : shortText(evt.reason, 160),
-            meta: taskMeta(`target=${target}`, evt.status ? String(evt.status) : ''),
+            meta: [evt.status ? String(evt.status) : ''],
         });
     }
 
     if (t === 'task_metrics_event' || t === 'task_eval') {
         return view('metrics', 'Task metrics', {
-            meta: taskMeta(
-                evt.task_type || '',
+            meta: [
                 ...taskOutcomeMeta(evt),
                 modelExecutionLabel(evt.model_execution),
                 evt.reason_code || '',
@@ -944,7 +935,7 @@ export function summarizeLogEvent(evt) {
                 evt.tool_calls != null ? `${evt.tool_calls} tools` : '',
                 evt.tool_errors ? `${evt.tool_errors} errors` : '',
                 evt.response_len ? `${evt.response_len} chars` : '',
-            ),
+            ],
         });
     }
 
@@ -959,12 +950,11 @@ export function summarizeLogEvent(evt) {
         // C13: the SHARED accessor and its null policy — same alias precedence as
         // chat.js and the Python seams, and a REAL $0 prints instead of vanishing.
         const ownValue = accountedUpperBound(evt) ?? (evt.cost ?? null);
-        const ownCost = unavailable
-            ? 'cost unavailable'
-            : (ownValue != null ? `${formatLogMoney(ownValue)}${evt.cost_final === false ? ' (pending)' : ''}` : '');
+        const money = formatLogMoney(ownValue);
+        const ownCost = unavailable ? 'cost unavailable' : money && `${money}${evt.cost_final === false ? ' (pending)' : ''}`;
         return view(presentation.phase, presentation.headline, {
             body: reviewDetails,
-            meta: taskMeta(
+            meta: [
                 ...taskOutcomeMeta(evt),
                 modelExecutionLabel(evt.model_execution),
                 // №8/Q3: the owner-requested soft stop shows the honest marker
@@ -975,11 +965,11 @@ export function summarizeLogEvent(evt) {
                 // v6.57.0 (P6b): show the recursive cost incl. children when it adds up to
                 // more than this task's own spend, so a parent isn't under-reported.
                 (accountedUpperBoundWithChildren(evt) ?? -1) > (ownValue ?? 0)
-                    ? `+children=${formatLogMoney(accountedUpperBoundWithChildren(evt))}${evt.cost_with_children_partial ? ' (partial)' : ''}`
+                    ? `with children ${formatLogMoney(accountedUpperBoundWithChildren(evt))}${evt.cost_with_children_partial ? ' (partial)' : ''}`
                     : '',
                 evt.total_rounds ? `${evt.total_rounds} rounds` : '',
                 formatLogTokens(evt),
-            ),
+            ],
         });
     }
 
@@ -988,14 +978,14 @@ export function summarizeLogEvent(evt) {
         const ownCost = unavailable ? 'cost unavailable' : formatLogMoney(accountedUpperBound(evt));
         const subtreeCost = unavailable ? '' : formatLogMoney(accountedUpperBoundWithChildren(evt));
         return view(unavailable ? 'warn' : 'metrics', 'Task cost finalized', {
-            meta: taskMeta(ownCost, subtreeCost ? `subtree=${subtreeCost}` : '', evt.post_task_status || ''),
+            meta: [ownCost, subtreeCost ? `with children ${subtreeCost}` : '', evt.post_task_status || ''],
         });
     }
 
     if (t === 'startup_verification') {
         return view(Number(evt.issues_count || 0) > 0 ? 'warn' : 'ok', 'Startup verification', {
             body: describeStartupChecks(evt.checks),
-            meta: [evt.git_sha ? String(evt.git_sha).slice(0, 8) : '', `${evt.issues_count || 0} issues`],
+            meta: [`${evt.issues_count || 0} issues`],
         });
     }
 
@@ -1015,8 +1005,7 @@ export function summarizeLogEvent(evt) {
         return view(result.phase, result.headline, result);
     }
 
-    if (t === 'worker_boot') return view('boot', 'Worker booted', {
-        meta: [evt.pid ? `pid ${evt.pid}` : '', evt.git_sha ? String(evt.git_sha).slice(0, 8) : ''] });
+    if (t === 'worker_boot') return view('boot', 'Worker booted', { meta: [evt.pid ? `pid ${evt.pid}` : ''] });
 
     if (t === 'deps_sync_ok') {
         return view('ok', 'Dependencies in sync', { meta: [evt.reason || '', shortText(evt.source, 60)] });
@@ -1034,16 +1023,14 @@ export function summarizeLogEvent(evt) {
 
     if (t === 'task_checkpoint' || t === 'context_reclaim') {
         return view(['context_fit_low_retry', 'service_finalization_error'].includes(evt.checkpoint_kind) ? 'warn' : 'thinking', taskCheckpointLabel(evt), {
-            meta: taskMeta(evt.model ? compactModel(evt.model) : '', evt.round ? `r${evt.round}` : '',
+            meta: [evt.model ? compactModel(evt.model) : '', evt.round ? `r${evt.round}` : '',
                 evt.context_tokens ? `~${evt.context_tokens} tok` : '',
-                formatLogMoney(evt.task_cost)),
+                formatLogMoney(evt.task_cost)],
         });
     }
 
     if (t === 'swarm_fanout') {
-        const n = (evt.requested_count != null)
-            ? evt.requested_count
-            : (Array.isArray(evt.task_ids) ? evt.task_ids.length : 0);
+        const n = evt.requested_count ?? (Array.isArray(evt.task_ids) ? evt.task_ids.length : 0);
         // #318: a delegated harness run rides the same telemetry with the host
         // constant role="delegated_run"; it is not a subagent.
         const headline = evt.role === 'delegated_run'
@@ -1051,10 +1038,9 @@ export function summarizeLogEvent(evt) {
             : `swarm fan-out: ${n} subagent(s) requested`;
         return view('info', headline, {
             meta: [
-                evt.task_group_id ? `group=${evt.task_group_id}` : '',
-                evt.role ? `role=${evt.role}` : '',
-                evt.requested_model_lane ? `lane=${evt.requested_model_lane}` : '',
-                evt.depth != null ? `depth=${evt.depth}` : '',
+                evt.role ? `role ${evt.role}` : '',
+                evt.requested_model_lane ? `lane ${evt.requested_model_lane}` : '',
+                evt.depth != null ? `depth ${evt.depth}` : '',
                 ('fanout_interval_sec' in evt ? evt.fanout_interval_sec : evt.inter_wave_latency_sec) != null
                     ? `since previous fan-out ${'fanout_interval_sec' in evt ? evt.fanout_interval_sec : evt.inter_wave_latency_sec}s` : '',
             ],
@@ -1066,27 +1052,16 @@ export function summarizeLogEvent(evt) {
     // unknown name that carries no typed fact: it keeps a genuine producer-side failure with
     // only a name visible under Errors, and it is pinned as a remainder, not a taxonomy.
     const level = String(evt.level || '').toLowerCase();
+    const name = about(machineWords(t), evt.tool ? tool : compactModel(evt.model));  // its subject: the tool, else the model
     const body = shortText(
         evt.error || evt.message || evt.text || evt.result_preview || effortEvidenceText(evt)
             || compactJson(evt.args || evt.task || evt.checks, 260), 260,
     );
-    if (evt.ok === true) {
-        return view('ok', shortText(t, 120), { body, meta: taskMeta() });
-    }
-    if (evt.ok === false || level === 'error' || level === 'critical' || level === 'fatal') {
-        return view('error', shortText(t, 120), { body, meta: taskMeta(evt.tool ? `tool=${evt.tool}` : '') });
-    }
-    if (level === 'warning' || level === 'warn') {
-        return view('warn', shortText(t, 120), { body, meta: taskMeta() });
-    }
-    if (t.includes('error') || t.includes('crash') || t.includes('fail')) {
-        return view('error', t, { body, meta: taskMeta(evt.tool ? `tool=${evt.tool}` : '') });
-    }
-
-    return view('info', shortText(t, 120), {
-        body,
-        meta: taskMeta(evt.model || '', formatLogMoney(accountedUpperBound(evt) ?? evt.cost)),
-    });
+    if (evt.ok === true) return view('ok', name, { body });
+    if (evt.ok === false || level === 'error' || level === 'critical' || level === 'fatal') return view('error', name, { body });
+    if (level === 'warning' || level === 'warn') return view('warn', name, { body });
+    if (t.includes('error') || t.includes('crash') || t.includes('fail')) return view('error', name, { body });
+    return view('info', name, { body, meta: [evt.tool ? compactModel(evt.model) : '', formatLogMoney(accountedUpperBound(evt) ?? evt.cost)] });
 }
 
 function chatView({

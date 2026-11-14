@@ -44,7 +44,7 @@ test('inline heading breaks use the existing heading classifier and preserve ord
 test('Logs and Chat narration share the heading preview without changing the source', () => {
     const source = 'Intro\n## Summary\n\nParagraph text';
     const event = { type: 'send_message', task_id: 'task-1', is_progress: true, content: source };
-    assert.equal(summarizeLogEvent(event).headline, 'Intro Summary — Paragraph text');
+    assert.equal(summarizeLogEvent(event).body, 'Intro Summary — Paragraph text');
     assert.equal(summarizeChatLiveEvent(event).fullHeadline, source);
     const child = { ...event, delegation_role: 'subagent', subagent_task_id: 'child-1',
         parent_task_id: 'task-1', subagent_role: 'Researcher', subagent_event: 'running' };
@@ -95,7 +95,7 @@ test('compact Chat removes internal write/status metadata while preserving execu
     assert.equal(view.activityLead, 'Report to parent');
     assert.equal(view.model, event.model);
     assert.equal(view.executorChip.label, 'Cursor');
-    assert.ok(summarizeLogEvent(event).meta.includes('write=workspace'));
+    assert.ok(summarizeLogEvent(event).meta.includes('write surface workspace'));
     assert.equal(prettyLogEvent(event), JSON.stringify(event, null, 2));
     assert.equal(JSON.stringify(event), before);
     // The card's own details block holds the labelled facts beyond the compact line.
