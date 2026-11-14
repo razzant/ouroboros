@@ -219,22 +219,39 @@ def written_text(facts: Mapping[str, Any], outside: str = "an outside edit, or a
 
 def held_version(journal: Path, address: Any, revision: str, tail_bytes: int,
                  live: str | None = None) -> dict[str, Any] | None:
-    """The version a stale write holds, when this note's rows in the writer's tail have it.
+    """The version a stale write holds, when this text's rows in the writer's tail have it.
 
-    ``{"facts", "text", "since"}``: that row's facts, its text read through ``knowledge_rows``
-    (``live``, the note's current text, closes the newest segment) and the facts of the rows written
-    after it, oldest first. ``None``: the tail holds no such row, or no verified text for it."""
-    since, texts = [], knowledge_rows.Texts(journal, live)
+    ``{"facts", "text", "since"}``: the facts of the row that wrote it, its text read through
+    ``knowledge_rows`` (``live``, the current text, closes the newest segment) and the facts of the rows
+    written after it, oldest first. A version only a row's old side holds (a first captured pre-image,
+    an outside edit) is read from that side, verified; its author is unknown unless an older row in the
+    tail wrote it, and the writes since begin with the oldest row that replaced it. ``None``: the tail
+    holds no verified text of it."""
+    since, texts, held = [], knowledge_rows.Texts(journal, live), None
     for offset, row in tail_rows(journal, address, tail_bytes):
         texts.rows.setdefault(offset, row)
         if row.get("new_sha256") == revision:
             try:
                 text = texts.text(offset, "new")
             except knowledge_rows.TextUnavailable:
+                text = held[0] if held else None
+            if text is None:
                 return None
             return {"facts": row_facts(row), "text": text, "since": [row_facts(item) for item in reversed(since)]}
         since.append(row)
-    return None
+        if row.get("old_sha256") == revision:  # the version this row replaced, held only on its old side so far
+            text = held[0] if held else None
+            if text is None:
+                try:
+                    text = texts.text(offset, "old")
+                except knowledge_rows.TextUnavailable:
+                    text = None
+            if text is not None:
+                held = (text, list(since))
+    if held is None:
+        return None
+    return {"facts": {**row_facts({}), "revision": revision}, "text": held[0],
+            "since": [row_facts(item) for item in reversed(held[1])]}
 
 
 def focus_text(focus: Any) -> str:
@@ -485,9 +502,9 @@ def changes_since(current: Any, held: Mapping[str, Any], tail: list[str]) -> str
                     f"{new_line}, {where}: {removed} chars removed, {added} added")
         body += old_lines + new_lines
     facts = held["facts"]
-    head = [f"The revision you sent is an earlier version of this {what}, written {facts['ts']} by focus "
-            f"{focus_text(facts['focus'])} ({facts['mode']}; reason: {reason_text(facts['reason'])}). "
-            f"Current revision: {note.revision}.", "Written since that version, oldest first:"]
+    written = written_text(facts, getattr(note.address, "outside", "an outside edit, or a write before history"))
+    head = [f"The revision you sent is an earlier version of this {what}{', ' if written.startswith('written') else '; '}"
+            f"{written}. Current revision: {note.revision}.", "Written since that version, oldest first:"]
     head += [f"- {item['ts']} · focus {focus_text(item['focus'])} · {item['mode']} · reason: {reason_text(item['reason'])}"
              f" → {item['revision']}" for item in held["since"]] or ["- (no row: the file changed outside the writer)"]
     head.append(f"What changed from your version to the current text, in whole lines ({len(blocks)} block(s)): "

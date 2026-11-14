@@ -302,3 +302,17 @@ def test_a_real_selector_beside_source_is_refused_and_a_default_is_not_a_selecto
     for arguments in ({"room_id": None}, {"room_id": ""}, {"after_seq": 0}, {"rows": False}, {"story": False},
                       {"owner_words": False}, {"node_id": ""}, {"revision": ""}):
         assert _read(ctx, source="identity", **arguments).startswith("[identity: versions newest first"), arguments
+
+
+def test_a_stale_revision_held_only_on_a_rows_old_side_gets_the_changes_since(tmp_path, identity):
+    """K7: the identity was written before history; its first row keeps it on its old side. A stale writer holding that
+    original gets every change since in whole lines (verified), the replacing write among them, and is told no row
+    wrote the version it holds; a version no row holds still gets the whole text (the test above)."""
+    original = _sha(identity.read_bytes())
+    _update_identity(_ctx(tmp_path, "other"), IDENTITY.replace("Keep what I learn.", "Keep what I learn, dated."),
+                     original)
+    stale = _update_identity(_ctx(tmp_path), "Mine.", original)
+    assert "revision_conflict" in stale and "1 block(s)" in stale, stale
+    assert "earlier version of this identity; no history row wrote it (an outside edit" in stale
+    assert "Written since that version, oldest first:\n- " in stale and "focus root task_id=other" in stale
+    assert "\n- Keep what I learn.\n+ Keep what I learn, dated.\n" in stale and "Mine." not in identity.read_text("utf-8")
