@@ -812,8 +812,8 @@ function paintRow(node, row, ctx) {
     if (metaNode && metaNode.textContent !== meta) metaNode.textContent = meta;
     paintResult(node.querySelector('[data-setting-result]'), outcomeLine(row, state.outcome));
     if (state.outcome) state.seen = true;
-    if (control.kind !== 'custom' || (!state.busy && state.typed === null
-        && (!state.outcome || ['saved', 'saved_then_failed', 'unchanged'].includes(state.outcome.state)))) ctx.onPaint?.(lastSettings, row, node);
+    const settled = !state.outcome || ['saved', 'saved_then_failed', 'unchanged', 'changed_elsewhere'].includes(state.outcome.state);
+    if (control.kind !== 'custom' || (!state.busy && state.typed === null && settled)) ctx.onPaint?.(lastSettings, row, node);
 }
 
 // A value from a control: the value already there (or already on its way) sends nothing.

@@ -482,6 +482,14 @@ test('Updates marks its accepted channel while the follow-up read is held, and k
     followup.resolve(response({ error: 'read failed' }, 500));
     await settle();
     assert.deepEqual(pressed(), ['qa'], 'a failed follow-up cannot put Stable back');
+    // Another device moves the channel; Undo is refused as changed elsewhere, and the card shows the value that stands.
+    server.routes.set('/api/settings', original);
+    Object.assign(server.stored, { OUROBOROS_UPDATE_CHANNEL: 'development' });
+    Object.assign(server.tokens, { OUROBOROS_UPDATE_CHANNEL: 'elsewhere' });
+    await card.fire('click', { target: rowNode(card, 'OUROBOROS_UPDATE_CHANNEL').querySelector('[data-setting-undo]') });
+    await settle();
+    assert.match(result(card, 'OUROBOROS_UPDATE_CHANNEL'), /^Changed on another device/);
+    assert.deepEqual(pressed(), ['development'], 'a write refused as changed elsewhere paints the current value at once');
 });
 
 test('Storage: how long finished work is kept is a row of its Cleanup card, read only while the tab is shown', async (t) => {
