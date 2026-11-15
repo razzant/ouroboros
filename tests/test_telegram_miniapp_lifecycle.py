@@ -183,7 +183,7 @@ def test_public_observer_outage_keeps_same_tunnel(monkeypatch: pytest.MonkeyPatc
     asyncio.run(scenario())
 
 
-def test_three_confirmed_bad_markers_rotate(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_confirmed_bad_markers_rotate_after_grace(monkeypatch: pytest.MonkeyPatch) -> None:
     async def scenario() -> None:
         calls = 0
 
@@ -195,6 +195,9 @@ def test_three_confirmed_bad_markers_rotate(monkeypatch: pytest.MonkeyPatch) -> 
         async def no_wait(*_args: Any, **_kwargs: Any) -> None:
             return None
 
+        # Without the registration grace, the rotation contract is the
+        # confirmation count alone; the grace itself has its own test below.
+        monkeypatch.setattr(companion, "_VERIFY_GRACE_SEC", 0.0)
         monkeypatch.setattr(companion, "probe_public_gateway_once", probe)
         monkeypatch.setattr(companion, "_wait_or_stop", no_wait)
         settings_observer = type(
@@ -216,7 +219,140 @@ def test_three_confirmed_bad_markers_rotate(monkeypatch: pytest.MonkeyPatch) -> 
             asyncio.create_task(asyncio.Event().wait()),
         )
         assert result is companion._GenerationResult.RECONNECT
+        assert calls == companion._VERIFY_CONFIRMED_BAD
+
+    asyncio.run(scenario())
+
+
+def test_fresh_tunnel_marker_lag_inside_grace_does_not_rotate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        outcomes = iter(
+            [
+                companion.PublicProbeOutcome.UNHEALTHY_RESPONSE,
+                companion.PublicProbeOutcome.UNHEALTHY_RESPONSE,
+                companion.PublicProbeOutcome.READY,
+            ]
+        )
+        calls = 0
+
+        async def probe(*_args: Any, **_kwargs: Any) -> companion.PublicProbeOutcome:
+            nonlocal calls
+            calls += 1
+            return next(outcomes)
+
+        async def no_wait(*_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        monkeypatch.setattr(companion, "probe_public_gateway_once", probe)
+        monkeypatch.setattr(companion, "_wait_or_stop", no_wait)
+        status = _Status()
+        settings_observer = type(
+            "Bridge",
+            (),
+            {
+                "state_dir": _nonexistent_state_dir(),
+                "owner_chat_id": lambda self: 12345,
+                "safe_for_exposure": lambda self, _owner=None: True,
+            },
+        )()
+        result = await companion._wait_for_public_verification(
+            "https://abc.trycloudflare.com/",
+            _RunningTunnel(),
+            settings_observer,  # type: ignore[arg-type]
+            12345,
+            status,  # type: ignore[arg-type]
+            asyncio.Event(),
+            asyncio.create_task(asyncio.Event().wait()),
+        )
+        assert result is None
         assert calls == 3
+        assert ("verifying", "public_marker_pending") in status.transitions
+        assert ("verifying", "public_marker_unhealthy") not in status.transitions
+
+    asyncio.run(scenario())
+
+
+def test_cloudflare_rate_limit_detection_and_cooldown() -> None:
+    assert companion._is_cloudflare_rate_limit(
+        'ERR Error unmarshaling QuickTunnel response: error code: 1015 '
+        'status_code="429 Too Many Requests"'
+    )
+    assert companion._is_cloudflare_rate_limit('status_code="429 Too Many Requests')
+    assert not companion._is_cloudflare_rate_limit("transient")
+    assert companion._rate_limit_delay(1) == 2700.0
+    assert companion._rate_limit_delay(2) == 5400.0
+    assert companion._rate_limit_delay(9) == companion._RATE_LIMIT_MAX_SEC
+
+
+def test_rate_limited_tunnel_creation_cools_down_instead_of_retrying(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        delays: list[float] = []
+        retry_delay_calls: list[int] = []
+        status = _Status()
+
+        class Tunnel:
+            returncode = None
+
+            def __init__(self, *_args: Any) -> None:
+                pass
+
+            async def start(self) -> None:
+                raise companion.CloudflaredError(
+                    "Cloudflared exited before publishing a URL (exit 1). Last output: "
+                    'ERR Error unmarshaling QuickTunnel response: error code: 1015 '
+                    'status_code="429 Too Many Requests"'
+                )
+
+            async def stop(self) -> None:
+                return None
+
+        async def binary(*_args: Any, **_kwargs: Any) -> Path:
+            return tmp_path / "cloudflared"
+
+        def record_retry(count: int) -> float:
+            retry_delay_calls.append(count)
+            return 0.0
+
+        async def record_wait(delay: float, *_args: Any, **_kwargs: Any) -> None:
+            delays.append(delay)
+            if len(delays) >= 2:
+                raise companion.ShutdownRequested("test complete")
+
+        monkeypatch.setattr(companion, "QuickTunnel", Tunnel)
+        monkeypatch.setattr(companion, "_wait_for_cloudflared", binary)
+        monkeypatch.setattr(companion, "_retry_delay", record_retry)
+        monkeypatch.setattr(companion, "_wait_or_stop", record_wait)
+        sidecar = type("Sidecar", (), {"clear_public_url": lambda self: None})()
+        server_task = asyncio.create_task(asyncio.Event().wait())
+        context = companion._GenerationContext(
+            menu=object(),  # type: ignore[arg-type]
+            settings_observer=type("Settings", (), {"state_dir": tmp_path})(),  # type: ignore[arg-type]
+            owner=12345,
+            button_text="Ouroboros",
+            core_port=9012,
+            status=status,  # type: ignore[arg-type]
+            stop_event=asyncio.Event(),
+            server_task=server_task,
+        )
+        with pytest.raises(companion.ShutdownRequested, match="test complete"):
+            await companion._run_tunnel_generations(
+                tmp_path / "cloudflared",
+                tmp_path,
+                45678,
+                sidecar,  # type: ignore[arg-type]
+                context,
+            )
+        server_task.cancel()
+        await asyncio.gather(server_task, return_exceptions=True)
+        assert delays == [2700.0, 5400.0]
+        assert retry_delay_calls == []
+        assert status.transitions[-1] == ("reconnecting", "cloudflare_rate_limited")
+        assert "rate limiting" in status.messages[-1]
 
     asyncio.run(scenario())
 

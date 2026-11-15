@@ -69,6 +69,18 @@ _INITIAL_PARENT_PID = os.getppid()
 _PARENT_PID_ENV = "OUROBOROS_PARENT_PID"
 _RETRY_BASE_SEC = (1.0, 2.0, 4.0, 8.0, 15.0, 30.0, 60.0)
 _STABLE_READY_RESET_SEC = 300.0
+# A Cloudflare 1015 rate limit is a closed window measured in tens of minutes
+# (Retry-After 1906-3262 s observed on 2026-11-14), not a network blip, and a
+# retry inside the window both fails and keeps the window open: cool down.
+_RATE_LIMIT_BASE_SEC = 2700.0
+_RATE_LIMIT_MAX_SEC = 5400.0
+_RATE_LIMIT_MARKERS = ("error code: 1015", 'status_code="429', "too many requests")
+# A fresh Quick Tunnel connector needs time to register with the edge; three
+# 2-second probes killed healthy tunnels and burned the creation quota (each
+# rotation costs one creation and pushes the window further out).
+_VERIFY_GRACE_SEC = 21.0
+_VERIFY_PROBE_INTERVAL_SEC = 3.0
+_VERIFY_CONFIRMED_BAD = 4
 _CORE_HEALTH_INTERVAL_SEC = 30.0
 _PUBLIC_HEALTH_INTERVAL_SEC = 45.0
 _MENU_HEALTH_INTERVAL_SEC = 300.0
@@ -450,6 +462,20 @@ def _retry_delay(failure_count: int) -> float:
     return min(60.0, max(0.1, base * random.uniform(0.8, 1.2)))
 
 
+def _is_cloudflare_rate_limit(message: str) -> bool:
+    """True when cloudflared reported the Quick Tunnel creation rate limit."""
+
+    lowered = str(message or "").lower()
+    return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
+
+
+def _rate_limit_delay(streak: int) -> float:
+    """Long cool-down for a closed Cloudflare window; the window grows on retries."""
+
+    index = max(1, int(streak))
+    return min(_RATE_LIMIT_MAX_SEC, _RATE_LIMIT_BASE_SEC * (2 ** (index - 1)))
+
+
 async def _wait_or_stop(
     delay: float,
     stop_event: asyncio.Event,
@@ -667,7 +693,10 @@ async def _wait_for_public_verification(
     stop_event: asyncio.Event,
     server_task: asyncio.Task[None],
 ) -> _GenerationResult | None:
+    loop = asyncio.get_running_loop()
+    published_at = loop.time()
     confirmed_bad = 0
+    pending_reported = False
     while True:
         if not miniapp_enabled(settings_observer.state_dir):
             return _GenerationResult.DISABLED
@@ -690,22 +719,34 @@ async def _wait_for_public_verification(
         if outcome is PublicProbeOutcome.TUNNEL_EXITED:
             return _GenerationResult.RECONNECT
         if outcome is PublicProbeOutcome.UNHEALTHY_RESPONSE:
-            confirmed_bad += 1
-            status.transition(
-                "verifying",
-                "The public endpoint responded without the exact Mini App marker.",
-                reason_code="public_marker_unhealthy",
-                attempt=confirmed_bad,
-            )
-            if confirmed_bad >= 3:
-                return _GenerationResult.RECONNECT
+            # The edge takes seconds to route a brand-new connector; an answer
+            # without the marker inside the grace window is registration lag,
+            # not proof that the tunnel is broken.
+            if loop.time() - published_at < _VERIFY_GRACE_SEC:
+                if not pending_reported:
+                    pending_reported = True
+                    status.transition(
+                        "verifying",
+                        "The new public endpoint is still registering with the Cloudflare edge.",
+                        reason_code="public_marker_pending",
+                    )
+            else:
+                confirmed_bad += 1
+                status.transition(
+                    "verifying",
+                    "The public endpoint responded without the exact Mini App marker.",
+                    reason_code="public_marker_unhealthy",
+                    attempt=confirmed_bad,
+                )
+                if confirmed_bad >= _VERIFY_CONFIRMED_BAD:
+                    return _GenerationResult.RECONNECT
         else:
             status.transition(
                 "degraded",
                 "This machine cannot currently observe the public tunnel; it will not rotate blindly.",
                 reason_code="public_observer_unavailable",
             )
-        await _wait_or_stop(2.0, stop_event, server_task=server_task)
+        await _wait_or_stop(_VERIFY_PROBE_INTERVAL_SEC, stop_event, server_task=server_task)
 
 
 async def _sync_menu_until_confirmed(
@@ -1007,6 +1048,7 @@ async def _run_tunnel_generations(
     stop_event = context.stop_event
     server_task = context.server_task
     failures = 0
+    rate_limit_streak = 0
     blocked: _GenerationResult | None = None
     # External tunnel outages are reconciled in-process with bounded backoff and
     # visible status. Host max_restarts owns process crashes, not network uptime.
@@ -1038,6 +1080,7 @@ async def _run_tunnel_generations(
                 return binary_result
             binary = binary_result
         tunnel = QuickTunnel(binary, state_dir, sidecar_port)
+        rate_limited = False
         result = _GenerationResult.RECONNECT
         stable_ready = False
         failure_message = ""
@@ -1110,6 +1153,9 @@ async def _run_tunnel_generations(
                 result = _GenerationResult.DISABLED
             else:
                 result = _GenerationResult.RECONNECT
+                rate_limited = isinstance(exc, CloudflaredError) and _is_cloudflare_rate_limit(
+                    str(exc)
+                )
                 failure_message = _safe_error(exc)
                 status.transition(
                     "reconnecting",
@@ -1132,15 +1178,31 @@ async def _run_tunnel_generations(
             blocked = result
             continue
         failures = 0 if stable_ready else failures + 1
+        if stable_ready:
+            rate_limit_streak = 0
+        if rate_limited:
+            rate_limit_streak += 1
         if not miniapp_enabled(settings_observer.state_dir):
             return _GenerationResult.DISABLED
-        delay = _retry_delay(max(1, failures))
+        if rate_limited:
+            delay = _rate_limit_delay(rate_limit_streak)
+            reason_code = "cloudflare_rate_limited"
+            message = (
+                "Cloudflare is rate limiting Quick Tunnel creation for this network; "
+                "the companion stays quiet until the window reopens."
+            )
+        else:
+            delay = _retry_delay(max(1, failures))
+            reason_code = (
+                "tunnel_generation_failed" if failure_message else "tunnel_reconnect_backoff"
+            )
+            message = failure_message or (
+                "The tunnel generation ended; retrying inside the same companion."
+            )
         status.transition(
             "reconnecting",
-            failure_message or "The tunnel generation ended; retrying inside the same companion.",
-            reason_code=(
-                "tunnel_generation_failed" if failure_message else "tunnel_reconnect_backoff"
-            ),
+            message,
+            reason_code=reason_code,
             attempt=failures,
             next_retry_at_epoch=int(time.time() + delay),
         )
