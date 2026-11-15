@@ -487,13 +487,12 @@ def test_restore_is_not_undone_by_the_restart_that_follows_it(source_checkout):
 def test_a_kept_checkout_drops_a_stale_stamped_identity_and_nothing_else(source_checkout, monkeypatch, keeper):
     """A branch/SHA an earlier tree move stamped would outrank the live read of a kept checkout, so the keep clears
     it without stamping an observed SHA or forgetting the smoke receipt; the deployment's own projection stays."""
-    from ouroboros import config, server_process
+    from ouroboros import config
     from ouroboros.gateway.state import _runtime_repo_identity
     from supervisor import git_ops_reset
 
     scene = source_checkout
     scene.forbid_moves()
-    monkeypatch.setattr(server_process, "_source_baseline", None)  # no server generation captured its source here
     stale = {"current_branch": "ouroboros", "current_sha": scene.first, "owner_chat_id": 7}
     state = dict(stale)
     monkeypatch.setattr(git_ops, "update_state", lambda mutate, **_kw: mutate(state))

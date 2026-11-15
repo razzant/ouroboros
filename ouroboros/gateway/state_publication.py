@@ -427,8 +427,8 @@ def produced_fields(snap: Dict[str, Any]) -> Dict[str, Any]:
         "spent_usd": round(spent, 4) if spent is not None else None,
         "budget_limit": limit,
         "budget_pct": round((spent / limit * 100) if limit > 0 else 0, 1) if spent is not None else None,
-        # W2-F3: the sha is this generation's start commit, else the supervisor's stamp, else the checkout
-        # (``state._runtime_repo_identity``); a guessed branch is not identity.
+        # W2-F3: state values when the supervisor stamped them, else the actual runtime checkout
+        # (source-mode installs never stamp state); a guessed branch is not identity.
         "branch": runtime_branch,
         "sha": (runtime_sha or "")[:8],
         "evolution_enabled": bool(evolution_enabled) if evolution_known else None,
