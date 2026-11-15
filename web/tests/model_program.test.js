@@ -28,8 +28,9 @@ test('newest verdict, refusal and operation outcome are engine facts, and text i
         const html = modelProgramMarkup(program, {entry: {selection: {path: '/p'}, updateAvailable: verdict,
             newest: {status: 'available', version: '1'}, actions: {update: {available: true}}}});
         assert.equal(/>Update<\/button>/.test(html), verdict !== 'no');
+        assert.doesNotMatch(html, />· /, 'wrapped clauses have no leading separator');
         assert.equal(html.includes('class="harness-model-latest"'), verdict !== 'no');
-        assert.equal(html.match(/<span class="harness-model-latest">· ([^<]+)<\/span>/)?.[1] || '',
+        assert.equal(html.match(/<span class="harness-model-latest">([^<]+)<\/span>/)?.[1] || '',
             { yes: '1 available', cannot_tell: 'Latest unknown', no: '' }[verdict],
             'the latest-version fact stays one clause beside Update when the footer wraps');
         assert.match(html, /Vendor &lt;/);
@@ -245,5 +246,5 @@ test('an unanswered native catalog releases the shared read at its bound; reopen
  test('the catalog and available version wrap between the two clauses', () => {
     const html = modelProgramMarkup({ harness: 'codex', label: 'Codex', programs: [{version: '0.162.1'}] },
         { entry: { selection: { path: '/codex' }, updateAvailable: 'yes', newest: { status: 'available', version: '0.169.0' } } });
-    assert.match(html, /<span>List from Codex 0\.162\.1<\/span><span class="harness-model-latest">· 0\.169\.0 available<\/span>/);
+    assert.match(html, /<span>List from Codex 0\.162\.1<\/span><span class="harness-model-latest">0\.169\.0 available<\/span>/);
  });
