@@ -18,6 +18,8 @@ test('Skills keeps its return and tabs at the leading edge, with one extra line 
     const narrow = css.slice(css.indexOf('@container skillspage'), css.indexOf('.skills-search-chrome {'));
     assert.match(narrow, /max-width: 44rem/);
     assert.match(narrow, /grid-template-areas: "back toolbar" "tabs tabs"/);
+    assert.match(narrow, /\.app-page-toolbar \{ min-height: max\(50px, var\(--window-chrome-top, 0px\)\);/,
+        'the first row keeps its band with native chrome and without the host token');
     assert.match(narrow, /\.app-page-lead \{ display: contents;/);
     assert.match(narrow, /\.app-tab-strip \{[\s\S]*?grid-area: tabs;/);
     assert.match(css, /html\[data-layout="docked"\] \.app-page-header\[data-lead\] \{[\s\S]*?grid-template-areas: "title toolbar"/,

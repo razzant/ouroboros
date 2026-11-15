@@ -107,10 +107,13 @@ MEASURE = """root => {
             small.push({node:name(e),label:(e.getAttribute('aria-label') || e.textContent).trim().slice(0,65),
                 width:Math.round(r.width*10)/10,height:Math.round(r.height*10)/10});
         if (e.matches('.app-page-header')) {
-            const rail = e.querySelector('.logs-kinds'), rb = rail?.getBoundingClientRect();
+            // A narrow Skills column lends its tabs one line under the header, as the Logs rail can have.
+            const skillsBelow = e.closest('#page-skills') && s.gridTemplateAreas.includes('"tabs tabs"');
+            const rail = e.querySelector(skillsBelow ? '.app-tab-strip' : '.logs-kinds'), rb = rail?.getBoundingClientRect();
             const secondLine = rb?.height && rb.top >= r.top + 28;
-            const gap = secondLine ? parseFloat(getComputedStyle(rail.closest('.section-lead-page')).rowGap) || 0 : 0;
-            const height = r.height - (secondLine ? rb.height + gap : 0);
+            const gap = secondLine ? parseFloat(getComputedStyle(skillsBelow ? e : rail.closest('.section-lead-page')).rowGap) || 0 : 0;
+            const margin = secondLine ? parseFloat(getComputedStyle(rail).marginBottom) || 0 : 0;
+            const height = r.height - (secondLine ? rb.height + gap + margin : 0);
             if (height > 56.1)
                 headers.push({node:name(e),height:Math.round(height*10)/10});
             if (secondLine && new Set([...rail.children].filter(shown).map(n=>Math.round(n.getBoundingClientRect().top))).size > 1)

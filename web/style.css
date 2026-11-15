@@ -7139,7 +7139,7 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     html[data-layout="docked"] #page-skills .app-page-lead { display: contents; }
     html[data-layout="docked"] #page-skills .app-page-title-row { display: none; }
     html[data-layout="docked"] #page-skills .app-page-return { grid-area: back; }
-    html[data-layout="docked"] #page-skills .app-page-toolbar { min-height: max(50px, var(--window-chrome-top)); }
+    html[data-layout="docked"] #page-skills .app-page-toolbar { min-height: max(50px, var(--window-chrome-top, 0px)); }
     html[data-layout="docked"] #page-skills .app-tab-strip {
         grid-area: tabs;
         padding-top: var(--space-2);
