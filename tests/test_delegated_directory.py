@@ -280,9 +280,11 @@ def test_lost_start_replays_original_processing_facts_after_setting_changes(tmp_
     prepare_actor = delegate.prepare_delegate_start_actor
     preference = "economy"
 
+    # The setting that changes is the row's own tier: the history's identity (`row_processing`, #3426), which this
+    # run also asks for (`processing_preference`). The replay keeps the original in both.
     def actor(*args, **kwargs):
         captured, refusal = prepare_actor(*args, **kwargs)
-        return {**captured, "processing_preference": preference}, refusal
+        return {**captured, "processing_preference": preference, "row_processing": preference}, refusal
 
     def start(request, *, idempotency_key):
         engine.posts.append((request, idempotency_key))
