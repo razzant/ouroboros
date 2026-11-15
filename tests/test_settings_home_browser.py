@@ -68,7 +68,9 @@ def test_the_home_answers_from_passive_reads_and_the_card_lists_what_waits(subsc
     # The card: who it is, its state, and what waits for the owner. A fact nobody read is said by its own row, never
     # as a line of the card (docs/DESIGN.md "Settings"; the approved shell, PR #3369, took the card's Check away).
     assert card.locator(".settings-being-name").inner_text().strip() == "Ouroboros"
-    assert card.locator("[data-being-state]").inner_text().strip() == "Online"
+    # The socket may open after the home's reads; its open repaints the card (settings_home.js), with no new read.
+    page.wait_for_function("() => document.querySelector('#page-settings [data-being-state]')?.textContent.trim() === 'Online'",
+                           timeout=10_000)
     assert needs(page) == ["restart:restart"]
     assert card.locator("[data-being-count]").inner_text().strip() == "One thing needs you"
     assert "nothing" not in card.inner_text().lower()

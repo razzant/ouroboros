@@ -731,8 +731,9 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     assert back["more"] is None and back["content"] <= back["height"] + 1, back
 
     # 6. A narrower window (or interface size) folds some of it: Read all comes, and goes at the owner's width again.
-    # A phone's column folds it; there the Dashboard, last brought back by the sidebar, shows its list (dashboard.js
-    # onPageShown), and the owner opens Updates from it.
+    # A phone's column folds it. There a Dashboard brought back by the sidebar may give its page up for its list (each
+    # showing resets the open page, dashboard.js onPageShown; only a row pressed in the visit keeps it); the owner then
+    # opens Updates from the list. Either way the letter is read on Updates.
     page.set_viewport_size({"width": 320, "height": OWNER_WINDOW["height"]})
     page.evaluate(FRAMES)
     if not page.locator("#dashboard-panel-updates").is_visible():
