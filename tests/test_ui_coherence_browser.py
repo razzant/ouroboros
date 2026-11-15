@@ -216,7 +216,9 @@ def test_settings_card_actions_are_reachable_at_content_breakpoints(subscription
 
     def show_card():
         # Two panes hold the card in the pane of the list's Ouroboros row, one press away; one column keeps it atop
-        # the list (settings.js placeOverview, DESIGN "Settings"), and no page is opened over it here.
+        # the list (settings.js placeOverview, DESIGN "Settings"), and no page is opened over it here. Which of the two
+        # stands is set by Settings' resize observer once the new width is laid out, so the row is read a frame later.
+        page.evaluate("() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))")
         overview = page.locator("#page-settings [data-settings-overview-row]")
         if overview.is_visible() and overview.get_attribute("aria-current") != "page":
             overview.click()
