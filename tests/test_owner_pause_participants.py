@@ -435,9 +435,16 @@ def test_a_resume_notice_names_who_granted_it_and_no_one_it_does_not_know(tmp_pa
     text = messages[-1]["content"]
     assert "This task continued from its Pause " + words in text and "owner Resume" not in text
     slept: list = []
-    budget_pause._resume_disclosure(ctx, {"reason": "sleep", "rail": "model_sleep", "paused_at": 1.0}, {},
-                                    {"consumed_at": 6.0, "by": by}, {"reason": "hard_rail"}, slept)
+    # A sleep's return names the independent review it did not wait for, and no other run it holds.
+    passed = {"runs": [{"run_id": "", "invocation_id": "inv-review", "state": "stop_unknown", "independent_review": True},
+                       {"run_id": "run-critic", "state": "stop_requested", "independent_review": True,
+                        "stop_policy": "request_stop"},
+                       {"run_id": "run-own", "state": "stop_unknown", "independent_review": False}]}
+    budget_pause._resume_disclosure(ctx, {"reason": "sleep", "rail": "model_sleep", "paused_at": 1.0, "external_runs": passed},
+                                    {}, {"consumed_at": 6.0, "by": by}, {"reason": "hard_rail"}, slept)
     assert any(woken in str(message.get("content")) for message in slept), slept
+    (notice,) = [str(message["content"]) for message in slept if "did not wait for" in str(message.get("content"))]
+    assert "for start inv-review, run run-critic (its stop was requested):" in notice and "run-own" not in notice
 
 
 def test_a_budget_pause_resume_keeps_its_own_census_disclosure(tmp_path, monkeypatch):

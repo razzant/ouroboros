@@ -429,6 +429,17 @@ def _name(row: Dict[str, Any]) -> str:
     return f"run {row['run_id']}" if row.get("run_id") else f"start {row.get('invocation_id') or '?'}"
 
 
+def passed_reviews_notice(observation: Any) -> str:
+    """What a sleep's return names of the independent reviews its Resume did not wait for
+    (``budget_resume._resume_custody_refusal``): still open, never a writer of this work. ``""`` for none."""
+    rows = [row for row in (observation or {}).get("runs") or [] if isinstance(row, dict)
+            and row.get("independent_review") is True and str(row.get("state") or "") != EXTERNAL_STOP_CONFIRMED]
+    named = ", ".join(_name(row) + (" (its stop was requested)" if row.get("stop_policy") == "request_stop" else "")
+                      for row in rows)
+    return (f"[SYSTEM NOTICE]\nThis return did not wait for {named}: independent review that cannot change this "
+            "work. Its outcome and cost are unresolved.") if rows else ""
+
+
 def _participant_line(root: Any, task_id: str, row: Dict[str, Any], runs: Dict[str, Any], pending: set,
                       reader: str) -> str:
     from ouroboros.delegate_custody_current import collection_pending
