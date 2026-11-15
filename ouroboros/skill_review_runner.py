@@ -1346,6 +1346,15 @@ def run_skill_review_lifecycle_blocking(
             )
             for key, value in reconcile.items():
                 setattr(outcome, f"extension_{key}", value)
+            # On after this review (turned on above, by turn-on-when-ready, or on before) without a passed review of
+            # these files: the work that ran the review names it on its card.
+            settled = _load_binding_skill(binding) if binding is not None else find_skill(
+                drive_root, skill_name, repo_path=repo_path,
+            )
+            if settled is not None and settled.enabled:
+                from ouroboros.review_overrides import note_skill_over_review
+
+                note_skill_over_review(ctx, skill_name, settled.review.gate_for(settled.content_hash), "after_review")
         return outcome
 
     outcome = None

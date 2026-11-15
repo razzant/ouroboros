@@ -151,8 +151,11 @@ def test_localized_109_tools_max_each_admission_metric_independently():
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "я" * 315,
+                            "description": "я" * 400,
                         },
+                        # Larger than the custom description bound with its prose, so the custom projection
+                        # carries the bare structure: the two measures then disagree about which is larger.
+                        "shape": {"const": "s" * 3700},
                     },
                     "required": ["query"],
                 },

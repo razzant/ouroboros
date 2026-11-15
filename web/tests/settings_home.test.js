@@ -625,6 +625,39 @@ test('one read of a source at a time: asked again in flight it starts no second 
     assert.equal(answer('page:circles'), '2 places');
 });
 
+test('the Tools status writer updates the list beside another page without reading; off screen it paints and reads nothing', async (t) => {
+    const { env, content } = world(t);
+    const status = (enabled) => ({ sdk_available: true, enabled: true, servers: [{ id: 'docs', enabled, tool_count: 3 }] });
+    env.routes.set('/api/mcp/status', () => reply(status(false)));
+    const { home, answer } = listHome(t, content);
+    await home.refresh();
+    home.mark('rules');
+    assert.equal(answer('tools'), '0 of 1 server on');
+    const pending = deferred();
+    env.routes.set('/api/mcp/status', () => pending.promise);
+    const tools = await settingsPageFor('tools').mount(new Stub(), { path: 'tools', ctx: { readSettings } });
+    t.after(() => tools.unmount());
+    await settle();
+    const before = [...env.calls];
+    pending.resolve(reply(status(true)));  // the page's completed status is stored by refreshStatus
+    await settle();
+    assert.equal(answer('tools'), '1 of 1 server on');
+    assert.deepEqual(env.calls, before, 'adopting the completed status starts no request');
+    const late = deferred();
+    env.routes.set('/api/mcp/status', () => late.promise);
+    env.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'tools' } }));
+    await settle();
+    home.hide();
+    const hiddenReads = [...env.calls];
+    const hiddenText = content.textContent;
+    late.resolve(reply(status(false)));
+    await settle();
+    assert.equal(content.textContent, hiddenText, 'a completed status paints nothing off screen');
+    assert.deepEqual(env.calls, hiddenReads, 'a completed status reads nothing off screen');
+    await home.refresh(['tools']);
+    assert.equal(answer('tools'), '0 of 1 server on', 'showing the list reads its current answer');
+});
+
 test('an answer is painted though another source was read meanwhile: a slow source, and the state snapshot by its sequencer', async (t) => {
     const { env, content } = world(t);
     const places = deferred();
@@ -675,4 +708,12 @@ test('the row of a page that is left reads its sources again, a setting\'s row a
     assert.equal((await writeEntry('MCP_SERVERS', 'docs', (before) => ({ ...before, enabled: true }))).state, 'saved');
     await settle();
     assert.equal(answer('tools'), '1 of 1 server on');
+    // A width change covers the list and brings it back beside the same page, without announcing a new path.
+    home.hide();
+    await home.refresh();
+    const afterWidth = count('/api/settings');
+    await go('ouro:settings-page-shown', { path: 'models' });
+    assert.equal(count('/api/settings'), afterWidth + 1, 'the first press after resizing still leaves Rules');
+    await go('ouro:settings-page-shown', { path: 'models/role/main' });
+    assert.equal(count('/api/settings'), afterWidth + 1, 'a level of the same page still reads nothing');
 });

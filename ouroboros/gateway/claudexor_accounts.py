@@ -49,10 +49,11 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import datetime
 import logging
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -221,59 +222,188 @@ def _account_row_visible(harness_id: str, capable) -> bool:
 # models or not), so a failed or unasked facet serves that value again, stale, under its
 # own observation time and this read's error.
 _STATUS_LOCK = threading.Lock()
-_STATUS_IN_FLIGHT: Dict[bool, Future] = {}
+_ACCOUNT_WRITE_LOCK = threading.Lock()  # RPC + confirmation order, never held by a reader
+_STATUS_IN_FLIGHT: Dict[tuple, Future] = {}
+_ACCOUNTS_REVISION = 0  # raised only by _account_changed, under _STATUS_LOCK; the fence reads it lock-free
+_STATUS_READ_SEQUENCE = 0
 _FACET_MEMORY: Dict[Tuple[str, str, bool], Dict[str, Any]] = {}
 _FACET_FIELDS = {"catalog": ("harnesses",), "accounts": ("profiles",),
-                 "quota": ("quota", "quota_absences", "resources", "availability_scope")}
+                 "quota": ("quota", "quota_absences", "availability_scope")}
 
 
 def _status_payload(include_models: bool, *, join: bool = True) -> Dict[str, Any]:
     """The status answer: joins a read of the same variant already in flight (an owner
     wake passes ``join=False`` and reads anew); every caller gets its own copy."""
+    from ouroboros.claudexor_daemon import owned_config_dir
+
+    global _STATUS_READ_SEQUENCE
     with _STATUS_LOCK:
-        shared = _STATUS_IN_FLIGHT.get(include_models) if join else None
+        revision = _ACCOUNTS_REVISION
+        key = (str(owned_config_dir()), include_models, revision)
+        shared = _STATUS_IN_FLIGHT.get(key) if join else None
         owner = shared is None
         if owner:
+            _STATUS_READ_SEQUENCE += 1
+            sequence = _STATUS_READ_SEQUENCE
             shared = Future()
             if join:
-                _STATUS_IN_FLIGHT[include_models] = shared
+                _STATUS_IN_FLIGHT[key] = shared
     if owner:
         try:
-            shared.set_result(_with_facet_memory(_read_status_payload(include_models), include_models))
+            shared.set_result(_with_facet_memory(
+                _read_status_payload(include_models), include_models,
+                account_revision=revision, read_sequence=sequence))
         except BaseException as exc:
             shared.set_exception(exc)
         finally:
             with _STATUS_LOCK:
-                if _STATUS_IN_FLIGHT.get(include_models) is shared:
-                    del _STATUS_IN_FLIGHT[include_models]
-    return copy.deepcopy(shared.result())
+                if _STATUS_IN_FLIGHT.get(key) is shared:
+                    del _STATUS_IN_FLIGHT[key]
+    # A completed Future can still be waiting in another request's consumer.
+    # Check after that wait too: PATCH/DELETE may have confirmed in the meantime.
+    return coherent_accounts(copy.deepcopy(shared.result()), revision)
 
 
-def _with_facet_memory(payload: Dict[str, Any], include_models: bool = False) -> Dict[str, Any]:
+def account_read_revision() -> int:
+    return _ACCOUNTS_REVISION
+
+
+def coherent_accounts(payload: dict, revision: int) -> dict:
+    """A read crossing a confirmed write cannot publish pre-write membership; its discarded
+    answer carries no failure of its own (a failed attempt stays in the reader's log).
+
+    The event loop runs this fence while a worker may hold ``_STATUS_LOCK`` copying a large
+    catalog. The revision only grows, under that lock: an unchanged one is answered without
+    it, and only a crossed read takes it, to read the held memory whole."""
+    if revision == _ACCOUNTS_REVISION:
+        return payload
+    with _STATUS_LOCK:
+        payload = {**payload, "reads": {**payload["reads"], "accounts": READ_NOT_READ},
+                   "profiles": {}, "unified_accounts": False}
+        if "accounts" in (payload.get("read_errors") or {}):
+            payload["read_errors"] = {key: value for key, value in payload["read_errors"].items()
+                                      if key != "accounts"}
+        if "facets" in payload:
+            held = _FACET_MEMORY.get((str(payload.get("config_dir") or ""), "accounts", False))
+            payload.update(copy.deepcopy(held["value"]) if held else {})
+            payload["facets"] = {**payload["facets"], "accounts": {
+                "observed_at": held["observed_at"] if held else None,
+                "stale": bool(held), "error": None}}
+            policy = _FACET_MEMORY.get((str(payload.get("config_dir") or ""), "login_policy", False))
+            if policy:
+                payload["profiles"] = {**payload["profiles"], "login_capable_harnesses": copy.deepcopy(policy["value"])}
+    return payload
+
+
+def _account_changed(harness: str, profile_id: str, enabled=None, *, home: str | None = None) -> None:
+    global _ACCOUNTS_REVISION
+    from ouroboros.claudexor_daemon import owned_config_dir
+
+    home = str(owned_config_dir()) if home is None else home
+    with _STATUS_LOCK:
+        _ACCOUNTS_REVISION += 1
+        for ((source_home, facet, _), held) in _FACET_MEMORY.items():
+            if source_home != home or facet != "accounts":
+                continue
+            roster = held["value"]["profiles"]
+            wrappers = roster.get("profiles", [])
+            roster["profiles"] = [
+                ({**row, "profile": {**row["profile"], "enabled": enabled}} if enabled is not None else None)
+                if (row.get("profile", {}).get("harness_id") == harness
+                    and row.get("profile", {}).get("profile_id") == profile_id) else row
+                for row in wrappers]
+            roster["profiles"] = [row for row in roster["profiles"] if row is not None]
+            roster["accountPools"] = []
+            roster.pop("routing_evidence", None)
+            roster.pop("routing_evidence_read", None)
+
+
+def _with_facet_memory(payload: Dict[str, Any], include_models: bool = False,
+                       *, account_revision: int | None = None,
+                       read_sequence: int | None = None) -> Dict[str, Any]:
     """Stamp ``facets`` and serve each unanswered facet's last answered value as stale.
 
-    An ``ok`` read replaces the facet's memory and observation time; a ``failed`` or
-    ``not_read`` facet keeps both (a stale value never refreshes its timestamp) and carries
-    this read's typed error. ``reads`` still states what THIS read established."""
+    An ``ok`` read replaces the facet's memory and observation time: the time the engine
+    dated the facet with (the catalog's ``generatedAt``: the engine may answer from a recent
+    composition), else the completion of that facet's own read, else this read's time. A
+    ``failed`` or ``not_read`` facet keeps both (a stale value never refreshes its timestamp)
+    and carries this read's typed error. ``reads`` still states what THIS read established."""
     from ouroboros.utils import utc_now_iso
 
+    global _STATUS_READ_SEQUENCE
     now, home = utc_now_iso(), str(payload.get("config_dir") or "")
+    completed = payload.pop("_facet_observed_at", {})  # when each facet's own read completed
     errors = payload.pop("_facet_errors", {})
+    engine_dated = payload.pop("_facet_observed", {})  # the time the engine dated a facet with
     facets: Dict[str, Dict[str, Any]] = {}
     with _STATUS_LOCK:
+        if read_sequence is None:
+            _STATUS_READ_SEQUENCE += 1
+            read_sequence = _STATUS_READ_SEQUENCE
+        # Manifest eligibility and roster membership are independent reads. A
+        # refused roster may retain old rows, never overwrite newer eligibility.
+        policy_key = (home, "login_policy", False)
+        policy = _FACET_MEMORY.get(policy_key)
+        roster = payload.get("profiles") or {}
+        if "login_capable_harnesses" in roster and (not policy or policy["sequence"] <= read_sequence):
+            _FACET_MEMORY[policy_key] = policy = {
+                "sequence": read_sequence, "value": copy.deepcopy(roster["login_capable_harnesses"])}
+        if account_revision is not None and account_revision != _ACCOUNTS_REVISION:
+            payload["reads"]["accounts"] = READ_NOT_READ
+            payload["profiles"] = {}
+            payload["unified_accounts"] = False
+            errors.pop("accounts", None)  # discarded, not failed
+        # Optional resources keep their own order (as in the browser's merge). An answered quota
+        # read whose operations catalog was unread could not negotiate them: it observed none, so
+        # it neither erases the last observed list nor outranks an earlier read's own.
+        answered = payload["reads"]["quota"] == READ_OK
+        resources_key = (home, "resources", False)
+        resources = _FACET_MEMORY.get(resources_key)
+        if (answered and ("resources" in payload or payload.get("resource_capabilities_read") != READ_FAILED)
+                and (not resources or resources["sequence"] <= read_sequence)):
+            _FACET_MEMORY[resources_key] = resources = {
+                "sequence": read_sequence, "value": copy.deepcopy(payload.get("resources"))}
         for facet, fields in _FACET_FIELDS.items():
             key = (home, facet, include_models and facet == "catalog")
+            held = _FACET_MEMORY.get(key)
+            if (payload["reads"][facet] == READ_OK and held
+                    and held["sequence"] > read_sequence):
+                payload["reads"][facet] = READ_NOT_READ
+                if facet == "accounts":
+                    payload["unified_accounts"] = False
             if payload["reads"][facet] == READ_OK:
                 _FACET_MEMORY[key] = held = {
-                    "observed_at": now, "value": copy.deepcopy({name: payload[name] for name in fields if name in payload})}
+                    "sequence": read_sequence,
+                    "observed_at": _engine_time(engine_dated.get(facet)) or completed.get(facet, now),
+                    "value": copy.deepcopy({name: payload[name] for name in fields if name in payload})}
             else:
-                held = _FACET_MEMORY.get(key)
+                # The scope binds the held rows. A resource list stays beside them from a read at
+                # least as new as this one (its own included), or stale when this read answered none.
+                if facet == "quota":
+                    payload.pop("resources", None)
+                    payload.pop("availability_scope", None)
                 payload.update(copy.deepcopy(held["value"]) if held else {})
+                if (facet == "quota" and resources and resources["value"] is not None
+                        and (not answered or resources["sequence"] >= read_sequence)):
+                    payload["resources"] = copy.deepcopy(resources["value"])
             facets[facet] = {"observed_at": held["observed_at"] if held else None,
                              "stale": bool(held) and payload["reads"][facet] != READ_OK,
                              "error": errors.get(facet)}
+        if policy:
+            payload["profiles"] = {**payload.get("profiles", {}), "login_capable_harnesses": copy.deepcopy(policy["value"])}
     payload["facets"] = facets
     return payload
+
+
+def _engine_time(value: Any) -> Optional[str]:
+    """An engine's ISO timestamp as UTC ``isoformat``; None when absent, unreadable or naive."""
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return moment.astimezone(datetime.timezone.utc).isoformat() if moment.tzinfo else None
+    except (ValueError, OverflowError):  # unparseable, or past what UTC can hold
+        return None
 
 
 def _read_status_payload(include_models: bool) -> Dict[str, Any]:
@@ -285,6 +415,7 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
         discover_daemon_at,
     )
     from ouroboros.subagents import subagent_last_delegation
+    from ouroboros.utils import utc_now_iso
 
     daemon = get_owned_daemon().status_dict()
     payload: Dict[str, Any] = {
@@ -382,6 +513,11 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
                 profiles_call = pool.submit(gateway.credential_profiles)
                 quota_call = pool.submit(_quota_state)
                 marks_call = pool.submit(_capability_marks)
+                # Accounts/quota may have answered long before a slow catalog.
+                # Their read-time stamps must not acquire the catalog's delay.
+                observed = payload["_facet_observed_at"] = {}
+                for facet, call in (("catalog", catalog_call), ("accounts", profiles_call), ("quota", quota_call)):
+                    call.add_done_callback(lambda _done, facet=facet: observed.__setitem__(facet, utc_now_iso()))
                 # Deferred lookup on purpose: the failure of THIS read (or a
                 # transport double that lacks the method) must land inside the
                 # future, where the absorbed fail-closed handling below owns it.
@@ -410,6 +546,7 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
                                        ("quota", quota_outcome)) if outcome[0] == READ_FAILED}
             payload["unified_accounts"] = profiles_outcome[0] == READ_OK
             catalog = catalog_outcome[1] if catalog_outcome[0] == READ_OK else {}
+            payload["_facet_observed"] = {"catalog": catalog.get("generatedAt")}
             # Account surfaces show only harnesses with a login concept. On a
             # transient manifest-read failure — or a successful read with zero
             # readable manifests (the helper answers None) — fail OPEN
@@ -467,6 +604,11 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
                 rows.append(projected)
             payload["harnesses"] = rows
             profiles = profiles_outcome[1] if profiles_outcome[0] == READ_OK else {}
+            # Full Accounts owns this manifest-derived presentation policy. The
+            # passive roster remains raw; its browser merge carries this evidence
+            # forward instead of deriving login support from catalog membership.
+            if profiles_outcome[0] == READ_OK or capable is not None:
+                profiles = {**profiles, "login_capable_harnesses": sorted(capable) if capable is not None else None}
             wrappers = profiles.get("profiles") if isinstance(profiles, dict) else None
             if capable is not None and isinstance(wrappers, list):
                 # Named credential-profile wrappers leak like catalog rows: an
@@ -556,12 +698,18 @@ async def api_claudexor_status(request: Request) -> JSONResponse:
     daemon's own account/quota/catalog truth. ``?view=quota`` reads only the
     passive quota and account roster. Read-only; never spawns."""
     include_models = "models" in str(request.query_params.get("include") or "")
+    revision = account_read_revision()
     try:
         if request.query_params.get("view") == "quota":
             from ouroboros.gateway.claudexor_passive import _quota_payload
 
-            return JSONResponse(await asyncio.to_thread(_quota_payload))
-        return JSONResponse(await asyncio.to_thread(_status_payload, include_models))
+            payload = await asyncio.to_thread(_quota_payload)
+        else:
+            payload = await asyncio.to_thread(_status_payload, include_models)
+        # The await can resume after another client's PATCH/DELETE confirmation,
+        # even when the worker thread finished before it. Serialize that response
+        # only after the same consumption fence, with no process counter on wire.
+        return JSONResponse(coherent_accounts(payload, revision))
     except Exception as exc:
         log.exception("api_claudexor_status failed")
         return json_error(f"{type(exc).__name__}: Claudexor status failed")
@@ -592,8 +740,10 @@ async def api_claudexor_wake(request: Request) -> JSONResponse:
         gateway.close()
         return _status_payload(include_models=False, join=False)
 
+    revision = account_read_revision()
     try:
-        return JSONResponse(await asyncio.to_thread(_wake))
+        payload = await asyncio.to_thread(_wake)
+        return JSONResponse(coherent_accounts(payload, revision))
     except ClaudexorUnavailable as exc:
         # Typed refusal (missing binary, foreign home, a daemon that never
         # published a descriptor): the panel keeps its rows and says why.
@@ -635,7 +785,11 @@ async def api_claudexor_restart(request: Request) -> JSONResponse:
         token = body.get("token") if isinstance(body, dict) else None
         if not isinstance(token, str) or not token:
             return json_error("token is required: the preview this restart was confirmed for", 400)
-        return JSONResponse(await asyncio.to_thread(_restart, token))
+        revision = account_read_revision()
+        answer = await asyncio.to_thread(_restart, token)
+        if "reads" in answer["status"]:  # a status failure still keeps the restart receipt
+            answer["status"] = coherent_accounts(answer["status"], revision)
+        return JSONResponse(answer)
     except RestartRefused as exc:
         return json_error(str(exc), 409, code=exc.code, **({"preview": exc.preview} if exc.preview else {}))
     except ClaudexorUnavailable as exc:
@@ -1052,20 +1206,27 @@ def _remove_credential_profile(harness: str, profile_id: str) -> Dict[str, Any]:
     from ouroboros.claudexor_daemon import owned_config_dir
     from ouroboros.gateways.claudexor import ClaudexorGateway, discover_daemon_at
 
-    endpoint = discover_daemon_at(owned_config_dir())
-    with ClaudexorGateway(endpoint) as gateway:
-        gateway.handshake()
-        return gateway.delete_credential_profile(harness, profile_id)
+    home = owned_config_dir()
+    with _ACCOUNT_WRITE_LOCK:
+        endpoint = discover_daemon_at(home)
+        with ClaudexorGateway(endpoint) as gateway:
+            gateway.handshake()
+            receipt = gateway.delete_credential_profile(harness, profile_id)
+        _account_changed(harness, profile_id, home=str(home))
+    return receipt
 
 
 def _update_credential_profile(harness: str, profile_id: str, enabled: bool) -> Dict[str, Any]:
     from ouroboros.claudexor_daemon import owned_config_dir
     from ouroboros.gateways.claudexor import ClaudexorGateway, discover_daemon_at
 
-    endpoint = discover_daemon_at(owned_config_dir())
-    with ClaudexorGateway(endpoint) as gateway:
-        gateway.handshake()
-        gateway.update_credential_profile(harness, profile_id, enabled=enabled)
+    home = owned_config_dir()
+    with _ACCOUNT_WRITE_LOCK:
+        endpoint = discover_daemon_at(home)
+        with ClaudexorGateway(endpoint) as gateway:
+            gateway.handshake()
+            gateway.update_credential_profile(harness, profile_id, enabled=enabled)
+        _account_changed(harness, profile_id, enabled, home=str(home))
     return {"ok": True, "harness": harness, "profile_id": profile_id, "enabled": bool(enabled)}
 
 

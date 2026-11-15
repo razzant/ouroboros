@@ -475,7 +475,7 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     place = connected.json()["place"]
     assert place["label"] == "Test chat · Room" and place["state"] == "silent"
     assert not validate_ingress(place, contract_typed_dict("PlaceSummary"))
-    assert place["model_route"] == {"value": "circle/model", "layer": "circle"}
+    assert place["model_route"] == {"value": "circle/model", "layer": "circle", "local": False}
     assert set(place["model_route"]) == _declared("PlaceModelRoute")
     assert validate_ingress({**place, "model_route": {"value": "x", "layer": "unknown"}}, contract_typed_dict("PlaceSummary"))
     assert set(place) <= _declared("PlaceSummary") and "connector_label" not in place

@@ -386,6 +386,26 @@ def test_extraction_runs_under_its_own_physical_rail():
     assert method == "light_model_extraction" and text == "[]"
 
 
+@pytest.mark.parametrize("main_local", [True, False])
+def test_extraction_runs_on_the_lane_the_light_slot_has(monkeypatch, main_local):
+    """An empty Light is Main's route, lane included (route_choice): under a local Main the verdict is read on the
+    local runtime, and the evidence names that route, instead of sending the local model's name to the cloud."""
+    monkeypatch.setenv("OUROBOROS_MODEL", "main-model")
+    monkeypatch.delenv("OUROBOROS_MODEL_LIGHT", raising=False)
+    monkeypatch.setenv("USE_LOCAL_MAIN", str(main_local))
+    monkeypatch.delenv("USE_LOCAL_LIGHT", raising=False)
+    sent = []
+
+    class LaneProbeLLM(FakeLLM):
+        def chat(self, **kwargs):
+            sent.append((kwargs["model"], kwargs["use_local"], kwargs["model_role"]))
+            return super().chat(**kwargs)
+
+    text, method, usage = canonicalize_session_verdict("narrative: clean.", conformance_passed=False, llm=LaneProbeLLM(reply="[]"))
+    assert (text, method, sent) == ("[]", "light_model_extraction", [("main-model", main_local, "light")])
+    assert usage["model"] == ("main-model (local)" if main_local else "main-model")
+
+
 def test_extraction_reads_the_whole_transcript_no_window():
     """CLAIM-2 regression: the extraction rail must see the artifact WHOLE. A
     head+tail window silently dropped everything mid-transcript, so a finding

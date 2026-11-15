@@ -1015,7 +1015,7 @@ def review_context_updates(ctx: Any, *, families: Mapping[str, str] | None = Non
         if family == "plan":
             history, operative = current_plan_history(ctx)
         else:
-            history, operative = review_dispute_history(drive_root=root, repo_root=repo, task_id=task), None
+            history, operative = review_dispute_history(drive_root=root, repo_root=repo, task_id=task, attempts_root=ctx.drive_root), None
         view = _project_for_context(ctx, history, operative, selection)
         index = _index_message(view["mandatory"], family, repo, task_id=task)
         if (family, repo, index[REVIEW_CONTEXT_INDEX_KEY]["sha256"]) not in indexes:
@@ -1046,7 +1046,7 @@ def review_note_options(ctx: Any) -> dict:
     root = getattr(ctx, "budget_drive_root", None) or ctx.drive_root
     repo = getattr(ctx, "repo_dir", None)
     if repo is not None:
-        histories.append(review_dispute_history(drive_root=root, repo_root=repo, task_id=str(ctx.task_id)))
+        histories.append(review_dispute_history(drive_root=root, repo_root=repo, task_id=str(ctx.task_id), attempts_root=ctx.drive_root))
     entries = [entry for history in histories for entry in decision_entries(history)]
     selected = {}
     for history in histories:

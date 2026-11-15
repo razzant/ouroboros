@@ -12,7 +12,7 @@ import { chipHtml } from './skill_presentation.js';
 import { tr, fmt } from './i18n.js';
 import { failureText, readConsciousness, readConsciousnessFromState, readPlaces } from './consciousness_api.js';
 import { autonomyOf } from './consciousness_autonomy.js';
-import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, safetyLevelOf, splitWakes, durationText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckChip, wakeCheckText, wakeCostText } from './consciousness_words.js';
+import { CHECK_CHIPS, allowanceText, clockText, consciousnessMark, modelRouteWords, safetyLevelOf, splitWakes, durationText, sendsAsHtml, usdText, wakePhaseText, wakeFactsText, wakeCheckChip, wakeCheckText, wakeCostText } from './consciousness_words.js';
 import { mountChatMarkdown, enhanceChatMarkdown, destroyChatMarkdown } from './chat_markdown.js';
 import { confirmAndSendRestart, costPresentationDetail } from './chat_activity.js';
 import { openConfirmDialog } from './confirm_dialog.js';
@@ -20,7 +20,6 @@ import { openCircles, openPlaceSheet } from './place_sheet.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { CODECS, GUARDED_WRITERS, WRITERS } from './settings_controls.js';
 import { mountTabSettings } from './dashboard.js';
-import { parseModelSource } from './route_editor_primitives.js';
 import { whenName } from './evolution.js';
 
 const SEP = ' · ';
@@ -48,12 +47,12 @@ export function waitWords(seconds) {
 }
 
 /** What the settings cards say from the last settings read besides their rows (dashboard.js `words`): the chosen level
- *  in its own sentence, the wake range in minutes or hours, and the values behind the doors: the allowance, the model,
+ *  in its own sentence, the wake range in minutes or hours, and the values behind the doors: the allowance,
  *  the Safety level of its own life in the scale's words (consciousness_words.js SAFETY_LEVELS) and the evolution
- *  choice by its name. A key the document does not carry is not said. */
-export function cardWords(settings) {
+ *  choice by its name. A key the document does not carry is not said. The model is the route its next wake takes
+ *  (`route`: the consciousness read's `modelRoute`), in Costs' words; a slot's text alone does not say its lane. */
+export function cardWords(settings, route = null) {
     const [min, max] = [waitWords(settings.OUROBOROS_BG_WAKEUP_MIN), waitWords(settings.OUROBOROS_BG_WAKEUP_MAX)];
-    const model = String(settings.OUROBOROS_MODEL_CONSCIOUSNESS ?? '').trim();
     const stored = settings.OUROBOROS_CONSCIOUSNESS_DAILY_USD;
     const allowance = stored === undefined || stored === null || stored === '' ? NaN : Number(stored);
     return {
@@ -61,7 +60,7 @@ export function cardWords(settings) {
         OUROBOROS_BG_WAKEUP: { caption: !min || !max ? '' : min === max ? `It wakes every ${min}.` : `It picks a moment between ${min} and ${max}.` },
         // The row names the limit as Costs does (a rolling 24 hours, never a calendar day), so its value is the sum alone.
         'consciousness-allowance': { value: !Number.isFinite(allowance) ? '' : Number.isInteger(allowance) ? `$${allowance}` : usdText(allowance) },
-        'consciousness-model': { value: model ? parseModelSource(model).model || model : 'Main model' },
+        'consciousness-model': { value: modelRouteWords(route) },
         'consciousness-safety': { value: safetyLevelOf(settings.OUROBOROS_CONSCIOUSNESS_SAFETY_MODE)?.label || '' },
         'consciousness-evolution': { value: 'OUROBOROS_POST_TASK_EVOLUTION' in settings ? whenName(CODECS.evolutionWhen.read(settings)) : '' },
     };
@@ -246,8 +245,8 @@ export function paintWakeRows(region, wakes, coverage, opened, put, release = de
  *  allowance door opens its row in Costs and the evolution door its row on the Evolution tab; the model door opens its
  *  role in Models and the Safety door its row in Permissions and checks, both leading back here; its places are the
  *  Circles page. */
-function mountSettingsCards(host, { state, openSettings, openDashboardTab }) {
-    if (!host) return { dispose() {} };
+function mountSettingsCards(host, { state, openSettings, openDashboardTab, route }) {
+    if (!host) return { paint() {}, dispose() {} };
     const back = { label: 'Consciousness', go: () => openDashboardTab?.('consciousness') };
     const doors = {
         'consciousness-allowance': () => openDashboardTab?.('costs', { row: 'OUROBOROS_CONSCIOUSNESS_DAILY_USD' }),
@@ -256,7 +255,7 @@ function mountSettingsCards(host, { state, openSettings, openDashboardTab }) {
         'consciousness-places': () => openCircles(),
         'consciousness-evolution': () => openDashboardTab?.('evolution', { row: 'OUROBOROS_POST_TASK_EVOLUTION' }),
     };
-    const cards = mountTabSettings(host, 'consciousness', { state, words: cardWords, openDoor: (row) => doors[row.id]?.(),
+    const cards = mountTabSettings(host, 'consciousness', { state, words: (settings) => cardWords(settings, route()), openDoor: (row) => doors[row.id]?.(),
         cards: [{ title: 'On its own', fold: 'More: conversations at once' },
             { title: 'Around it', rows: ['consciousness-model', 'consciousness-safety', 'consciousness-places', 'consciousness-evolution'] }] });
     // The range reads "[shortest] to [longest] s".
@@ -276,8 +275,8 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettings, ope
     readFallback = readConsciousnessFromState, readPlacesFn = readPlaces, openSheet = openPlaceSheet,
     markdown = { mount: mountChatMarkdown, enhance: enhanceChatMarkdown, destroy: destroyChatMarkdown } } = {}) {
     if (!mount) return { refresh: () => {}, destroy() {} };
-    // The tab's one root and scroller (style.css "The Dashboard tab body"); the settings cards are drawn once and no
-    // repaint of the tab touches them.
+    // The tab's one root and scroller (style.css "The Dashboard tab body"); the settings cards are drawn once, and a
+    // repaint of the tab only paints their rows' words again (the Model door reads the route this read published).
     mount.innerHTML = `<div class="dashboard-body scroll-fade-y consciousness-root">
             <p class="ui-status consciousness-read-status" role="status" data-cx-status></p>
             <section class="ui-card" aria-label="Consciousness" data-cx-summary><p class="consciousness-copy">Reading…</p></section>
@@ -288,9 +287,10 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettings, ope
         status: mount.querySelector('[data-cx-status]'), summary: mount.querySelector('[data-cx-summary]'),
         wakes: mount.querySelector('[data-cx-wakes]'),
     };
-    const cards = mountSettingsCards(mount.querySelector('[data-cx-settings]'), { state, openSettings, openDashboardTab });
-    // The page binds every `.scroll-fade-y` scroller once, after the panels mount (app.js).
     let snapshot = null;
+    const cards = mountSettingsCards(mount.querySelector('[data-cx-settings]'), { state, openSettings, openDashboardTab,
+        route: () => snapshot?.modelRoute || null });
+    // The page binds every `.scroll-fade-y` scroller once, after the panels mount (app.js).
     let generation = 0;
     let timer = 0;
     let destroyed = false;
@@ -319,6 +319,7 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettings, ope
     let toggledAt = 0;
     let detailsOpen = false;  // the headline card's Details stays as its reader left it across repaints
     function paint() {
+        cards.paint();  // the Model door says the route this read published
         if (snapshot) put(regions.summary, summaryHtml(snapshot, { hasSocket: Boolean(ws?.send), toggling, detailsOpen }));
         const wakes = snapshot?.recentWakes ?? null;
         const coverage = snapshot?.coverage || '';

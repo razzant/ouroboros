@@ -273,6 +273,16 @@ def test_role_words_are_refused_as_ids_but_their_routes_remain_usable(local_mode
     monkeypatch.setattr("ouroboros.llm.LLMClient.available_models", lambda _self: [r[0] for r in routes.values()])
     _switch_model(ctx, model=routes[role][0])
     assert ctx.active_model_override == routes[role][0]
+    # The route as the refusal printed it is usable too: an empty Light on the local runtime has Main's id, and
+    # only its label tells the two lanes apart. A label no role prints stays an unknown model.
+    routes["light"] = (routes["main"][0], True)
+    monkeypatch.setattr("ouroboros.llm.LLMClient.available_models", lambda _self: [routes["main"][0]])
+    printed = routes[role][0] + (" (local)" if routes[role][1] else "")
+    _switch_model(ctx, model=printed)
+    assert (ctx.active_model_override, ctx.active_use_local_override) == routes[role]
+    _switch_model(ctx, model="stranger (local)")
+    assert _published_tool_result(ctx, None).code == "TOOL_ARG_ERROR"
+    assert (ctx.active_model_override, ctx.active_use_local_override) == routes[role]
 
 
 def test_main_role_cannot_be_saved_as_a_route_but_room_follow_main_remains(configured_model_start, monkeypatch):

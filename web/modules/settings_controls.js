@@ -133,7 +133,7 @@ function rowState(row) {
     return ROW_STATES.get(row.id);
 }
 const repaintRow = (id) => BOUND.get(id)?.forEach((paint) => paint());
-const repaintAll = (read = false) => BOUND.forEach((paints) => paints.forEach((paint) => paint(read)));
+const repaintAll = () => BOUND.forEach((paints) => paints.forEach((paint) => paint()));
 
 // The composer's list and the circle and place Model fields learn the tiers and keys from the newest document
 // (model_catalog_store.js): a read, or a row's landed write.
@@ -158,7 +158,7 @@ export async function readSettings() {
         if (state.busy || state.outcome?.state !== 'unknown' || !sameValue(currentValue(state.row, data), state.sent)) return;
         Object.assign(state, { outcome: { ...state.outcome, state: 'saved', message: '', details: '' }, reread: false, typed: null, seen: false });
     });
-    repaintAll(true);
+    repaintAll();
     return data;
 }
 let firstRead = null;  // writes that come before any read wait on one read
@@ -727,7 +727,7 @@ function paintResult(result, line) {
     if (tail) result.append(doc.createTextNode(tail));
 }
 
-function paintRow(node, row) {
+function paintRow(node, row, ctx) {
     const state = rowState(row);
     const control = controlOf(row);
     const stored = currentValue(row);
@@ -782,7 +782,7 @@ function paintRow(node, row) {
     }
     // A write in flight: the control is disabled and busy; nothing else is drawn for "saving". Disabling moves the
     // focus away, so a control that had it takes it back when the answer comes, unless the owner has moved on.
-    [...controls, ...node.querySelectorAll('[data-setting-value]'), ...node.querySelectorAll('[data-setting-no-limit]')].forEach((element) => {
+    [...controls, ...node.querySelectorAll('[data-setting-value]'), ...node.querySelectorAll('[data-setting-no-limit], [data-secret-show], [data-secret-remove]')].forEach((element) => {
         if (state.busy) {
             if (!element.dataset.settingBusy && doc?.activeElement === element) element.dataset.settingRefocus = '1';
             element.disabled = true;
@@ -811,6 +811,8 @@ function paintRow(node, row) {
     setRowMeta(node.querySelector('[data-setting-meta]'), meta);
     paintResult(node.querySelector('[data-setting-result]'), outcomeLine(row, state.outcome));
     if (state.outcome) state.seen = true;
+    const settled = !state.outcome || ['saved', 'saved_then_failed', 'unchanged', 'changed_elsewhere'].includes(state.outcome.state);
+    if (control.kind !== 'custom' || (!state.busy && state.typed === null && settled)) ctx.onPaint?.(lastSettings, row, node);
 }
 
 // A value from a control: the value already there (or already on its way) sends nothing.
@@ -841,8 +843,8 @@ function commitTyped(row, text, ctx) {
  * Wire the rows drawn in `container`: a typed value, a switch and a select commit on `change` (for a field: leaving it
  * or Enter); a strip option and "No limit" on the press. Each row shows its result line and its Undo. `ctx.rows` names
  * descriptors that are not in settings_rows.js; `ctx.ask` stands in for the confirm dialog; `ctx.openDoor(row)` takes
- * a door's press; `ctx.onPaint(settings)` paints a `custom` control from the last read whenever its row is painted (at
- * bind, and at every read that lands). Answers `{ paint, leave, dispose }`: `paint()` after a fresh read (it never
+ * a door's press; `ctx.onPaint(settings, row, node)` paints the row's own control and words from the document whenever
+ * it holds no pending custom choice or draft. Answers `{ paint, leave, dispose }`: `paint()` after a fresh read (it never
  * touches a focused or typed field), `leave()` when the page is left (a result the owner saw ends there), `dispose()`
  * when it is torn down.
  */
@@ -852,14 +854,13 @@ export function bindSettingRows(container, ctx = {}) {
     container.querySelectorAll('[data-setting-row]').forEach((node) => {
         const row = find(node.dataset.settingRow);
         if (!row) return;
-        const paint = (read = false) => {
+        const paint = () => {
             if (node.isConnected === false) { BOUND.get(row.id)?.delete(paint); return; }
-            paintRow(node, row);
-            if (read && row.control?.kind === 'custom') ctx.onPaint?.(lastSettings);  // a page's own control, by its own painter
+            paintRow(node, row, ctx);
         };
         paintWithRow(row.id, paint);
         bindings.push({ row, node, paint });
-        paint(true);
+        paint();
         if (CODECS[row.codec]?.host && !HOST_STATES.has(row.codec)) void readHost(row);
     });
     const of = (event) => {
@@ -868,8 +869,9 @@ export function bindSettingRows(container, ctx = {}) {
     };
     const onInput = (event) => {
         const binding = of(event);
-        if (!binding || !isTyped(binding.row) || !event.target.matches?.('[data-setting-control]')) return;
+        if (!binding || !(isTyped(binding.row) || binding.row.control?.kind === 'custom') || !event.target.matches?.('[data-setting-control]')) return;
         event.target.dataset.settingDirty = '1';
+        if (binding.row.control?.kind === 'custom') rowState(binding.row).typed = event.target.value;
         // An edit of the row starts a new subject: its last result goes.
         rowState(binding.row).outcome = null;
         binding.paint();
@@ -878,6 +880,7 @@ export function bindSettingRows(container, ctx = {}) {
         const binding = of(event);
         if (!binding || !event.target.matches?.('[data-setting-control]')) return;
         const { row, node } = binding;
+        if (row.control?.kind === 'custom') return;  // its page commits the value assembled from its fields
         if (row.control?.kind === 'switch') { void commitValue(row, Boolean(event.target.checked), ctx); return; }
         if (!isTyped(row)) { void commitValue(row, event.target.value, ctx); return; }
         const inputs = node.querySelectorAll('[data-setting-control]');
@@ -923,7 +926,7 @@ export function bindSettingRows(container, ctx = {}) {
     container.addEventListener('keydown', onKeydown);
     const leave = () => bindings.forEach(({ row, paint }) => {
         const state = rowState(row);
-        if (state.seen && !state.busy) Object.assign(state, { outcome: null, typed: null });
+        if (!state.busy && (state.seen || row.control?.kind === 'custom')) Object.assign(state, { outcome: null, typed: null });
         paint();
     });
     return {

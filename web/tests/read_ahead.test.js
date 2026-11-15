@@ -361,3 +361,99 @@ test('completed and released partial messages retain no DOM subtrees', () => {
         tracker.dispose();
     }
 });
+
+// The observer mode (DESIGN "Unread"): `?observer=1` takes the tab out of the owner's reading until `?observer=0`.
+// Each case takes its own instance of the module (a query in the specifier), so one case's mode never reaches another.
+let viewInstances = 0;
+const freshView = () => import(`../modules/read_ahead.js?observer-case-${++viewInstances}`);
+
+// One tab's session storage (`broken`: a document that may not use it) and its history.
+function tab(href, held = new Map(), { broken = false } = {}) {
+    const writes = [], refuse = () => { if (broken) throw new Error('SecurityError'); };
+    globalThis.sessionStorage = {
+        setItem(key, value) { refuse(); held.set(key, String(value)); },
+        getItem(key) { refuse(); return held.has(key) ? held.get(key) : null; },
+        removeItem(key) { refuse(); held.delete(key); },
+    };
+    const history = { state: { layer: 'drawer' }, replaceState: (...args) => writes.push(args) };
+    return { where: { href }, history, writes, held };
+}
+
+test('observer=1 keeps the tab out of the owner\'s reading until it opens observer=0; only that parameter leaves', async () => {
+    try {
+        const view = await freshView();
+        const opened = tab('http://127.0.0.1:8765/?a=b%20c&observer=1&flag#/projects/p1?x=1');
+        view.captureObserverMode(opened.where, opened.history);
+        assert.equal(view.ownerReads(), false);
+        // The other parameters keep their spelling; the hash and the entry's state stay.
+        assert.deepEqual(opened.writes, [[{ layer: 'drawer' }, '', 'http://127.0.0.1:8765/?a=b%20c&flag#/projects/p1?x=1']]);
+        const reloaded = await freshView();  // the same tab reloaded: a new document, the same session storage
+        const again = tab('http://127.0.0.1:8765/?a=b%20c&flag#/projects/p1?x=1', opened.held);
+        reloaded.captureObserverMode(again.where, again.history);
+        assert.deepEqual(again.writes, []);
+        assert.equal(reloaded.ownerReads(), false);
+        const left = await freshView();  // the tab opens observer=0: a view that reads for the owner again
+        const exit = tab('http://127.0.0.1:8765/?observer=0&a=b%20c#/projects/p1', opened.held);
+        left.captureObserverMode(exit.where, exit.history);
+        assert.equal(left.ownerReads(), true);
+        assert.deepEqual([...opened.held], []);
+        assert.deepEqual(exit.writes, [[{ layer: 'drawer' }, '', 'http://127.0.0.1:8765/?a=b%20c#/projects/p1']]);
+    } finally {
+        delete globalThis.sessionStorage;
+    }
+});
+
+test('an address without observer=1 or observer=0 is left as it is; observer=1 beside observer=0 still asks', async () => {
+    try {
+        for (const href of ['http://127.0.0.1:8765/#/projects', 'http://127.0.0.1:8765/?observer=true',
+            'http://127.0.0.1:8765/?observers=1', 'http://127.0.0.1:8765/?observer=']) {
+            const view = await freshView();
+            const opened = tab(href);
+            view.captureObserverMode(opened.where, opened.history);
+            assert.equal(view.ownerReads(), true, href);
+            assert.deepEqual([opened.writes, [...opened.held]], [[], []], href);
+        }
+        const view = await freshView();
+        const both = tab('http://127.0.0.1:8765/?observer=0&observer=1');  // any observer=1 asks; every observer field leaves
+        view.captureObserverMode(both.where, both.history);
+        assert.equal(view.ownerReads(), false);
+        assert.equal(both.writes[0][2], 'http://127.0.0.1:8765/');
+    } finally {
+        delete globalThis.sessionStorage;
+    }
+});
+
+test('without session storage the mode lives in this document only', async () => {
+    try {
+        const view = await freshView();
+        const opened = tab('http://127.0.0.1:8765/?observer=1', new Map(), { broken: true });
+        view.captureObserverMode(opened.where, opened.history);
+        assert.equal(view.ownerReads(), false);
+        assert.equal(opened.writes[0][2], 'http://127.0.0.1:8765/');
+        const reloaded = await freshView();  // a reload of that tab: nothing kept the mode (disclosed limitation)
+        const again = tab('http://127.0.0.1:8765/', new Map(), { broken: true });
+        reloaded.captureObserverMode(again.where, again.history);
+        assert.equal(reloaded.ownerReads(), true);
+    } finally {
+        delete globalThis.sessionStorage;
+    }
+});
+
+test('a message shown whole is recorded in a view that reads for the owner and not in an observer view', async () => {
+    try {
+        for (const [href, expected] of [['http://127.0.0.1:8765/', ['row:1@o#shared']],
+            ['http://127.0.0.1:8765/?observer=1', []]]) {
+            const view = await freshView();
+            const opened = tab(href);
+            view.captureObserverMode(opened.where, opened.history);
+            const { posted, post } = recorder();
+            const shown = feedOf([{ address: 'row:1@o#shared', revisions: { 1: 4, 5551: 2 }, top: 150, height: 100 }]);
+            const tracker = view.createSharedReadTracker({ chatId: 1, feed: shown.feed, band: shown.band, shown: () => true, post });
+            tracker.sample();
+            tracker.dispose();
+            assert.deepEqual(posted, expected, href);
+        }
+    } finally {
+        delete globalThis.sessionStorage;
+    }
+});

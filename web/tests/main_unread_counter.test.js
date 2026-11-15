@@ -9,7 +9,7 @@ import vm from 'node:vm';
 
 import * as readAhead from '../modules/read_ahead.js';
 import { forgetProjectPreviews } from '../modules/chat_preview.js';
-import { IDLE_SUMMARY } from '../modules/project_activity.js';
+import { IDLE_SUMMARY, pictureOwner } from '../modules/project_activity.js';
 import { markView, paintStatusMark } from '../modules/status_mark.js';
 
 const source = readFileSync(new URL('../app.js', import.meta.url), 'utf8').replace(/\r\n?/g, '\n');
@@ -39,11 +39,12 @@ function liftLine(start) {
 // a room beyond the feed: pinned verbatim below and run here as the list runs it.
 const IS_UNREAD = '(row) => unreadCount(row.visible_revision, state.projectSeenRevision?.[row.id], readAheadFor(row.chat_id)) > 0';
 
-function harness({ revision = null, seen = null, loaded = true, page = 'files', project = null, answer = () => ({}) } = {}) {
+function harness({ revision = null, seen = null, loaded = true, page = 'files', project = null, answer = () => ({}),
+    view = readAhead } = {}) {
     const posts = [], badges = [], acks = [], landings = [];
     const moves = {};  // what Main's feed (#chat-messages) and its ↓ (#chat-scroll-bottom) listen to
     const context = vm.createContext({
-        ...readAhead,  // app.js imports these: a message read in full elsewhere (DESIGN "Unread")
+        ...view,  // app.js imports these: a message read in full elsewhere, the observer mode (DESIGN "Unread")
         state: { mainVisibleRevision: revision, mainSeenRevision: seen, mainSeenLoaded: loaded, activePage: page },
         navState: { activeProjectId: project },  // a Project open over Main (owner 06.11)
         updateUnreadBadge: () => badges.push(context.mainUnreadCount()),
@@ -64,6 +65,26 @@ function harness({ revision = null, seen = null, loaded = true, page = 'files', 
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+// A view opened with `?observer=1` (DESIGN "Unread"): its own instance of read_ahead.js, in the observer mode.
+async function observerView() {
+    const view = await import('../modules/read_ahead.js?observer-main');
+    view.captureObserverMode({ href: 'http://127.0.0.1:8765/?observer=1' }, { state: null, replaceState() {} });
+    return view;
+}
+
+test('an observer view writes no Main cursor, not even a first one; the revision stays offered', async () => {
+    const view = await observerView();
+    const first = harness({ revision: 161, seen: null, view, answer: (body) => ({ main_seen_revision: body.main_seen_revision }) });
+    first.api.observeMainRevision(161);
+    await flush();
+    assert.deepEqual(first.posts, []);
+    assert.equal(first.context.state.mainSeenRevision, null);
+    const held = harness({ revision: 5, seen: 2, view, answer: (body) => ({ main_seen_revision: body.main_seen_revision }) });
+    assert.equal(await held.api.markMainViewed(5), false);  // "still unread here", as a failed write answers
+    assert.deepEqual(held.posts, []);
+    assert.equal(held.context.state.mainSeenRevision, 2);
+});
 
 test("Main's number is its room revision less its read cursor; unknown counts none", () => {
     assert.equal(harness({ revision: 42, seen: 40 }).api.mainUnreadCount(), 2);
@@ -231,7 +252,7 @@ function listHarness({ host = {}, beyond = [], seen = {}, main = [90, 90] } = {}
     const toggle = { attrs: {}, querySelector: (selector) => (selector === '.status-mark' ? mark : null),
         setAttribute(name, value) { this.attrs[name] = value; } };
     const context = vm.createContext({
-        ...readAhead, markView, paintStatusMark, IDLE_SUMMARY, forgetProjectPreviews, beyond, paints,
+        ...readAhead, markView, paintStatusMark, IDLE_SUMMARY, pictureOwner, forgetProjectPreviews, beyond, paints,
         navState: { activeProjectId: null },
         state: { mainVisibleRevision: main[0], mainSeenRevision: main[1], mainSeenLoaded: true, activePage: 'files',
             projectSeenRevision: seen },
@@ -254,7 +275,9 @@ const isUnread = ${IS_UNREAD};
 const projectsNav = { paint: () => paints.push('list'),
     unreadRows: () => [...lastProjectRows.filter((row) => row._unread), ...beyond.filter(isUnread)] };
 function patchProjectActivityMarkers() { paints.push('marks'); paintNavToggles(); }
-globalThis.api = { renderProjectsNav, observeMainRevision, mainUnreadCount, rows: () => lastProjectRows };`, context);
+globalThis.api = { renderProjectsNav, observeMainRevision, mainUnreadCount, rows: () => lastProjectRows,
+    mainWaits: (waits) => { if (waits) projectRooms.set('1', { owner: true }); else projectRooms.delete('1'); paintNavToggles(); },
+    projectsWait: (waits) => { projectActivityIndex.aggregate.owner = waits; paintNavToggles(); } };`, context);
     return {
         context, answers, paints, toggle, api: context.api,
         // Each row the list holds, by id: whether the list holds it unread.
@@ -286,6 +309,16 @@ test("a Project row is unread by the same count as Main's number: its revision, 
     assert.equal(read.dot(), 'none', 'no Project unread, Main read: no dot');
     assert.equal(read.toggle.attrs['aria-label'], 'Open navigation');
     assert.equal(read.answers.length, 0, 'nothing unread asks after no other client');
+    // Main's own wait lights the picture with no Project waiting, a Project's wait with Main at rest, and the
+    // owner's move outranks new messages.
+    for (const lit of [read, h]) {
+        for (const waits of [lit.api.mainWaits, lit.api.projectsWait]) {
+            waits(true);
+            assert.deepEqual([lit.dot(), lit.toggle.attrs['aria-label']], ['dot owner', 'Open navigation · something waits for you']);
+            waits(false);
+        }
+    }
+    assert.deepEqual([read.dot(), h.dot()], ['none', 'dot unread']);
 });
 
 test('a message read in full in another room leaves the counts without moving a cursor', () => {

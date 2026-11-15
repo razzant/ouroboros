@@ -173,6 +173,22 @@ def test_the_age_only_retirers_run_again_on_a_later_pass_and_trees_wait_out_a_re
     assert observations() == 2
 
 
+def test_a_pass_whose_only_work_removed_a_task_tree_logs_it(root, monkeypatch):
+    """#3239: the tree step counts its removals under ``pruned``; a pass that removed nothing else still logs them."""
+    def retirements():
+        rows = (root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        return [event for event in map(json.loads, rows) if event.get("type") == "runtime_retirement"]
+
+    write_task_result(root, "settled", "completed", result="done", ts="2000-01-01T00:00:00+00:00")
+    tree = _aged(root / "task_trees" / "settled" / "blackboard.jsonl").parent
+    sm._startup_prune_sweeps()  # recovery complete: the gate is open
+    _reconcile_pass(monkeypatch)
+    assert not tree.exists()
+    [event] = retirements()
+    assert [row["root_task_id"] for row in event["reports"]["task_trees"]["pruned"]] == ["settled"]
+    assert event["errors"] == []
+
+
 def test_a_generation_closed_between_two_reconcile_prunes_starts_no_further_one(root, monkeypatch):
     from ouroboros import code_intelligence, delegate_state_sweep, skill_uninstall_state
 

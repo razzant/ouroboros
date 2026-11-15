@@ -138,7 +138,8 @@ def present(root: Any) -> bool:
 
 
 def encode(row: Dict[str, Any]) -> str:
-    """The exact text a chain line held: ``append_jsonl``'s own encoding, without the newline."""
+    """The exact text a chain line held, without the newline: the encoding the chat logs were written in while they
+    were files. Chain coordinates were measured on it, so it never follows ``append_jsonl``'s."""
     return json.dumps(row, ensure_ascii=False)
 
 
@@ -1149,6 +1150,20 @@ def rows_by_client_id(root: Any, client_message_id: str, *, stream: str = "chat"
         records = conn.execute(f"{_SELECT} INDEXED BY dialogue_named WHERE stream=? AND client_message_id=?{where} "
                                "ORDER BY seq DESC LIMIT ?", (stream, client_message_id, *params, limit)).fetchall()
     return [_row(record) for record in records]
+
+
+def carried_ids(root: Any, client_message_ids: Iterable[str], *, stream: str = "chat") -> set:
+    """The ids among ``client_message_ids`` some row of ``stream`` carries (``rows_by_client_id`` non-empty), in ONE
+    step: one ``dialogue_named`` seek an id inside one statement, never a transaction an id (each releases the GIL).
+    Ids travel as JSON: SQLite 3.44 and older (not 3.51) ask an id holding U+0000 by its prefix, as _probe_seqs."""
+    wanted = list(dict.fromkeys(str(value) for value in client_message_ids if value))
+    if not wanted:
+        return set()
+    with transaction(root, write=False) as conn:
+        found = conn.execute("SELECT json_group_array(key) FROM json_each(?) WHERE EXISTS (SELECT 1 FROM dialogue "
+                             "INDEXED BY dialogue_named WHERE stream=? AND client_message_id=+value)",
+                             (json.dumps(wanted, ensure_ascii=False), stream)).fetchone()[0]
+    return {wanted[index] for index in json.loads(found or "[]")}
 
 
 def rows_by_identity(root: Any, chat_id: Optional[int], ts: str, *, stream: str = "chat") -> List[Row]:

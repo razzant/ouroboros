@@ -338,7 +338,7 @@ test('Web search saves only what the owner changed: the source or the model chos
     assert.equal(page.container.querySelector('[data-editor-result]').textContent, 'Nothing to save.');
 });
 
-test('Web search starts neutral before its first read, then keeps the last read on a return', async (t) => {
+test('Web search adopts a read, a return snapshot and a fallback through the same form and Key painter before unlocking', async (t) => {
     forgetSettingRows();
     const env = setup(t);
     const server = fakeServer(env.routes);
@@ -377,6 +377,45 @@ test('Web search starts neutral before its first read, then keeps the last read 
     assert.deepEqual(fields(secondPage.container).slice(0, 2).map((control) => [control.value || '', control.disabled]),
         [['auto', false], ['', false]], 'the returning read leaves the choice in place');
     assert.equal(server.values.OUROBOROS_WEBSEARCH_BACKEND, 'auto');
+    secondPage.handle.unmount();
+
+    // Its first read fails after somebody else's read succeeded: unlock only after adopting that answer.
+    forgetSettingRows();
+    Object.assign(server.values, { OUROBOROS_WEBSEARCH_BACKEND: 'openai', OUROBOROS_WEBSEARCH_MODEL: 'gpt-5.2' });
+    const failed = deferred();
+    env.routes.set('/api/settings', () => failed.promise);
+    const raced = await mount();
+    t.after(() => raced.handle.unmount());
+    assert.equal(fields(raced.container)[3].disabled, true);
+    env.routes.set('/api/settings', originalSettings);
+    await readSettings();
+    failed.resolve(response({ error: 'older read failed' }, 500));
+    await settle();
+    const [source, model, , save] = fields(raced.container);
+    assert.deepEqual([source.value, model.value, save.disabled], ['openai', 'gpt-5.2', false]);
+    assert.notEqual(raced.container.querySelector('[data-websearch-preview]').textContent, 'Reading…');
+    source.value = 'auto';
+    await source.fire('change', { target: source });
+    await raced.container.fire('click', { target: save });
+    await settle();
+    assert.deepEqual(server.posts.at(-1).settings, { OUROBOROS_WEBSEARCH_BACKEND: 'auto' }, 'saving Source cannot erase the model');
+    assert.equal(server.values.OUROBOROS_WEBSEARCH_MODEL, 'gpt-5.2');
+    raced.handle.unmount();
+
+    Object.assign(server.values, { OUROBOROS_WEBSEARCH_BACKEND: 'deepseek', OUROBOROS_WEBSEARCH_MODEL: 'deepseek@team::' });
+    await readSettings();
+    const returning = deferred();
+    env.routes.set('/api/settings', () => returning.promise);
+    const deepseek = await mount();
+    t.after(() => deepseek.handle.unmount());
+    const keyShown = () => {
+        const [source, model, key, save] = fields(deepseek.container);
+        return [source.value, model.hidden, key.hidden, key.value, save.disabled];
+    };
+    assert.deepEqual(keyShown(), ['deepseek', true, false, 'api:deepseek@team', false], 'the return paints Key, hiding its wire spelling');
+    returning.resolve(response({ error: 'read failed' }, 500));
+    await settle();
+    assert.deepEqual(keyShown(), ['deepseek', true, false, 'api:deepseek@team', false], 'a failed own read keeps the adopted Key');
 });
 
 test('the fallbacks keep their per-role entries through an order change, a removal and one fallback\'s own Save', () => {

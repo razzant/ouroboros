@@ -1,6 +1,6 @@
 """Task browser targets and Ouroboros control-request policy.
 
-Playwright lifecycle and operations remain in tools.browser. This owner composes
+Playwright lifecycle and operations remain in tools.browser(_session). This owner composes
 existing resource authority, concrete origins and live service identity.
 
 Owner control is admitted from the actual HTTP requests a page makes and three-valued

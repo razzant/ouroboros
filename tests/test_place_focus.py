@@ -882,10 +882,10 @@ def test_focus_aliases_remain_admission_snapshots(focus, monkeypatch, layer, ali
     root, place, _, event = focus
     settings = {"main": "main/first", "light": "light/first", "local": local}
     monkeypatch.setattr("ouroboros.model_slots._main_model", lambda: settings["main"])
-    monkeypatch.setattr("ouroboros.config.get_light_model", lambda: settings["light"])
     from ouroboros.config import runtime_setting
-    monkeypatch.setattr("ouroboros.config.runtime_setting", lambda key, default="": (
-        str(settings["local"]).lower() if key in {"USE_LOCAL_MAIN", "USE_LOCAL_LIGHT"} else runtime_setting(key, default)))
+    monkeypatch.setattr("ouroboros.route_choice.runtime_setting", lambda key, default="": (
+        str(settings["local"]).lower() if key in {"USE_LOCAL_MAIN", "USE_LOCAL_LIGHT"}
+        else settings["light"] if key == "OUROBOROS_MODEL_LIGHT" else runtime_setting(key, default)))
     circle = p.create_circle(root, name="Team", model=alias if layer == "circle" else "circle/model", author="owner")
     p.edit_place(root, place.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
     if layer == "place":

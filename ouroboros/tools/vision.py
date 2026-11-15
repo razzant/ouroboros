@@ -325,9 +325,10 @@ def _vision_capable_slot_candidates(client: Any, ctx: Any = None) -> List[str]:
         getattr(ctx, "active_model", "") or getattr(ctx, "task_model_override", ""),
         bool(getattr(ctx, "active_use_local", False)))]
     try:
-        from ouroboros.config import get_light_model, get_vision_model
+        from ouroboros.config import get_vision_model
+        from ouroboros.route_choice import following_route
         out.append(slot_lane_label("vision", get_vision_model()))
-        out.append(slot_lane_label("light", get_light_model()))
+        out.append(local_lane_label(*following_route("light")))
     except Exception:
         pass
     try:

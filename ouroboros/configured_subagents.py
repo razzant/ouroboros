@@ -729,11 +729,13 @@ def _append_legacy_model_rows(
     # in whatever binding (a compiled role row carries its role's pin), covers it.
     seen = {(row.route.kind, row.route.target_id) for row in items}
     heavy = _legacy_model_target(settings, "HEAVY", "OUROBOROS_MODEL_HEAVY")
-    light_key = "OUROBOROS_MODEL_LIGHT"
-    light_slot = "LIGHT"
-    if not str(settings.get(light_key) or "").strip():
-        light_key, light_slot = "OUROBOROS_MODEL", "MAIN"
-    light = _legacy_model_target(settings, light_slot, light_key)
+    if str(settings.get("OUROBOROS_MODEL_LIGHT") or "").strip():
+        light = _legacy_model_target(settings, "LIGHT", "OUROBOROS_MODEL_LIGHT")
+    else:  # an empty Light is Main's model on the lane the one rule gives it (its own box under a cloud Main)
+        from ouroboros.model_slots import local_lane_label
+        from ouroboros.route_choice import following_route
+
+        light = local_lane_label(settings.get("OUROBOROS_MODEL"), following_route("light", read=settings.get)[1])
     for row_id, recommendation, model, effort in (  # Auto rows: the owner's effort range decides
         ("legacy-heavy", PRIMARY_RECOMMENDATION, heavy, ""),
         ("fast-scout", SCOUT_RECOMMENDATION, light, ""),

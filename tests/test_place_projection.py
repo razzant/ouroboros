@@ -293,22 +293,22 @@ def test_owner_views_keep_manifest_labels_safety_and_accounts_without_identity(c
     assert revoked["owner_accounts"] == []
 
 
-@pytest.mark.parametrize("place_model,circle_model,consciousness_model,value,layer", [
-    ("place/model", "circle/model", "consciousness/model", "place/model", "place"),
-    ("", "circle/model", "consciousness/model", "circle/model", "circle"),
-    ("", "", "consciousness/model", "consciousness/model", "consciousness"),
-    ("", "", "", "main/model", "consciousness"),
-    ("place/model", None, "", "place/model", "place"),
-    ("", None, "consciousness/model", "consciousness/model", "consciousness"),
-    ("main", "circle/model", "consciousness/model", "main/model", "place"),
-    ("", "light", "consciousness/model", "light/model", "circle"),
+@pytest.mark.parametrize("place_model,circle_model,consciousness_model,value,layer,local", [
+    ("place/model", "circle/model", "consciousness/model", "place/model", "place", False),
+    ("", "circle/model", "consciousness/model", "circle/model", "circle", False),
+    ("", "", "consciousness/model", "consciousness/model", "consciousness", False),
+    ("", "", "", "main/model", "consciousness", False),
+    ("place/model", None, "", "place/model", "place", False),
+    ("", None, "consciousness/model", "consciousness/model", "consciousness", False),
+    ("main", "circle/model", "consciousness/model", "main/model", "place", False),
+    ("", "light", "consciousness/model", "light/model", "circle", True),  # the alias runs on Light's own box
 ])
 def test_model_route_is_shared_by_brief_full_and_inspect(tmp_path, monkeypatch, place_model, circle_model,
-                                                       consciousness_model, value, layer):
+                                                       consciousness_model, value, layer, local):
     monkeypatch.setattr("ouroboros.route_choice.runtime_setting", lambda key, default="": {
-        "OUROBOROS_MODEL_CONSCIOUSNESS": consciousness_model}.get(key, default))
+        "OUROBOROS_MODEL_CONSCIOUSNESS": consciousness_model, "OUROBOROS_MODEL_LIGHT": "light/model",
+        "USE_LOCAL_LIGHT": "true"}.get(key, default))
     monkeypatch.setattr("ouroboros.model_slots._main_model", lambda: "main/model")
-    monkeypatch.setattr("ouroboros.config.get_light_model", lambda: "light/model")
     monkeypatch.setattr(projection, "place_declarations", lambda _root: [])
     place = places.connect_place(tmp_path, connector="bridge", provider="chat")
     place = places.edit_place(tmp_path, place.place_id, "set_model", author="owner", model=place_model)
@@ -321,6 +321,7 @@ def test_model_route_is_shared_by_brief_full_and_inspect(tmp_path, monkeypatch, 
     full = projection.place_view(tmp_path, place)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
     inspected = json.loads(_configure_presence(ctx, "inspect", place.place_id))["place"]
-    assert brief["model_route"] == full["model_route"] == inspected["model_route"] == {"value": value, "layer": layer}
+    assert brief["model_route"] == full["model_route"] == inspected["model_route"] == {
+        "value": value, "layer": layer, "local": local}
     assert full["model"] == place_model
     assert places.places_path(tmp_path).read_bytes() == before  # a projection never freezes the inherited choice
