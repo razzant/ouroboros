@@ -35,7 +35,7 @@ export function filesPageTemplate() {
                 </div>
         </div>
         <div class="files-layout" data-files-view="list">
-            <section class="files-sidebar">
+            <section class="files-sidebar scroll-fade-y">
                 <div class="files-toolbar">
                     <input id="files-search" class="ui-control" name="files-filter" type="search" aria-label="Filter current folder" placeholder="Filter current folder...">
                 </div>

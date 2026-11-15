@@ -16,6 +16,8 @@ test('Files keeps location and actions in the band, with the filter first in its
     }
     assert.ok(list.firstElementChild.contains(page.querySelector('#files-search')));
     assert.ok(list.contains(page.querySelector('#files-list')));
+    assert.ok(list.classList.contains('scroll-fade-y'), 'the filter and entries fade together on their one scroller');
+    assert.equal(page.querySelector('#files-list').classList.contains('scroll-fade-y'), false, 'no second mask on the inner list');
     assert.equal(band.contains(page.querySelector('#files-search')), false);
     assert.equal(page.querySelector('#files-search').getAttribute('type'), 'search', 'Escape can clear a filter before Back');
     assert.equal(page.querySelector('[data-files-back]'), null, 'a preview uses the shell slot too');

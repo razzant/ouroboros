@@ -3452,8 +3452,8 @@ column) a name still cut leaves the consciousness chip its brain and mark, its a
 state; a desk's panel beside Main keeps the chip's word. Panic and ×
 never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
 Skills keeps its tabs and actions in the band, its search and chips first in the scrolling list, in every view.
-On a phone the tabs are one line under the header row. Files keeps its location and actions in the band, its filter
-first in the folder's list; Circles ends the band with New circle, Widgets has no controls.
+Phone tabs sit one line below. Files keeps location and actions in the band; its filter heads the list and shares
+its fade. Circles ends the band with New circle; Widgets has no controls.
 Files shows the folder's list and the chosen file side by side while its own width holds both (the `files`
 container, 700 px); narrower, the list comes first and a chosen file replaces it with its folder's named Back, which
 keeps an unsaved draft: the file's row says `unsaved` (a new file's draft has its own row at the top) and reopens
