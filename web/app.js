@@ -1057,14 +1057,9 @@ function paintMainRow() {
         .filter(Boolean);
     const text = said.length ? ` · ${said.join(' · ')}` : '';
     if (words && words.textContent !== text) words.textContent = text;
-    // The card's tooltip says what its picture's dot stands for: one of three fixed sentences, written only when it
-    // changes, so the interface language's overlay is asked about each once.
-    const title = !waits.any ? MAIN_ROW_TITLE : waits.projects ? `${MAIN_ROW_TITLE} · Something in a project waits for you`
-        : `${MAIN_ROW_TITLE} · Something waits for you`;
-    if (navMainRow && mainRowTitle !== title) {
-        mainRowTitle = title;
-        navMainRow.title = title;
-    }
+    // The card's tooltip says what the dot stands for, as the ☰'s name does; written only when it changes.
+    const title = waits.any ? `${MAIN_ROW_TITLE} · something waits for you` : MAIN_ROW_TITLE;
+    if (navMainRow && mainRowTitle !== title) navMainRow.title = mainRowTitle = title;
     // The card's second line: what Main is doing now, the title of its running work; none while it rests.
     const work = navMainRow?.querySelector('.nav-ouro-work');
     if (work) {

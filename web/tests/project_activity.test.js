@@ -166,7 +166,7 @@ test('a known question survives a room whose works are unconfirmed; an owner tur
     assert.deepEqual(['mark', 'owner', 'word'].map((key) => rooms.get('42')[key]), ['ring', true, 'Activity unconfirmed']);
 });
 
-test('the index reads Project rooms only; the header\'s one mark is the strongest shape and the owner\'s move', () => {
+test('the index reads Project rooms only; its aggregate is the strongest shape and the owner\'s move', () => {
     const rooms = new Map([
         ['42', summary('paused_by_owner')], ['43', summary('spending_limit')], ['1', summary('held_continue')],
     ]);
@@ -189,7 +189,7 @@ test('the index reads Project rooms only; the header\'s one mark is the stronges
     assert.equal(buildProjectActivityIndex().aggregate, IDLE_SUMMARY);
 });
 
-test('an amber Projects header always has an amber row: what waits counts only the rooms the feed can show', () => {
+test('an amber picture always has an amber row: what waits counts only the rooms the feed can show', () => {
     const rooms = new Map([['42', summary('held_continue')], ['43', summary('spending_limit')]]);
     // The room that waits has its row: the header is the owner's turn.
     const fed = buildProjectActivityIndex(rooms, [42, 43], [{ chat_id: 42 }, { chat_id: 43 }]);
@@ -202,7 +202,7 @@ test('an amber Projects header always has an amber row: what waits counts only t
     assert.deepEqual([...buildProjectActivityIndex(rooms, undefined, [{ chat_id: 43 }]).byChat.keys()], ['43']);
 });
 
-test('a carried amber room keeps its feed row and the header its amber; a complete read, or a room set that no longer names the room, drops them', () => {
+test('a carried amber room keeps its feed row and the picture its amber; a complete read, or a room set that no longer names the room, drops them', () => {
     // The page as app.js applies each body: the rooms, then the index over the feed's rows.
     let rooms = new Map();
     let index = buildProjectActivityIndex();
@@ -272,7 +272,7 @@ test('a feed the server could not read keeps the rows the page showed; a read th
     assert.deepEqual([feed.map((row) => row.id), index.aggregate.owner, revision], [[], false, 'r0']);
 });
 
-test('the header counts a room the feed shows even when the reserved set the page holds does not name it yet', () => {
+test('the picture counts a room the feed shows even when the reserved set the page holds does not name it yet', () => {
     const rooms = new Map([['41', summary('held_continue')], ['43', summary('spending_limit')]]);
     // The page holds [41]; a new Project 43 is the owner's turn and has its row: it counts.
     const held = buildProjectActivityIndex(rooms, [41], [{ chat_id: 41 }, { chat_id: 43 }]);
@@ -338,6 +338,11 @@ test('a waiting Project\'s line says its question in the question\'s own opening
     const delivery = reconcileProjectRooms(new Map(),
         body({ 42: room([{ ...item, code: 'delivery_unknown' }]) }, [row])).rooms;
     assert.equal(line(delivery).text, 'An answer here was recorded; its delivery is unknown');
+    // Beside a question still unanswered, the answered one never lends its words: the line says the unanswered one.
+    const mixed = reconcileProjectRooms(new Map(), body(
+        { 42: room([{ ...item, code: 'delivery_unknown' }, { ...item, quiz_id: 'q2' }]) },
+        [row, { task_id: 't', quiz_id: 'q2', question: 'Which of the two?' }])).rooms;
+    assert.deepEqual(mixed.get('42').ask, { key: 't:q2', words: 'Which of the two?' });
     // A task standing on its question says the question; without its row, the room's own word.
     const stands = room([{ kind: 'question', task_id: 't', quiz_id: 'q', work_id: 'w' }], { activity: 'waiting', mark: 'still', works: ['w'] });
     assert.equal(line(reconcileProjectRooms(new Map(), body({ 42: stands }, [row])).rooms).text, words);
@@ -347,6 +352,8 @@ test('a waiting Project\'s line says its question in the question\'s own opening
     // A long question is cut for a name with a visible ellipsis; the row's own line is cut by its width.
     const long = questionWords('word '.repeat(80), 160);
     assert.deepEqual([long.length, long.endsWith('…'), questionWords('word '.repeat(80)).length], [160, true, 399]);
+    assert.equal(questionWords('x'.repeat(200), 160), `${'x'.repeat(159)}…`, 'the cut keeps max characters, the ellipsis one of them');
+    assert.equal(questionWords('x'.repeat(160), 160), 'x'.repeat(160), 'a line that fits is not cut');
     assert.equal(questionWords(null), '');
 });
 

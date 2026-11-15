@@ -326,11 +326,11 @@ test("a named work with a focus line: the summary carries its name and focus, an
     context.projectActivityIndex = { aggregate: { owner: true } };
     second(summary);
     assert.deepEqual(picture(), ['dot/owner', ` · ${summary.label} · Something in a project waits for you`,
-        'Main Ouroboros chat · Something in a project waits for you']);
+        'Main Ouroboros chat · something waits for you']);
     assert.equal(nodes['.nav-mark'].dataset.hue, 'ink', "Main's own mark keeps Main's room");
     context.projectActivityIndex = { aggregate: { owner: false } };
     second({ ...summary, owner: true });
-    assert.deepEqual(picture(), ['dot/owner', ` · ${summary.label}`, 'Main Ouroboros chat · Something waits for you']);
+    assert.deepEqual(picture(), ['dot/owner', ` · ${summary.label}`, 'Main Ouroboros chat · something waits for you']);
     assert.equal(nodes['.nav-mark'].dataset.hue, 'owner');
     second(null);
     assert.deepEqual(picture(), ['none', '', 'Main Ouroboros chat']);

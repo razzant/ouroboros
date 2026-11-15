@@ -143,8 +143,8 @@ export function buildProjectActivityIndex(rooms = new Map(), chatIds = null, row
  * the picture, on his card and where it opens the drawer alike. `projects` also tells the card's words that the wait
  * is in a Project: Main's own is its room's word there already.
  */
-export function pictureOwner(rooms = new Map(), index = null) {
-    const main = Boolean((rooms instanceof Map ? rooms.get('1') : null)?.owner);
+export function pictureOwner(rooms = null, index = null) {
+    const main = Boolean(rooms?.get?.('1')?.owner);
     const projects = Boolean(index?.aggregate?.owner);
     return { main, projects, any: main || projects };
 }

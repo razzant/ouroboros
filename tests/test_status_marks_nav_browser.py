@@ -415,7 +415,7 @@ def test_the_picture_on_ouroboross_card_says_the_owners_move_for_main_and_the_pr
         assert abs(asks['picture']['top'] - asks['box']['top'] - 1) <= 0.5, facts
         assert not seen['asksMain']['drawn'], facts
         assert seen['asksWords'].strip() == '· Something in a project waits for you', facts
-        assert seen['asksTitle'] == 'Main Ouroboros chat · Something in a project waits for you', facts
+        assert seen['asksTitle'] == 'Main Ouroboros chat · something waits for you', facts
         assert (seen['sentence']['text'], seen['sentence']['kind']) == ('Waiting for your answer', 'ask'), facts
         asked = seen['asked']
         assert (asked['text'], asked['kind']) == (QUESTION_WORDS, 'ask'), facts
@@ -427,7 +427,7 @@ def test_the_picture_on_ouroboross_card_says_the_owners_move_for_main_and_the_pr
         mine = seen['mainAsks']
         assert (mine['picture']['shape'], mine['picture']['hue'], mine['picture']['drawn']) == ('dot', 'owner', True), facts
         assert mine['main']['hue'] == 'owner' and mine['main']['drawn'], facts
-        assert 'Project' not in mine['words'] and mine['title'] == 'Main Ouroboros chat · Something waits for you', facts
+        assert 'in a project' not in mine['words'] and mine['title'] == 'Main Ouroboros chat · something waits for you', facts
         assert not seen['rest']['picture']['drawn'] and seen['rest']['title'] == 'Main Ouroboros chat', facts
 
 
