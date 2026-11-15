@@ -445,7 +445,8 @@ _SEARCH_LANDED = """([page, words]) => {
     const node = (""" + _SEARCH_ROW + """)([page, words]);
     if (!node) return null;
     const box = node.getBoundingClientRect(), feed = node.closest('.chat-messages, #chat-messages').getBoundingClientRect();
-    return {top: box.top, bottom: box.bottom, feedBottom: feed.bottom, target: node.classList.contains('is-quote-target'),
+    return {top: box.top, bottom: box.bottom, feedBottom: feed.bottom,
+            target: node.classList.contains('is-quote-target') || window.__lastQuoteTarget === node,
             highlighted: CSS.highlights ? CSS.highlights.has('ouro-chat-find') : null};
 }"""
 
@@ -460,10 +461,23 @@ def _search_evidence(tmp_path):
 SEARCH_CATALOG = {"items": [], "errors": [], "model_sources": []}
 
 
+# The landing marks its row for 1.6 s (chat_reply.js TARGET_MS); a slow runner can read the row after the mark has
+# faded. The row the landing last marked is recorded as the mark is set, so a check after a settle still sees it.
+_RECORD_QUOTE_TARGET = """() => {
+    window.__lastQuoteTarget = null;
+    new MutationObserver(changes => {
+        for (const change of changes) {
+            if (change.target.classList?.contains('is-quote-target')) window.__lastQuoteTarget = change.target;
+        }
+    }).observe(document, {subtree: true, attributes: true, attributeFilter: ['class']});
+}"""
+
+
 def _open_main_for_search(page, url):
     """Main, as a client opening the app sees it: its socket open and its newest saved page drawn."""
     page.route("**/api/model-catalog*", lambda route: route.fulfill(json=SEARCH_CATALOG))
     page.add_init_script(f"({_CAPTURE_TEST_SOCKET})()")
+    page.add_init_script(f"({_RECORD_QUOTE_TARGET})()")
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
     page.wait_for_function("() => window.__testSockets?.some(socket => socket.readyState === WebSocket.OPEN)")
     page.locator("#chat-messages [data-history-id]").first.wait_for(state="attached", timeout=30_000)
@@ -1048,7 +1062,8 @@ def test_a_long_reply_lands_on_its_matched_words_and_a_fold_says_where_they_are(
             state = _search_state(page, "#page-chat")
             assert state["note"] == "The words are in the folded part of this answer: its Project shows it in full.", state
             folded = page.evaluate("""() => {
-                const row = document.querySelector('#page-chat .chat-bubble.project-answer.is-folded.is-quote-target');
+                const row = [...document.querySelectorAll('#page-chat .chat-bubble.project-answer.is-folded')].find(
+                    node => node.classList.contains('is-quote-target') || window.__lastQuoteTarget === node);
                 return row && {top: row.getBoundingClientRect().top, bottom: row.getBoundingClientRect().bottom};
             }""")
             assert folded and folded["top"] >= state["bottom"] - 1, (folded, state)
