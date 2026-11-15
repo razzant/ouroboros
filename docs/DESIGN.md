@@ -3462,8 +3462,8 @@ title opens even in an empty Project, starts with it, wrapped. Where the room co
 column) a name still cut leaves the consciousness chip its brain and mark, its accessible name keeping the whole
 state; a desk's panel beside Main keeps the chip's word. Panic and ×
 never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
-Skills keeps its tabs and actions in the band, its search and chips first in the scrolling list, in every view.
-Phone tabs sit one line below. Files keeps location and actions in the band; its filter heads the list and shares
+Skills keeps its capsule whole, tabs beside it and actions at the end. Below 44rem of page width, tabs sit below;
+search follows with a 2px inset. Files keeps location and actions in the band; its filter heads the list and shares
 its fade. Circles ends the band with New circle; Widgets has no controls.
 Files shows the folder's list and the chosen file side by side while its own width holds both (the `files`
 container, 700 px); narrower, the list comes first and a chosen file replaces it with its folder's named Back, which

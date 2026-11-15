@@ -6,6 +6,25 @@ import { NodeStub, setup } from './dashboard_dom_fixture.js';
 import { createRoomHeader } from '../modules/chat_header.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
+test('Skills keeps its return and tabs at the leading edge, with one extra line only in a narrow page column', () => {
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.match(css, /#page-skills \{ container: skillspage \/ inline-size; \}/);
+    assert.match(css, /#page-skills \.app-page-return \{ flex: none; max-width: none; \}/,
+        'changing the trailing actions cannot shrink or move the return before the tabs');
+    assert.match(css, /#page-skills \.skills-scroll \{ padding-top: 0; \}/);
+    assert.match(css, /#page-skills > \.app-page-tabs \{ padding-bottom: 0; \}/);
+    assert.match(css, /#page-skills > \.app-page-tabs > \.app-tab-strip \{[\s\S]*?margin-bottom: calc\(-1 \* var\(--space-4\)\);/,
+        'the strip lends its shadows space without a blank row before the search');
+    const narrow = css.slice(css.indexOf('@container skillspage'), css.indexOf('.skills-search-chrome {'));
+    assert.match(narrow, /max-width: 44rem/);
+    assert.match(narrow, /grid-template-areas: "back toolbar" "tabs tabs"/);
+    assert.match(narrow, /\.app-page-lead \{ display: contents;/);
+    assert.match(narrow, /\.app-tab-strip \{[\s\S]*?grid-area: tabs;/);
+    assert.match(css, /html\[data-layout="docked"\] \.app-page-header\[data-lead\] \{[\s\S]*?grid-template-areas: "title toolbar"/,
+        'a wide column keeps the single existing row');
+    assert.doesNotMatch(narrow, /@media|ResizeObserver/);
+});
+
 test('page headers retain their toolbar contract with an optional chrome recipe', () => {
     for (const field of ['toolbarHtml', 'actionsHtml']) {
         const basic = renderPageHeader({ title: 'Chat', [field]: '<button>Act</button>' });

@@ -7104,6 +7104,38 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     padding: var(--space-4) var(--space-5) var(--space-5);
 }
 
+/* Skills keeps the return whole and the tabs next to it, independent of its trailing actions. A narrow page
+   column gives the tabs the one line below the header; the list starts at the strip's edge. */
+#page-skills { container: skillspage / inline-size; }
+#page-skills .app-page-return { flex: none; max-width: none; }
+#page-skills .skills-scroll { padding-top: 0; }
+#page-skills > .app-page-tabs { padding-bottom: 0; }
+#page-skills > .app-page-tabs > .app-tab-strip {
+    padding-bottom: var(--space-4);
+    margin-bottom: calc(-1 * var(--space-4));
+}
+@container skillspage (max-width: 44rem) {
+    html[data-layout="docked"] #page-skills > .app-page-header[data-lead] {
+        grid-template-columns: auto minmax(0, 1fr);
+        grid-template-areas: "back toolbar" "tabs tabs";
+        row-gap: 0;
+        overflow: visible;
+        mask-image: none;
+        -webkit-mask-image: none;
+    }
+    html[data-layout="docked"] #page-skills .app-page-title-block,
+    html[data-layout="docked"] #page-skills .app-page-lead { display: contents; }
+    html[data-layout="docked"] #page-skills .app-page-title-row { display: none; }
+    html[data-layout="docked"] #page-skills .app-page-return { grid-area: back; }
+    html[data-layout="docked"] #page-skills .app-page-toolbar { min-height: max(50px, var(--window-chrome-top)); }
+    html[data-layout="docked"] #page-skills .app-tab-strip {
+        grid-area: tabs;
+        padding-top: var(--space-2);
+        padding-bottom: var(--space-4);
+        margin-bottom: calc(-1 * var(--space-4));
+    }
+}
+
 .skills-search-chrome {
     flex: 0 0 auto;
     margin: 2px 0 12px;
