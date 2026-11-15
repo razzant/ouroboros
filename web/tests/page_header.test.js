@@ -207,29 +207,18 @@ test('a page\'s own navigation starts its bar on a desk and goes back under the 
         const toolbar = el('app-page-toolbar', el('refresh'));
         const filesHeader = el('app-page-header', el('app-page-title-block', filesLead), toolbar);
         el('page', filesHeader, el('files-layout', home));
-        let resized, disconnected = false;
-        doc.defaultView = { ResizeObserver: class {
-            constructor(callback) { resized = callback; }
-            observe(target) { assert.equal(target, filesHeader); }
-            disconnect() { disconnected = true; }
-        }, requestAnimationFrame: (callback) => { callback(); return 1; }, cancelAnimationFrame() {} };
         filesHeader.clientWidth = 440;
         const off = bindPageHeader(filesHeader, { lead: location, actions });
         assert.deepEqual([names(filesLead), names(toolbar), names(home)], [['files-breadcrumb'], ['files-browser-actions', 'refresh'], []]);
         actions.focus();
         filesHeader.clientWidth = 175;
-        resized([]);
-        assert.deepEqual([names(home), names(toolbar)], [['files-breadcrumb', 'files-browser-actions'], ['refresh']],
-            'a sidebar resize returns the same controls to their home, even while the window stays docked');
-        assert.equal(doc.activeElement, actions);
-        filesHeader.clientWidth = 440;
-        resized([]);
-        assert.equal(location.parentNode, filesLead);
+        layout('docked');
+        assert.deepEqual([names(home), names(toolbar)], [[], ['files-browser-actions', 'refresh']],
+            'a narrow column keeps the same one band; the navigation rail yields to actions');
         assert.equal(doc.activeElement, actions);
         layout('stack');
         assert.deepEqual([names(home), names(toolbar)], [['files-breadcrumb', 'files-browser-actions'], ['refresh']]);
         off();
-        assert.ok(disconnected);
         // A header with nothing of its own to place (Widgets) binds nothing.
         assert.equal(typeof bindPageHeader(el('app-page-header', el('app-page-title-block', el('app-page-lead')))), 'function');
         assert.equal(listeners.size, 0);
@@ -237,11 +226,6 @@ test('a page\'s own navigation starts its bar on a desk and goes back under the 
         // every named page, and goes back to the base header in the stack layout.
         const barOnly = el('app-page-header', el('app-page-title-block', el('app-page-lead')), el('app-page-toolbar', el('new')));
         barOnly.clientWidth = 900;
-        let barReleased = false;
-        doc.defaultView = { ResizeObserver: class {
-            observe(target) { assert.equal(target, barOnly); }
-            disconnect() { barReleased = true; }
-        }, requestAnimationFrame: (callback) => { callback(); return 1; }, cancelAnimationFrame() {} };
         const offBar = bindPageHeader(barOnly);
         assert.ok(barOnly.attrs.has('data-lead'), 'a desk: the desk band');
         layout('stack');
@@ -249,7 +233,6 @@ test('a page\'s own navigation starts its bar on a desk and goes back under the 
         layout('docked');
         assert.ok(barOnly.attrs.has('data-lead'));
         offBar();
-        assert.ok(barReleased, 'its disposer releases the observer it took');
         assert.equal(listeners.size, 0);
     } finally { delete globalThis.window; delete globalThis.document; }
 });

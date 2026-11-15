@@ -3432,9 +3432,9 @@ title opens even in an empty Project, starts with it, wrapped. Where the room co
 column) a name still cut leaves the consciousness chip its brain and mark, its accessible name keeping the whole
 state; a desk's panel beside Main keeps the chip's word. Panic and ×
 never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
-Navigation sharing a toolbar also returns below the bar when the
-content column is too narrow, including while the sidebar is resized; the toolbar wraps in its
-own row. Files' location and its actions return above the list on one row; folder names fit, actions wrap.
+Skills keeps its tabs and actions in the band, its search and chips first in the scrolling list, in every view.
+On a phone the tabs are one line under the header row. Files keeps its location and actions in the band, its filter
+first in the folder's list; Circles ends the band with New circle, Widgets has no controls.
 Files shows the folder's list and the chosen file side by side while its own width holds both (the `files`
 container, 700 px); narrower, the list comes first and a chosen file replaces it under `Back to folder`, which
 keeps an unsaved draft: the file's row says `unsaved` (a new file's draft has its own row at the top) and reopens

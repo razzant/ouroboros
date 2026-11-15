@@ -133,8 +133,7 @@ export function bindPageBack({ layers, currentHeader, doc = document, win = wind
  * A page's own navigation in its bar (docs/DESIGN.md "Page header", owner 19.10 A): on a desk the bar of a page the
  * sidebar names starts with the page's tabs or location, where the hidden title stood, and ends with its actions, so
  * it has two ends as Main's bar has; in the stack layout the same nodes return under the row, where a phone keeps
- * them. Navigation sharing a toolbar also returns there when the content column is too narrow (including a
- * sidebar drag). `lead` defaults to what renderPageHeader wrote under the row (the tab strip); `actions` join the toolbar's
+ * them. `lead` defaults to what renderPageHeader wrote under the row (the tab strip); `actions` join the toolbar's
  * start. Nodes move and are never re-rendered, so their listeners, selection and focus stay theirs; the selected
  * tab is revealed again by its strip's own observer. Returns the disposer.
  */
@@ -156,12 +155,7 @@ export function bindPageHeader(header, { lead = null, actions = null } = {}) {
     if (!moves.length && !toolbar) return () => {};
     let docked = null;
     const place = (layout) => {
-        // Navigation competes with both moved actions (Files) and actions already in the bar (Skills).
-        // A tab-only bar can scroll at any column width; a toolbar needs its own row in a narrow column.
-        const narrow = toolbar && header.clientWidth > 0 && header.clientWidth < 440;
-        const desk = (typeof layout === 'string' ? layout : currentLayout()) === 'docked';
-        header.toggleAttribute('data-narrow', desk && narrow);
-        const next = desk && !narrow;
+        const next = (typeof layout === 'string' ? layout : currentLayout()) === 'docked';
         if (next === docked) return;
         docked = next;
         const active = doc.activeElement;
@@ -174,15 +168,7 @@ export function bindPageHeader(header, { lead = null, actions = null } = {}) {
     };
     place();
     const offLayout = onLayoutChange(place);
-    const view = doc.defaultView;
-    let frame = 0;
-    // Moving the nodes can change the bar's height. Do that in the next frame, outside observer delivery.
-    const observer = view?.ResizeObserver && toolbar ? new view.ResizeObserver(() => {
-        view.cancelAnimationFrame(frame);
-        frame = view.requestAnimationFrame(place);
-    }) : null;
-    observer?.observe(header);
-    return () => { offLayout(); observer?.disconnect(); if (frame) view.cancelAnimationFrame(frame); };
+    return offLayout;
 }
 
 /** A bar narrower than this (px) cannot hold the status, the consciousness chip, Restart, Panic and the budget. */
