@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.12
+version: 1.4.13
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -67,6 +67,21 @@ plain text, under where he wrote them and with the file names, above the note; a
 note between works that quotes none of his words stays in its room.
 Quiz buttons and replies keep their decision path; earlier parts of a long
 question carry ordinary references.
+
+Mirrored messages, files, cards and their updates leave through one outbox that
+survives restarts (`outbox/` in this skill's state): each is saved before it is sent
+or waits, and nothing that could not be saved is sent. One that never left this
+computer, because Telegram or its proxy could not be reached, waits there and goes out
+by itself when Telegram answers, as does one Telegram's flood control asked to send
+later; while the outbox runs, nothing mirrored after it overtakes it, and a long
+message continues from its first part that did not arrive. When the answer is lost
+after a request was sent (a timeout, a dropped connection, a server error), the
+message or edit may already be on the phone, so nothing is sent again for it. One
+still waiting after a day is dropped. Delivery, in this skill's Telegram settings,
+counts what waits and what recently may not have arrived, was refused or dropped,
+never its words, and says when the outbox cannot save. Completion notices keep their
+own retry; the bot's replies to commands, typing and `/panic` are sent once, as
+before.
 
 A derived reference map that cannot be saved only warns, blocking no owner message
 or later outbound part. Completion notifications

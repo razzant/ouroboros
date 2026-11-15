@@ -301,14 +301,18 @@ def test_the_light_rule_is_judged_at_the_first_start_even_with_no_owner_to_tell_
     with its settings) ran no work under the old rule: it is judged at once, so the box it has or gets is never told
     as news of an update once an owner is bound. The other notices stay owed until there is an owner to tell."""
     moved = {"OUROBOROS_MODEL": "openai/main", "USE_LOCAL_LIGHT": True, "LOCAL_MODEL_SOURCE": "org/model"}
-    assert notice_world.notices.light_local_notice(moved)
+    said = notice_world.notices.light_local_notice(moved)
     owner_chat = notice_world.state.pop("owner_chat_id")
+    # A state that does not know its owner chat (a recovery, a read that is not current) is no fresh install: owed.
+    notice_world.notices.startup_upgrade_notices(moved)
+    assert "light_local_box_notified" not in notice_world.state and not notice_world.sent
+    notice_world.state["owner_chat_id"] = None  # known, and nobody bound yet
     notice_world.notices.startup_upgrade_notices(moved if seeded else {})
     assert notice_world.state["light_local_box_notified"] and not notice_world.sent
     assert "optional_bounds_notified" not in notice_world.state
     notice_world.state["owner_chat_id"] = owner_chat
     notice_world.notices.startup_upgrade_notices(moved)
-    assert "light_local_box_notice" not in [kw["system_type"] for _chat, _text, kw in notice_world.sent]
+    assert said and "light_local_box_notice" not in [kw["system_type"] for _chat, _text, kw in notice_world.sent]
 
 
 def test_an_upgraded_untouched_install_hears_each_notice_once(notice_world):
@@ -494,7 +498,7 @@ BLOCKING_GONE = (
     "finding, or a review that gave no answer, no longer stops Ouroboros. Outside Cyber Pro it still asks for a "
     "review before changing its own code and reads the answer first; when it disagrees, it goes ahead and says "
     "why. Each time it goes ahead over a serious finding or without an answer, the work card, the restart "
-    "message and the update description name it.")
+    "message and the Update window name it.")
 
 
 @pytest.mark.parametrize("where, value, environment, owed", [

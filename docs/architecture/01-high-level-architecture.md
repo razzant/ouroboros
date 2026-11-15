@@ -325,7 +325,7 @@ ouroboros/ — agent core and shared runtime (§6)
   launcher_windows_runtime.py — Windows runtime; pre-import legacy GUI handoff (§2)
   launcher_background.py — Desktop close/quit, consent, second-launch activation (§9); `DesktopApi` supplies `MainApi` alerts, shell facts and Panic (§3)
   panic_source.py, platform_peer.py — Diagnostic Panic source (§9)
-  launcher_appearance.py, launcher_window_chrome.py, launcher_page_zoom.py, launcher_context_menu.py, standalone_page.py — Windows app mode/caption; macOS chrome/appearance; zoom; native menus; inline theme.js/ui.css (§3)
+  launcher_appearance.py, launcher_window_chrome.py, launcher_page_zoom.py, launcher_context_menu.py, standalone_page.py — Windows app mode/caption; macOS chrome/appearance, Windows fit; zoom; native menus; inline theme.js/ui.css (§3)
   launcher_tray.py, launcher_tray_macos.py — Windows notification-area icon; macOS menu-bar item, Dock reopen, quit marking (§9)
   desktop_media.py — GTK display probe and own-loopback audio permission grant; other shells keep native prompts
   desktop_notifications.py — System notifications, one adapter per platform; submitted/unknown/typed refusal, click token back to the page (§3; DESIGN §9)
@@ -338,7 +338,7 @@ ouroboros/ — agent core and shared runtime (§6)
   post_task_evolution.py — Worker's durable promotion signal for the supervisor idle tick (§6 Background consciousness and Evolution)
   repo_remotes.py — Fetch URLs as Git resolves them; `managed` is the read/update-only official source, `origin` the token's personal target
   review_evidence.py — Same-execution commit-review evidence (§6 Commit review evidence) and the durable commit/advisory review record of a task or checkout; execution facts are visibility only
-  review_status_projection.py, review_overrides.py — Commit-review status projection over `review_state` records, re-exported by review_evidence.py; the owner-visible trace of review FAIL or no verdict and what followed (§6 Own-body candidates)
+  review_status_projection.py, review_overrides.py — Commit-review status projection over `review_state` records, re-exported by review_evidence.py; the owner-visible trace of review FAIL or no verdict and what followed, skills left on included (§6 Own-body candidates)
   semantic_dedup.py — LLM-first semantic dedup, fail-open None; fuzzy-entity primitive (DEV 02), no runtime consumer
   betterleaks_runtime.py — Pinned Betterleaks runtime resolver (six platform artifacts, packaged resource first)
   skill_loader.py, skill_catalogue.py — Discovers data buckets and connected folders (`OUROBOROS_SKILLS_REPO_PATH` is My folder), state in `data/state/skills/<name>/`; paged skill records, named diagnostics and manifest addresses, the delegate skill index (§13)

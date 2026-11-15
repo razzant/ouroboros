@@ -204,6 +204,14 @@ def test_an_empty_light_sends_the_supervisor_where_its_own_local_box_says(monkey
     monkeypatch.setenv("USE_LOCAL_LIGHT", "false")
     assert get_safety_model() == "google/gemini-3.8-flash"
     assert _resolve_safety_routing() == (False, False, None)
+    # A box is read as its reader's values come: a settings document by the loader's spellings (a hand-written
+    # "yes" is what the loader types as ticked), the live settings as the Safety routing reads them, so the rule and
+    # safety.py never name two lanes for one value.
+    for spelling in ("yes", "on"):
+        assert safety_configuration({**document, "USE_LOCAL_LIGHT": spelling})[:2] == ("google/gemini-3.8-flash", True)
+        monkeypatch.setenv("USE_LOCAL_LIGHT", spelling)  # untyped in the environment: not a tick for either reader
+        assert get_safety_model() == "google/gemini-3.8-flash"
+        assert _resolve_safety_routing() == (False, False, None)
     assert safety_configuration({**document, "USE_LOCAL_LIGHT": False})[:2] == ("google/gemini-3.8-flash", False)
     # A Light of its own on the local lane checks locally; so does a local Main an unticked Light inherits.
     monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "owner/light")

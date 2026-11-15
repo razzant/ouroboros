@@ -591,7 +591,7 @@ def test_a_migrated_light_stand_in_runs_where_an_empty_light_runs(_clean_subagen
     settings = {"OUROBOROS_SUBAGENT_HARNESS": "claude=claude-opus-5:high", "OUROBOROS_MODEL": "openai/gpt-5.6-sol",
                 "OPENROUTER_API_KEY": "configured", "LOCAL_MODEL_SOURCE": "org/model.gguf", "USE_LOCAL_LIGHT": box}
 
-    resolution, _diagnostics = resolve_settings_subagent_candidate(settings)
+    resolution = resolve_configured_subagents(settings)  # the migration's own compiler (_append_legacy_model_rows)
 
     assert resolution.config is not None
     assert dict((row.subagent_id, row.route.target_id) for row in resolution.config.items)["fast-scout"] == scout

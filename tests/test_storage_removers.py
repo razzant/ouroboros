@@ -346,7 +346,8 @@ def test_a_closed_recovery_gate_is_the_retirement_job_hold_and_an_open_one_leave
     closed = retirement()
     assert [(hold["class"], hold["count"], hold["example"]) for hold in closed["holds"]] == [
         ("source_recovery_pending", None, "startup recovery report missing")], "how many it keeps is unknown, never a number"
-    assert closed["state"] == "done" and closed["held"] == 0 and closed["held_since"] == closed["holds"][0]["since"]
+    assert closed["state"] == "done" and "held" not in closed, "an uncounted hold has no sum: unknown, never zero"
+    assert closed["held_since"] == closed["holds"][0]["since"]
     assert storage_fact(data)["holds"]["runtime_retirement"]["holds"] == closed["holds"]
     assert "released" not in closed and "released" not in storage_fact(data)["holds"]["runtime_retirement"], \
         "the job keeps no released count: none is said, never a zero"

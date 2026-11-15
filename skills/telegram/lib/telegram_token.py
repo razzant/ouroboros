@@ -26,7 +26,7 @@ import asyncio
 import threading
 import weakref
 
-from .telegram_api import TelegramBindingChanged, TelegramTokenMissing
+from .telegram_api import OUTBOUND_JOURNAL, TelegramBindingChanged, TelegramTokenMissing
 
 TOKEN_KEY = "TELEGRAM_BOT_TOKEN"
 WATCH_SEC = 2.0
@@ -197,7 +197,11 @@ def binding_for(api) -> TokenBinding:
 
 
 def _report_failure(api, what: str, exc: Exception) -> None:
-    """One handler failure line: no token is a wait the status shows, and a token change stops the rest quietly."""
+    """One handler failure line: no token is a wait the status shows, and a token change stops the rest quietly.
+    The outbound operation the handler ran for (lib/telegram_outbox.py) learns how it ended."""
+    operation = OUTBOUND_JOURNAL.get()
+    if operation is not None:
+        operation.failed(exc)
     if isinstance(exc, TelegramTokenMissing):
         return
     if isinstance(exc, TelegramBindingChanged):

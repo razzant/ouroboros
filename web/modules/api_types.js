@@ -51,7 +51,7 @@
  * @property {?number} project_listable_count
  * @property {Array<number>|null} project_chat_ids  // complete (uncapped) project chat_ids — WS fan-out isolation SSOT (v6.32.0); null: registry unreadable, keep the held set
  * @property {?number=} main_visible_revision  // Main's room revision (its standalone messages, as a Project's visible_revision counts); null while unreadable
- * @property {?Object<string, {project_id: string, chat_id: number, project_name: string, origin_bound?: boolean}>} task_bindings  // null only when task_bindings_unchanged; bound task -> its project: suppress the stray "turn into project" button (v6.33.0 P2) + render a pointer that opens the project panel (v6.33.0 F4). origin_bound marks a task the host included because its OWNER MESSAGE already has a project (#902), so one message cannot keep a second convertible card
+ * @property {?Object<string, {project_id: string, chat_id: number}>} task_bindings  // null only when task_bindings_unchanged; bound task -> its project and room (the Project's name is in the census rows and `projects`): suppress the stray "turn into project" button (v6.33.0 P2) + render a pointer that opens the project panel (v6.33.0 F4)
  * @property {string} task_bindings_revision  // opaque revision of task_bindings (a digest of the map as sent); '' after a failed read (never held)
  * @property {boolean} task_bindings_unchanged  // the request's bindings_since names this revision: keep the held map
  * @property {ActiveDirectTurn[]=} active_direct_turns  // active direct/ephemeral chat turns snapshot
@@ -1221,7 +1221,7 @@
  * @property {Array<{adoption_id:string, outcome:'adopted'|'not_applied'|'superseded'|'unconfirmed', commit_sha:string, previous_sha:string, branch:string, note:string, settled_at:string, revision:number, commits?:string[], commits_complete?:boolean, commits_omitted?:number}>=} body_adoptions
  *   Every adoption this task authorized, as boot settled them; `commits` (previous..candidate, newest first, bounded;
  *   a cut range counts the rest in `commits_omitted`) only when adopted.
- * @property {{count?:number, latest?:{at:string, reason:string, task_id:string, text:string}, continued?:{count:number, latest:{at:string, disposition:string, rationale:string, reason:string, record_id:string}}, landed?:{count:number, latest:{sha:string, at:string}}}=} review_overrides  // a root's reviews that returned FAIL or no verdict, the author's continuations over one, the commits landed over one (review_overrides.py)
+ * @property {{count?:number, latest?:{at:string, reason:string, task_id:string, text:string}, continued?:{count:number, latest:{at:string, disposition:string, rationale:string, reason:string, record_id:string}}, landed?:{count:number, latest:{sha:string, at:string}}, skills?:{count:number, latest:{skill:string, reason:string, door:string, at:string, task_id:string}, seen:string[]}}=} review_overrides  // a root's reviews that returned FAIL or no verdict, the author's continuations over one, the commits landed over one (review_overrides.py)
  * @property {string=} error
  * @property {ContinuationOffer=} continuation_offer
  */
@@ -1555,7 +1555,7 @@
  * @property {boolean} description_current  the shown text covers exactly the running-source to checked-target range; a newer post-merge run never clears it
  * @property {string} failed_at  ISO 8601 of the retained failure or the check's material error
  * @property {({base_sha: string, target_sha: string, update_channel: string, target_ref: string}|null)} latest_failed_key  that failure's range, never the provenance of retained text
- * @property {?Object=} qualification - Exact-range commit receipts and observed GitHub checks of the last check's range (self-keyed by base_sha/target_sha), including missing evidence.
+ * @property {?Object=} qualification - Exact-range commit receipts and observed GitHub checks of the last check's range (self-keyed by base_sha/target_sha), including missing evidence; `landed_over_review` lists this install's own commits of the range recorded over a review FAIL or no verdict (absent = not read).
  * @property {number} revision  compared by every writer; 0 before the first save
  * @property {{task_id: string, model: string, requested: boolean}|{}} author  host-derived: the task that saved it, its model, whether it was the owner's request
  * @property {?{base_sha: string, target_sha: string, update_channel: string, target_ref: string}} checked_key  the range the last fetching check offered

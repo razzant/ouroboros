@@ -299,7 +299,9 @@ def test_late_or_unknown_answers_are_toasted_honestly(tmp_path, monkeypatch):
          "✅ Answer recorded · delivery pending. The task had already finished.",
          "\nAnswer recorded · delivery pending"),
     ):
-        api = _send_card(plugin, tmp_path, monkeypatch)
+        fresh = tmp_path / f"card-{update_id}"  # its own state: sent again, the same card would keep its answer
+        fresh.mkdir()
+        api = _send_card(plugin, fresh, monkeypatch)
         Client.updates = [_callback(update_id, f"qz:{token}:1")]
         _run_poller(plugin, api, monkeypatch, [], reply=(200, reply))
         last = _LAST_CLIENT[-1]
@@ -639,6 +641,11 @@ def test_record_without_details_from_an_older_skill_still_answers(tmp_path, monk
                 reply=(200, {"ok": True, "state": "answered", "answered_index": 0}))
     assert posts[0][1]["option_index"] == 0
     assert _LAST_CLIENT[-1].edits[0][2].endswith("\nAnswered: 1. sqlite")
+
+
+    # The duplicate record may carry a fresh transport id, but its settled
+    # lifecycle facts must survive; the plugin's card-lock guard prevents a
+    # second card from being sent in the real consumer path.
 
 
 class _CardClient:

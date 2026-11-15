@@ -889,8 +889,8 @@ def test_cited_settings_scopes_use_owner_writers_and_uncited_attempts_refuse(hos
     else:
         assert '"account": "none"' in result and '"window_reset": false' in result
         assert json.loads(config.SETTINGS_PATH.read_text(encoding="utf-8"))["OUROBOROS_MODEL"] == B
-        rows = (root / "logs/events.jsonl").read_text(encoding="utf-8")
-        assert '"surface": "tool"' in rows and '"actor_task_id": "work"' in rows
+        rows = [json.loads(line) for line in (root / "logs/events.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert any((row.get("surface"), row.get("actor_task_id")) == ("tool", "work") for row in rows)
     assert json.loads((root / "state/ui_preferences.json").read_text(encoding="utf-8"))["model_recents"][0]["model"] == B
 
 
