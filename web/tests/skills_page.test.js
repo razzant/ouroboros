@@ -30,6 +30,9 @@ test('search and chips belong to the scrolling list; tabs and actions stay above
     for (const selector of ['.skills-tabs', '#skills-refresh', '#skills-update-all']) {
         assert.equal(scroll.contains(page.querySelector(selector)), false, selector);
     }
+    const band = page.querySelector('.app-page-tabs');
+    assert.ok(band.contains(page.querySelector('#skills-update-all')), 'phones keep Update beside the tabs');
+    assert.equal(band.contains(page.querySelector('#skills-refresh')), false, 'Refresh stays beside the title');
 });
 
 test('Update counts trusted candidates briefly in the band and keeps the full scope in its accessible name', () => {

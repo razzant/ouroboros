@@ -1411,7 +1411,7 @@ html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
     max-width: 100%;
 }
 
-.app-page-header .btn, .files-band .btn {
+.app-page-header .btn, .app-page-tabs .btn {
     --control-h: var(--control-h-float);
     --button-font-size: var(--type-meta);
     --control-pad-x: var(--space-3);
@@ -7141,7 +7141,10 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 #page-skills .skills-scroll { padding-top: 0; }
 #page-skills .skills-scroll { padding-inline: var(--page-header-padding-x); }
 #page-skills > .app-page-tabs { padding-bottom: 0; }
+#page-skills > .app-page-tabs:not([hidden]) { display: flex; align-items: center; gap: var(--space-2); }
 #page-skills > .app-page-tabs > .app-tab-strip {
+    flex: 1;
+    padding-inline: 0;
     padding-bottom: var(--space-4);
     margin-bottom: calc(-1 * var(--space-4));
 }
@@ -12211,7 +12214,7 @@ html[data-telegram-fullscreen][data-layout="docked"] .project-panel-bar { paddin
 html[data-telegram-fullscreen][data-layout="docked"] .sidebar-head { padding-top: calc(var(--space-4) + var(--inset-top)); }
 
 /* A section shares Telegram's row: one drawer control and one title inside the host's safe gap.
-   Rails and actions keep their existing nodes on the line below. Rooms keep their own placement. */
+   One action ends that row; rails and further actions keep their nodes below. Rooms keep their placement. */
 html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header {
     position: relative;
     --telegram-header-start: 108px;
@@ -12236,7 +12239,7 @@ html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-
     position: absolute;
     top: var(--telegram-row-top);
     left: calc(var(--telegram-header-start) + var(--touch-target-min) + var(--space-1));
-    right: var(--telegram-header-end);
+    right: var(--telegram-title-end, var(--telegram-header-end));
     width: auto;
     height: var(--touch-target-min);
     margin: 0;
@@ -12244,6 +12247,10 @@ html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-
     align-items: center;
     clip-path: none;
     grid-area: auto;
+}
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header:is(:has(> .app-page-toolbar), [data-controls]) { --telegram-title-end: calc(var(--telegram-header-end) + 96px); }
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header :is(.app-page-toolbar > button:last-child, .logs-clear-list) {
+    position: absolute; top: var(--telegram-row-top); right: var(--telegram-header-end); grid-area: auto;
 }
 html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place[data-section-view="page"] > .app-page-header .app-page-title { display: none; }
 html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header > .app-page-title-block { display: block; grid-area: title; }

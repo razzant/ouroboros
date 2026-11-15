@@ -42,7 +42,7 @@ test('a section band has the same inset without native chrome and one leading ed
 
 test('header actions use the floating control tokens while the return keeps its glass recipe', () => {
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
-    assert.match(css, /\.app-page-header \.btn, \.files-band \.btn \{[^}]*--control-h: var\(--control-h-float\);[^}]*--button-font-size: var\(--type-meta\)/);
+    assert.match(css, /\.app-page-header \.btn, \.app-page-tabs \.btn \{[^}]*--control-h: var\(--control-h-float\);[^}]*--button-font-size: var\(--type-meta\)/);
     assert.match(css, /\.shell-back \{ width: auto;/);
     assert.doesNotMatch(css, /\.app-page-header \.shell-back[^}]*--control-h:/);
 });

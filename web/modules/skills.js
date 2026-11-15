@@ -47,11 +47,11 @@ export function skillsPageTemplate() {
         <section class="page app-page-glass" id="page-skills">
             ${renderPageHeader({
                 page: 'skills',
-                actionsHtml: '<button id="skills-update-all" class="btn btn-default btn-sm" hidden>Update all</button><button id="skills-refresh" class="btn btn-default btn-sm">Refresh</button>',
+                actionsHtml: '<button id="skills-refresh" class="btn btn-default btn-sm">Refresh</button>',
                 tabsHtml: renderTabStrip({
                     items: SKILLS_TABS, active: 'installed', dataAttr: 'data-tab', activeClass: 'is-active',
                     ariaLabel: 'Skills views', stripClass: 'skills-tabs', tabClass: 'skills-tab',
-                }),
+                }) + '<button id="skills-update-all" class="btn btn-default btn-sm" hidden>Update all</button>',
             })}
             <div class="skills-scroll scroll-fade-y">
                 <div class="skills-search-chrome" data-chrome-pane="installed">
@@ -1039,7 +1039,7 @@ export function initSkills(ctx = {}) {
         onChange(tabName) { closeMenus(); activeTab = tabName; activateTab(tabName); paintChrome(); showActive(); },
     });
     // On a desk Installed, Browse and Sources start the bar that Update all and Refresh end (DESIGN "Page header").
-    const disposeBar = bindPageHeader(root.querySelector('.app-page-header'));
+    const disposeBar = bindPageHeader(root.querySelector('.app-page-header'), { actions: updateAllBtn });
 
     const onRefresh = async () => {
         refreshBtn.disabled = true;

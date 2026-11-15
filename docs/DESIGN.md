@@ -3462,7 +3462,7 @@ title opens even in an empty Project, starts with it, wrapped. Where the room co
 column) a name still cut leaves the consciousness chip its brain and mark, its accessible name keeping the whole
 state; a desk's panel beside Main keeps the chip's word. Panic and ×
 never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
-Skills keeps its capsule, tabs and short actions in one row; below 36rem with a return, 30rem without, tabs sit below. Search follows at 2px.
+Skills keeps its capsule, tabs and short actions in one row; below 36rem with a return, 30rem without, tabs sit below. On phones Update stays beside the tabs; Refresh ends the title row.
 Files keeps location and actions in the band, its divider at the window top; the filter heads the list, which
 scrolls under the shared fade. Circles ends the band with New circle; Widgets has no controls.
 Files shows the folder's list and the chosen file side by side while its own width holds both (the `files`
@@ -3561,7 +3561,7 @@ Inside Telegram the page announces readiness, fills the screen (fullscreen if gr
 and disables swipe-down so lists scroll. Telegram owns Back while a layer is open, Close otherwise; the page
 then draws no Back. Its bars take the room's colour; System appearance follows Telegram's theme. Safe areas apply
 on all sides (`web/modules/host_telegram.js`). Fullscreen sections share one title baseline beside the drawer
-picture, 12px clear of both host buttons (108px, 100px safe sides). Rails and actions stay together below.
+picture and one action, 12px clear of both host buttons (108px, 100px safe sides). The rail stays below.
 Rooms keep their bar placement.
 
 Enforcement: `tests/test_design_system_gate_browser.py` visits every registered
