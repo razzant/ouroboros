@@ -205,7 +205,7 @@ export function settingsReturn({ layers = null, openSettings = null, id = BACK_L
  * Settings row (`activateTab(name, { back })`) gets "Back to Settings" before its name instead. Each row says its
  * page's current answer where the Settings home already knows it (settings_home.js homeAnswers): no read starts here.
  */
-export function initDashboard({ state, layers = null, openSettings = null, stateSnapshots = null }) {
+export function initDashboard({ state, ws, layers = null, openSettings = null, stateSnapshots = null }) {
     const active = DASHBOARD_TABS.some((tab) => tab.value === state.dashboardActiveSubtab) ? state.dashboardActiveSubtab : 'logs';
     const page = document.createElement('div');
     page.id = 'page-dashboard';
@@ -331,6 +331,10 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     window.addEventListener('ouro:page-shown', onPageShown);
     window.addEventListener('ouro:dashboard-subtab-shown', onShownTab);
     window.addEventListener('ouro:settings-page-shown', onShownTab);
+    const offReconnect = ws?.on?.('open', (event) => {
+        if (event?.previouslyConnected && state.activePage === 'dashboard' && !document.hidden
+            && rowsOf(`dashboard:${state.dashboardActiveSubtab}`).some((row) => row.keys.length)) void readSettings().catch(() => {});
+    });
     // The answers follow the state the app already reads (every 20 s, faster while a room shows): no read of their own.
     const answerTimer = setInterval(() => { if (state.activePage === 'dashboard' && !document.hidden) paintAnswers(); }, 5000);
     answerTimer?.unref?.();  // a test runner's clock is never kept alive by it
@@ -383,6 +387,7 @@ export function initDashboard({ state, layers = null, openSettings = null, state
         page,
         activateTab,
         destroy() {
+            offReconnect?.();
             tabStrip.destroy();
             disposeFade();
             back.clear();

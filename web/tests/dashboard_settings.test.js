@@ -912,3 +912,40 @@ test('a tab drawn before any read is no value; a read made elsewhere paints its 
     assert.deepEqual(facts(), [['qa'], [false, false, false], '']);
     mounted.dispose();
 });
+
+test('a shown Dashboard tab recovers its failed first read on reconnect; first open, hidden tabs and disposal read nothing', async (t) => {
+    const server = settingsServer(t, { OUROBOROS_UPDATE_CHANNEL: 'qa' });
+    const content = new NodeStub(); content.id = 'content'; server.mount.appendChild(content);
+    const state = { activePage: 'dashboard', dashboardActiveSubtab: 'updates' };
+    const listeners = new Set();
+    const ws = { on: (type, fn) => { assert.equal(type, 'open'); listeners.add(fn); return () => listeners.delete(fn); } };
+    const reconnect = async (previouslyConnected = true) => { listeners.forEach((fn) => fn({ previouslyConnected })); await settle(); };
+    const dashboard = initDashboard({ state, ws });
+    const host = dashboard.page.querySelector('#dashboard-panel-updates');
+    const original = server.routes.get('/api/settings');
+    server.routes.set('/api/settings', () => response({ error: 'offline' }, 500));
+    const settings = mountTabSettings(host, 'updates', { state, custom: (row) => row.control.options.map((option) =>
+        `<button data-setting-value="${option.value}">${option.label}</button>`).join('') });
+    await settle();
+    const meta = host.querySelector('[data-setting-meta]');
+    const choices = host.querySelectorAll('[data-setting-value]');
+    assert.equal(meta.textContent, 'Could not be read');
+    assert.ok(choices.every((button) => button.disabled));
+    const reads = () => server.calls.filter((url) => url === '/api/settings').length;
+    const failed = reads();
+    server.routes.set('/api/settings', original);
+    await reconnect(false);
+    state.activePage = 'settings'; await reconnect();
+    state.activePage = 'dashboard'; document.hidden = true; await reconnect();
+    assert.equal(reads(), failed, 'no read at first open or while off screen');
+    document.hidden = false;
+    await reconnect();
+    assert.equal(reads(), failed + 1);
+    assert.equal(meta.textContent, '');
+    assert.ok(choices.every((button) => !button.disabled), 'the shown tab recovered without reopening');
+    state.dashboardActiveSubtab = 'logs'; await reconnect();
+    assert.equal(reads(), failed + 1, 'a tab with no settings needs no read');
+    dashboard.destroy(); settings.dispose();
+    state.dashboardActiveSubtab = 'updates'; await reconnect();
+    assert.equal(reads(), failed + 1, 'disposal releases the socket subscription');
+});
