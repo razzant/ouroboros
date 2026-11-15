@@ -46,8 +46,8 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
     // catalog of another tier than the settings now name is stale at once, however late its answer came.
     function adopt(data, tier = state.cacheTier) {
         state.catalog = mergeModelCatalog(state.catalog || {}, data);
-        state.catalogTier = tier;
-        state.readAt = tier === state.cacheTier ? now() : 0;
+        state.catalogTier = tier ?? state.catalogTier;  // begun before any settings document: the tier that document named
+        state.readAt = state.catalogTier === state.cacheTier ? now() : 0;
         state.failed = false;
     }
 

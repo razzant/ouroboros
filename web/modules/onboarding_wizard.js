@@ -109,7 +109,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
     let catalogRequest = null;
     let catalogRead = '';  // the access whose catalog was read whole
     let catalogAsked = '';  // the access of the last read begun
-    let askedDraft = null;  // the draft the owner last asked the model catalog for (the Models step, Retry)
+    let askedAccess = '';  // the keys, rows and local model the owner last asked the model catalog with (the Models step, Retry)
     let disposed = false;
     let disposeLanguage = null;
     let catalogGeneration = 0;
@@ -166,13 +166,15 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
 
     // The catalog of the draft's access: its keys, rows and local model, which only this draft knows, and the
     // connected subscriptions. `once` skips an access already read whole (the Models step asks it when it opens).
-    // A read the owner did not ask for (`asked: false`: a preview's answer, a changed account) sends the draft he
-    // last asked with, or the access the wizard opened with: a key or an address still being typed leaves this
-    // page only when the Models step opens or on Retry.
+    // A read the owner did not ask for (`asked: false`: a preview's answer, a changed account) sends the draft only
+    // while it is the one he last asked with, else the access the wizard opened with: a key or an address typed,
+    // changed or deleted since leaves this page only when the Models step opens or on Retry.
     function refreshModelSources({ once = false, asked = true } = {}) {
-        const draft = asked ? draftSettings() : askedDraft || openedDraft;
-        const access = JSON.stringify([state.agentsConnected, draft.OUROBOROS_CONNECTIONS,
-            PROVIDER_FIELDS.map((field) => draft[field.settingKey]), draft.LOCAL_MODEL_SOURCE, draft.LOCAL_MODEL_FILENAME, draft.LOCAL_MODEL_CONTEXT_LENGTH]);
+        const own = (draft) => JSON.stringify([draft.OUROBOROS_CONNECTIONS, PROVIDER_FIELDS.map((field) => draft[field.settingKey]),
+            draft.LOCAL_MODEL_SOURCE, draft.LOCAL_MODEL_FILENAME, draft.LOCAL_MODEL_CONTEXT_LENGTH]);
+        const current = draftSettings();
+        const draft = asked || own(current) === askedAccess ? current : openedDraft;
+        const access = JSON.stringify([state.agentsConnected, own(draft)]);
         if (catalogRequest?.access === access) return catalogRequest.promise;
         if (!asked && access === catalogAsked) return Promise.resolve();
         // A read in flight for another access is no longer wanted, also when this access needs none.
@@ -183,7 +185,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
             syncCurrentStepActionState();
             return Promise.resolve();
         }
-        if (asked) askedDraft = draft;
+        if (asked) askedAccess = own(draft);
         catalogAsked = access;
         const request = catalogRequest = { access, ...readDraftCatalog(draft) };
         request.promise = request.promise.then((catalog) => {
