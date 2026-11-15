@@ -775,7 +775,7 @@ class TaskModelWait:
 
     def _control_reason(self, *, strict_current: bool) -> str | None:
         """Existing task controls and explicit calendar bounds, never model prose."""
-        from ouroboros.cancel_intents import cancel_pending, resolve_owner_stop_intent
+        from ouroboros.cancel_intents import immediate_stop_pending
         from ouroboros.config import resolve_task_execution_timeout_sec
         from ouroboros.deadline_utils import seconds_until
         from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, drain_owner_entries
@@ -786,10 +786,8 @@ class TaskModelWait:
         control_gap = None
         if self.owner_control is None:
             try:
-                if cancel_pending(pathlib.Path(self.canonical_root), self.task_id, propagate_busy=True):
-                    _, graceful = resolve_owner_stop_intent(self.canonical_root, self.task_id, propagate_busy=True)
-                    if not graceful:
-                        return "cancelled"
+                if immediate_stop_pending(self.canonical_root, self.task_id):
+                    return "cancelled"
             except StoreBusy as exc:
                 control_gap = exc  # No wait here; known Stop wins, then clocks, then an admission gap.
         metadata = getattr(self.tool_context, "task_metadata", None)

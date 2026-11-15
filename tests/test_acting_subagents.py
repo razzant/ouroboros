@@ -1262,7 +1262,7 @@ def test_acting_browser_evaluate_runs_and_keeps_resource_targets(tmp_path, monke
         def set_default_timeout(self, ms):
             calls.append(("default_timeout", ms))
 
-        def evaluate(self, script):
+        async def evaluate(self, script):
             calls.append(script)
             return 2
 
@@ -1270,7 +1270,15 @@ def test_acting_browser_evaluate_runs_and_keeps_resource_targets(tmp_path, monke
     monkeypatch.setattr(browser_mod, "_ensure_browser", lambda ctx, *_args, **_kwargs: (page, ctx.browser_state))
     registry = ToolRegistry(repo_dir=repo, drive_root=drive)
     registry.set_context(ctx)
+    from tests._browser_fakes import track_sessions, close_generations
+    sessions = track_sessions(monkeypatch)
+    try:
+        _acting_evaluate_checks(registry, ctx, page, calls, drive)
+    finally:
+        close_generations(*sessions)
 
+
+def _acting_evaluate_checks(registry, ctx, page, calls, drive):
     assert registry.execute("browser_action", {"action": "evaluate", "value": "1 + 1"}) == "2"
     # The requested expression executes (wrapped in the in-page Promise.race
     # timeout bound — harness-health O5); the contract is the script REACHES

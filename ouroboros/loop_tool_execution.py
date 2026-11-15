@@ -767,7 +767,7 @@ def _execute_single_tool(
 
 
 class StatefulToolExecutor:
-    """Thread-sticky executor for Playwright/greenlet stateful tools."""
+    """One sticky worker that serializes a task's browser calls in their caller context."""
     def __init__(self):
         self._executor: Optional[ThreadPoolExecutor] = None
 
@@ -1107,18 +1107,13 @@ def _retire_stateful_tool(stateful_executor, tool_ctx, future):
             cleanup_browser_handles,
         )
 
-        # CROSS-THREAD INVARIANT (#409): Playwright objects are bound
-        # to the worker thread that created them. This main-thread
-        # path may only DETACH (retire) the generation — never call
-        # close()/stop() here (a cross-thread stop() kills the driver
-        # under the hung worker and turns its dispatcher wait into a
-        # CPU busy-loop). The close is QUEUED on the retiring
-        # executor behind the hung call, so it runs on the owning
-        # worker thread whenever that call settles — including the
-        # already-settled race, where the queued task runs at once on
-        # that same thread (a done-callback would have run HERE, on
-        # the main thread, exactly the cross-thread close this path
-        # exists to prevent).
+        # SETTLEMENT ORDER (#409): this path only DETACHES (retires)
+        # the generation — it never closes here, so a timeout never
+        # preempts the call. The close is QUEUED on the retiring
+        # executor behind the hung call and runs once that call
+        # settles (at once in the already-settled race); it closes on
+        # the generation's own event loop, from whichever thread runs
+        # it. The task's end closes what a call never settled.
         retired_generation, _fresh = _detach_browser(tool_ctx)
         try:
             settlement_target = stateful_executor.submit(
