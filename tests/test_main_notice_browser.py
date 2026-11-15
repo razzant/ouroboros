@@ -119,6 +119,16 @@ def _nav(page, name):
     page.wait_for_selector(f"#page-{name}.active")
 
 
+def _project_unread(page, project, on=True):
+    """The Project row carries its own unread mark; the approved shell has no Projects total."""
+    page.wait_for_function("""({id, on}) => {
+        const row = document.querySelector(`.nav-project-row[data-project-id="${id}"]`);
+        return row && row.hasAttribute('data-unread') === on
+            && (row.querySelector('.status-mark')?.dataset.hue === 'unread') === on;
+    }""", arg={"id": project["id"], "on": on}, timeout=45_000)
+    assert page.locator('#nav-projects-count').count() == 0
+
+
 def _open_project(page, project):
     _open_drawer(page)
     page.locator(f'.nav-project-row[data-project-id="{project["id"]}"]').click()
@@ -573,8 +583,7 @@ def test_a_long_or_clipped_shared_notice_is_read_only_when_every_part_was_shown(
                         if marker in str(row.get("task", {}).get("text") or "")), None), 60)
                     assert wait_durable_result(oracle, task["id"], timeout=120)["status"] == "completed"
                     # Two notices and the answer: unread in the Project, the notices in Main too.
-                    page.wait_for_function(
-                        "() => document.querySelector('#nav-projects-count')?.textContent.trim() === '3'", timeout=45_000)
+                    _project_unread(page, project, True)
                     capture.checkpoint("1-away-three-unread")
 
                     _nav(page, "chat")
@@ -589,7 +598,7 @@ def test_a_long_or_clipped_shared_notice_is_read_only_when_every_part_was_shown(
                     page.wait_for_timeout(1500)
                     prefs = _prefs(page)
                     assert not prefs["read_ahead_revisions"].get(project_chat), prefs  # nothing recorded yet
-                    assert page.evaluate(_NAV_FACTS, project["id"])["projects_count"] == "3"
+                    _project_unread(page, project, True)
                     _shot(page, request, "L1-long-bottom-only-clipped-whole-box")
                     capture.checkpoint("2-bottom-only")
 
@@ -601,8 +610,7 @@ def test_a_long_or_clipped_shared_notice_is_read_only_when_every_part_was_shown(
                     while top < long_facts["top"] + long_facts["height"]:
                         _scroll_to(page, main_feed, top)
                         top += (below - above) // 2
-                    page.wait_for_function(
-                        "() => document.querySelector('#nav-projects-count')?.textContent.trim() === '2'", timeout=30_000)
+                    _project_unread(page, project, True)
                     prefs = _prefs(page)
                     held = prefs["read_ahead_revisions"].get(project_chat) or []
                     revision = long_facts["revisions"][project_chat]
@@ -612,7 +620,7 @@ def test_a_long_or_clipped_shared_notice_is_read_only_when_every_part_was_shown(
                     _shot(page, request, "L2-long-read-by-parts")
                     _scroll_to(page, main_feed, clipped["top"] - 40)
                     page.wait_for_timeout(1500)
-                    assert page.evaluate(_NAV_FACTS, project["id"])["projects_count"] == "2"  # the clipped one stays
+                    _project_unread(page, project, True)  # the clipped notice and answer stay unread
                     _shot(page, request, "L3-clipped-never-read")
                     capture.checkpoint("3-read-by-parts")
                     assert not errors.unexpected(), errors
@@ -721,8 +729,7 @@ def test_a_shared_notice_read_in_main_leaves_its_projects_own_unread_landing_and
                     assert [(row["direction"], row["chat_id"], row["type"]) for row in notice_rows] == [
                         ("out", 1, "main_notice")], notice_rows
                     # Its own message and the notice are unread in the Project; the notice is unread in Main.
-                    page.wait_for_function(
-                        "() => document.querySelector('#nav-projects-count')?.textContent.trim() === '2'", timeout=45_000)
+                    _project_unread(page, project, True)
                     page.wait_for_function(
                         "() => document.querySelector('[data-nav-page=\"chat\"] .unread-badge')?.textContent.trim() === '1'",
                         timeout=30_000)
@@ -741,8 +748,7 @@ def test_a_shared_notice_read_in_main_leaves_its_projects_own_unread_landing_and
                         _scroll_to(page, main_feed, top)
                         top += (below - above) // 2
                     # The Project's own message stays unread there: one read, of one message.
-                    page.wait_for_function(
-                        "() => document.querySelector('#nav-projects-count')?.textContent.trim() === '1'", timeout=30_000)
+                    _project_unread(page, project, True)
                     page.wait_for_function(
                         "() => !document.querySelector('[data-nav-page=\"chat\"] .unread-badge')?.textContent.trim()",
                         timeout=30_000)
@@ -774,9 +780,7 @@ def test_a_shared_notice_read_in_main_leaves_its_projects_own_unread_landing_and
                     main_scroll = _scroll_top(page, main_feed)
                     _scroll_to(page, project_feed, page.evaluate("feed => document.querySelector(feed).scrollHeight",
                                                                   project_feed))
-                    page.wait_for_function(
-                        "() => (document.querySelector('#nav-projects-count')?.textContent.trim() || '') === ''",
-                        timeout=30_000)
+                    _project_unread(page, project, False)
                     assert _scroll_top(page, main_feed) == main_scroll, "reading the Project moved Main"
                     assert not (_prefs(page).get("read_ahead_revisions") or {}).get("1")  # Main read the notice itself
                     _shot(page, request, "R3-each-room-kept-its-own-position")

@@ -331,8 +331,8 @@ def test_from_the_minimum_window_width_every_top_control_clears_the_lights(subsc
     apply(page)
     integrated = page.evaluate(LAYOUT)
     assert integrated["sidebar_position"] == baseline["sidebar_position"] and integrated["drawer_toggle"] == "none"
-    # The approved card sits a 16px step into the band's lower part (79fac1cf4), below the lights themselves.
-    assert integrated["first_row"]["y"] == max(16, TOP - 16)
+    # The approved card starts after the measured window band, with the ordinary head step still below it.
+    assert integrated["first_row"]["y"] >= TOP
     assert clear_of_lights(integrated["first_row"])
     blocked = [c for c in page.evaluate(CONTROLS) if not clear_of_lights(c)]
     assert blocked == []
