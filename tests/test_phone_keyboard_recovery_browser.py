@@ -342,7 +342,8 @@ def test_an_open_capsule_in_a_low_keyboard_room_keeps_the_bar_in_reach_and_folds
     # Closed in the short room, the row folds again with no scroll; just above it the row stays.
     assert closed['folded'] == (height == 250) and closed['unreached'] == [] and closed['send'] <= height, closed
     # Folded or not, the feed keeps a line of the newest message's words and its foot (60 px at least, style.css).
-    assert closed['words'] >= 1 and closed['foot'] and closed['capsules'] == (0 if height == 250 else 3), closed
+    # DESIGN.md:478: "Model, Subagents, Context and Effort" — all four return when the row has room.
+    assert closed['words'] >= 1 and closed['foot'] and closed['capsules'] == (0 if height == 250 else 4), closed
     assert field.input_value() == draft, 'the draft stays whole'
 
 
