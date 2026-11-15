@@ -414,12 +414,8 @@ def test_docker_target_env_uses_only_inert_host_aliases(monkeypatch, tmp_path, r
         def communicate(self, **kwargs):
             return "done", ""
     def probe(command, **kwargs):
-        assert command[:3] == ["docker", "exec", "isolated-fixture"]
-        # The wait receipt is guarded first (``completed`` or ``completed:<pid>``, else no claim), then settled.
-        assert command[-1].startswith('case "$(cat ') and "in completed|completed:*) ;; *) exit 1;; esac; " in command[-1]
-        assert command[-1].endswith(" && printf completed")
-        assert kwargs["timeout"] == 5 and "env" not in kwargs
-        probes.append(command)
+        # Only recorded here: the product swallows a probe's exceptions (an assert would read as ``unknown``).
+        probes.append((command, kwargs))
         return subprocess.CompletedProcess(command, 0, receipt, "")
     monkeypatch.setattr(executor.subprocess, "Popen", Process)
     monkeypatch.setattr(executor.subprocess, "run", probe)
@@ -431,9 +427,16 @@ def test_docker_target_env_uses_only_inert_host_aliases(monkeypatch, tmp_path, r
     assert result.returncode == 0
     assert result.operation_outcome == ("completed" if receipt == "completed" else "unknown")
     assert len(probes) == 1
+    [(probe_command, probe_kwargs)] = probes
+    assert probe_command[:3] == ["docker", "exec", "isolated-fixture"]
+    # The wait receipt is guarded first (``completed`` or ``completed:<pid>``, else no claim), then settled.
+    assert probe_command[-1].startswith('case "$(cat ')
+    assert "in completed|completed:*) ;; *) exit 1;; esac; " in probe_command[-1]
+    assert probe_command[-1].endswith(" && printf completed")
+    assert probe_kwargs["timeout"] == 5 and "env" not in probe_kwargs
     host_env = seen["kwargs"]["env"]
     assert host_env.get("DOCKER_HOST") == os.environ.get("DOCKER_HOST")
     assert host_env["PATH"] == os.environ["PATH"]
-    assert all(value not in " ".join(command) for command in [seen["command"], *probes] for value in target.values())
+    assert all(value not in " ".join(command) for command in [seen["command"], probe_command] for value in target.values())
     aliases = [seen["command"][i + 1] for i, value in enumerate(seen["command"]) if value == "--env"]
     assert len(aliases) == 3 and {host_env[key] for key in aliases} == set(target.values())
