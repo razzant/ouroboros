@@ -1,8 +1,6 @@
-"""The Settings shell in a browser (docs/DESIGN.md "Settings"): the home opens a page, and every way back (the page's
-first row, Escape, the browser's Back) returns where the owner was, one level at a time, the home keeping its scroll
-and the field a level held committing before it closes. On a phone the ☰ stays in the header of every page; on a
-desk the sidebar does. An address no page registers never shows an empty page: the home opens with its last word
-searched."""
+"""The Settings shell: its header Back, Escape and browser Back return one level at a time in one column;
+two panes keep the list beside the page (docs/DESIGN.md "A section with pages"). Scroll, focus and field commits
+survive the return. An address no page registers opens the list with its last word searched."""
 from __future__ import annotations
 
 import pytest
@@ -70,10 +68,18 @@ def _open_from_home(page, target):
 def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui, width, height):
     ui = subscription_ui
     page = ui["new_page"](viewport={"width": width, "height": height}, has_touch=width < 720)
+    # The section switches at 40rem of its own box, not the window's width. A stored, supported sidebar width
+    # keeps the docked case in one column too: 1087 - 460 = 627px. The wide case below guards both panes.
+    if width == 1087:
+        page.route("**/api/ui/preferences", lambda route: route.fulfill(json={"sidebar_width": 460}))
     page.goto(ui["url"] + "/#settings")
+    if width == 1087:
+        page.wait_for_function("() => document.querySelector('#page-settings')?.clientWidth === 627")
+        open_settings(page)  # A page opened before stored widths arrived survives the narrowing; start at the list.
     page.locator(HOME).wait_for(state="visible")
     page.evaluate(TEST_PAGE)
     assert _layout(page) == ("stack" if width < 720 else "docked")
+    assert page.locator("#page-settings").bounding_box()["width"] == (627 if width == 1087 else width)
     assert _menu_visible(page)
     # On a phone a sideways finger over a page's scroller is the drawer's (style.css, the stack layout's scrollers).
     touch = "pan-y pinch-zoom" if width < 720 else "auto"
@@ -103,7 +109,7 @@ def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui,
     assert len(page.evaluate(SETTINGS_LAYERS)) == 1, "a narrow level is one layer of the shell's stack"
     assert page.evaluate("() => window.testShown.at(-1)") == "computer"
 
-    # Back by the first row: the home, at the place it was left, focus on the row that opened the page.
+    # Header Back: the home, at the place it was left, focus on the row that opened the page.
     assert go_back(page) == ""
     page.locator(HOME).wait_for(state="visible")
     assert page.locator(HOME).evaluate("home => home.scrollTop") == kept
@@ -156,7 +162,8 @@ def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui,
     open_settings(page, "test-shell")
     assert page.evaluate("() => window.__ouroSettings.open('secrets')") is True
     page.locator(f'{HOME} [data-settings-result="home:accounts"]').wait_for(state="visible")
-    assert top_path(page) == "" and page.locator("#page-settings [data-settings-page]").count() == 0
+    assert top_path(page) == "" and page.locator("#page-settings [data-settings-page]:not([data-settings-overview])").count() == 0
+    assert page.locator("#page-settings [data-settings-page]:visible").count() == 0
     assert page.locator("#settings-search").input_value() == "secrets"
     assert page.locator(f"{HOME} [data-settings-ask]").is_visible()
     assert page.evaluate(SETTINGS_LAYERS) == []
@@ -194,15 +201,16 @@ def test_a_wide_page_box_shows_the_home_beside_the_page_with_no_layer(subscripti
     page.evaluate(TEST_PAGE)
     level, _kept = _open_from_home(page, "rules")
     setup_browser.capture(page, "settings-beside-1440x900")
-    # Beside the home too the opened page takes the focus on its Back: a keyboard reaches the page at once.
-    assert _focused(page, '[data-settings-page="rules"] [data-settings-back]')
+    # DESIGN "A section with pages": beside its list the first level needs no Back; the page takes the keyboard.
+    assert _focused(page, '[data-settings-page="rules"]')
     assert page.locator(HOME).is_visible(), "wide: the home stays beside the page"
     assert page.locator(f'{HOME} [data-settings-open="rules"]').get_attribute("aria-current") == "page"
     assert page.evaluate(SETTINGS_LAYERS) == [], "beside the home a level is no layer"
-    # The home is a rail: its card keeps its list behind its count. The page keeps its first row, Back.
-    back = level.locator("[data-settings-back]")
-    assert back.is_visible() and back.inner_text().strip() == "Settings"
-    assert level.locator(".settings-page-title").inner_text().strip() == "Your rules"
+    # The rail and page are named in one band; the card occupies the overview pane only when chosen.
+    back = page.locator('#page-settings > .app-page-header [data-settings-back]')
+    assert back.is_hidden()
+    assert level.locator('[data-settings-back], .settings-page-title').count() == 0
+    assert page.locator('[data-settings-lead-name]').inner_text().strip() == "Your rules"
     assert not page.locator(f"{HOME} [data-being-needs]").is_visible()
     # Another home row replaces the page.
     page.locator(f'{HOME} [data-settings-open="appearance"]').click()
@@ -214,21 +222,29 @@ def test_a_wide_page_box_shows_the_home_beside_the_page_with_no_layer(subscripti
     first.locator("[data-test-deeper]").click()
     second = settings_page(page, "test-shell/deeper")
     second.wait_for(state="visible")
-    back = second.locator("[data-settings-back]")
-    assert back.is_visible() and back.inner_text().strip() == "Shell test"
+    assert back.is_visible() and back.inner_text().strip() == ""
+    assert back.get_attribute('aria-label') == back.get_attribute('title') == 'Back to Shell test'
+    assert len(page.evaluate(SETTINGS_LAYERS)) == 1
     assert go_back(page) == "test-shell"
+    assert first.is_visible() and back.is_hidden() and page.evaluate(SETTINGS_LAYERS) == []
     # A page opened from outside Settings names where it came from, in the wide layout too.
     page.evaluate("() => window.__ouroSettings.open('test-shell', { back: { label: 'Skills', go() { window.testWentBack = true; } } })")
     outside = settings_page(page, "test-shell")
-    assert outside.locator("[data-settings-back]").inner_text().strip() == "Skills"
-    outside.locator("[data-settings-back]").click()
+    assert outside.is_visible() and back.is_visible() and back.inner_text().strip() == ''
+    assert back.get_attribute('aria-label') == back.get_attribute('title') == 'Back to Skills'
+    back.click()
     page.wait_for_function("() => window.testWentBack === true")
-    # Back beside the rail returns to the home alone; narrowed, a page is alone and one layer of the shell's stack.
+    # The overview row selects Ouroboros's card beside the rail; there is always an open pane.
     open_settings(page, "rules")
-    assert go_back(page) == ""
-    assert page.locator(f'{HOME} [aria-current="page"]').count() == 0
+    page.locator(f'{HOME} [data-settings-overview-row]').click()
+    assert top_path(page) == '' and page.locator(f'{HOME} [aria-current="page"]').count() == 1
+    assert page.locator(f'{HOME} [data-settings-overview-row]').get_attribute('aria-current') == 'page'
+    assert page.locator('#page-settings .settings-page[data-settings-overview] [data-settings-card]').is_visible()
     open_settings(page, "rules")
     page.set_viewport_size({"width": 1087, "height": 740})
+    assert page.locator(HOME).is_visible() and back.is_hidden() and page.evaluate(SETTINGS_LAYERS) == []
+    # Narrowing the section's own box below 40rem, while the shell remains docked, turns its page into a layer.
+    page.set_viewport_size({"width": 900, "height": 740})
     page.wait_for_function(SETTINGS_LAYERS.replace("() =>", "() => 1 === (") + ").length")
     assert not page.locator(HOME).is_visible()
     assert go_back(page) == ""

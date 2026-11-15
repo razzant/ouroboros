@@ -163,7 +163,7 @@ def _run_core_ui_assertions(url: str) -> None:
 
 @pytest.mark.ui_browser
 def test_ui_projects_sidebar_unread_and_keyboard_menu(direct_server_with_data):
-    """Projects stays compact, paint-ACKs unread, and exposes a real keyboard menu."""
+    """Projects marks unread on its row, paint-ACKs it, and keeps its keyboard menu and Find usable."""
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
@@ -186,15 +186,19 @@ def test_ui_projects_sidebar_unread_and_keyboard_menu(direct_server_with_data):
                 add = page.locator("#nav-projects-add")
                 assert add.is_visible()
                 assert add.get_attribute("aria-label") == "New project"
-                assert page.locator("#nav-projects-count").inner_text() == "1"
+                assert page.locator("#nav-projects-count, #nav-projects-toggle, .nav-projects-facts").count() == 0
                 assert row.get_attribute("data-unread") == ""
+                assert row.locator('.status-mark').get_attribute('data-hue') == 'unread'
+                assert row.get_attribute('aria-label').endswith(' · new messages')
 
                 row.click()
                 page.wait_for_selector('#project-panel:not([hidden])', timeout=30_000)
                 page.wait_for_function(
-                    "() => document.querySelector('#nav-projects-count')?.textContent === ''",
+                    "() => !document.querySelector('.nav-project-row[data-project-id=\"alpha\"]')?.hasAttribute('data-unread')",
                     timeout=30_000,
                 )
+                assert row.locator('.status-mark').get_attribute('data-hue') != 'unread'
+                assert not row.get_attribute('aria-label').endswith(' · new messages')
                 page.click("#project-panel-close")
 
                 kebab = page.locator('.nav-project-kebab[aria-label="Actions for Alpha project"]')
@@ -212,11 +216,16 @@ def test_ui_projects_sidebar_unread_and_keyboard_menu(direct_server_with_data):
                 assert menu.count() == 0
                 assert page.locator(':focus').get_attribute("aria-label") == "Actions for Alpha project"
 
-                toggle = page.locator("#nav-projects-toggle")
-                toggle.focus()
-                toggle.press("Space")
-                assert toggle.get_attribute("aria-expanded") == "false"
-                assert page.locator("#nav-projects-list").is_hidden()
+                find = page.locator('.nav-find-input')
+                find.fill('no such project')
+                page.wait_for_function("() => !document.querySelector('.nav-project-row[data-project-id=\"alpha\"]')")
+                page.locator('#nav-projects-list').get_by_role('button', name='Clear search', exact=True).wait_for(state='visible')
+                find.press('Escape')
+                row.wait_for(state='visible')
+                assert find.input_value() == '' and find.evaluate('el => el === document.activeElement')
+                assert page.locator('#nav-projects-list .nav-project-row').count() == 1
+                find.press('ArrowDown')
+                assert row.evaluate('el => el === document.activeElement')
                 assert add.is_visible()
             finally:
                 browser.close()
