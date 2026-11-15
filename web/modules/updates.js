@@ -623,7 +623,7 @@ export function initUpdates({ mount, state, ws }) {
                         </div>
                     </div>
                     <div class="updates-letter-note" id="updates-letter-note-line" hidden><span id="updates-letter-note" role="status" aria-live="polite"></span> <span id="updates-letter-task"></span></div>
-                    <p class="updates-letter-over" id="updates-letter-over" hidden></p>
+                    <p class="ui-status updates-letter-over" id="updates-letter-over" data-tone="warn" hidden></p>
                     <div class="updates-letter-body ui-rich-content" id="updates-letter-body"></div>
                     <button type="button" class="btn btn-ghost btn-sm ui-list-more" id="updates-letter-more" hidden>Read all</button>
                     <details class="ui-disclosure updates-letter-details" id="updates-letter-details">
@@ -750,7 +750,8 @@ export function initUpdates({ mount, state, ws }) {
     function mountDescription(container, markdown, over = '') {
         if (over) {
             const line = document.createElement('p');
-            line.className = 'updates-letter-over';
+            line.className = 'ui-status updates-letter-over';
+            line.dataset.tone = 'warn';
             line.textContent = over;
             container.append(line);
         }

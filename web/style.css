@@ -10354,13 +10354,10 @@ html[data-layout="stack"] .project-panel {
     line-height: var(--line-meta);
     color: var(--text-meta);
 }
-/* What the update on offer brings over a review FAIL or no verdict: one host fact above the prose, in the panel
-   and in the Apply confirmation; ordinary wrapping text, never clipped. */
+/* What the update on offer brings over a review FAIL or no verdict: one host status sentence (`.ui-status`, warn)
+   above the prose, in the panel and in the Apply confirmation; ordinary wrapping text, never clipped. */
 .updates-letter-over {
     margin: var(--space-2) 0 0;
-    font-size: var(--type-body);
-    line-height: var(--line-body);
-    color: var(--text-primary);
     overflow-wrap: anywhere;
 }
 .updates-letter-details {

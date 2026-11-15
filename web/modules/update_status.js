@@ -111,7 +111,8 @@ export function updateOverReview(facts) {
     return {
         line: parts.length ? `Went in over a review FAIL or no verdict: ${parts.join(', ')}.` : '',
         names: [...landed.map((row) => `${String(row.sha).slice(0, 8)} (made on this computer; ${row.outcome})`),
-            ...merges.map((commit) => `${String(commit.sha).slice(0, 8)} (merge; review observed ${commit.receipt.review.observed})`)],
+            ...merges.map((commit) => `${String(commit.sha).slice(0, 8)} (merge; ${
+                commit.receipt.review.observed === 'FAIL' ? 'review FAIL' : 'no review verdict'})`)],
         landed,
     };
 }
@@ -131,7 +132,7 @@ export function preflightEvidenceRows(preflight) {
         return [{ label: 'Checks', value: 'Qualification for this range is unknown.' }];
     }
     const rows = updateOverReview(facts).landed.map((row) => ({ label: String(row.sha).slice(0, 8),
-        value: `${row.subject ? `${row.subject}\n` : ''}Ouroboros made it on this computer; ${row.outcome}.` }));
+        value: `${row.subject ? `${row.subject}\n` : ''}Ouroboros made it on this computer; ${row.outcome}${/[.!?]"?$/.test(row.outcome) ? '' : '.'}` }));
     if (!Array.isArray(facts.landed_over_review)) {
         rows.push({ label: 'Made on this computer',
             value: 'Not read for this range: whether its commits landed over a review FAIL or no verdict is unknown.' });

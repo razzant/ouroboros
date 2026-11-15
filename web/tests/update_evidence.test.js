@@ -62,7 +62,8 @@ test('confirmation details name failed, absent and green evidence without conver
     qualification.landed_over_review = [{ sha: 'cccc1111dddd', subject: 'own change', reason: 'critical_findings', outcome },
         { sha: 'bbbb', subject: '#123', reason: 'review_quorum', outcome: 'no review verdict: review quorum' }];
     const own = preflightEvidenceRows({ merge_plan: plan, letter, qualification });
-    assert.deepEqual(own[0], { label: 'cccc1111', value: `own change\nOuroboros made it on this computer; ${outcome}.` });
+    assert.deepEqual(own[0], { label: 'cccc1111', value: `own change\nOuroboros made it on this computer; ${outcome}` });
+    assert.equal(own[1].value, '#123\nOuroboros made it on this computer; no review verdict: review quorum.');
     assert.doesNotMatch(rowsText(own), /Not read for this range/);
     const over = updateOverReview(qualification);
     assert.equal(over.line, 'Went in over a review FAIL or no verdict: 2 commits Ouroboros made on this computer.');
@@ -73,6 +74,8 @@ test('confirmation details name failed, absent and green evidence without conver
         at('m1', { observed: 'FAIL', declared: 'PASS' }), at('m2', { observed: 'QUORUM_FAILED' }), at('m3', { observed: 'unknown' }),
         at('earlier', { observed: 'PASS', relation: 'changes_after_review' }), at('sparse', {}), at('future', { observed: 'LATER' }),
         { sha: 'bare', subject: 'no receipt' }] }).line, 'Went in over a review FAIL or no verdict: 3 merges.');
+    assert.deepEqual(updateOverReview({ ...plan, commits: [at('m1', { observed: 'FAIL' }), at('m3', { observed: 'unknown' })] }).names,
+        ['m1 (merge; review FAIL)', 'm3 (merge; no review verdict)']);
     qualification.landed_over_review = [];
     qualification.commits = [{ sha: 'bbbb', subject: 'green', receipt: { checks: [{ name: 'full_battery', status: 'passed', source: 'author_declared' }], review: { observed: 'PASS', declared: 'PASS' } } }];
     qualification.github.runs[0].conclusion = 'success';
