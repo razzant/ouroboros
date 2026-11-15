@@ -743,3 +743,61 @@ def test_a_results_material_is_read_and_kept_through_the_work_domain(env, monkey
     monkeypatch.setenv("PATH", str(env.root / "no-cli"))  # nothing can ask the container now: no evidence of absence
     asked = {item["path"]: item for item in produced_material(ctx)["files"]}[str(repo / "out" / "result.txt")]
     assert asked["sha256"] == "unreadable (FileNotFoundError)" and "retained_gap" in asked, asked
+
+
+def test_a_browser_file_intake_reads_a_work_file_as_read_file_does_never_through_a_service_path(env, monkeypatch):
+    """``mcp_browser_guard`` file intake over a managed workspace, with its real consumers (``read_admission``, the
+    session's task store): a direct work file arrives through the confined descent, and a folder the employee made a
+    link to a service folder is the work domain's own read (``read_in_work``), never the service file the same
+    spelling reaches when the service opens it. Admission is lexical for a work path, so the reader is what decides.
+    The mocked ``cat`` is the namespace boundary a real container gives; the service opens nothing there by name."""
+    from ouroboros import mcp_browser_guard
+    from ouroboros.artifacts import task_artifact_dir_path
+    from tests.test_mcp_browser_guard import _ask
+
+    _managed(env, monkeypatch)
+    repo = _work_repo(env.work / "app", {"upload/direct.bin": "placeholder\n"})
+    direct = b"\x00WORK BYTES\xff\r\n"
+    work_domain.write_file(repo / "upload" / "direct.bin", direct)
+    service = env.root / "service-only"
+    service.mkdir()
+    (service / "secret.bin").write_bytes(b"SERVICE SENTINEL")
+    (repo / "linked").symlink_to(service, target_is_directory=True)
+    assert (repo / "linked" / "secret.bin").read_bytes() == b"SERVICE SENTINEL"  # what a service open would read
+    ctx = _registry(env, repo)._ctx
+    view, asked, original = b"THE WORK DOMAIN'S VIEW\n", [], work_domain.run_in_work
+
+    def run_in_work(argv, **kwargs):  # the container's own read: ``head -c N`` for a bounded one
+        if str(repo / "linked") in str(argv[-1]) and list(argv[:1]) in (["cat"], ["head"]):
+            asked.append(list(map(str, argv)))
+            return subprocess.CompletedProcess(argv, 0, view[:int(argv[2])] if argv[0] == "head" else view, b"")
+        return original(argv, **kwargs)
+
+    monkeypatch.setattr(work_domain, "run_in_work", run_in_work)
+    guard = mcp_browser_guard.BrowserGuard(ctx)
+    try:
+        with service_effects_on(env.work, service, allowed_opens=(str(env.work),)) as seen:
+            answer = _ask(guard, {"action": "file_intake",
+                                  "files": [{"path": "upload/direct.bin"}, {"path": "linked/secret.bin"}]})
+            missing = _ask(guard, {"action": "file_intake", "files": [{"path": "upload/absent.bin"}]})
+            folder = _ask(guard, {"action": "file_intake", "files": [{"path": "upload"}]})
+        assert seen == [], seen
+        assert answer.get("block") == "" and [row["name"] for row in answer["files"]] == ["direct.bin", "secret.bin"], answer
+        store = task_artifact_dir_path(env.root / "drive", ctx.task_id)
+        got = [pathlib.Path(row["path"]).read_bytes() for row in answer["files"]]
+        assert got == [direct, view] and all(pathlib.Path(row["path"]).is_relative_to(store) for row in answer["files"])
+        assert asked and all(argv[-1].endswith("linked/secret.bin") for argv in asked), asked
+        assert asked[0][:3] == ["head", "-c", str(mcp_browser_guard.FILE_INTAKE_BYTES - len(direct) + 1)], asked
+        assert missing == {"block": "BROWSER_FILE_INTAKE_BLOCKED: file 1 of 1 does not exist"}, missing
+        assert folder == {"block": "BROWSER_FILE_INTAKE_BLOCKED: file 1 of 1 is a folder; select each file in it"}, folder
+
+        def unavailable(argv, **kwargs):  # the work domain cannot read it: refused, never the service's bytes
+            return subprocess.CompletedProcess(argv, 1, b"", b"Permission denied")
+
+        monkeypatch.setattr(work_domain, "run_in_work", unavailable)
+        refused = _ask(guard, {"action": "file_intake", "files": [{"path": "linked/secret.bin"}]})
+        assert set(refused) == {"block"} and "file 1 of 1 cannot be read" in refused["block"], refused
+    finally:
+        guard.close()
+    kept = b"".join(path.read_bytes() for path in store.rglob("*") if path.is_file())
+    assert b"SERVICE SENTINEL" not in kept
