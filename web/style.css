@@ -8592,6 +8592,12 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     border-radius: var(--radius-inner);
 }
 
+/* An image is a <figure>: without this the browser's own 40px side margins inset it. */
+figure.widget-media {
+    margin-inline: 0;
+    margin-bottom: 0;
+}
+
 .widget-media audio {
     width: 100%;
 }
