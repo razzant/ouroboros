@@ -114,13 +114,13 @@ def battery_commands() -> list[tuple[str, list[str]]]:
     ]
 
 
-def _run(label: str, argv: list[str], cwd: pathlib.Path) -> int:
+def _run(label: str, argv: list[str], cwd: pathlib.Path, node: str = "") -> int:
     from ouroboros.preflight_node import node_environment
     from ouroboros.process_containment import ProcessContainer
     from ouroboros.test_parallelism import NESTED_WORKERS_ENV, bounded_test_command, reserve
 
     started = time.monotonic()
-    env = node_environment(os.environ)
+    env = node_environment(os.environ, node)  # the Node this battery's lane ran; none: one named without running it
     for key in _OUTER_WORKER_KEYS:  # a battery is a run of its own, never a worker of the session that started it
         env.pop(key, None)
     # One reservation under the ledger's lock: the admission, and this pass's row holding what the pass uses.
@@ -190,14 +190,15 @@ def _warm_bytecode(files=(), evidence=None) -> None:
         print(f"=== warm: exit {code} decides nothing; the passes run cold", flush=True)
 
 
-def _node_lane() -> int:
+def _node_lane() -> tuple[int, str]:
+    """The complete Node lane: its exit status and the Node it ran (``""``: none), for the passes after it."""
     from ouroboros.preflight_node import (
         NODE_MIN_VERSION, WEB_DIR, _version_tuple, candidate_node_tests, probe_node_version, resolve_node,
     )
 
     files = candidate_node_tests(REPO)
     if not files:
-        return 0
+        return 0, ""
     node = resolve_node()
     version = probe_node_version(node) if node else ""
     floor = ".".join(str(part) for part in NODE_MIN_VERSION)
@@ -205,10 +206,16 @@ def _node_lane() -> int:
         found = f"{node} is v{version}" if version else (f"{node} did not answer --version" if node else "no node found")
         print(f"\n=== node: NOT_RUN — {found}; the web lane needs node >= {floor}, so this is not the full "
               "battery: install node or pass focused targets", flush=True)
-        return 1
+        return 1, ""
+    from ouroboros.claudexor_runtime import get_runtime_manager
     from ouroboros.preflight_node import NODE_TEST_TIMEOUT_FLAG
 
-    return _run("node", [node, "--test", NODE_TEST_TIMEOUT_FLAG, f"--test-concurrency={_workers()}", *files], REPO / WEB_DIR)
+    pinned = getattr(get_runtime_manager().pin, "node_version", "")
+    # Named, never silent; another version means no copy of the pin was found (bundled, prepared or carried).
+    print(f"=== node: {node} v{version}" + (f", not the reviewed Node {pinned}" if pinned and version != pinned
+                                            else ""), flush=True)
+    argv = [node, "--test", NODE_TEST_TIMEOUT_FLAG, f"--test-concurrency={_workers()}", *files]
+    return _run("node", argv, REPO / WEB_DIR, node), node
 
 
 def _selected(args, evidence) -> int:
@@ -237,7 +244,8 @@ def _selected(args, evidence) -> int:
         selection = _defer_full(selection)
         record = {**selection.record(), "inventory": {}, "outcomes": record["outcomes"], "deferred_full": True}
         output.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    code = _node_lane()
+    code, node = _node_lane()
+    carried = [node] if node else []  # the passes run the Node the lane ran
     record["node"] = "success" if code == 0 else "failure"
     if code == 0 or args.keep_going:
         _warm_bytecode(selection.files, root)
@@ -250,7 +258,7 @@ def _selected(args, evidence) -> int:
         for spec in selection_passes(selection, probe_module=probe, temp_root=root) if code == 0 or args.keep_going else []:
             command = [sys.executable, "-m", "pytest", *launch_args(spec.args),
                        "--ci-evidence-dir", str(root / spec.label)]
-            code = _run(spec.label, command, REPO)
+            code = _run(spec.label, command, REPO, *carried)
             inventory, problem = read_inventory(root, spec.label)
             record["inventory"][spec.label] = inventory
             record["outcomes"][spec.label] = "success" if code in (0, _PYTEST_EXIT_NO_TESTS) and not problem else "failure"
@@ -350,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.node:
         if args.selected or pytest_args:
             parser.error("--node runs only the Node lane")
-        return _node_lane()
+        return _node_lane()[0]
     if args.selected:
         if pytest_args:
             parser.error("--selected cannot be combined with arbitrary pytest arguments")
@@ -362,13 +370,15 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     print(f"=== full: {sum(1 for _ in (REPO / 'tests').rglob('test_*.py'))} Python modules; "
           "full default suite; complete Node lane", flush=True)
-    if (code := _node_lane()) == 0:
+    code, node = _node_lane()
+    carried = [node] if node else []  # the passes run the Node the lane ran
+    if code == 0:
         _warm_bytecode()
     ran = 0
     for label, command in battery_commands() if code == 0 else []:
         if evidence is not None:
             command = [*command, "--ci-evidence-dir", str(evidence / label)]
-        code = _run(label, command, REPO)
+        code = _run(label, command, REPO, *carried)
         if code == _PYTEST_EXIT_NO_TESTS:
             code = 0
             continue

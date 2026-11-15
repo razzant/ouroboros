@@ -687,17 +687,17 @@ def _transport_factory(cfg: MCPServerConfig, host_env: Optional[Dict[str, str]] 
     if cfg.transport in ("streamable_http", "sse"):
         return _http_with_guards(cfg)
     if cfg.transport == "stdio":
-        # Leaving env/cwd unset uses the SDK's small cross-platform default
-        # environment and its context-managed process shutdown sequence.
-        # The SDK merges a plain dict onto its defaults. Windows env names are
-        # case-insensitive: canonical names prevent a second Path/PATH entry.
+        from ouroboros.node_runtime import forward_playwright_node
         from ouroboros.process_scope import installation_scope_entries
 
-        # The installation scope marker rides every stdio server (a long-lived shared
-        # helper belongs to the installation, never to the task that first touched it);
-        # a task session's ``host_env`` adds that task's scope marker and guard address last.
+        # Leaving env/cwd unset uses the SDK's small cross-platform default environment and its context-managed
+        # process shutdown sequence. The SDK merges a plain dict onto its defaults. Windows env names are
+        # case-insensitive: canonical names prevent a second Path/PATH entry. The installation scope marker rides
+        # every stdio server (a long-lived shared helper belongs to the installation, never to the task that first
+        # touched it); a task session's ``host_env`` adds that task's scope marker and guard address last.
         env = {**installation_scope_entries(),
                **{key.upper() if IS_WINDOWS else key: value for key, value in {**cfg.env, **(host_env or {})}.items()}}
+        forward_playwright_node(env)  # Playwright's driver Node, unless the config or host env chose one
         selected = {"env": env} if env else {}
         if cfg.cwd:
             selected["cwd"] = cfg.cwd

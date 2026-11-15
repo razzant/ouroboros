@@ -23,10 +23,30 @@ from tests.body_candidate_support import isolate, make_ctx, make_serving
 SETSID_SHIM = 'import os, sys\ntry:\n    os.setsid()\nexcept OSError:\n    pass\nos.execvp(sys.argv[1], sys.argv[1:])\n'
 
 
+_DRIVER_KEYS = ('PLAYWRIGHT_NODEJS_PATH', 'OUROBOROS_PLAYWRIGHT_NODE_SELECTED', 'OUROBOROS_PINNED_NODE_CARRIED')
+_SERVING_NODE = '/serving/state/cx/node/24.22.3-linux-x64.g-0123456789ab-00000000/node-standalone/bin/node'
+
+
+def _pinned_node(monkeypatch, node):
+    """The serving installation's pinned Node, whatever this host prepared: 'prepared' is one fixed host path found
+    by record, 'cold' the real lookup in the isolated data root, which names a not-yet-published generation."""
+    for name in _DRIVER_KEYS:
+        monkeypatch.delenv(name, raising=False)
+    if node == 'prepared':
+        from types import SimpleNamespace
+
+        from ouroboros import claudexor_runtime
+        monkeypatch.setattr(claudexor_runtime, 'get_runtime_manager', lambda: SimpleNamespace(
+            reviewed_node=lambda allow_install=False, prepared=False: _SERVING_NODE,
+            prepared_node=lambda root: _SERVING_NODE))
+
+
+@pytest.mark.parametrize('node', ['cold', 'prepared'])
 @pytest.mark.parametrize('consumer', ['command', 'service'])
-def test_docker_candidate_uses_mapped_clean_environment(tmp_path, monkeypatch, consumer):
+def test_docker_candidate_uses_mapped_clean_environment(tmp_path, monkeypatch, consumer, node):
     serving = make_serving(tmp_path)
     data = isolate(monkeypatch, tmp_path)
+    _pinned_node(monkeypatch, node)
     monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', 'pro')
     ctx = make_ctx(serving, data, 'docker-env')
     body_candidate.prepare(ctx)
@@ -116,8 +136,49 @@ def test_docker_candidate_uses_mapped_clean_environment(tmp_path, monkeypatch, c
     assert env['HOME'] == str(mount / (candidate.name + '.env') / 'home')
     assert env['OUROBOROS_REPO_DIR'] == str(mount / candidate.name)
     assert 'CONTAINER_API_KEY' not in env and 'OUROBOROS_MANAGED_BY_LAUNCHER' not in env
+    assert not set(_DRIVER_KEYS) & set(env)  # the container runs its own runtime, never a host Node path
     assert not any(key.startswith(('OUROBOROS_SERVICE_ENV_', 'OUROBOROS_PROCESS_ENV_')) for key in env)
     assert commands and all('synthetic-leak' not in ' '.join(cmd) for cmd, _ in commands)
+
+
+@pytest.mark.parametrize('operator', ['', '/operator/node'])
+@pytest.mark.parametrize('node', ['cold', 'prepared'])
+def test_only_a_local_candidate_process_gets_the_host_driver_node(tmp_path, monkeypatch, node, operator):
+    """R4 (Fable): the candidate environment gained the serving installation's driver Node, a host path under
+    <data>/state/cx/node, and the Docker projection maps every absolute value: map_host_path refused it, so every
+    Docker command and service of a bound candidate or system copy was refused (CANDIDATE_ENVIRONMENT_UNAVAILABLE).
+    The production projection itself, both executors: the host Node (carried or planned, beside an operator's literal
+    driver) reaches a local process only; an operator's host path is not handed to a container either."""
+    serving = make_serving(tmp_path)
+    data = isolate(monkeypatch, tmp_path)
+    _pinned_node(monkeypatch, node)
+    if operator:
+        monkeypatch.setenv('PLAYWRIGHT_NODEJS_PATH', operator)
+    monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', 'pro')
+    ctx = make_ctx(serving, data, 'driver-node')
+    body_candidate.prepare(ctx)
+    candidate = pathlib.Path(ctx.repo_dir)
+    from types import SimpleNamespace
+    local = body_candidate.executor_environment(
+        ctx, candidate, executor=SimpleNamespace(kind='local'), map_path=executor.map_host_path)
+    selected = local.get('OUROBOROS_PLAYWRIGHT_NODE_SELECTED', '')
+    carried = local.get('OUROBOROS_PINNED_NODE_CARRIED', '')
+    assert local['PLAYWRIGHT_NODEJS_PATH'] == (operator or selected)
+    if operator:
+        assert not selected  # an operator's literal driver is never marked automatic, even beside a carried Node
+    if node == 'prepared':
+        assert carried == _SERVING_NODE and selected == ('' if operator else _SERVING_NODE)
+    elif not operator:  # nothing prepared: the generation the serving installation's own preparation publishes
+        assert not carried
+        from ouroboros import config
+        assert pathlib.Path(selected).is_relative_to(pathlib.Path(config.DATA_DIR) / 'state' / 'cx' / 'node')
+        assert not pathlib.Path(selected).exists()
+    ctx.executor_ref = {'type': 'docker_exec', 'container_name': 'fixture',
+        'workspace_host_path': str(candidate.parent), 'workspace_backend_path': '/workspace'}
+    docker = body_candidate.executor_environment(
+        ctx, candidate, executor=executor.executor_ref_from_ctx(ctx), map_path=executor.map_host_path)
+    assert not set(_DRIVER_KEYS) & set(docker)
+    assert docker['OUROBOROS_DATA_DIR'] == f'/workspace/{candidate.name}.env/data'  # still the mapped isolated roots
 
 
 @pytest.mark.parametrize('consumer', ['command', 'service'])

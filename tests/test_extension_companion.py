@@ -806,7 +806,8 @@ def test_generation_bound_disposal_skips_a_newer_publication(
         extension_loader.unload_extension(loaded.name)
         init_server_process_pid()
 
-def _node_companion_api(tmp_path: pathlib.Path, monkeypatch, *, runtime: str, command: list[str]) -> PluginAPIImpl:
+def _node_companion_api(tmp_path: pathlib.Path, monkeypatch, *, runtime: str, command: list[str],
+                        env: dict | None = None) -> PluginAPIImpl:
     init_server_process_pid()
     skill_dir = tmp_path / "skill"
     skill_dir.mkdir(exist_ok=True)
@@ -826,6 +827,7 @@ def _node_companion_api(tmp_path: pathlib.Path, monkeypatch, *, runtime: str, co
             "name": "daemon",
             "command": command,
             "runtime": runtime,
+            **({"env": env} if env else {}),
         }],
         skill_dir=skill_dir,
     ))
@@ -863,13 +865,14 @@ def test_companion_node_command_rewritten_via_policy_helper(tmp_path: pathlib.Pa
 
 
 def test_companion_npm_not_rewritten_but_emergency_path_prepended(tmp_path: pathlib.Path, monkeypatch) -> None:
-    """npm is NOT bundled: argv stays npm; in the emergency state (PATH node
+    """Without a pin npm is NOT rewritten: argv stays npm; in the emergency state (PATH node
     dead, bundled selected) the child PATH gains the bundled-node dir so npm's
-    `#!/usr/bin/env node` shebang finds the working runtime."""
+    `#!/usr/bin/env node` shebang finds the working runtime. (Under the pin: ``reviewed_npm_command``.)"""
     import os
 
     from ouroboros import node_runtime
 
+    monkeypatch.setattr(node_runtime, "pinned_node_wait", lambda: (False, ""))
     bundle_bin = str(tmp_path / "bundle" / "bin")
     monkeypatch.setattr(
         node_runtime,
@@ -889,27 +892,140 @@ def test_companion_npm_not_rewritten_but_emergency_path_prepended(tmp_path: path
     assert env["PATH"].endswith(os.environ["PATH"])
 
 
-def test_companion_node_unusable_leaves_command_and_env_untouched(tmp_path: pathlib.Path, monkeypatch) -> None:
-    """Nothing usable -> honest failure at spawn time, no rewrite, no env edit."""
+@pytest.mark.parametrize("command", [["node", "server.js"], ["npm", "run", "start"]])
+@pytest.mark.parametrize("pinned", [False, True])
+def test_companion_node_unusable_leaves_command_and_env_untouched_or_waits_for_the_pin(
+        tmp_path: pathlib.Path, monkeypatch, pinned, command) -> None:
+    """Nothing usable on a host the pin does not govern -> honest failure at spawn time, no rewrite, no env edit.
+    Under the pin (owner 14 Nov 2026: functions require the new Node) the companion is not started on a bare PATH
+    `node`, nor through `npm` (R7, Opus: its shebang found PATH node): registration fails naming why, and asks for the
+    pin's Node once (the prepared Node re-queues it)."""
     import os
 
-    from ouroboros import node_runtime
+    from ouroboros import node_runtime, server_boot
+    from ouroboros.contracts.plugin_api import ExtensionRegistrationError
 
     monkeypatch.setattr(
         node_runtime,
         "select_skill_node_runtime",
-        lambda timeout_sec=10: ("", "bundled:absent; path:broken:signal:SIGKILL"),
+        lambda timeout_sec=10: ("", "pinned:24.22.3:not_prepared" if pinned
+                                else "bundled:absent; path:broken:signal:SIGKILL"),
     )
+    monkeypatch.setattr(node_runtime, "pinned_node_wait", lambda: (True, "/planned/node") if pinned else (False, ""))
+    requests = []
+    monkeypatch.setattr(server_boot, "request_pinned_node", lambda root=None: requests.append(root))
     monkeypatch.setattr(node_runtime, "skill_node_emergency_path_dir", lambda timeout_sec=10: "")
-    api = _node_companion_api(tmp_path, monkeypatch, runtime="node", command=["node", "server.js"])
+    api = _node_companion_api(tmp_path, monkeypatch, runtime=command[0], command=command)
 
+    if pinned:
+        with pytest.raises(ExtensionRegistrationError, match="pinned:24.22.3:not_prepared"):
+            api.register_companion_process("daemon")
+        assert requests == [None]
+        return
     api.register_companion_process("daemon")
 
     descriptor, env = _staged_companion_env(api)
-    assert descriptor.command == ["node", "server.js"]
+    assert descriptor.command == command and requests == []
     assert env.get("PATH", os.environ["PATH"]) == os.environ["PATH"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shebang resolution")
+@pytest.mark.parametrize("case", ["pinned", "no_pin", "manifest_path"])
+def test_an_npm_companions_node_shebang_runs_the_reviewed_node_under_the_pin(
+        tmp_path: pathlib.Path, monkeypatch, case) -> None:
+    """R7 (Opus): under the pin an `npm` companion still ran a healthy PATH `node` (only a broken PATH prepended the
+    reviewed one). Real processes, npm's POSIX layout: `npm` links its `#!/usr/bin/env node` CLI. Under the pin the
+    reviewed Node runs that CLI; without a pin, on a healthy PATH, the shebang finds PATH's; a manifest PATH stays the
+    author's. A launcher whose CLI is not found is refused under the pin: its Node could be any."""
+    import os
+
+    from ouroboros import node_runtime
+
+    def fake_node(where: pathlib.Path, label: str) -> pathlib.Path:
+        where.mkdir(parents=True)
+        node = where / "node"
+        node.write_text('#!/bin/sh\nif [ "$1" = --version ]; then echo v24.22.3; else echo "ran:%s:$1"; fi\n' % label,
+                        encoding="utf-8")
+        node.chmod(0o755)
+        return node
+
+    pinned_node = fake_node(tmp_path / "pinned" / "bin", "pinned")
+    path_bin = tmp_path / "path-bin"
+    fake_node(path_bin, "path")
+    cli = tmp_path / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    cli.parent.mkdir(parents=True)
+    cli.write_text("#!/usr/bin/env node\n", encoding="utf-8")  # npm's CLI: node runs this file
+    cli.chmod(0o755)
+    npm = path_bin / "npm"
+    npm.symlink_to(cli)
+    system = os.pathsep.join(["/usr/bin", "/bin"])
+    monkeypatch.setenv("PATH", os.pathsep.join([str(path_bin), system]))
+    # This test owns the host PATH: the real bootstrap prepends Homebrew's dirs, whose node may be SIGKILLed (an
+    # emergency of its own, which would prepend the reviewed Node without any pin).
+    monkeypatch.setattr("ouroboros.platform_layer.bootstrap_process_path", lambda *a, **k: None)
+    monkeypatch.setattr("ouroboros.platform_layer.resolve_bundled_node", lambda: str(pinned_node))
+    monkeypatch.setattr(node_runtime, "pinned_node_wait",
+                        lambda: (False, "") if case == "no_pin" else (True, str(pinned_node)))
+    api = _node_companion_api(tmp_path, monkeypatch, runtime="npm", command=["npm", "start"], env={
+        "PATH": os.pathsep.join([str(path_bin), system])} if case == "manifest_path" else None)
+
+    api.register_companion_process("daemon")
+    descriptor, env = _staged_companion_env(api)
+    pinned = case == "pinned"
+    assert descriptor.command == ([str(pinned_node), str(cli.resolve()), "start"] if pinned else ["npm", "start"])
+    ran = subprocess.run(descriptor.command, env=env, cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout.strip() == (f"ran:pinned:{cli.resolve()}" if pinned else f"ran:path:{npm}")
+    if pinned:
+        from ouroboros.contracts.plugin_api import ExtensionRegistrationError
+
+        npm.unlink()
+        npm.write_text("#!/bin/sh\nexec /an/older/node \"$0\" \"$@\"\n", encoding="utf-8")  # opaque: no CLI found
+        npm.chmod(0o755)
+        (tmp_path / "opaque").mkdir()
+        again = _node_companion_api(tmp_path / "opaque", monkeypatch, runtime="npm", command=["npm", "start"])
+        with pytest.raises(ExtensionRegistrationError, match="would choose its own Node"):
+            again.register_companion_process("daemon")
+
+
+
+
+@pytest.mark.parametrize("layout", ["official", "shim"])
+def test_an_npm_companion_runs_its_cli_on_the_reviewed_node_or_is_refused_without_asking_again(
+        tmp_path: pathlib.Path, monkeypatch, layout) -> None:
+    """Under the pin a Windows ``npm.cmd`` ran the ``node.exe`` beside it, not the reviewed Node the PATH prepend put
+    first. The companion now starts on ``[reviewed node, npm-cli.js]``; a launcher whose CLI is not found is refused,
+    and that refusal asks nothing: the prepared Node re-queuing this extension would only meet it again."""
+    from ouroboros import node_runtime, server_boot
+    from ouroboros.contracts.plugin_api import ExtensionRegistrationError
+
+    pinned = str(tmp_path / "pinned" / "bin" / "node")
+    host = tmp_path / "nodejs"
+    host.mkdir()
+    launcher = host / "npm.cmd"
+    launcher.write_text("@ECHO OFF\n", encoding="utf-8")
+    cli = host / "node_modules" / "npm" / "bin" / "npm-cli.js"
+    if layout == "official":
+        cli.parent.mkdir(parents=True)
+        cli.write_text("// npm\n", encoding="utf-8")
+    monkeypatch.setattr(node_runtime, "select_skill_node_runtime", lambda timeout_sec=10: (pinned, "bundled"))
+    monkeypatch.setattr(node_runtime, "pinned_node_wait", lambda: (True, pinned))
+    monkeypatch.setattr(node_runtime, "skill_node_emergency_path_dir", lambda timeout_sec=10: "")
+    monkeypatch.setattr(node_runtime._platform, "IS_WINDOWS", True)
+    monkeypatch.setattr(node_runtime._platform, "bootstrap_process_path", lambda *a, **k: None)
+    monkeypatch.setattr(node_runtime.shutil, "which", lambda name, *a, **k: str(launcher) if name == "npm" else None)
+    requests = []
+    monkeypatch.setattr(server_boot, "request_pinned_node", lambda root=None: requests.append(root))
+    api = _node_companion_api(tmp_path, monkeypatch, runtime="npm", command=["npm", "start"])
+
+    if layout == "shim":
+        with pytest.raises(ExtensionRegistrationError, match="would choose its own Node"):
+            api.register_companion_process("daemon")
+        assert requests == []
+        return
+    api.register_companion_process("daemon")
+    descriptor, _env = _staged_companion_env(api)
+    assert descriptor.command == [pinned, str(cli), "start"] and requests == []
 
 
 def test_windows_companion_start_does_not_request_console_process_group(tmp_path: pathlib.Path, monkeypatch) -> None:
@@ -2488,3 +2604,43 @@ def test_a_rotated_token_ends_the_old_mini_app_generation_and_the_new_one_serves
     finally:
         core_server.should_exit = True
         core_thread.join(10)
+
+
+@pytest.mark.parametrize("manifest", ["", "/operator/my node", "/generation/old"],
+                         ids=["automatic", "manifest-choice", "manifest-equal-to-selected"])
+def test_companion_respawn_refreshes_automatic_driver_and_preserves_manifest(tmp_path, monkeypatch, manifest):
+    """Astra R2: a manifest naming the very path selected at build time kept the automatic marker, so a respawn
+    after another generation was preferred rewrote the manifest's literal choice."""
+    import os
+    from ouroboros import claudexor_runtime, extension_companion, node_runtime
+
+    monkeypatch.setenv("PLAYWRIGHT_NODEJS_PATH", "")
+    monkeypatch.setenv("OUROBOROS_PLAYWRIGHT_NODE_SELECTED", "")
+    generation = ["/generation/old"]
+    manager = types.SimpleNamespace(reviewed_node=lambda **kw: generation[0])
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: manager)
+    env = companion_spawn_env(skill="demo", skill_dir=None, state_dir=tmp_path, spec={"env":
+        {"PLAYWRIGHT_NODEJS_PATH": manifest} if manifest else {}},
+        env_allow=[], granted_upper=[], token="fixture", settings={})
+    output = tmp_path / "child.json"
+    descriptor = CompanionDescriptor("demo", "node", [sys.executable, "-c",
+        # Published whole (a temporary name, then os.replace): the poll below never reads a half-written file.
+        "import json,os,pathlib,sys,time; t=pathlib.Path(sys.argv[1] + '.tmp'); "
+        "t.write_text(json.dumps(dict(os.environ))); os.replace(t, sys.argv[1]); time.sleep(60)",
+        str(output)], tmp_path, env)
+    supervisor = CompanionSupervisor(tmp_path)
+    monkeypatch.setattr(extension_companion, "_SERVER_PROCESS_PID", os.getpid())
+    try:
+        for current in ("/generation/old", "/generation/new"):
+            generation[0] = current
+            assert supervisor.start(descriptor)
+            deadline = time.monotonic() + 20
+            while not output.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            actual = json.loads(output.read_text())
+            assert actual[node_runtime.PLAYWRIGHT_NODE_ENV] == (manifest or current)
+            assert (node_runtime.SELECTED_DRIVER_NODE_ENV in actual) == (not manifest)
+            supervisor.stop("demo", "node", timeout_sec=1)
+            output.unlink()
+    finally:
+        supervisor.stop_all(timeout_sec=1)

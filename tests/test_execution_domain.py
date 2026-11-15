@@ -1058,8 +1058,10 @@ def test_a_reviewed_skill_keeps_its_state_in_the_work_domain_across_runs(env, mo
     root and reads it back on its next run; the service keeps its own records apart and spawns only its CLI."""
     from ouroboros.tools import skill_exec
 
+    monkeypatch.setenv("PLAYWRIGHT_NODEJS_PATH", str(env.root / "host-only-node"))
     ctx, drive = _reviewed_skill(env, monkeypatch, "counter", (
         "import os, pathlib\n"
+        "assert 'PLAYWRIGHT_NODEJS_PATH' not in os.environ\n"
         "state = pathlib.Path(os.environ['OUROBOROS_SKILL_STATE_DIR']) / 'count'\n"
         "count = int(state.read_text(encoding='utf-8')) + 1 if state.exists() else 1\n"
         "state.write_text(str(count))\n"

@@ -525,10 +525,12 @@ def preflight_test_workload(
     from ouroboros.test_parallelism import requested_workers
 
     base = default_temp_parent() / "ouroboros-preflight-contract"
+    node_tests = tuple(candidate_node_tests(repo))
+    node = resolve_node() if node_tests else None
     # The workload names the requested worker count. The count free memory admits
     # is an execution fact frozen in the run's own probe, so a memory sample never
     # changes what a proof covers, and naming the workload reads no memory at all.
-    env = pr._preflight_env(base, base / "repo", create=False, workers=requested_workers(os.cpu_count() or 1))
+    env = pr._preflight_env(base, base / "repo", create=False, workers=requested_workers(os.cpu_count() or 1), node=node)
     # Containment membership stays in the child env (an outer reap must see the
     # tree), but its keys are per-launch nonces, not test inputs. Evidence and
     # diagnostic destinations are output locations, never part of what a proof covers.
@@ -538,14 +540,13 @@ def preflight_test_workload(
                                             sort_keys=True).encode()).hexdigest()
     python = agent_python or os.environ.get("OUROBOROS_AGENT_PYTHON") or sys.executable or "python3"
     specs = passes if passes is not None else (selection_passes(selection) if selection else pr._preflight_pass_specs(pytest_args))
-    node_tests = tuple(candidate_node_tests(repo))
     return (
         tuple((p.label, tuple(preflight_probe.WORKER_PROBE_MODULE if probe_module and arg == probe_module else
                              MODULE if arg.startswith(MODULE + "_") else arg
                              for arg in p.args), p.parallel) for p in specs),
         pr._resolve_preflight_timeout(timeout, full=pr._full_tier(selection, pytest_args)),
         environment, _executable_identity(python),
-        (_executable_identity(resolve_node()), node_tests) if node_tests else (),
+        (_executable_identity(node), node_tests) if node_tests else (),
         preflight_probe.WORKER_PROBE_SOURCE,
     )
 

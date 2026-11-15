@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Install the UI lane's browsers and their Ubuntu packages with every download bounded (#2895).
 
-    python3 -I -S scripts/ci_browser_install.py [--pinned-chromium] [--attempt-seconds N]
+    python3 -I -S scripts/ci_browser_install.py [--pinned-node] [--pinned-chromium] [--attempt-seconds N]
         [--python PATH] <browser>...
 
 `playwright install --with-deps <browser>...` is one command with no deadline of its own: when an
@@ -20,6 +20,12 @@ wait on a server:
    this helper is interrupted: its failure ends the install, and only the step's ceiling bounds it.
 3. browsers: `playwright install <browser>...`, then with --pinned-chromium the browser tools'
    Chrome for Testing (`python -m ouroboros.chromium_runtime install`).
+
+With --pinned-node a bounded stage runs first: `scripts/download_node_standalone.py` stages the reviewed
+Node of ouroboros/claudexor_runtime_pin.json, exact size and SHA-256 checked, into the checkout's
+`node-standalone/` (git-ignored), where the browser tools find it as a bundled Node, as in a packaged
+build. The commands after it run Playwright's driver on it (`PLAYWRIGHT_NODEJS_PATH`); the lane's
+test steps name it the same way, so no test downloads Node.
 
 An attempt of a bounded stage has --attempt-seconds (600, the owner's ~10 minutes) for all of its
 commands, and the stage gets ONE more attempt, starting again at the step that failed or was still
@@ -220,9 +226,13 @@ def _install_packages(command: list[str]) -> None:
 
 
 def install(browsers: list[str], *, pinned_chromium: bool = False, attempt_sec: float = ATTEMPT_SEC,
-            python: str = sys.executable) -> None:
-    """Install ``browsers`` and their packages in the three stages of the module docstring."""
+            python: str = sys.executable, pinned_node: bool = False) -> None:
+    """Install ``browsers`` and their packages in the stages of the module docstring."""
     root, missing = _as_root(), []
+    if pinned_node:
+        run_stage("node", [("download_node_standalone.py", lambda deadline: run_bounded(
+            [python, str(REPO / "scripts" / "download_node_standalone.py")], deadline)[0] == 0)], attempt_sec)
+        os.environ["PLAYWRIGHT_NODEJS_PATH"] = str(REPO / "node-standalone" / "bin" / "node")
 
     def update_and_resolve(deadline: float) -> bool:
         if run_bounded([*root, "apt-get", "update"], deadline)[0] != 0:
@@ -274,6 +284,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("browsers", nargs="+", type=_browser, help="Playwright browser names, e.g. chromium webkit")
     parser.add_argument("--pinned-chromium", action="store_true",
                         help="also install the browser tools' pinned Chrome for Testing")
+    parser.add_argument("--pinned-node", action="store_true",
+                        help="first stage the reviewed Node into node-standalone/ for Playwright's driver")
     parser.add_argument("--attempt-seconds", type=_seconds, default=ATTEMPT_SEC,
                         help=f"one attempt of a download stage (default {ATTEMPT_SEC:.0f})")
     parser.add_argument("--python", default=sys.executable,
@@ -284,7 +296,7 @@ def main(argv: list[str] | None = None) -> int:
     started = time.monotonic()
     try:
         install(args.browsers, pinned_chromium=args.pinned_chromium, attempt_sec=args.attempt_seconds,
-                python=args.python)
+                python=args.python, pinned_node=args.pinned_node)
     except Refused as refusal:
         _say(f"refused: {refusal}")
         _annotate("error", "Browser install refused", str(refusal))

@@ -187,6 +187,29 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
         _install_beside_calls("playwright-package", "the Playwright package", lambda _progress: subprocess.check_call(
             [sys.executable, "-m", "pip", "install", *pip_install_target_args(sys.executable), "playwright"]))
 
+    # Before every SDK start and installer subprocess, either engine: the driver runs on the pinned Node,
+    # never silently on the SDK's own copy (an older signed bundle or a pip-installed SDK carries one). A local
+    # one is selected at once; preparing it (~50 MB download) runs beside the calls, as a browser's does.
+    from ouroboros.claudexor_runtime import ClaudexorRuntimeError, get_runtime_manager
+    from ouroboros.node_runtime import select_playwright_node
+
+    try:
+        try:
+            select_playwright_node()
+        except ClaudexorRuntimeError:
+            if not allow_install:
+                raise
+            node_version = getattr(get_runtime_manager().pin, "node_version", "")
+            _install_beside_calls("pinned-node", f"the pinned Node {node_version} for Playwright's driver",
+                                  lambda _progress: _prepare_driver_node(select_playwright_node))
+    except ClaudexorRuntimeError as exc:
+        if exc.code == "runtime_install_in_progress":  # another process prepares it (a boot after an Update)
+            raise chromium_runtime.ChromiumRefusal(chromium_runtime.PREPARING, (
+                "the pinned Node for Playwright's driver is still being installed (waiting for another Ouroboros "
+                "process that is installing it); this call opened no browser. A later call uses it.")) from None
+        raise RuntimeError(f"Browser tools need the reviewed Node for Playwright's driver: {exc}. "
+                           "Set PLAYWRIGHT_NODEJS_PATH to choose a Node explicitly.") from exc
+
     if engine == "chromium":
         return _pinned_chromium(allow_install=allow_install)
 
@@ -300,6 +323,20 @@ def _repair_host_dependencies(engine: str, install_python: str = "") -> None:
 # its own download. A call waits only what is left of its own window and then says where it stands.
 _installs: Dict[str, Tuple[concurrent.futures.Future, Dict[str, Any]]] = {}
 _installs_lock = threading.Lock()
+
+
+def _prepare_driver_node(select) -> str:
+    """Prepare and select the pin's Node for the driver; then the extensions that waited for it are asked again, as
+    after the boot's preparation (``server_boot.requeue_waiting_extensions``; a failure there only logs)."""
+    node = select(allow_install=True)
+    try:
+        from ouroboros.config import DATA_DIR
+        from ouroboros.server_boot import requeue_waiting_extensions
+
+        requeue_waiting_extensions(DATA_DIR)
+    except Exception:
+        log.warning("Extensions waiting for the pinned Node were not asked again", exc_info=True)
+    return node
 
 
 def _install_beside_calls(key: str, what: str, install: Callable[[Dict[str, Any]], Any], hint: str = "") -> Any:

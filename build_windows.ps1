@@ -37,13 +37,13 @@ if (-not (Test-Path "python-standalone\python.exe")) {
     exit 1
 }
 
-# Bundle the official Node.js runtime so node-runtime skills work out of the box.
-if (-not (Test-Path "node-standalone\node.exe")) {
-    Write-Host "--- Downloading bundled Node.js runtime ---"
-    Invoke-NativeChecked "Node.js runtime download" {
-        powershell -ExecutionPolicy Bypass -File scripts/download_node_standalone.ps1
-    }
+# Bundle the official Node.js runtime the Claudexor pin names, so node-runtime skills work out of the box;
+# always re-verified, and the build's own Playwright CLI runs on it.
+Write-Host "--- Verifying and staging the pinned Node.js runtime ---"
+Invoke-NativeChecked "Node.js runtime download" {
+    powershell -ExecutionPolicy Bypass -File scripts/download_node_standalone.ps1
 }
+$env:PLAYWRIGHT_NODEJS_PATH = (Resolve-Path "node-standalone\node.exe").Path
 
 Write-Host "--- Installing launcher dependencies ---"
 $BuildRequirements = Join-Path ([IO.Path]::GetTempPath()) "ouroboros-build-requirements-$PID.txt"
@@ -128,6 +128,11 @@ Write-Host "--- Installing packaged CLI wrappers ---"
 New-Item -ItemType Directory -Force -Path "dist\Ouroboros\bin" | Out-Null
 Copy-Item "packaging\cli\ouroboros.cmd" "dist\Ouroboros\bin\ouroboros.cmd" -Force
 Copy-Item "packaging\cli\install-ouroboros-cli.cmd" "dist\Ouroboros\bin\install-ouroboros-cli.cmd" -Force
+
+Write-Host "--- Giving every bundled Playwright driver the pinned Node ---"
+Invoke-NativeChecked "Playwright driver Node replacement" {
+    & "python-standalone\python.exe" scripts/download_node_standalone.py --replace-playwright dist\Ouroboros
+}
 
 # WA6 parity: precompile bytecode instead of deleting it. Windows has no codesign
 # seal, so this is purely for start-speed + consistency with the macOS build (where

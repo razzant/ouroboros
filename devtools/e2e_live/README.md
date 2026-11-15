@@ -28,11 +28,14 @@ admits it; for the bundled interpreter it adds `--user`, which that guard refuse
 (SM1_a1 of 2026-11-02 logged `Could not find an activated virtualenv` at boot). When the bundled runtime's packages match the selected lock, a venv made with
 `--system-site-packages --without-pip` can reuse them. Verify that exact runtime
 and lock before the rehearsal; this does not qualify the packaged user-site path.
-A lane's clone carries no `node-standalone/`, so on a venv outside the packaged
-launcher the adoption's Node lane resolves `node` from `PATH` and a missing one
-blocks it. Put a runnable Node >= 20.11 first on `PATH` (the bundled
-`node-standalone/bin` qualified as 24.16.0 this way); the stand detects and
-downloads nothing.
+A lane's clone carries no `node-standalone/`. Its server's first boot prepares
+the pin's Node in the lane's data root (a ~53 MB download kept as a ~133 MB
+tree, or a copy of an exact shipped Node) unless the run carried a prepared one
+in (`OUROBOROS_PINNED_NODE_CARRIED`, as safe_test does from its caller). Until
+then, on a venv outside the packaged launcher, the adoption's Node lane resolves
+`node` from `PATH`, names it, and a missing one blocks it. Put a runnable Node
+>= 20.11 first on `PATH` (a staged `node-standalone/bin`, then 24.16.0, qualified
+this way; the pin's later Node was not re-qualified here).
 
 ## Scenario acceptance
 
