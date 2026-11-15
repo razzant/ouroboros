@@ -249,7 +249,7 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
     const leadName = page.querySelector('[data-dashboard-lead-name]');
     const listBack = page.querySelector('[data-dashboard-list-back]');
     const backSlot = page.querySelector('[data-dashboard-back-slot]');
-    const tabStrip = bindTabStrip(list, { dataAttr: 'data-dashboard-tab', onChange: (name) => showTab(name, { asLevel: true }) });
+    const tabStrip = bindTabStrip(list, { dataAttr: 'data-dashboard-tab', onChange: (name) => showTab(name, { asLevel: panes() }) });
     const disposeFade = bindScrollFade(rail);
     // Two panes from a 40rem box where the engine draws them (ui.css @container sectionplace), as Settings.
     const panes = () => sectionHoldsTwoPanes(page);

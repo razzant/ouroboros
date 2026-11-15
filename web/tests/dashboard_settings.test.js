@@ -1055,6 +1055,9 @@ test('a page explicitly chosen beside the Dashboard list survives narrowing, whi
             const resize = value => { width = value; observers.forEach(fn => fn([{ target: dashboard.page }])); };
             resize(390);
             assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['home', 0], 'automatic landing has not chosen a page');
+            // In one column the arrow keys move along the list; only a press (or the keyboard beside it) chooses a page.
+            await list.fire('keydown', { target: rows[0], key: 'ArrowDown', preventDefault() {} });
+            assert.deepEqual([state.dashboardActiveSubtab, dashboard.page.dataset.sectionView, layers.size], [rows[1].dataset.dashboardTab, 'home', 0]);
             resize(735);
             const chosen = gesture === 'same row' ? rows[0] : gesture === 'another row' ? rows[5] : rows[6];
             if (gesture === 'keyboard') await list.fire('keydown', { target: rows[0], key: 'End', preventDefault() {} });
