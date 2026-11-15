@@ -416,6 +416,8 @@ def test_received_raw_shown_again_keeps_its_page_scroll_and_selection_and_a_page
             download = entry.get_by_role("link", name="Download full")
             expect(download).to_be_visible()
             raw = entry.locator(".log-raw")
+            # A reader selects inside Raw, leaving the summary's focus before making the range.
+            raw.click(position={"x": 20, "y": 20})
             before = raw.evaluate("""pre => {
                 pre.scrollTop = 200;
                 const text = pre.firstChild, range = document.createRange();
