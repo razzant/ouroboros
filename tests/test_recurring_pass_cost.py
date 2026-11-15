@@ -758,6 +758,66 @@ def test_l1_memo_any_write_of_the_tree_is_a_new_census(tmp_path, monkeypatch, me
     assert any(row["kind"] == kind and row.get("task_id") == child for row in blockers), blockers
 
 
+def test_l1_memo_a_write_decodes_only_the_rows_that_moved(tmp_path, monkeypatch):
+    """One member's write, or a new member, is a new census that decodes only the rows that moved; the others keep
+    the rows the last census read, by each row's store signature, so a row deleted and written again is read again
+    (#3399: each write of a live 57-member tree decoded all 57 bodies, 37 MB)."""
+    import collections
+    from ouroboros import task_results, task_store
+    from ouroboros.task_results import write_task_result
+    from supervisor import tree_census
+
+    monkeypatch.setattr(tree_census, "_MEMO", collections.OrderedDict())
+    root, _queue, _workers, target = _census_tree(tmp_path, monkeypatch)
+    child, joined, reborn = f"{target}-c0", f"{target}-c9", f"{target}-c8"
+    claim, other = {"op": {"tool": "opaque", "state": "claimed"}}, {"op2": {"tool": "opaque", "state": "claimed"}}
+    member = {"root_task_id": target, "parent_task_id": target, "delegation_role": "subagent"}
+    write_task_result(root, reborn, "completed", **member)
+    born = task_store.signature(root, reborn)
+    first = tree_census.writer_facts(root, target).rows
+    write_task_result(root, child, "scheduled", launch_handoffs=claim)
+    reads, load = [], task_results.load_task_result
+    monkeypatch.setattr(task_results, "load_task_result", lambda r, tid, **kw: reads.append(tid) or load(r, tid, **kw))
+    rows = tree_census.writer_facts(root, target).rows
+    assert reads == [child], "only the member that moved is decoded again"
+    assert rows[child]["launch_handoffs"] == claim, "and the census carries its new row"
+    assert {tid: rows[tid] for tid in rows if tid != child} == {tid: first[tid] for tid in first if tid != child}
+    reads.clear()
+    write_task_result(root, joined, "scheduled", launch_handoffs=other, **member)
+    after = tree_census.writer_facts(root, target).rows
+    assert reads == [joined] and after[joined]["launch_handoffs"] == other, "a new member is read with its row"
+    assert after[child]["launch_handoffs"] == claim, "a row kept across another member's write keeps its claim"
+    reads.clear()
+    task_store.delete_document(root, reborn)
+    write_task_result(root, reborn, "scheduled", launch_handoffs=claim, **member)
+    assert task_store.signature(root, reborn)[0] == born[0], "its sequence restarted where the census read it"
+    assert tree_census.writer_facts(root, target).rows[reborn]["launch_handoffs"] == claim and reads == [reborn]
+    from ouroboros import delegate_custody_current
+    tree_ids = delegate_custody_current.tree_task_ids
+
+    def gap(*args):  # a claim committed after the revision was read, before the members are
+        write_task_result(root, joined, "scheduled", launch_handoffs={**other, **claim})
+        return tree_ids(*args)
+    write_task_result(root, child, "scheduled", launch_handoffs=other)
+    monkeypatch.setattr(delegate_custody_current, "tree_task_ids", gap)
+    assert tree_census.writer_facts(root, target).rows[joined]["launch_handoffs"] == {**other, **claim}
+    monkeypatch.setattr(delegate_custody_current, "tree_task_ids", tree_ids)
+    write_task_result(root, joined, "scheduled", launch_handoffs=other)
+    tree_census.writer_facts(root, target)
+    write_task_result(root, child, "scheduled", launch_handoffs=claim)
+    handed = []
+
+    def hand_off(r, tid, **kw):  # while the moved member is read, a kept one claims and the moved one returns
+        if tid == child and not handed:
+            handed.append(tid)
+            write_task_result(root, joined, "scheduled", launch_handoffs={**other, **claim})
+            write_task_result(root, child, "scheduled", launch_handoffs={})
+        return load(r, tid, **kw)
+    monkeypatch.setattr(task_results, "load_task_result", hand_off)
+    rows = tree_census.writer_facts(root, target).rows
+    assert handed and rows[joined]["launch_handoffs"] == {**other, **claim}, "a kept row is confirmed after the reads"
+
+
 def test_l1_memo_a_fact_no_revision_names_is_derived_fresh_on_a_hit(tmp_path, monkeypatch, meter):
     """Inputs are kept, never verdicts: a claim's owner that died, a queue member, a process."""
     from ouroboros import tool_custody
