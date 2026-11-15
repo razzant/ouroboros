@@ -22,7 +22,7 @@ import { harnessPresentation } from './harness_presentation.js';
 import { strokeIcon } from './page_icons.js';
 import { apiConnections } from './route_editor_primitives.js';
 import { editorLine, keyHeads, keyPath, keyTitle, mountKeyPage, parseKeyPath, referencesLine, setKeyEnabled } from './settings_connections.js';
-import { bindSettingRows, doorSign, setRowMeta, settingsRow } from './settings_controls.js';
+import { bindSettingRows, doorSign, settingsRow } from './settings_controls.js';
 import { readSkills } from './settings_extension_forms.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { PROVIDER_SECRET_KEYS, providerIconHtml } from './settings_provider_cards.js';
@@ -257,7 +257,6 @@ function mountList(container, { ctx = {} }) {
             } else {
                 Object.assign(mounted.row, row);
                 if (otherEl.children[index] !== mounted.node) otherEl.insertBefore(mounted.node, otherEl.children[index] || null);
-                setRowMeta(mounted.node.querySelector('[data-setting-meta]'), row.meta || '');
                 mounted.handle.paint();
             }
             mounted.secrets.paint(settings);
