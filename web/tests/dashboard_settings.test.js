@@ -149,16 +149,23 @@ test('the wake range is one row of two numbers; a first number above the second 
         OUROBOROS_CONSCIOUSNESS_DAILY_USD: 20, OUROBOROS_MODEL_CONSCIOUSNESS: '', OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'light',
         OUROBOROS_POST_TASK_EVOLUTION: 'true', OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'every_n:3' }), {
         OUROBOROS_CONSCIOUSNESS_AUTONOMY: AUTONOMY_LEVELS[1].note, OUROBOROS_BG_WAKEUP: 'It picks a moment between 5 minutes and 2 hours.',
-        'consciousness-allowance': '$20', 'consciousness-model': 'Main model',
+        'consciousness-allowance': '$20', 'consciousness-model': '',
         'consciousness-safety': SAFETY_LEVELS.find((level) => level.value === 'light').label, 'consciousness-evolution': 'Every 3 tasks' });
     assert.deepEqual(words({ OUROBOROS_BG_WAKEUP_MIN: 900, OUROBOROS_BG_WAKEUP_MAX: 900, OUROBOROS_CONSCIOUSNESS_DAILY_USD: '12.5',
         OUROBOROS_MODEL_CONSCIOUSNESS: 'anthropic::claude-test', OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'off',
         OUROBOROS_POST_TASK_EVOLUTION: false, OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'every_n:3' }), {
         OUROBOROS_CONSCIOUSNESS_AUTONOMY: '', OUROBOROS_BG_WAKEUP: 'It wakes every 15 minutes.',
-        'consciousness-allowance': '$12.50', 'consciousness-model': 'claude-test', 'consciousness-safety': 'Off', 'consciousness-evolution': 'Off' });
+        'consciousness-allowance': '$12.50', 'consciousness-model': '', 'consciousness-safety': 'Off', 'consciousness-evolution': 'Off' });
     assert.deepEqual(words({}), { OUROBOROS_CONSCIOUSNESS_AUTONOMY: '', OUROBOROS_BG_WAKEUP: '', 'consciousness-allowance': '',
-        'consciousness-model': 'Main model', 'consciousness-safety': '', 'consciousness-evolution': '' },
+        'consciousness-model': '', 'consciousness-safety': '', 'consciousness-evolution': '' },
     'a value that was not read is not said: no "$0", no level and no "Off" the document did not carry');
+    // The model door says the route the next wake takes, as the consciousness read publishes it and Costs words it:
+    // the slot's text alone does not say its lane (its box checked under a cloud Main is the local runtime).
+    const model = (route, settings = {}) => cardWords(settings, route)['consciousness-model'].value;
+    assert.equal(model({ value: 'claudexor::codex=gpt-6-astra', layer: 'main', local: false }), 'gpt-6-astra (Main model)');
+    assert.equal(model({ value: 'anthropic::claude-test', layer: 'consciousness', local: false }), 'claude-test');
+    assert.equal(model({ value: 'openai/gpt-6', layer: 'consciousness', local: true }, { OUROBOROS_MODEL_CONSCIOUSNESS: '' }), 'Local model');
+    assert.equal(model(null, { OUROBOROS_MODEL_CONSCIOUSNESS: 'anthropic::claude-test' }), '', 'a route that was not read is not guessed from the slot');
     // The Safety door speaks the scale's one list, whatever its words are, and the evolution door the choice's own names.
     for (const level of SAFETY_LEVELS) assert.equal(words({ OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: level.value })['consciousness-safety'], level.label);
     assert.deepEqual([[true, 'llm'], ['1', 'every_n:1'], [true, 'every_n:12'], ['false', 'llm']].map(whenName),
@@ -172,7 +179,8 @@ test('Consciousness: its cards are drawn once beside the summary; a refresh leav
     const opened = [];
     const controller = initConsciousnessDashboard({
         mount: server.mount, state: { activePage: 'dashboard', dashboardActiveSubtab: 'consciousness' },
-        read: async () => ({ ...normalizeConsciousness(FIXTURE.consciousness), recentWakes: [] }),
+        read: async () => ({ ...normalizeConsciousness({ ...FIXTURE.consciousness,
+            model_route: { value: 'openai/gpt-6', layer: 'consciousness', local: true } }), recentWakes: [] }),
         readPlacesFn: async () => ({ places: [] }),
         openSettings: (path, options) => { opened.push(['settings', path, options]); },
         openDashboardTab: (tab, options) => { opened.push(['tab', tab, options]); },
@@ -205,7 +213,8 @@ test('Consciousness: its cards are drawn once beside the summary; a refresh leav
     // One name for one limit: the door carries the name its row has on Costs (a rolling 24 hours), and the sum alone.
     assert.equal(rowNode(card, 'consciousness-allowance').querySelector('.ui-row-title').textContent, rowById('OUROBOROS_CONSCIOUSNESS_DAILY_USD').name);
     assert.equal(rowNode(card, 'consciousness-allowance').querySelector('[data-row-value]').textContent, '$20');
-    assert.equal(rowNode(card, 'consciousness-model').querySelector('[data-row-value]').textContent, 'Main model');
+    assert.equal(rowNode(card, 'consciousness-model').querySelector('[data-row-value]').textContent, 'Local model',
+        'an empty slot whose box is checked under a cloud Main: the published route, not the slot\'s text');
     assert.equal(rowNode(card, 'consciousness-places').querySelector('[data-row-value]'), null, 'a door with nothing to say says nothing');
     assert.deepEqual(['consciousness-safety', 'consciousness-evolution'].map((id) => [rowNode(card, id).querySelector('.ui-row-title').textContent,
         rowNode(card, id).querySelector('[data-row-value]').textContent]),

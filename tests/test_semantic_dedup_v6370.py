@@ -20,12 +20,16 @@ def _fake_llm(monkeypatch, content):
     import ouroboros.config as cfg
     import ouroboros.llm as llm_mod
 
+    sent = []
+
     class FakeClient:
         def chat(self, **kw):
+            sent.append(kw)
             return ({"content": content}, {})
 
     monkeypatch.setattr(llm_mod, "LLMClient", FakeClient)
     monkeypatch.setattr(cfg, "get_light_model", lambda: "fake-model")
+    return sent
 
 
 def test_primitive_fail_open_without_candidates_or_text():
@@ -33,6 +37,21 @@ def test_primitive_fail_open_without_candidates_or_text():
 
     assert find_semantic_duplicate_id("x", [], subject="s", call_type="t") is None
     assert find_semantic_duplicate_id("", [{"id": "a", "text": "y"}], subject="s", call_type="t") is None
+
+
+@pytest.mark.parametrize("main_local", [True, False])
+def test_the_light_check_runs_on_the_lane_the_light_slot_has(monkeypatch, main_local):
+    """An empty Light is Main's route, lane included (route_choice): under a local Main the check goes to the local
+    runtime instead of sending the local model's name to the cloud; under a cloud Main it stays remote."""
+    from ouroboros.semantic_dedup import find_semantic_duplicate_id
+
+    sent = _fake_llm(monkeypatch, '{"duplicate_id":null,"confidence":"high","reason":"new"}')
+    monkeypatch.setenv("OUROBOROS_MODEL", "main-model")
+    monkeypatch.delenv("OUROBOROS_MODEL_LIGHT", raising=False)
+    monkeypatch.setenv("USE_LOCAL_MAIN", str(main_local))
+    monkeypatch.delenv("USE_LOCAL_LIGHT", raising=False)
+    find_semantic_duplicate_id("n", [{"id": "obl-1", "text": "o"}], subject="s", call_type="t", drive_root=None)
+    assert [(call["model"], call["use_local"], call["model_role"]) for call in sent] == [("main-model", main_local, "light")]
 
 
 def test_primitive_rejects_low_confidence(monkeypatch):

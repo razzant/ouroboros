@@ -64,7 +64,7 @@ def test_one_row_shows_one_measured_price_in_settings_and_in_review(pool):
     costs = settings_mod.review_pool_payload()["row_costs"]
     shown, hints = _settings_texts(costs, rows), _seat_hints()
     assert shown == [hints["critic"], hints["newcomer"]], "Settings and ## Review show one row differently"
-    assert shown[0] == "≈$0.91 per review (median of 3 measured, $0.31–$2.52)"
+    assert shown[0] == "≈$0.91 per review (median of 4 measured, $0.31–$2.52)"
     assert shown[1] == COST_UNKNOWN_HINT, "a row without measured reviews has no price, never a one-call guess"
 
 
