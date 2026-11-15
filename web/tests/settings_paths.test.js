@@ -229,7 +229,10 @@ test('a Settings jump retains its clean origin until Back, while a map choice re
     t.after(() => nav.destroy());
     const showPage = (name, options = {}) => nav.go(options.key || name, () => { shown(name); options.enter?.(); }, options);
     controls = initSettings({ state, ws: env.ws, layers, showPage });
+    assert.equal(controls.capture().label, 'Settings', 'the home returns to the section');
     await controls.open('test-return-clean', { map: true }); await settle();
+    assert.equal(controls.capture().label, 'test-return-clean', 'a deeper origin names the level it returns to');
+    assert.equal(controls.capture().title, 'Settings › test-return-clean');
     const clean = () => content.querySelectorAll('.settings-page').find(level => level.dataset.settingsPage === 'test-return-clean');
     const origin = clean();
     const body = origin.querySelector('.settings-page-body');

@@ -60,7 +60,7 @@ export function capturePagePlace({ state, navState, settingsControls, dashboardC
     const reading = restorePlaces.capture(root, opener);
     const feed = page === 'chat' ? (project ? projectInstances.get(projectId) : mainChat)?.captureReading()
         : state.dashboardActiveSubtab === 'logs' && page === 'dashboard' ? logsControls?.captureReading() : null;
-    const label = project?.name || (settings ? 'Settings' : dashboard?.label || (page === 'chat' ? 'Main' : pageLabel(page)));
+    const label = project?.name || settings?.label || dashboard?.label || (page === 'chat' ? 'Main' : pageLabel(page));
     return { key: project ? `project:${projectId}` : settings ? `settings:${state.settingsPath}`
         : dashboard ? `dashboard:${state.dashboardActiveSubtab}` : page, label, title: settings?.title || label,
         retains: settings?.retains, release: settings?.release,

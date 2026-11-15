@@ -94,8 +94,8 @@ export function renderBackControl({ to = '', title = to, attrs = '' } = {}) {
     return `<button type="button" class="shell-icon-control shell-back" ${attrs} aria-label="${escapeHtml(name)}" title="${escapeHtml(name)}">${SHELL_ICONS.back}<span class="shell-back-name">${escapeHtml(to)}</span></button>`;
 }
 
-/** The shell paints the jump before a deeper level's parent in the page column's slot. Placement is a writer fact;
- * late children never decide layout through :has(:empty). Each named control dismisses its own layer. */
+/** An owed jump occupies the level's one Back slot until spent. Placement is a writer fact;
+ * late children never decide layout through :has(:empty). */
 export function bindPageBack({ layers, currentHeader, doc = document, win = window }) {
     let previous = null;
     function paint() {
@@ -108,29 +108,25 @@ export function bindPageBack({ layers, currentHeader, doc = document, win = wind
         if (!header) return;
         const slot = header.querySelector('[data-page-return]');
         const column = slot?.closest('.section-lead-page');
-        const jump = layers.returnPage?.();
-        const level = column && jump ? layers.ids().map(id => layers.get(id)).reverse().find(layer => layer.page && !layer.returnTo && layer.back) : layers.page();
-        const primary = column && jump || level;
+        const primary = column && layers.returnPage?.() || layers.page();
         if (primary?.back) header.setAttribute('data-return', column ? 'column' : 'leading');
         else header.removeAttribute('data-return');
         if (!slot) return;
-        for (const [hook, layer] of [['data-shell-back', primary], ['data-shell-level', column && jump && level]]) {
-            let button = slot.querySelector(`[${hook}]`);
-            const back = layer?.back;
-            if (!back) { button?.remove(); continue; }
-            if (!button) {
-                const holder = doc.createElement('span');
-                holder.innerHTML = renderBackControl({ attrs: hook });
-                button = holder.firstElementChild;
-                slot.append(button);
-                button.addEventListener('click', () => layers.back('control', button.dataset.pageLayer));
-            }
-            button.dataset.pageLayer = layer.id;
-            const title = `Back to ${back.title || back.label}`;
-            button.setAttribute('aria-label', title);
-            button.title = title;
-            button.querySelector('.shell-back-name').textContent = back.label;
+        let button = slot.querySelector('[data-shell-back]');
+        const back = primary?.back;
+        if (!back) { button?.remove(); return; }
+        if (!button) {
+            const holder = doc.createElement('span');
+            holder.innerHTML = renderBackControl({ attrs: 'data-shell-back' });
+            button = holder.firstElementChild;
+            slot.append(button);
+            button.addEventListener('click', () => layers.back('control', button.dataset.pageLayer));
         }
+        button.dataset.pageLayer = primary.id;
+        const title = `Back to ${back.title || back.label}`;
+        button.setAttribute('aria-label', title);
+        button.title = title;
+        button.querySelector('.shell-back-name').textContent = back.label;
     }
     const off = layers.onChange(paint);
     win.addEventListener('ouro:page-shown', paint);

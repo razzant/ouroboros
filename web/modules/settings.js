@@ -501,7 +501,8 @@ export function initSettings(ctx = {}) {
     return { page, open: openFromOutside, pressedAgain,
         capture() {
             const kept = [...levels], own = ownChosen;
-            return { title: ['Settings', ...levels.map((level) => settingsTitle(level.path))].join(' › '),
+            return { label: levels.length ? settingsTitle(levels.at(-1).path) : 'Settings',
+                title: ['Settings', ...levels.map((level) => settingsTitle(level.path))].join(' › '),
                 retains: el => kept.some(level => level.el === el), release: releaseAside,
                 restore() {
                     let shared = 0;

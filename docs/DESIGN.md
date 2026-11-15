@@ -3440,9 +3440,9 @@ glyphs (`web/modules/page_icons.js`).
 ### Page header
 
 The shared header (`web/modules/page_header.js`) draws one row, without decorative icons. Its first capsule is the
-top page layer's return: ‹ Settings, ‹ Main, or a level's parent. Its tooltip and accessible name give the full path.
-Two panes put it over the page column, before a deeper level's own named Back and title; one column
-replaces the leading picture. Docked, the sidebar names a section without pages: tabs or Files' location lead its
+owed jump's origin (‹ Tools, ‹ Main), then the level's parent when spent. Tooltip and accessible name give its full path.
+Two panes put it over the page column; one column replaces the leading picture. A model role names its destination
+(Consciousness model), distinct from its return. Docked, the sidebar names a section without pages: tabs or Files' location lead its
 band, actions end it, on Main's line. If the actions and navigation cannot fit beside the widest sidebar, the same
 row scrolls sideways, keeping every control reachable. Tabs, filters and location use the shared fade; location reveals the current
 folder, none wider than the rail. Section headings follow

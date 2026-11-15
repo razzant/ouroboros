@@ -31,7 +31,7 @@ test('only a forward jump without a named row lands at the top; vetoes, map choi
 test('a captured place restores its retained owners before their independent reading snapshots', () => {
     for (const page of ['settings', 'dashboard', 'skills', 'chat']) {
         const restored = [], opener = {}, root = {}, state = { activePage: page, settingsPath: 'tools', dashboardActiveSubtab: 'logs' };
-        const owner = { capture: () => ({ label: 'Logs', title: 'Settings › Tools', restore: () => restored.push('level') }) };
+        const owner = { capture: () => ({ label: page === 'settings' ? 'Tools' : 'Logs', title: 'Settings › Tools', restore: () => restored.push('level') }) };
         const captured = capturePagePlace({ state, navState: {}, settingsControls: owner, dashboardControls: owner,
             skillsControls: { capture: () => () => restored.push('tab') },
             mainChat: { captureReading: () => () => restored.push('feed') }, logsControls: { captureReading: () => () => restored.push('logs') },
@@ -47,6 +47,7 @@ test('a captured place restores its retained owners before their independent rea
         assert.equal(restored.includes('feed'), page === 'chat');
         assert.equal(restored.includes('logs'), page === 'dashboard');
         assert.equal(captured.key, ({ settings: 'settings:tools', dashboard: 'dashboard:logs', skills: 'skills', chat: 'chat' })[page]);
+        assert.equal(captured.label, ({ settings: 'Tools', dashboard: 'Logs', skills: 'Skills', chat: 'Main' })[page]);
     }
 });
 
