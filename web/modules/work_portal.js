@@ -350,8 +350,9 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         askContinued();
     }
 
-    // Every mounted card against the census and bindings last read.
-    function reconcile() {
+    // Every mounted card against the census and bindings last read; a census also reads again the followed successors
+    // whose record read failed (`retry`).
+    function reconcile({ retry = true } = {}) {
         onDomWrite(() => {
             let changed = false;
             for (const record of records.values()) {
@@ -365,23 +366,28 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
             for (const successorId of [...follows.keys()]) changed = adopt(successorId) || changed;
             return reconcilePortalNotes(feed) || changed;
         });
-        for (const successorId of [...follows.keys()]) hydrate(successorId);
+        if (retry) for (const successorId of [...follows.keys()]) hydrate(successorId);
     }
 
     /**
      * Cards a history replay mounted after the last `/api/state` was read meet that census now: a reload's state can
-     * arrive before its history draws the cards, and the next census is a poll away. It starts no Continue asks of its
-     * own: a card it reconciles reads its record through the room's missing-work path, which stays quiet while away.
+     * arrive before its history draws the cards, and the next census is a poll away. It starts no reads of its own (no
+     * Continue asks, no retried successor read): a card it reconciles reads its record through the room's missing-work
+     * path, which stays quiet while away.
      */
     function refresh() {
         if (!censusRead) return;
-        if (isMain) reconcile();
+        if (isMain) reconcile({ retry: false });
     }
 
-    /** A disconnect: the census read before it proves nothing after it, so no replay meets it until the next one. */
+    /**
+     * A disconnect: the census read before it proves nothing after it, so no card meets it (a replay, a first binding)
+     * until the next one.
+     */
     function retire() {
         censusRead = false;
         censusComplete = false;
+        census.clear();
     }
 
     /**

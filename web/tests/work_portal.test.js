@@ -33,7 +33,7 @@ ElementStub.prototype.dispatchEvent = function (event) {
 
 const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setTimeout(resolve, 0)); };
 
-function fixture({ history = [], details = {}, continues = {}, chatId = 1, hold = {} } = {}) {
+function fixture({ history = [], details = {}, continues = {}, chatId = 1, hold = {}, fail = {} } = {}) {
     const reads = [];
     const env = installDom(async (url, init = {}) => {
         const path = String(url);
@@ -43,6 +43,10 @@ function fixture({ history = [], details = {}, continues = {}, chatId = 1, hold 
         if (path.startsWith('/api/tasks/')) reads.push(path.split('/').pop().split('?')[0]);
         // A read the test holds open answers only when the test releases it.
         if (path.startsWith('/api/tasks/') && hold[path.split('/').pop().split('?')[0]]) await hold[path.split('/').pop().split('?')[0]];
+        // A read the test fails answers 500, which the strict read raises: a failed read, never an absent record.
+        if (path.startsWith('/api/tasks/') && fail[path.split('/').pop().split('?')[0]]) {
+            return { ok: false, status: 500, json: async () => ({ error: 'unavailable' }) };
+        }
         // `null` is a record the host does not have: its real answer, a 404.
         if (path.startsWith('/api/tasks/') && details[path.split('/').pop().split('?')[0]] === null) {
             return { ok: false, status: 404, json: async () => ({ error: 'task not found' }) };
@@ -503,6 +507,65 @@ test('a census read before a disconnect never decides a later replay: the card s
         f.state(census);
         await settle();
         assert.equal(phase(), 'working', 'the census read after the outage decides');
+    } finally { f.close(); }
+});
+
+test('a card first bound after a disconnect takes nothing from the census read before it', async () => {
+    // The census before the outage lists a work Main holds no card for; the replay after the reconnect draws its start
+    // row. Until a census read after the outage, the new card shows neither that room's line nor its Stop.
+    const history = [];
+    const started = { role: 'system', system_type: 'project_started', chat_id: 1, task_id: 'w-2', project_id: 'p-1',
+        project_name: 'Audit', task_name: 'Audit the projects', text: 'Audit › Audit the projects · Started',
+        ts: '2026-10-10T12:00:00Z', history_id: 'h-2' };
+    const f = fixture({ history });
+    const census = { task_bindings: { 'w-2': { project_id: 'p-1', chat_id: 7 } }, projects: [{ id: 'p-1', name: 'Audit' }],
+        active_chat_activities: [room({ activity_id: 'w-2', last_line: 'Checking the third project.', cancelable: true })] };
+    try {
+        f.state(census);
+        await settle();
+        assert.equal(f.card('w-2'), null, 'no card before its start row is read');
+        f.emit('close');
+        await settle();
+        history.push(started);
+        await f.instance.refreshHistory({ revision: 2 });
+        await settle();
+        assert.equal(f.card('w-2')?.dataset.portal, '1', 'the replay binds the work\'s card');
+        assert.notEqual(f.part('w-2', 'live-activity').textContent, 'Checking the third project.',
+            'the room\'s line from before the outage is not drawn');
+        assert.ok(!controls(f, 'w-2').includes('Stop…'), 'no Stop from the census read before the outage');
+        f.state(census);
+        await settle();
+        assert.equal(f.part('w-2', 'live-activity').textContent, 'Checking the third project.', 'the next census decides');
+        assert.ok(controls(f, 'w-2').includes('Stop…'));
+    } finally { f.close(); }
+});
+
+test('a history replay retries no failed successor read; the next census does', async () => {
+    // A followed successor whose record read failed is read again at the next census (sync), never by a history read,
+    // whose answer may land while Main is away.
+    const history = [
+        { role: 'user', text: 'audit the projects in their own room', ts: '2026-10-10T11:59:00Z', chat_id: 1, source: 'web',
+            history_id: 'h-1', row_address: 'row:1@h#1' },
+        { role: 'system', system_type: 'project_started', chat_id: 1, task_id: 'w-1', project_id: 'p-1', project_name: 'Audit',
+            task_name: 'Audit the projects', text: 'Audit › Audit the projects · Started', ts: '2026-10-10T12:00:00Z',
+            history_id: 'h-2' },
+    ];
+    const f = fixture({ history, fail: { 'w-1-c1': true },
+        details: { 'w-1': failedDetail({ ...continuedBy(), wake_summary: 'The first attempt stopped here.' }) } });
+    const census = { task_bindings: bindings, projects: [{ id: 'p-1', name: 'Audit' }], active_chat_activities: [] };
+    const successorReads = () => f.reads.filter((id) => id === 'w-1-c1').length;
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        await settle();
+        f.state(census);
+        await settle();
+        assert.equal(successorReads(), 1, 'the admitted successor\'s record is read once, and that read fails');
+        await f.instance.refreshHistory({ revision: 2 });
+        await settle();
+        assert.equal(successorReads(), 1, 'a history read does not read it again');
+        f.state(census);
+        await settle();
+        assert.equal(successorReads(), 2, 'the next census does');
     } finally { f.close(); }
 });
 
