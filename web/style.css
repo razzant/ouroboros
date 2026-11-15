@@ -1010,7 +1010,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
     min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
-    border-right: 1px solid var(--divider);
 }
 
 #page-files > :is(.app-page-header, .files-band) { position: relative; z-index: 2; pointer-events: none; }
@@ -1150,6 +1149,7 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
 
 .files-preview {
     grid-area: preview;
+    border-left: 1px solid var(--divider);
     min-width: 0;
     min-height: 0;
     display: flex;
@@ -1287,7 +1287,7 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
 @container files (max-width: 700px) {
     .files-sidebar,
     .files-preview { grid-column: 1 / -1; }
-    .files-sidebar { border-right: 0; }
+    .files-preview { border-left: 0; }
     .files-layout:not([data-files-view="file"]) .files-preview,
     .files-layout[data-files-view="file"] .files-sidebar { display: none; }
     .files-entry.is-draft { display: grid; }
