@@ -3531,7 +3531,7 @@ opens and holds the field, the row and the pressed control still.
 Inside the Telegram Mini App the page tells Telegram it is ready,
 fills the screen (fullscreen if granted, the owner's to leave), turns off
 Telegram's swipe-down so lists scroll, shows
-Telegram's Back while a layer is open and its Close otherwise, gives Telegram's
+Telegram's Back while a layer is open and its Close otherwise (the page then draws no Back), gives Telegram's
 header and bottom bar the room's colour, follows Telegram's light or dark as the
 System appearance, and respects Telegram's safe areas on all four sides
 (`web/modules/host_telegram.js`). Everything else is the same page.
