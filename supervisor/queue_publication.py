@@ -19,9 +19,11 @@ generation; one whose bytes did not keeps the generation it was written under, a
 certificate names each document's own generation (``generation`` is the snapshot's,
 ``documents`` the others'), so a reader certifies a document by its own generation
 (``queue_observation.load_queue_document``) and a torn bundle is still unknown as a whole.
-``queue.alive`` is rewritten only when a document's generation or the heartbeat map changed
-or its stamp aged past ``QUEUE_ALIVE_REFRESH_SEC``; a process that never published writes
-none (the uncustodied saved queue rule, ``queue_snapshot._keeps_saved_queue``).
+``queue.alive`` is rewritten only when a document's generation, the heartbeat map or the pool's
+counts changed or its stamp aged past ``QUEUE_ALIVE_REFRESH_SEC``; a process that never published
+writes none (the uncustodied saved queue rule, ``queue_snapshot._keeps_saved_queue``). The counts
+ride it, not the document (``_pool_counts``): a boot, retirement or reap that changes no row
+rewrites a few kilobytes, not the queue.
 
 Durability before an effect is an explicit barrier (``publish_queue_snapshot``), used only
 where a caller acts on the publication; it publishes where its caller stands, outside Q (Q
@@ -54,7 +56,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
 from ouroboros.project_admission import carried_basis
-from ouroboros.queue_observation import QUEUE_ALIVE_FRESH_SEC, SHARED_KEY
+from ouroboros.queue_observation import POOL_COUNT_KEYS as _POOL_COUNT_KEYS, QUEUE_ALIVE_FRESH_SEC, SHARED_KEY
 from ouroboros.shared_values import TOKEN_PATTERN, token
 from ouroboros.subagents import subagent_intent_fields
 from ouroboros.utils import machine_json, utc_now_iso, write_text_atomic
@@ -108,7 +110,7 @@ _REPORTED_TASK_FACTS = ("model_waits", "focus")
 _STATE: Dict[str, Any] = {"revision": 0, "published": 0, "reason": "", "kept": None, "census": None,
                           "capture_seq": 0, "published_seq": 0, "write_failed": False,
                           "failed_writes": 0, "failures_answered": 0, "failed_streak": 0,
-                          "alive_heartbeats": None, "alive_written_at": 0.0}
+                          "alive_heartbeats": None, "alive_pool": None, "alive_written_at": 0.0}
 #: Consecutive failed writes after which the tick answers False on every tick until a write lands: the supervisor
 #: loop's own ending rule (``server._run_supervisor`` dies after three consecutive crashes), so a disk that fails
 #: every write slowly ends the loop as one that fails fast does, instead of resetting the loop's count on each tick
@@ -207,7 +209,7 @@ def reset() -> None:
     global _PUBLISHER, _WRITER
     _STATE.update(revision=0, published=0, reason="", kept=None, census=None, capture_seq=0, published_seq=0,
                   write_failed=False, failed_writes=0, failures_answered=0, failed_streak=0, alive_heartbeats=None,
-                  alive_written_at=0.0)
+                  alive_pool=None, alive_written_at=0.0)
     _PUBLISHER = None
     ended, _WRITER = _WRITER, _TickWriter()  # rebound first: a capture of the ended generation is refused by identity
     ended.stop()
@@ -376,7 +378,8 @@ def _row_facts(meta: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _census() -> str:
-    """Under Q: one small identity of what the rows publish without a transition, and the pool counts."""
+    """Under Q: one small identity of what the rows publish without a transition, and the pool facts a reader
+    decides on (``_pool_counts(census=True)``; the counts themselves ride the certificate)."""
     rows = []
     for task_id, meta in _queue().RUNNING.items():
         if isinstance(meta, dict):
@@ -456,9 +459,13 @@ def _pool_counts(*, census: bool = False) -> Dict[str, Any]:
     each count) from the ACTUAL pool, plus the last reading of the machine's memory (``memory_admission``:
     ``pool_admission.facts``, dated by its own ``read_at``). A slot mid-reap is not
     assignable, so no reader is told of a free slot that is not. A failed measurement publishes
-    ``pool_observation_status: "unknown"`` with null counts: never zeros, which would read as an empty pool. The
-    census hashes only whether starts are admitted and their reason in place of the reading's bytes, so a
-    change of verdict or reason publishes and byte noise does not."""
+    ``pool_observation_status: "unknown"`` with null counts: never zeros, which would read as an empty pool.
+
+    The census takes what a reader decides on from the document itself: the disablement and its reason, whether
+    any process is started (``model_detach.pool_available``), and whether starts are admitted and why. The counts
+    change with every boot, retirement and reap while no row changes; they reach readers on the certificate
+    (``_certify``, ``queue_observation.load_queue_document``), so such a change rewrites ``queue.alive`` and not
+    the document, which keeps the counts of its own write."""
     try:
         from supervisor import pool_admission, workers as _workers_mod
         from supervisor.worker_pool_lifecycle import pool_slot_counts
@@ -469,7 +476,11 @@ def _pool_counts(*, census: bool = False) -> Dict[str, Any]:
         counts["worker_pool_disabled_reason"] = "" if disabled == "no_workers" else disabled
         counts["pool_observation_status"] = "observed"
         memory = pool_admission.facts()
-        counts["memory_admission"] = (bool(memory.get("starts_admitted")), memory.get("reason", "")) if census else memory
+        if census:
+            return {"worker_pool_disabled_reason": counts["worker_pool_disabled_reason"],
+                    "started": counts["worker_total"] + counts["lane_carrier_total"] > 0,
+                    "memory_admission": (bool(memory.get("starts_admitted")), memory.get("reason", ""))}
+        counts["memory_admission"] = memory
         return counts
     except Exception:
         log.debug("Worker pool facts unavailable; published as unknown", exc_info=True)  # every tick: no warning flood
@@ -477,10 +488,12 @@ def _pool_counts(*, census: bool = False) -> Dict[str, Any]:
                 "pool_observation_status": "unknown", "pool_observation_error": "introspection_failed"}
 
 
-#: The counts ``pool_slot_counts`` measures; an unknown observation publishes each as null.
-_POOL_COUNT_KEYS = ("max_workers", "worker_total", "parked_worker_count", "busy_worker_count",
-                    "acting_worker_count", "booting_count", "reaping_count", "retiring_count",
-                    "assignable_idle_workers", "lane_carrier_total", "memory_admission")
+def _certified_pool(counts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The counts ``queue.alive`` carries (``_POOL_COUNT_KEYS``, the reader's ``POOL_COUNT_KEYS``); None for a
+    failed measurement, whose readers keep the document's own counts."""
+    if counts.get("pool_observation_status") != "observed":
+        return None
+    return {key: counts.get(key) for key in _POOL_COUNT_KEYS}
 
 
 def _documents(capture: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
@@ -645,8 +658,9 @@ def _publish(capture: Dict[str, Any], *, writer: Optional[_TickWriter] = None) -
                     published = _stamped(documents[name], encoded[name], generations[name], capture["reason"])
                     if _queue().atomic_write_text(state / name, published) is False:
                         raise OSError(f"queue publication failed: {name}")
-            if changed or _alive_due(capture["heartbeats"]):
-                _certify(state, generations, capture["heartbeats"])
+            pool = _certified_pool(capture["pool"])
+            if changed or _alive_due(capture["heartbeats"], pool):
+                _certify(state, generations, capture["heartbeats"], pool)
             if changed:
                 _queue().QUEUE_PUBLICATION = (_queue().QUEUE_SNAPSHOT_PATH, encoded, generations[_SNAPSHOT_NAME],
                                               generations)
@@ -676,7 +690,8 @@ def _refresh_alive() -> Optional[bool]:
     with _queue()._queue_lock:
         heartbeats = {tid: (meta.get("last_heartbeat_at") if isinstance(meta, dict) else None)
                       for tid, meta in _queue().RUNNING.items()}
-    if not _alive_due(heartbeats):
+        pool = _certified_pool(_pool_counts())
+    if not _alive_due(heartbeats, pool):
         return True
     with _PUBLISH_LOCK:
         if _STATE["write_failed"]:
@@ -684,15 +699,15 @@ def _refresh_alive() -> Optional[bool]:
         if _queue().QUEUE_PUBLICATION is not published:
             return True  # a publication landed meanwhile and certified itself
         try:
-            _certify(_queue().QUEUE_SNAPSHOT_PATH.parent, published[3], heartbeats)
+            _certify(_queue().QUEUE_SNAPSHOT_PATH.parent, published[3], heartbeats, pool)
         except Exception:
             log.warning("Failed to refresh queue liveness", exc_info=True)
             return False
     return True
 
 
-def _alive_due(heartbeats: Dict[str, Any]) -> bool:
-    return (heartbeats != _STATE["alive_heartbeats"]
+def _alive_due(heartbeats: Dict[str, Any], pool: Optional[Dict[str, Any]]) -> bool:
+    return (heartbeats != _STATE["alive_heartbeats"] or pool != _STATE["alive_pool"]
             or time.monotonic() - _STATE["alive_written_at"] >= QUEUE_ALIVE_REFRESH_SEC)
 
 
@@ -707,16 +722,18 @@ def _revoke_alive(state) -> None:
             time.sleep(0.01)  # Windows readers briefly deny delete sharing.
 
 
-def _certify(state, generations: Dict[str, str], heartbeats: Dict[str, Any]) -> None:
+def _certify(state, generations: Dict[str, str], heartbeats: Dict[str, Any], pool: Optional[Dict[str, Any]]) -> None:
     """``queue.alive`` names each document's generation on disk (``generation``: the snapshot's; ``documents``: the
-    others', absent when they share it); written without fsync (a crash loses only freshness)."""
+    others', absent when they share it) and carries the running rows' heartbeats and the pool's counts
+    (``_certified_pool``; absent for a failed measurement); written without fsync (a crash loses only freshness)."""
     others = {name: generation for name, generation in generations.items()
               if name != _SNAPSHOT_NAME and generation != generations[_SNAPSHOT_NAME]}
     alive = {"generation": generations[_SNAPSHOT_NAME], "ts": utc_now_iso(), "heartbeats": heartbeats,
-             **({"documents": others} if others else {})}
+             **({"pool": pool} if pool is not None else {}), **({"documents": others} if others else {})}
     if _write_alive(state / _ALIVE_NAME, json.dumps(alive, separators=(",", ":"))) is False:
         raise OSError("queue liveness publication failed")
     _STATE["alive_heartbeats"] = dict(heartbeats)
+    _STATE["alive_pool"] = pool
     _STATE["alive_written_at"] = time.monotonic()
 
 

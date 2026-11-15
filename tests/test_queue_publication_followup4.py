@@ -69,11 +69,11 @@ def test_an_inflight_quiet_refresh_cannot_recertify_after_a_failed_barrier(publi
     reached, proceed = threading.Event(), threading.Event()
     due = queue_publication._alive_due
 
-    def paused_due(heartbeats):
+    def paused_due(*facts):
         if threading.current_thread().name == "quiet-tick":
             reached.set()
             assert proceed.wait(5)
-        return due(heartbeats)
+        return due(*facts)
 
     monkeypatch.setattr(queue_publication, "_alive_due", paused_due)
     answers, errors = [], []
