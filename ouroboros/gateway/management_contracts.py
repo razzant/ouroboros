@@ -870,11 +870,15 @@ class ModelPriceTier(TypedDict):
 
 
 class ModelPrice(TypedDict, total=False):
-    """A catalog's published token price, USD per 1M tokens; ``tiers`` only when input length changes it."""
+    """A catalog's published token price, USD per 1M tokens; ``tiers`` only when input length changes it;
+    ``cache_write`` only where the record states the prompt-cache write figure of the tier this install sends, with
+    ``cache_write_ttl`` naming that tier (the resolved ``OUROBOROS_PROMPT_CACHE_TTL`` the catalog was read under)."""
 
     input: Required[float]
     output: Required[float]
     tiers: List[ModelPriceTier]
+    cache_write: float
+    cache_write_ttl: str
 
 
 class ModelCatalogItem(TypedDict, total=False):

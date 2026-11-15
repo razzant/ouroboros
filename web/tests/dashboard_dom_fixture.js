@@ -42,6 +42,10 @@ export class NodeStub {
     getAttribute(key) { return this.attrs[key] ?? null; }
     hasAttribute(key) { return key in this.attrs; }
     removeAttribute(key) { delete this.attrs[key]; }
+    toggleAttribute(key, force = !this.hasAttribute(key)) {
+        if (force) this.setAttribute(key, this.getAttribute(key) ?? ''); else this.removeAttribute(key);
+        return Boolean(force);
+    }
     get firstElementChild() { return this.children.find((child) => child.nodeType !== 3); }
     get firstChild() { return this.children[0] || null; }
     get lastChild() { return this.children.at(-1) || null; }

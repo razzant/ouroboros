@@ -361,7 +361,7 @@ def pending_tool_call_ids(messages: List[Dict[str, Any]]) -> List[str]:
 from ouroboros.external_runs import (  # noqa: E402,F401 -- the pause's historical import surface
     EXTERNAL_RUNNING, EXTERNAL_STOP_CONFIRMED, EXTERNAL_STOP_REQUESTED, EXTERNAL_STOP_UNKNOWN,
     STOP_POLICIES, STOP_POLICY_ALL, STOP_POLICY_OBSERVE, STOP_POLICY_TASK_OWNED,
-    episode_fields, observe_task_runs, owner_pause_runs, task_owned_runs_open,
+    episode_fields, held_run_line, observe_task_runs, owner_pause_runs, passed_reviews_notice, task_owned_runs_open,
 )
 
 
@@ -1337,10 +1337,7 @@ def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], gra
     external_basis = ("re-observed at this Resume" if fresh_observation is not None
                       else "as recorded at the pause, NOT re-observed")
     external = external_observation.get("runs") or []
-    external_lines = "".join(
-        f"\n- run {run.get('run_id')}: {run.get('state')} (stop outcome: {run.get('stop_outcome') or 'n/a'})"
-        for run in external if isinstance(run, dict)
-    ) or "\n- none"
+    external_lines = "".join(held_run_line(run) for run in external if isinstance(run, dict)) or "\n- none"
     if owner_runs := owner_pause_runs(ctx, row, external_observation):  # an owner Pause's participants (#1562)
         external_basis, external_lines = "its participants, read now", "\n" + owner_runs
     pending = pending_tool_call_ids(messages)
@@ -1362,6 +1359,8 @@ def _resume_disclosure(ctx: Any, row: Dict[str, Any], state: Dict[str, Any], gra
         if owner_runs:  # the owner's Pause stopped or observed these runs while it slept
             messages.append({"role": "user", "content": "[SYSTEM NOTICE]\nWhile you slept the Pause stopped or observed "
                              "these delegated runs (current custody; engine facts are evidence, never a grant):\n" + owner_runs})
+        elif not row.get("external_custody") and (passed := passed_reviews_notice(external_observation)):
+            messages.append({"role": "user", "content": passed})
         return
     kind = {REASON_OWNER: "Pause", REASON_AUTHORITY: f"technical pause ({str(row.get('rail')).replace('_', ' ')})"}.get(
         str(row.get("reason") or ""), "budget pause")

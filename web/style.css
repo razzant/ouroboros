@@ -146,6 +146,8 @@ html[data-layout="stack"] .shell-icon-control {
     scrollbar-width: thin;
     container-type: inline-size;  /* a narrow column stands the tools two to a line */
 }
+/* One maximum for a drag, a restored width and a narrowing window; the adjacent room keeps its composer. */
+html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw - var(--room-min-width))); }
 @media (pointer: coarse) {
     #primary-sidebar { --nav-item-h: 44px; --nav-control-h: 44px; }
 }
@@ -164,7 +166,7 @@ html[data-layout="stack"] .shell-icon-control {
    them, so a row reached with Tab is never left under either bar, while a bar's own control (Main, a section, the
    update) leaves the column where it is (a scroll padding on the column would count the bars as covered and move
    it). A column too short even for the card, one Project row and the foot (layout.js sets data-bars-crowd; by the
-   bars' heights a desk under 306 px with the macOS title band, 272 px without, a touch screen under 296 px) lets
+   bars' heights and the rows' clearance at both edges) lets
    the card scroll away with the list instead: the sections and the version stay on the edge, the card is the
    list's top, one scroll up, and the rows keep the room between; two pinned bars there would cover every row. */
 @media (max-height: 540px), (pointer: coarse) and (max-height: 600px) {
@@ -230,15 +232,12 @@ html[data-layout="stack"] .shell-icon-control {
 
 /* The sections, quiet items three to a line on a desk in three columns, each as wide as its widest item: the first
    column starts where the Project names start, the last ends where the column ends, and within a column the items start
-   on one line, so the glyphs of the two rows stand under each other. A name is never cut: a column is never narrower
-   than its widest name, and where three columns do not fit the column stands them two to a line, the phone drawer
-   always (a finger high there), and a column too narrow even for two stands them one to a line. An engine without
-   container queries keeps the one-to-a-line base. The steps are the English names' widths at the body size (328 px
-   holds three, 226 px two); a longer translation that passes a step's width overflows instead of being cut. The chosen
-   one is the crimson capsule. */
+   on one line, so the glyphs of the two rows stand under each other. The column's existing steps keep three at 328 px,
+   two at 226 px (and in the drawer), otherwise one. Longer names wrap within those columns: Navigation keeps their
+   names whole, never clipped or reduced to an unlabelled icon. The chosen one is the crimson capsule. */
 .nav-tools {
     display: grid;
-    grid-template-columns: minmax(max-content, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     justify-content: space-between;
     gap: var(--space-1) 0;
     padding-top: var(--space-3);
@@ -246,6 +245,7 @@ html[data-layout="stack"] .shell-icon-control {
 .nav-tools > .nav-row {
     width: auto;
     min-width: 0;
+    max-width: 100%;  /* bound an unhyphenatable word so its last-resort break can fit the cell */
     min-height: 32px;
     gap: 6px;
     padding: 0 var(--space-3);
@@ -254,14 +254,14 @@ html[data-layout="stack"] .shell-icon-control {
     font-size: var(--type-body);
     font-weight: 400;
 }
-.nav-tools > .nav-row > .nav-row-label { overflow: visible; text-overflow: clip; }
+.nav-tools > .nav-row > .nav-row-label { overflow: visible; text-overflow: clip; white-space: normal; hyphens: auto; overflow-wrap: break-word; }
 .nav-tools > .nav-row:not(.active) > svg { color: var(--text-meta); }
 .nav-tools > .nav-row { justify-self: start; }
 @container (min-width: 226px) {
-    .nav-tools { grid-template-columns: repeat(2, minmax(max-content, 1fr)); }
+    .nav-tools { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @container (min-width: 328px) {
-    html:not([data-layout="stack"]) .nav-tools { grid-template-columns: repeat(3, max-content); }
+    html:not([data-layout="stack"]) .nav-tools { grid-template-columns: repeat(3, minmax(0, max-content)); }
 }
 /* A finger's target in the docked layout too (a tablet, a touch laptop): the row is the touch minimum tall; a mouse
    keeps the quieter row. */
@@ -311,10 +311,17 @@ html[data-layout="stack"] .sidebar-foot-meta { min-height: 44px; margin: var(--s
     --window-chrome-clearance: calc(var(--window-chrome-start) + var(--space-3));
 }
 /* The card stands right under the traffic lights (owner 12.11, the fifth round frames): a step of air under them, so
-   its top reaches into the band's lower part. */
-:root[data-window-chrome="integrated"] .sidebar-head {
-    padding-top: max(var(--space-4), calc(var(--window-chrome-top) - var(--space-4)));
+   its top reaches into the band's lower part. The stack layout's drawer has its × there, which clears the band itself
+   (.drawer-head below), so the head under it adds no second clearance. */
+:root[data-window-chrome="integrated"]:not([data-layout="stack"]) .sidebar-head {
+    padding-top: calc(var(--space-4) + var(--window-chrome-top));
 }
+/* Once the head scrolls away, the scroller itself must still clear the window buttons. */
+:root[data-window-chrome="integrated"]:not([data-layout="stack"]) #primary-sidebar[data-bars-crowd] {
+    margin-top: var(--window-chrome-top);
+    height: calc(var(--vvh) - var(--window-chrome-top));
+}
+:root[data-window-chrome="integrated"]:not([data-layout="stack"]) #primary-sidebar[data-bars-crowd] .sidebar-head { padding-top: 0; }
 :root[data-window-chrome="integrated"] .onboarding-overlay {
     box-sizing: border-box;
     padding-top: var(--window-chrome-top);
@@ -489,6 +496,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .nav-ouro-text {
     flex: 1 1 auto;
     min-width: 0;
+    container: ourocard / inline-size;
     display: flex;
     flex-direction: column;
     gap: 1px;
@@ -507,20 +515,22 @@ html[data-layout="stack"] .resize-handle { display: none; }
     font-weight: 600;
     line-height: 20px;
 }
-/* The quiet "Main Chat" shows whole or not at all, never cut inside its two words: it takes the room the name, the
-   count and the mark leave, and where its words do not fit there they wrap past a zero-wide first item one line tall
-   onto a second line its one-line box hides (its words stay in the card's name for a reader). */
+/* The room's name stays readable. A narrow card puts it below Ouroboros's name, leaving the count and mark at the end. */
 .nav-ouro-line1 > .nav-row-label {
-    --label-line: calc(var(--type-meta) * var(--line-meta));
-    flex: 1 1 0;
-    display: flex;
-    flex-wrap: wrap;
-    height: var(--label-line);
+    flex: 1 1 auto;
+    white-space: normal;
+    overflow: visible;
     color: var(--text-meta);
     font-size: var(--type-meta);
     line-height: var(--line-meta);
 }
-.nav-ouro-line1 > .nav-row-label::before { content: ''; height: var(--label-line); }
+/* The name, Main Chat, count and mark need 200px of text room, after the avatar and menu inset.
+   The phone's 293px drawer has that room; 282px and 270px columns need the second line. */
+@container ourocard (max-width: 200px) {
+    .nav-ouro-line1 { flex-wrap: wrap; row-gap: 0; }
+    .nav-ouro-name { flex: 1 1 auto; }
+    .nav-ouro-line1 > .nav-row-label { order: 4; flex-basis: 100%; }
+}
 /* the count stands just before the mark, a step before it, and the mark keeps the rows' own column */
 .nav-ouro-line1 > .unread-badge { order: 2; margin-right: var(--space-1); }
 .nav-ouro-line1 > .nav-mark-slot {
@@ -580,6 +590,10 @@ html[data-layout="stack"] .resize-handle { display: none; }
     --focus-accent-border: var(--tone-crimson-ink);
     --mark-unread: var(--tone-crimson-ink);
 }
+/* The chosen Project row's Pin and ⋯ lie on that fill as the row's siblings, where its restatement does not reach:
+   their ring restates the same token the same way. */
+:root .nav-project-pin:has(+ .nav-project-row.active),
+:root .nav-project-row.active ~ .nav-project-kebab { --focus-accent-border: var(--tone-crimson-ink); }
 
 .nav-row:focus,
 .app-tab:focus,
@@ -1509,6 +1523,9 @@ html[data-layout="docked"] .app-page-lead .app-tab-strip {
 }
 html[data-layout="docked"] .app-page-lead { --control-h: var(--control-h-float); }
 html[data-layout="docked"] .app-page-lead .app-tab { pointer-events: auto; }
+/* A pane too narrow for the bar keeps the strip under the row (page_header.js bindPageHeader): there too it wraps and
+   never scrolls; only the phone's strip, at the top of its page, scrolls. */
+html[data-layout="docked"] .app-page-tabs > .app-tab-strip { flex-wrap: wrap; row-gap: var(--space-1); overflow-x: visible; }
 /* Files: the folder's location starts the bar at reading size, each folder by its name, the one you are in in primary
    ink. A location longer than the bar's start scrolls inside it as a tab strip does, fading where folders hide: it
    rests at its end (files.js), so the folders above give way first, and no folder is wider than the strip less one
@@ -5397,8 +5414,12 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .chat-capsule[data-name-fit="off"]:not([data-open="true"]) .chat-capsule-name {
     display: none;
 }
+/* Closed-row fitting reads settled widths and margins; opening and closing keep their own transitions. */
+.chat-toolbar-row[data-owner-fitting] .chat-capsule-value { transition: none; }
 .chat-toolbar-row[data-owner-compact="values"] .chat-capsule:not([data-open="true"]) .chat-capsule-value {
     max-width: var(--capsule-value-cap);
+    /* An emptied value leaves no word spacing: 2px cancels its -2px start margin, keeping the glyph round. */
+    margin-inline-end: clamp(2px, var(--capsule-value-cap), var(--space-3));
     text-overflow: ellipsis;
 }
 .chat-toolbar-row[data-owner-glyphs="true"] .chat-capsule:not(.chat-model-mode):not([data-open="true"]) .chat-subagents-lock {
@@ -6340,8 +6361,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     border-bottom: 1px solid rgba(var(--neutral-rgb), 0.04);
     color: var(--text-secondary);
 }
-.cost-table tbody tr:hover td {
-    background: rgba(var(--neutral-rgb), 0.03);
+/* Only a pointer that hovers paints a row (a finger's tap would leave it painted), and the row is painted whole, so a
+   row a narrow card stacks shows no seams between its cells. */
+@media (hover: hover) {
+    .cost-table tbody tr:hover { background: rgba(var(--neutral-rgb), 0.03); }
 }
 
 /* Dashboard Evolution (evolution.js): the campaign object, then one time line of versions with the chosen version
@@ -9089,8 +9112,11 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
 
 /* While finding, a found name may take three lines, so the words that matched are not cut off behind the ellipsis
    (the resting list keeps the rows' two lines). The row grows past its fixed height; its time keeps the name's first
-   line and its newest line and mark stay under the name. */
-html .nav-projects-list[data-finding] .nav-project-row { height: auto; }
+   line and its newest line and mark stay under the name. At rest a row's two lines reach 1 px into its padding at each
+   edge (a solo name 2 px into the bottom one), so a growing row's padding gives those pixels back: a row of one or two
+   lines keeps its height, and its words their place, when a find starts. */
+html .nav-projects-list[data-finding] .nav-project-row { height: auto; padding-block: 5px; }
+html .nav-projects-list[data-finding] .nav-project-row[data-solo] { padding-block: 6px 4px; }
 .nav-projects-list[data-finding] .nav-project-row .nav-project-line1 { align-items: flex-start; }
 .nav-projects-list[data-finding] .nav-project-row .nav-row-label {
     display: -webkit-box;
@@ -9100,9 +9126,10 @@ html .nav-projects-list[data-finding] .nav-project-row { height: auto; }
     overflow-wrap: anywhere;
 }
 
-/* The list's own commands (Show more, Clear search, Show all projects, Try again) and its one sentence take a
-   Project row's geometry in the meta ink, their words on the label column (Show more's chevron in the icon column),
-   so none reads as one more Project. */
+/* The list's own commands (Show more, Clear search, Show all projects, Try again) stand on the rows' words' column,
+   semibold at the meta size in the primary ink, a command's glyph leading there and its words after it (the chevron
+   of Show more and Show all projects, Clear search's ×), and its one sentence in the meta ink on the same column, so
+   none reads as one more Project. */
 .nav-projects-more {
     display: flex;
     align-items: center;
@@ -9206,6 +9233,10 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
    keeps its ink on the crimson fill (below). */
 .nav-project-row .nav-row-label {
     flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
     color: var(--text-meta);
     font-weight: 400;
     line-height: 18px;
@@ -9241,6 +9272,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     align-items: center;
     justify-content: center;
     min-height: 16px;
+    transform: translateX(-1px);
 }
 /* A row with nothing to say under its name keeps its lines where every row has them: the name and the time on the
    first, the mark on the second line's end (absolute, below), so a one-line name never drops the time onto the mark. */
@@ -10016,6 +10048,7 @@ html[data-layout="stack"] .project-panel {
 .harness-maintenance-details dd { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 var(--space-1); color: var(--text-primary); }
 .harness-maintenance-details pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 .harness-model-program { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); }
+.harness-model-latest { white-space: nowrap; }
 .ui-model-options[data-model-popup] { display: flex; flex-direction: column; overflow: hidden; }
 .ui-model-options[data-model-popup] > [role="listbox"] { min-height: 0; overflow-y: auto; }
 .ui-model-footer { flex: 0 0 auto; padding: var(--space-2) var(--space-3); overflow-wrap: anywhere; }
@@ -10107,12 +10140,13 @@ html[data-layout="stack"] .project-panel {
     width: fit-content;
     max-width: 100%;
 }
-/* The meta line is facts: each one whole on its line (a fact wider than the line wraps inside itself), parted by a
-   dot that stays with the fact before it, so no line starts with a separator. A spent window is the one fact in the
-   warning's hue (DESIGN principle 3: the words that carry the state take the hue; the row's body stays neutral, so
-   rows never alternate); the plan, who it is and "checked …" keep the meta ink. */
-.harness-account-meta .meta-fact { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
-.harness-account-meta .meta-fact:not(:last-of-type)::after { content: " ·"; margin-right: 0.35em; color: var(--text-meta); }
+/* The meta line is facts: each one whole on its line (a fact wider than the line wraps between its words, and an
+   address in it, as the name's, is cut with an ellipsis rather than inside a word), parted by a dot that stays with
+   the fact before it, so no line starts with a separator. A spent window is the one fact in the warning's hue (DESIGN
+   principle 3: the words that carry the state take the hue; the row's body stays neutral, so rows never alternate);
+   the plan, who it is and "checked …" keep the meta ink. Its top stands on the line's top, as its baseline did. */
+.harness-account-meta .meta-fact { display: inline-block; max-width: 100%; overflow: hidden; overflow-wrap: normal; text-overflow: ellipsis; vertical-align: top; }
+.harness-account-meta .meta-fact:not(:last-of-type)::after { content: "\00a0·"; margin-right: 0.35em; color: var(--text-meta); }
 .harness-account-meta .meta-fact[data-tone="warn"] { color: var(--status-warn-word, var(--text-meta)); }
 /* The light seed's half of the warning row (DESIGN seed table: light — the row's tint, its words in their own ink;
    dark — a neutral row, its words in the hue): the one warning row with a body, so the theme scopes its rule here. */

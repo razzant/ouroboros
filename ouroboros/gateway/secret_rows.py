@@ -148,6 +148,14 @@ def mask_connections(rows: Any) -> list:
     return out
 
 
+def typed_connection_secrets(rows: Any) -> set:
+    """The secrets a posted row list carries as typed text, a placeholder not among them: what this request's
+    author may send anywhere, while a kept secret goes only where it was saved for (Provider Test's rule)."""
+    return {str(row[field]).strip() for row in (rows if isinstance(rows, list) else []) if isinstance(row, dict)
+            for field, flat in _secret_fields(row)
+            if str(row.get(field) or "").strip() and not looks_masked_settings_secret(flat, row[field])}
+
+
 class ConnectionSecretIdentityAmbiguous(ValueError):
     """A masked connection secret whose (kind, name) is claimed more than once."""
 

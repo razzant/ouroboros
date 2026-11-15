@@ -142,7 +142,7 @@ function keyHeadHtml(head, busy) {
     </div>`;
 }
 
-const doorHtml = (card) => `<button type="button" class="ui-row settings-row" data-kind="door" data-open-path="${keyPath(card.kind)}">
+const doorHtml = (card) => `<button type="button" class="ui-row settings-row" data-kind="door" data-open-path="${keyPath(card.kind)}"${card.hint ? '' : ' data-no-meta'}>
         <span class="ui-row-title">${escapeHtml(card.title)}</span><span class="ui-row-meta"><span>${escapeHtml(card.hint || '')}</span></span>
         <span class="ui-row-actions">${CHEVRON}</span></button>`;
 
@@ -257,7 +257,6 @@ function mountList(container, { ctx = {} }) {
             } else {
                 Object.assign(mounted.row, row);
                 if (otherEl.children[index] !== mounted.node) otherEl.insertBefore(mounted.node, otherEl.children[index] || null);
-                mounted.node.querySelector('[data-setting-meta]').textContent = row.meta || '';
                 mounted.handle.paint();
             }
             mounted.secrets.paint(settings);

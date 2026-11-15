@@ -59,6 +59,10 @@ def _page(browser, engine, *, width=1440, height=900, theme="light"):
 
 def _nav(page, target: str) -> None:
     """A page of the shell from its navigation, through the phone's drawer where the bar is narrow."""
+    if page.evaluate("document.documentElement.dataset.layout === 'stack'"):
+        back = page.locator('.page.active [data-dashboard-list-back]:visible')
+        if back.count():
+            back.click()
     toggle = page.locator(".page.active [data-mobile-nav-toggle]:visible")
     if toggle.count():
         toggle.first.click()
@@ -74,7 +78,7 @@ def _costs(page, url: str, *, load: bool = True) -> None:
     _nav(page, "dashboard")
     page.click('[data-dashboard-tab="costs"]')
     expect(page.locator(FIELD)).to_be_visible(timeout=30_000)
-    page.wait_for_function("document.getElementById('costs-allowance-spend').textContent.trim() !== 'Reading…'"
+    page.wait_for_function("document.getElementById('costs-allowance-spent').textContent.trim() !== 'Reading…'"
                            f" && document.getElementById('setting-{KEY}').value !== ''", timeout=30_000)
 
 
@@ -188,7 +192,12 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_wr
             assert float(_settings(data_dir)[KEY]) == 12.75
             _costs(page, url)
             expect(allowance).to_have_value("12.75")
-            expect(page.locator("#costs-allowance-spend")).to_contain_text("of $12.75 in the last 24 hours")
+            # DESIGN.md:2729–2735: the card names the window, then separates spend, limit and room;
+            # a limit set with cents keeps cents. The old spend sentence is now the omissions line.
+            expect(page.locator("#costs-meter-consciousness")).to_have_text("Consciousness, last 24 hours")
+            expect(page.locator("#costs-allowance-spent")).to_have_text("$0.00")
+            expect(page.locator("#costs-allowance-of")).to_have_text("of $12.75")
+            expect(page.locator("#costs-allowance-left")).to_have_text("$12.75 left")
             # Another unrelated row keeps the decimal too.
             stored = _write_unrelated(page, data_dir, posts, 11)
             assert float(stored[KEY]) == 12.75, stored
@@ -206,7 +215,12 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_wr
             door.click()
             expect(page.locator(FIELD)).to_be_visible(timeout=30_000)
             expect(allowance).to_have_value("12.75")
-            expect(page.locator("#dashboard-panel-costs > .dashboard-back")).to_have_text("Settings")
+            # Owner 14.11: a door from Settings keeps its return in the destination's header on every layout.
+            _shoot(page, f"{engine}-settings-costs-return")
+            back = page.locator('#page-dashboard > .app-page-header').get_by_role('button', name='Back to Settings', exact=True)
+            expect(back).to_be_visible()
+            back.click()
+            expect(home).to_be_visible()
             assert page.errors.unexpected() == [], page.errors.report()
         finally:
             browser.close()
@@ -321,14 +335,25 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
                     _fits(page)
                     _shoot(page, f"{engine}-{width}-{theme}-{state}")
 
-            def spend_says(text):
-                return lambda page: expect(page.locator("#costs-allowance-spend")).to_have_text(text)
+            def meter_says(page, *, spent, of, left, share, reached, note):
+                # The limit card now separates its figure, limit, room and omissions (DESIGN: Limits).
+                for suffix, text in (("spent", spent), ("of", of), ("left", left), ("spend", note)):
+                    expect(page.locator(f"#costs-allowance-{suffix}")).to_have_text(text)
+                bar = page.locator("#costs-allowance-bar")
+                expect(bar).to_have_attribute("data-reached", "1" if reached else "0")
+                if share is None:
+                    expect(bar).to_be_hidden()
+                else:
+                    expect(bar).to_be_visible()
+                    assert bar.evaluate("el => el.style.getPropertyValue('--spend-share')") == share
+                expect(page.locator('[data-costs-consciousness]')).to_have_attribute("aria-label", "Open Consciousness")
 
             # 1. Room left: the server's own window, the unpriced call said, no condition line; last, the model its
             # wake-ups think with (this server's Main, the slot left empty), in every state but Off.
-            normal = "≥ $12.40 of $20.00 in the last 24 hours · 1 without a price · Consciousness ›"
+            normal = dict(spent="$13", of="of $20", left="$7 left", share="62.0%", reached=False,
+                          note="Not counted: 1 calls without a known price")
             model = "Model: mock-model (Main model)."
-            each("normal", lambda page: (spend_says(normal)(page),
+            each("normal", lambda page: (meter_says(page, **normal),
                                          expect(page.locator(".costs-allowance-line")).to_have_text([model])))
             # 2. The limit reached: what waits, and when room returns if nothing more is charged, in the viewer's zone.
             page = pages[COMBOS[0]]
@@ -341,8 +366,8 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
             assert abs(dt.datetime.fromisoformat(served["allowance_room_after"]).timestamp() - leaves) < 1, served
             reached = ("Consciousness limit reached: new wake-ups, replies in places and its own tasks wait. If its charges stay "
                        f"as they are, there is room again by {_room_words(leaves, now)}.")
-            each("reached", lambda page: (spend_says("≥ $12.40 of $10.00 in the last 24 hours · 1 without a price · "
-                                                     "Consciousness ›")(page),
+            exhausted = {**normal, "of": "of $10", "left": "Limit reached", "share": "100.0%", "reached": True}
+            each("reached", lambda page: (meter_says(page, **exhausted),
                                           expect(page.locator(".costs-allowance-line")).to_have_text([reached, model])))
             # 3. Its wake held at the allowance it started with: two facts, the window and the wake, with its card's door.
             for page in pages.values():
@@ -350,7 +375,8 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
             held = ("The consciousness wake-up is paused at the allowance it had left when it started ($2.99). Resume keeps "
                     "that limit, so it pauses again while its known spend is at it; room returning or a higher limit does "
                     "not raise it. Stop now on its card ends it and frees the clock for its next check. Open in Main ↗")
-            each("held", lambda page: expect(page.locator(".costs-allowance-line")).to_have_text([reached, held, model]))
+            each("held", lambda page: (meter_says(page, **exhausted),
+                                       expect(page.locator(".costs-allowance-line")).to_have_text([reached, held, model])))
             page = pages[COMBOS[0]]
             opened = page.evaluate_handle("""() => { const seen = [];
                 window.addEventListener('ouro:open-task', (event) => seen.push(event.detail)); return seen; }""")
@@ -395,7 +421,8 @@ def test_the_allowance_says_its_spend_hold_and_room_in_each_state(direct_server_
             for page in pages.values():
                 _overlay(page, _unreadable)
             each("unknown", lambda page: (
-                spend_says("What it spent in the last 24 hours is unknown. · Consciousness ›")(page),
+                meter_says(page, spent="Unknown", of="", left="", share=None, reached=False,
+                           note="What it spent in the last 24 hours is unknown."),
                 expect(page.locator(".costs-allowance-line")).to_have_text(
                     ["The usage ledger could not be read, so whether consciousness has room is unknown.", model])))
             # 4b. A long model id with no break point of its own (no space, hyphen or slash: only the line's overflow-wrap

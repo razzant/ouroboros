@@ -515,6 +515,8 @@
  * @property {*=} elapsed_sec
  * @property {Object=} tool_evidence
  * @property {Object=} cancel_origin
+ * @property {Object=} finalization_recovery
+ * @property {string=} terminal_origin
  * @property {Object=} continuation_offer
  */
 

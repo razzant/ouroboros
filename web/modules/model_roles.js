@@ -15,7 +15,9 @@ import { parseModelSource, composeModelSource, apiConnections, configuredApiProv
     profileOptionsFor, routeChoiceGroups, selectHtml, mintStableId, unavailableConnectionState, API_CHOICE_PREFIX,
     DEFAULT_API_PROVIDER, PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_CHOICES,
     processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, priceWords, tierPriced,
-    KEY_PROBLEM_WORDS, routeKeyProblem, keyProblemLine, apiProviderLabel } from './route_editor_primitives.js';
+    KEY_PROBLEM_WORDS, PRICE_UNKNOWN, routeKeyProblem, keyProblemLine, apiProviderLabel } from './route_editor_primitives.js';
+import { windowWords } from './chat_model_routes.js';
+import { fmt, translateString } from './i18n.js';
 import { revealNewRow } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { catalogPrograms } from './model_program.js';
@@ -389,13 +391,24 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             if (choosing) status.dataset.tone = 'warn'; else delete status.dataset.tone;
             const price = local || keyNote(row) || note || !row.model || sourceId(row) || tieredProcessing(row) ? ''
                 : priceWords(currentItem(row)?.price, { unit: true });
-            status.textContent = local ? 'Uses the local runtime.'
+            const unlisted = rowCatalog?.read_state === 'ok' && !rowCatalog.items.length;
+            const plain = local ? 'Uses the local runtime.'
                 : keyNote(row) || note || (!row.model ? (row.slot.slot === 'main' ? 'Choose a model to continue.' : `Uses ${inheritName(row)}.`)
-                    : sourceId(row) ? (rowCatalog?.read_state === 'ok' && !rowCatalog.items.length
-                        ? 'No models were listed for this source. Your selection is kept.'
-                        : 'Uses your subscription. No API key required.') : price || 'Price unknown');
-            // The price is already composed through the translation seam: the overlay leaves it alone and reads the rest.
-            if (price) status.dataset.i18nFmt = 'model price'; else delete status.dataset.i18nFmt;
+                    : sourceId(row) ? (unlisted ? 'No models were listed for this source. Your selection is kept.'
+                        : 'Uses your subscription. No API key required.') : price || PRICE_UNKNOWN);
+            // The model's window beside how it is paid, in the model list's words (DESIGN "Onboarding density"): the
+            // window this route is sized with when the server knows one, else the one its catalog publishes; an
+            // unknown window is omitted. Where it comes from stays in the fold below.
+            const routed = !local && !keyNote(row) && !note && Boolean(row.model);  // the line is about the model's own route
+            // A local role may keep a cloud id in its slot: its window is the local model's own row, never that id's.
+            const listed = local ? catalog.items.find((item) => item.use_local) : currentItem(row);
+            const size = local || (routed && !(sourceId(row) && unlisted)) ? windowWords(row.windowPreview?.window?.tokens
+                || listed?.max_context_window || listed?.context_window) : '';
+            const sized = size && fmt('{window} window', { window: size });
+            status.textContent = !sized ? plain : routed && !sourceId(row) ? `${price || translateString(PRICE_UNKNOWN)} · ${sized}`
+                : `${translateString(plain)} ${sized}.`;
+            // A price or a window is composed through the translation seam: the overlay leaves such a line alone.
+            if (price || sized) status.dataset.i18nFmt = 'model price'; else delete status.dataset.i18nFmt;
             const errors = validationAttempted ? rowErrors(row) : [];
             const message = node.querySelector('[data-model-role-error]');
             Object.assign(message, { textContent: errors.map((error) => error.message).join(' '), hidden: !errors.length });
@@ -462,6 +475,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             if (!data.response_limit || !data.route) throw new Error('Max output tokens are not checked');
             row.windowPreview = data;
             node.querySelector('[data-model-context-note]').textContent = modelContextNote(data);
+            updateCatalogViews();  // the role line says this window
             node.querySelector('[data-window-clear]').hidden = !data.window_ack;
             let evidence = data.response_limit;
             if (apply) {
@@ -594,7 +608,12 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             if (fallback && !soleRow()) rows.push(Object.assign(rowState(fallback, '', rows.length), { account: '', context: 0, processing_preference: '' }));
             const at = kept ? rows.indexOf(soleRow()) : -1;
             if (at >= 0) rows[at] = Object.assign(kept, { slot: rows[at].slot });
-            loaded = true; render();
+            loaded = true;
+            // A kept draft includes the browser's unfinished number, selection and open Details, not just row values.
+            if (at >= 0 && host()?.querySelector(`[data-model-role="${kept.id}"]`)) {
+                updateCatalogViews();
+                void refreshRow(kept);
+            } else render();
         },
         mount() {
             getDoc()?.addEventListener?.('harness-maintenance:settled', onMaintenanceSettled);
@@ -823,7 +842,7 @@ function mountModels(container, { path, ctx }) {
             : keyWords(settings[slots.main?.settingKey], local('main'));
         // The answer is one row: the model, under it the source with its own mark (or what is wrong with its key), and
         // the chevron of a row that opens a level. The role's name is the object's title above.
-        container.querySelector('.models-main').innerHTML = `<button type="button" class="ui-row settings-row models-main-row" data-kind="door" data-entry-open>
+        container.querySelector('.models-main').innerHTML = `<button type="button" class="ui-row settings-row models-main-row" data-kind="door" data-entry-open${mainNote || main.source ? '' : ' data-no-meta'}>
             <span class="ui-row-title models-main-name">${escapeHtml(main.follows || labels.length ? 'Not chosen yet' : main.name)}</span>
             <span class="ui-row-meta models-main-meta"${mainNote ? ' data-tone="warn"' : ''}>${mainNote ? '' : routeMark(settings[slots.main?.settingKey], { local: local('main') })}<span>${escapeHtml(mainNote || main.source)}</span></span>
             <span class="ui-row-actions">${doorSign('models/role/main')}</span></button>`;
