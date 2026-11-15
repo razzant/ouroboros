@@ -316,6 +316,26 @@ def test_the_addressed_census_applies_a_bound_decision_to_its_own_tree_only(tmp_
     assert _retired(tmp_path, "A")["op-A"]["accepted"]["task_id"] == "mind-task"
 
 
+def test_an_addressed_repair_reads_only_the_members_that_hold_a_claimed_launch(tmp_path, monkeypatch):
+    """A tree's repair decodes no body of a member without a claimed launch row (each Continue, Resume and held
+    re-check of a large tree read every member's whole body for nothing); the claim's ended owner still retires."""
+    from ouroboros import task_results
+
+    _platform(monkeypatch, gone={111})
+    quiet = {"root", "returned", *(f"quiet-{index}" for index in range(8))}
+    for task_id in quiet - {"returned"}:
+        write_task_result(tmp_path, task_id, "completed", root_task_id="root")
+    _claim(tmp_path, "returned", "op-returned", pid=222, state="returned")
+    _claim(tmp_path, "holder", "op-dead", pid=111)
+    reads, load = [], task_results.load_task_result
+    monkeypatch.setattr(task_results, "load_task_result", lambda root, task_id, **kw: reads.append(task_id) or load(
+        root, task_id, **kw))
+    retired = repair.repair_ended_local_custody(tmp_path, quiet | {"holder"}, root_task_id="root")
+    assert "holder" in reads and not quiet & set(reads), "only the member holding a claimed launch row is read"
+    assert [row["task_id"] for row in retired] == ["holder"] and "op-dead" not in _claims(tmp_path, "holder")
+    assert "op-returned" in _claims(tmp_path, "returned"), "a returned row is not custody to retire"
+
+
 def test_a_receiver_of_unknown_fate_is_accepted_and_leaves_the_census(tmp_path, monkeypatch):
     from ouroboros import model_wait, usage_accounting as ua
     from supervisor.continuation_admission import model_handoffs
