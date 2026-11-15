@@ -324,3 +324,48 @@ def test_a_timeout_keeps_the_registered_host_salvage_not_a_later_intermediate(qe
     assert stored["terminal_origin"] == "host_salvage" and stored["reason_code"] == "finalization_incomplete"
     assert stored["result"] == answer, "the history salvage replaced the registered answer's preserved bytes"
     assert preserved.read_text(encoding="utf-8") == answer and qenv.q.PENDING == []
+
+
+@pytest.mark.parametrize(("state", "word"), [("delivered", "Done"), ("owed", "Failed")])
+def test_an_adopted_answer_reads_by_its_delivery_on_every_surface_of_its_row(qenv, monkeypatch, state, word):
+    """Owner, 15.11: a model's final answer that reached the chat before its task's finalization was cut reads Done,
+    the stored row unchanged; one still owed reads Failed as before. The same fact travels with the Main row, the
+    history's terminal truth and the rebuilt ``task_done``, which the browser folds, and with the mind's result read."""
+    import asyncio
+
+    from ouroboros.gateway.history import make_chat_history_endpoint
+    from ouroboros.project_dialogue import completion_status_label
+    from ouroboros.terminal_projection import _project_row
+    from ouroboros.tools.control_task_results import _get_task_result
+    from ouroboros.working_checkpoint import adopt_registered_answer
+    from supervisor import events
+
+    tid = "cut-after-answer"
+    write_task_result(qenv.drive, tid, "running", result="working", task_attempt=1)
+    _register(qenv.drive, tid, state)
+    stored = adopt_registered_answer(qenv.drive, _task(tid), tid, attempt=1, cause="app_stop")
+    recovery = stored["finalization_recovery"]
+    assert (stored["status"], recovery["answer"], stored["terminal_origin"]) == ("failed", state, "model_final")
+    assert completion_status_label(stored, {}) == word
+    row = _project_row(tid, stored, {}, {})
+    assert row["text"].startswith(f"{word}. Root task {tid}.") and row["finalization_recovery"] == recovery
+    assert ("The answer was delivered." in row["text"]) is (state == "delivered")
+
+    (qenv.drive / "logs").mkdir(exist_ok=True)
+    (qenv.drive / "logs" / "progress.jsonl").write_text(json.dumps(
+        {"ts": "2026-11-13T20:47:00Z", "task_id": tid, "content": "Working"}) + "\n", encoding="utf-8")
+    response = asyncio.run(make_chat_history_endpoint(qenv.drive)(SimpleNamespace(query_params={"limit": "10"})))
+    shown = next(item for item in json.loads(response.body.decode("utf-8"))["messages"] if item.get("task_id") == tid)
+    assert (shown["finalization_recovery"], shown["terminal_origin"]) == (recovery, "model_final")
+    assert shown["outcome_phase"] == ("done" if state == "delivered" else "error")
+    from ouroboros.gateway.state import _task_activity_facts
+
+    census = _task_activity_facts(qenv.drive, tid)["display"]  # Activity folds the same record
+    assert (census["finalization_recovery"], census["terminal_origin"]) == (recovery, "model_final")
+
+    published: list = []
+    monkeypatch.setattr(events, "_finish_task_done_dispatch", lambda *_a, **kw: published.append(kw["task_done_event"]))
+    events._handle_task_done({"task_id": tid, "status": "failed"}, SimpleNamespace(DRIVE_ROOT=qenv.drive, RUNNING={}, WORKERS={}))
+    assert (published[0]["finalization_recovery"], published[0]["terminal_origin"]) == (recovery, "model_final")
+    read = _get_task_result(SimpleNamespace(drive_root=qenv.drive, task_metadata={}), tid)
+    assert json.loads(read.split("[SUBTASK_OUTCOME]\n", 1)[1].split("\n[/SUBTASK_OUTCOME]", 1)[0])["finalization_recovery"] == recovery

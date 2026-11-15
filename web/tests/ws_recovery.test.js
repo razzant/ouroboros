@@ -632,6 +632,28 @@ test('keep-recovery preserves the outbound queue and the reconnect flush deliver
     }
 });
 
+test('a throwing open listener surfaces, and the version read and the queued frame still happen', async () => {
+    const env = installEnv([{ body: { sha: 'def' } }]);
+    const ws = new WS('ws://unused');
+    try {
+        ws._wasConnected = true;
+        ws._lastSha = 'abc';
+        ws.send({ type: 'chat', text: 'hello' });
+        ws._clearUiRecoveryTimer();
+        ws._clearReconnectTimer();
+        ws.on('open', () => { throw new Error('a view listener failed'); });
+        ws.connect();
+        const sock = ws.ws;
+        sock.readyState = FakeSocket.OPEN;
+        assert.throws(() => sock.onopen(), /a view listener failed/);
+        await waitFor(() => env.replaced.length === 1, 'the post-open read of a changed SHA');
+        assert.match(env.replaced[0], /_ouro_reason=sha-change/);
+        assert.equal(JSON.parse(sock.sent[0]).text, 'hello');
+    } finally {
+        await teardown(ws);
+    }
+});
+
 // ---------------------------------------------------------------------------
 // Disconnect-episode generations: a probe belongs to the episode it was armed
 // in; a reconnect ends the episode and stale resolutions are discarded.

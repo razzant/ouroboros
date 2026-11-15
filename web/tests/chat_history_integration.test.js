@@ -48,7 +48,7 @@ function fixture(t, initial = page([]), fetchPage = null, { seed = null } = {}) 
         bubbles: () => messages.children.filter((node) => node.classList.contains('chat-bubble')
             && !node.classList.contains('typing-bubble') && node.dataset.ephemeral !== '1'),
         emit: (message) => handlers.get('chat')({ chat_id: 2, ...message }),
-        reconnect: () => handlers.get('open')({ previouslyConnected: true }),
+        reconnect: (flags = {}) => handlers.get('open')({ previouslyConnected: true, ...flags }),
         respond: next => { response = next; },
         async refresh(next = response) {
             response = next;
@@ -942,4 +942,37 @@ test('a newest read refused while the Project registry cannot be read keeps the 
     const notes = [...(f.messages.parentNode.querySelector('.chat-panel-statusbar')?.children || []),
         ...(f.messages.querySelector('.chat-load-older')?.children || [])].map(node => node.textContent).join(' ');
     assert.match(notes, /Some saved history could not be loaded/, 'the feed says its source is unavailable');
+});
+
+for (const failed of [false, true]) test(`a room return and its paint receipt share one ${failed ? 'failed' : 'successful'} recent read`, async (t) => {
+    const f = fixture(t, page([row('chat:1', 'Before leaving')]));
+    await f.refresh();
+    f.instance.leave();
+    f.instance.stay();
+    f.respond(failed ? { httpStatus: 503, body: { error: 'unavailable' } } : page([row('chat:2', 'While away')]));
+    const before = f.calls.length;
+    f.reconnect({ resumed: true });
+    const receipt = await f.instance.refreshHistory({ revision: 100 });
+    for (let n = 0; n < 4; n += 1) await new Promise(setImmediate);
+    assert.deepEqual(f.calls.slice(before), [null], 'one return, one recent read, including after a failure');
+    assert.equal(receipt.painted, !failed);
+    assert.equal(f.bubbles().at(-1).dataset.historyId, failed ? 'chat:1' : 'chat:2');
+    assert.ok(f.bubbles().at(-1).innerHTML.includes(failed ? 'Before leaving' : 'While away'));
+});
+
+test('an actual reconnect during a recent read still owes a fresh read after that request', async (t) => {
+    const f = fixture(t, page([row('chat:1', 'First')]));
+    await f.refresh();
+    let release;
+    f.respond(new Promise(resolve => { release = resolve; }));
+    const before = f.calls.length;
+    const painting = f.instance.refreshHistory({ revision: 100 });
+    await new Promise(setImmediate);
+    assert.deepEqual(f.calls.slice(before), [null]);
+    f.reconnect();
+    await new Promise(setImmediate);
+    release(page([row('chat:2', 'Reconnected')]));
+    await painting;
+    for (let n = 0; n < 4; n += 1) await new Promise(setImmediate);
+    assert.deepEqual(f.calls.slice(before), [null, null], 'the true reconnect must not join a request from before it');
 });

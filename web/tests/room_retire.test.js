@@ -256,7 +256,7 @@ test('a room away hears only its own sends\' custody; back, it hears everything 
     heard.length = 0;
     socket.resume();
     assert.equal(count(), 6);
-    assert.deepEqual(heard, [['open', { previouslyConnected: true }]], 'back: one catch-up, as after a reconnect');
+    assert.deepEqual(heard, [['open', { previouslyConnected: true, resumed: true }]], 'back: one catch-up shared with the return paint');
     ws.emit('log', { data: {} });
     assert.equal(heard.at(-1)[0], 'log');
     assert.equal(socket.send({ type: 'chat' }).status, 'sent');

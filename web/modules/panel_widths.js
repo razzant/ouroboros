@@ -27,6 +27,9 @@ export function sidebarMinWidth(root = globalThis.document?.documentElement) {
 export function setupResizablePanels(prefs) {
     const root = document.documentElement;
     const sidebarMin = sidebarMinWidth(root);
+    const sidebar = document.getElementById('primary-sidebar');
+    // CSS owns the room's remaining width, including when the window narrows without a handle drag.
+    const sidebarMax = () => (sidebar && parseFloat(getComputedStyle(sidebar).maxWidth)) || Infinity;
     let persistTimer = 0;
     const persist = (patch) => {
         clearTimeout(persistTimer);
@@ -36,10 +39,12 @@ export function setupResizablePanels(prefs) {
             }).catch(() => {});
         }, 400);
     };
-    // A width stored before the minimum (or by a smaller handle) is raised to it once, and the raised width is kept.
+    const clamp = (width, min, max) => Math.max(min, Math.min(max, width));
+    // Restore within the same bounds as a drag; keep a corrected preference once.
     const storedSidebar = Number(prefs?.sidebar_width) || 0;
-    if (storedSidebar > 0) root.style.setProperty('--sidebar-width', `${Math.max(sidebarMin, storedSidebar)}px`);
-    if (storedSidebar > 0 && storedSidebar < sidebarMin) persist({ sidebar_width: sidebarMin });
+    const restoredSidebar = clamp(storedSidebar, sidebarMin, sidebarMax());
+    if (storedSidebar > 0) root.style.setProperty('--sidebar-width', `${restoredSidebar}px`);
+    if (storedSidebar > 0 && storedSidebar !== restoredSidebar) persist({ sidebar_width: restoredSidebar });
     if (Number(prefs?.project_panel_width) > 0) root.style.setProperty('--project-panel-width', `${prefs.project_panel_width}px`);
     const makeHandle = (target, cssVar, dir, prefKey, min, max) => {
         if (!target) return;
@@ -63,7 +68,7 @@ export function setupResizablePanels(prefs) {
         handle.addEventListener('pointermove', (e) => {
             if (!dragging) return;
             const delta = dir === 'right' ? (e.clientX - startX) : (startX - e.clientX);
-            wanted = Math.max(min, Math.min(max, Math.round(startW + delta)));
+            wanted = clamp(Math.round(startW + delta), min, max());
             if (!frame) frame = requestAnimationFrame(apply);
         });
         const end = (e) => {
@@ -83,6 +88,6 @@ export function setupResizablePanels(prefs) {
         handle.addEventListener('pointerup', end);
         handle.addEventListener('pointercancel', end);
     };
-    makeHandle(document.getElementById('primary-sidebar'), '--sidebar-width', 'right', 'sidebar_width', sidebarMin, 560);
-    makeHandle(document.getElementById('project-panel'), '--project-panel-width', 'left', 'project_panel_width', 320, 1100);
+    makeHandle(sidebar, '--sidebar-width', 'right', 'sidebar_width', sidebarMin, sidebarMax);
+    makeHandle(document.getElementById('project-panel'), '--project-panel-width', 'left', 'project_panel_width', 320, () => 1100);
 }

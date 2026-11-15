@@ -25,7 +25,9 @@ PROBE = """() => {
     probe.sample = row => {
         const r = row.getBoundingClientRect();
         if (!(r.width > 0 && r.height > 0)) return;
-        const kids = [...row.children].filter(n => n.getBoundingClientRect().width > 0 && getComputedStyle(n).display !== 'none');
+        // Latest stands outside the flow, in the reserved end pad or above the phone's line.
+        const kids = [...row.children].filter(n => n.getBoundingClientRect().width > 0 && getComputedStyle(n).display !== 'none'
+            && !n.matches('.chat-scroll-bottom-btn'));
         if (!kids.length) return;
         const boxes = kids.map(n => n.getBoundingClientRect()), css = getComputedStyle(row);
         probe.samples.push({

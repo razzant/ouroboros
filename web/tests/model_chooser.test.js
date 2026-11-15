@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { matchingModelOptions, modelChooserHtml, modelOptions } from '../modules/model_chooser.js';
 
@@ -30,4 +31,9 @@ test('the supplying-program footer closes the hidden popup outside the selectabl
     assert.match(html, /role="group" aria-label="Supplying program"/);
     assert.match(html, /hidden><\/div><\/div><span class="ui-field-help" data-model-custom/);
     assert.equal((html.match(/data-model-footer/g) || []).length, 1);
+});
+
+test('the chooser positions against the input and protects its labelled field', () => {
+    const source = readFileSync(new URL('../modules/model_chooser.js', import.meta.url), 'utf8');
+    assert.match(source, /bindPopoverPosition\(popup, \{ anchor: input, field: input\.closest\('\.ui-field'\) \|\| input \}\)/);
 });

@@ -415,7 +415,7 @@ def resolve_pending_result_review(drive_root: Any, task_id: str, record_id: str)
 # facts those readers take, of two mappings the one key they read. Never the row's answer, traces or evidence.
 _CARD_FACTS = ("task_id", "parent_task_id", "root_task_id", "status", "task_terminal_status", "reason_code",
                "reason_detail", "artifact_status", "review_status", "task_completion", "cancel_origin",
-               "terminal_origin", "terminal_plan_review_open", "delegated_runs_unreconciled")
+               "terminal_origin", "finalization_recovery", "terminal_plan_review_open", "delegated_runs_unreconciled")
 _CARD_PARTS = {"artifact_bundle": "status", "root_phase_checkpoint": "post_task_synthesis"}
 _RESOLUTION_FACTS = ("pending_finish_resolved", "late_verdict")
 

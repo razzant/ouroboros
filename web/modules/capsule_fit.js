@@ -41,7 +41,7 @@ export function createCapsuleFit({ el, row, kind, strip, segs, padMax = SEG_PAD.
         let width = 0;
         let count = 0;
         for (const node of Array.from(row.children || [])) {
-            if (node === el || node.hidden) continue;
+            if (node === el || node.hidden || node.classList?.contains?.('chat-scroll-bottom-btn')) continue;
             const own = widthOf(node);
             if (own > 0) { width += own + gap; count += 1; }
         }

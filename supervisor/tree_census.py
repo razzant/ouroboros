@@ -194,8 +194,9 @@ def member_result_loader(custody_root: Any, tree: str) -> Any:
 
 
 # The ONE explicit purpose that may leave an independent review out of the
-# writer census: the owner's Continue. Every other consumer (Pause, Resume,
-# money, sleep, restart) keeps the whole observation.
+# writer census: the owner's Continue. Every other consumer (Pause, money,
+# sleep, restart) keeps the whole observation; an exact Resume reads it whole
+# and leaves the same reviews out of its own wait (``budget_resume``).
 CONTINUE_PURPOSE = "owner_continue"
 
 

@@ -73,6 +73,7 @@ def _open(ui, size, scheme="light", agent="grok"):
         await document.fonts.ready;
         for (let i = 0; i < 8; i++) await new Promise(requestAnimationFrame);
     }""")
+    page.wait_for_function("() => !document.querySelector('#page-settings [data-settings-arrive]')")
     return page
 
 

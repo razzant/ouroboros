@@ -894,6 +894,7 @@ def recover_saved_running(rows: Iterable[Dict[str, Any]], drive_root: Any, *,
     from supervisor.events_budget import HOLD_SAVED_WORK, hold_budget_row
     from supervisor.task_admission import SEED_RETURN, seed_returnable
     from ouroboros.work_stop import retain_consumed_selection
+    from ouroboros.working_checkpoint import registered_answer
 
     returning = set((transaction or {}).get("return_ids") or [])
     rows = [row for row in rows or () if isinstance(row, dict)]
@@ -919,7 +920,8 @@ def recover_saved_running(rows: Iterable[Dict[str, Any]], drive_root: Any, *,
             seed = task.pop(SEED_RETURN, None)  # the stop's own decision (``retain_saved_running``)
             if not _recovery_source(root, task, attempt, source_cause):
                 if not (auto and isinstance(seed, dict) and seed_returnable(root, task, attempt)):
-                    refused[task_id] = "no_usable_recovery_source"
+                    basis = registered_answer(root, task_id).get("basis")  # the host holds its answer, or cannot tell
+                    refused[task_id] = f"answer_{basis}" if basis else "no_usable_recovery_source"
                     continue
                 task[SEED_RETURN] = {**seed, "cause": source_cause}
             from ouroboros.model_wait import fold_running_clock, stamp_execution_handoff
