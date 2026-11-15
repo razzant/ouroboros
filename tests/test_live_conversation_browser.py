@@ -442,6 +442,7 @@ def test_project_call_names_and_reveals_its_room_across_navigation(subscription_
         page.locator('.nav-project-row[data-project-id="voice-room"]').click()
     room = "#panel-pchat-voice-room"
     start_call(page, room)
+    retained = page.locator(room).element_handle()
     assert posts[-1]["chat_id"] == 71
     page.locator('[data-nav-page="settings"]').click()
     mark = page.locator(".call-mark")
@@ -463,7 +464,10 @@ def test_project_call_names_and_reveals_its_room_across_navigation(subscription_
     page.locator('[data-nav-page="settings"]').click()
     mark.locator(".call-mark-end").click()
     assert_ended(page)
-    expect(page.locator(room)).to_have_count(0)
+    # DESIGN.md:3353–3356: a visited room "stays whole and quiet for its return" until teardown or deletion.
+    expect(page.locator(room)).to_have_count(1)
+    expect(page.locator(room)).to_be_hidden()
+    assert retained.evaluate("el => el.isConnected"), "ending the call keeps the same visited room"
     expect(mark).to_be_hidden()
     assert not subscription_ui["errors"]
 

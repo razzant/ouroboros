@@ -192,7 +192,12 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_wr
             assert float(_settings(data_dir)[KEY]) == 12.75
             _costs(page, url)
             expect(allowance).to_have_value("12.75")
-            expect(page.locator("#costs-allowance-spend")).to_contain_text("of $12.75 in the last 24 hours")
+            # DESIGN.md:2729–2735: the card names the window, then separates spend, limit and room;
+            # a limit set with cents keeps cents. The old spend sentence is now the omissions line.
+            expect(page.locator("#costs-meter-consciousness")).to_have_text("Consciousness, last 24 hours")
+            expect(page.locator("#costs-allowance-spent")).to_have_text("$0.00")
+            expect(page.locator("#costs-allowance-of")).to_have_text("of $12.75")
+            expect(page.locator("#costs-allowance-left")).to_have_text("$12.75 left")
             # Another unrelated row keeps the decimal too.
             stored = _write_unrelated(page, data_dir, posts, 11)
             assert float(stored[KEY]) == 12.75, stored
@@ -210,7 +215,12 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_wr
             door.click()
             expect(page.locator(FIELD)).to_be_visible(timeout=30_000)
             expect(allowance).to_have_value("12.75")
-            expect(page.locator("#dashboard-panel-costs > .dashboard-back")).to_have_text("Settings")
+            # Owner 14.11: a door from Settings keeps its return in the destination's header on every layout.
+            _shoot(page, f"{engine}-settings-costs-return")
+            back = page.locator('#page-dashboard > .app-page-header').get_by_role('button', name='Back to Settings', exact=True)
+            expect(back).to_be_visible()
+            back.click()
+            expect(home).to_be_visible()
             assert page.errors.unexpected() == [], page.errors.report()
         finally:
             browser.close()

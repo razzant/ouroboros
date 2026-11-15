@@ -217,9 +217,25 @@ def test_action_row_preserves_empty_notes_and_hidden_primary_buttons(updates_ui)
     expect(button).to_be_visible()
     expect(note).to_be_empty()
     expect(note).not_to_be_visible()
-    # The one next action stands at the headline's end (the tab body's hero), whatever the meta lines say.
-    row_box, action_box = row.bounding_box(), button.bounding_box()
-    assert abs(action_box["x"] + action_box["width"] - row_box["x"] - row_box["width"]) <= 1
+    # DESIGN.md:3208: "components adapt to their own box". Beside the section list, this pane is narrow:
+    # Updates puts its action under the words, at their start. A wide pane keeps it at the headline's end.
+    placements = []
+    for width, wide in ((1100, False), (1440, True), (1100, False)):
+        page.set_viewport_size({"width": width, "height": 750})
+        rw.settle_frames(page)
+        measured = facts(page)
+        assert (measured["paneWidth"] > 42 * measured["rootEm"]) == wide, measured
+        row_box, action_box = row.bounding_box(), button.bounding_box()
+        if wide:
+            assert abs(action_box["x"] + action_box["width"] - row_box["x"] - row_box["width"]) <= 1
+        else:
+            assert abs(action_box["x"] - row_box["x"]) <= 1
+            assert action_box["y"] >= measured["meta"]["bottom"] - 1
+        expect(note).to_be_empty()
+        expect(note).not_to_be_visible()
+        placements.append({"width": width, "pane": measured["paneWidth"], "row": row_box, "action": action_box})
+        capture(page, f"action-placement-{width}")
+    evidence("action-placement", placements)
     capture(page, "action-with-empty-note")
     # An unmanaged checkout can still say when it was checked, without offering
     # an update. Layout must not revive that hidden primary action.
@@ -313,8 +329,13 @@ def test_samples_are_rows_of_their_last_attempt_and_survive_refreshes(updates_ui
 
     # A refresh, a tab switch and a changed record repaint in place; both disclosures stay as the owner left them.
     refresh(page, transport, reads)
+    # DESIGN.md:3289–3295: on a phone a section's page stands under Back; return to its list to choose another.
+    if not page.locator('[data-dashboard-tab="logs"]').is_visible():
+        page.locator('#page-dashboard').get_by_role('button', name='Back to Dashboard', exact=True).click()
     page.click('[data-dashboard-tab="logs"]')
     count = len(reads)
+    if not page.locator('[data-dashboard-tab="updates"]').is_visible():
+        page.locator('#page-dashboard').get_by_role('button', name='Back to Dashboard', exact=True).click()
     page.click('[data-dashboard-tab="updates"]')
     wait_reads(page, reads, count + 1)
     kept = facts(page)
