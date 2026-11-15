@@ -263,6 +263,14 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     assert page.locator('#page-settings [data-settings-lead-name]').inner_text() == "Consciousness model"
     back.click()
     page.wait_for_selector("#dashboard-panel-consciousness.active")
+    model_row = page.locator(row("consciousness-model"))
+    assert model_row.evaluate("el => el === document.activeElement && getComputedStyle(el).outlineStyle === 'none'")
+    model_row.click()
+    page.locator('[data-settings-page="models/role/consciousness"]:visible').wait_for()
+    page.keyboard.press("Escape")
+    page.wait_for_selector("#dashboard-panel-consciousness.active")
+    assert model_row.evaluate("""el => el === document.activeElement && el.dataset.returnFocus === 'keyboard'
+        && getComputedStyle(el).outlineStyle === 'solid'""")
     # Spending a jump through the map keeps the child named and its own parent reachable.
     page.click(row("consciousness-model"))
     page.locator('[data-settings-page="models/role/consciousness"]:visible').wait_for()

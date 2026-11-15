@@ -12265,5 +12265,5 @@ html[data-telegram-fullscreen="active"] #page-dashboard .logs-filters:not([hidde
 html[data-telegram-fullscreen="active"] #page-dashboard .logs-kinds { margin: 0; padding: 0; max-width: 100%; }
 
 /* A return always restores focus. Its input determines whether that cursor is visible. */
-[data-return-focus="keyboard"]:focus { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
-[data-return-focus="pointer"]:focus { outline: none; }
+:root [data-return-focus="keyboard"]:focus { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+:root [data-return-focus="pointer"]:focus { outline: none; }

@@ -3,6 +3,7 @@
 // and the Logs list keep their own place and are left alone.
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 
 import { initPagePlaces } from '../modules/page_places.js';
 
@@ -126,6 +127,10 @@ test('a returned row takes focus for either input, but only a keyboard return pa
         assert.equal(attrs.has('data-return-focus'), false);
     }
     assert.equal(focused, 3);
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.match(css, /:root \[data-return-focus="pointer"\]:focus \{ outline: none; \}/,
+        'the return input overrides button.settings-row:focus-visible as well as section rows');
+    assert.match(css, /:root \[data-return-focus="keyboard"\]:focus \{ outline: 2px solid var\(--focus-accent-border\)/);
 });
 
 test('Logs owns its actual scroller; generic page restoration still restores other boxes', () => {
