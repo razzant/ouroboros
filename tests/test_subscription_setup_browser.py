@@ -96,7 +96,8 @@ def subscription_ui():
         path = urlparse(request.url).path
         reads.append(request.url)
         body = {}
-        if request.method == "POST":
+        draft_catalog = path == "/api/onboarding/model-catalog"  # the wizard's catalog read: a POST answered below, as a GET's
+        if request.method == "POST" and not draft_catalog:
             payload = request.post_data_json or {}
             posts.append((path, payload))
             if path == "/api/onboarding/subagents/preview":
@@ -169,12 +170,13 @@ def subscription_ui():
         elif path == "/api/review-pool":
             body = backend.get("review_pool", {"pool": [], "excluded": [], "last_executions": {},
                                                "row_costs": {}, "config_error": "", "migration": None})
-        elif path in ("/api/model-catalog", "/api/onboarding/model-catalog"):
-            # The wizard reads the catalog of its draft's access (POST); Settings reads the saved one (GET). A draft
-            # with no connected subscription lists none of the fixture's subscription models.
-            draft_only = path.endswith("/onboarding/model-catalog") and not fixture["status"]["profiles"]["profiles"]
+        elif path == "/api/model-catalog" or draft_catalog:
+            # The wizard reads the catalog of its draft's access (POST); Settings reads the saved one (GET). A fresh
+            # install has no engine rows before an account is connected, so a draft with none lists none of the
+            # fixture's subscription models (a provisioned engine would still answer its rows).
+            unconnected = draft_catalog and not fixture["status"]["profiles"]["profiles"]
             body = copy.deepcopy(backend.get("catalog_response", {"items": [], "model_sources": [], "errors": []}
-                                             if draft_only else fixture["catalog"]))
+                                             if unconnected else fixture["catalog"]))
             if backend.get("catalog_status"):
                 route.fulfill(status=backend["catalog_status"], content_type="application/json", body=json.dumps(body))
                 return

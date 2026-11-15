@@ -269,6 +269,9 @@ function reviewCost(row, state, { line = false } = {}) {
     return line ? reviewMoneyLine(row, cost, modelTariff(row, state)) : reviewCostText(row, cost);
 }
 const modelTariff = (row, state) => modelTariffText(row, state.modelCatalog || {}, state.processingPreference);
+// The delivery line shows the tariff: composed words the translation overlay leaves alone.
+const tariffMark = (row, state) => (modelTariff(row, state) && reviewCost(row, state, { line: true }) === modelTariff(row, state)
+    ? ' data-i18n-fmt="model price"' : '');
 
 function reviewException(row) {
     return row.review_eligible === true && row.enabled === false ? 'Switched off, so not in the review pool.' : '';
@@ -383,7 +386,7 @@ function reviewDeliveryHtml(row, state, index) {
                         { value: 'native', label: 'Reads the work itself' },
                         { value: 'packet', label: 'Packet — for models without tool calling' },
                     ] }], row.delivery === 'packet' ? 'packet' : 'native')}</label>
-                    <span class="ui-field-help" data-subagent-delivery-cost>${escapeHtml(reviewCost(row, state, { line: true }))}</span>
+                    <span class="ui-field-help" data-subagent-delivery-cost${tariffMark(row, state)}>${escapeHtml(reviewCost(row, state, { line: true }))}</span>
                 </div>`;
 }
 
@@ -469,7 +472,7 @@ function rowDetailsHtml(row, state, rowKey) {
                 <summary>Details &amp; history</summary>
                 <dl class="available-subagent-facts">
                     <div${reviewCost(row, state) ? '' : ' hidden'}><dt>Review cost</dt><dd data-subagent-review-facts>${escapeHtml(reviewCost(row, state))}</dd></div>
-                    ${fact('Model tariff', modelTariff(row, state), 'data-subagent-tariff')}
+                    <div${modelTariff(row, state) ? '' : ' hidden'} data-subagent-tariff><dt>Model tariff</dt><dd data-i18n-fmt="model price">${escapeHtml(modelTariff(row, state))}</dd></div>
                     ${fact('Last review', review, 'data-subagent-last-review')}
                     ${fact('Last task run', task, 'data-subagent-last-task')}
                     ${session ? '' : fact('Stored as', stored, 'data-subagent-stored')}
@@ -825,6 +828,7 @@ export function createAvailableSubagentsEditor({
             if (delivery) delivery.hidden = row.review_eligible !== true;
             const money = el.querySelector('[data-subagent-delivery-cost]');
             if (money) money.textContent = reviewCost(row, state, { line: true });
+            if (money?.dataset) { if (tariffMark(row, state)) money.dataset.i18nFmt = 'model price'; else delete money.dataset.i18nFmt; }
             const measured = el.querySelector('[data-subagent-review-facts]');
             if (measured) measured.textContent = reviewCost(row, state);
             if (measured?.parentElement) measured.parentElement.hidden = !reviewCost(row, state);

@@ -108,6 +108,8 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
     let modelCatalog = {};
     let catalogRequest = null;
     let catalogRead = '';  // the access whose catalog was read whole
+    let catalogAsked = '';  // the access of the last read begun
+    let askedDraft = null;  // the draft the owner last asked the model catalog for (the Models step, Retry)
     let disposed = false;
     let disposeLanguage = null;
     let catalogGeneration = 0;
@@ -133,6 +135,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         return onboardingSettingsDraft({ state, providerFields: PROVIDER_FIELDS,
             budgetFields: BUDGET_FIELDS, modelSlots: MODEL_SLOTS, trim });
     }
+    const openedDraft = draftSettings();  // the access the install had saved when the wizard opened
 
     function adoptModelSettings(settings = {}) {
         MODEL_SLOTS.forEach((slot) => {
@@ -163,15 +166,25 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
 
     // The catalog of the draft's access: its keys, rows and local model, which only this draft knows, and the
     // connected subscriptions. `once` skips an access already read whole (the Models step asks it when it opens).
-    function refreshModelSources({ once = false } = {}) {
-        const draft = draftSettings();
-        const access = JSON.stringify([state.agentsConnected, draft.OUROBOROS_CONNECTIONS, draft.OPENAI_BASE_URL,
+    // A read the owner did not ask for (`asked: false`: a preview's answer, a changed account) sends the draft he
+    // last asked with, or the access the wizard opened with: a key or an address still being typed leaves this
+    // page only when the Models step opens or on Retry.
+    function refreshModelSources({ once = false, asked = true } = {}) {
+        const draft = asked ? draftSettings() : askedDraft || openedDraft;
+        const access = JSON.stringify([state.agentsConnected, draft.OUROBOROS_CONNECTIONS,
             PROVIDER_FIELDS.map((field) => draft[field.settingKey]), draft.LOCAL_MODEL_SOURCE, draft.LOCAL_MODEL_FILENAME, draft.LOCAL_MODEL_CONTEXT_LENGTH]);
         if (catalogRequest?.access === access) return catalogRequest.promise;
-        if (once && access === catalogRead) return Promise.resolve();
+        if (!asked && access === catalogAsked) return Promise.resolve();
+        // A read in flight for another access is no longer wanted, also when this access needs none.
         catalogRequest?.abort();
         const generation = ++catalogGeneration;
-        if (!state.agentsConnected.length && !hasApiAccess() && !hasLocalModel()) { catalogRequest = null; return Promise.resolve(); }
+        catalogRequest = null;
+        if ((once && access === catalogRead) || (!state.agentsConnected.length && !hasApiAccess() && !hasLocalModel())) {
+            syncCurrentStepActionState();
+            return Promise.resolve();
+        }
+        if (asked) askedDraft = draft;
+        catalogAsked = access;
         const request = catalogRequest = { access, ...readDraftCatalog(draft) };
         request.promise = request.promise.then((catalog) => {
             if (generation !== catalogGeneration) return;
@@ -199,10 +212,8 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
             if (JSON.stringify(draftSettings()) !== previous) loadModelRoles();
         }
         if (Array.isArray(response.items)) adoptModelCatalog(response);
-        if (state.agentsConnected.length) void refreshModelSources();
+        if (state.agentsConnected.length) void refreshModelSources({ asked: false });
         state.spendGaps = response.known_spend_gaps;  // what this draft's limits cannot count, said on the limits step
-        const gaps = document.getElementById('budget-gaps');
-        if (gaps) Object.assign(gaps, { textContent: spendGapsWords(state.spendGaps), hidden: !spendGapsWords(state.spendGaps) });
         refreshSummary();
     }
 
@@ -290,9 +301,14 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         return Boolean(validateCurrentStep());
     }
 
+    // The limits step's line: what the last answered preview of this draft could not count; none while a preview failed.
+    const gapsShown = () => spendGapsWords(agentsStep?.previewError ? [] : state.spendGaps);
+
     function syncCurrentStepActionState() {
         const next = document.getElementById('next-btn');
         if (next) next.disabled = nextButtonShouldBeDisabled();
+        const gaps = document.getElementById('budget-gaps');
+        if (gaps) Object.assign(gaps, { textContent: gapsShown(), hidden: !gapsShown() });
         const quick = document.getElementById('quick-start-btn');
         if (quick) quick.hidden = !hasModelSubscription();
         const error = root.querySelector('.wizard-error');
@@ -740,7 +756,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                 isVisible: () => ['accounts', 'models', 'budget'].includes(state.currentStep),
                 onChange: (connected) => {
                     state.agentsConnected = connected;
-                    void refreshModelSources();
+                    void refreshModelSources({ asked: false });
                     syncCurrentStepActionState();
                 },
                 previewPayload: draftSettings,
@@ -910,7 +926,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                         </div>
                     `).join('')}
                 </div>
-                <div id="budget-gaps" class="field-note ui-field-help" data-i18n-fmt="spend gaps"${spendGapsWords(state.spendGaps) ? '' : ' hidden'}>${escapeHtml(spendGapsWords(state.spendGaps))}</div>
+                <div id="budget-gaps" class="field-note ui-field-help" data-i18n-fmt="spend gaps"${gapsShown() ? '' : ' hidden'}>${escapeHtml(gapsShown())}</div>
                 ${budgetNote ? `<div id="budget-fields-help" class="field-note ui-field-help">${escapeHtml(budgetNote)}</div>` : ''}
                 </details>
             `;

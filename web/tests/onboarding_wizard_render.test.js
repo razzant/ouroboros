@@ -813,11 +813,12 @@ test('Summary says what an exhausted subscription quota does, with and without a
         else if (String(url) === '/api/claudexor/status') body = subscription.status;
         else if (String(url) === '/api/onboarding/subagents/preview') {
             const payload = JSON.parse(init.body);
-            body = { ok: true, available_subagents: { enabled: true, items: [] },
+            body = { ok: true, available_subagents: { enabled: true, items: [] }, known_spend_gaps: gaps,
                 model_settings: Object.fromEntries(Object.keys(subscription.preview.model_settings).map((key) => [key, payload[key]])) };
         }
         return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
     };
+    let gaps = [];
     const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
     // Walk from Accounts (where the connected subscription is observed) to Summary.
     const summary = async (query, fallbackModel, mainModel = 'claudexor::codex=gpt-test', openrouterKey = '') => {
@@ -847,6 +848,47 @@ test('Summary says what an exhausted subscription quota does, with and without a
     const api = await summary('quota-api-main', '', 'google/gemini-3.8-flash', 'sk-or-v1-test-not-a-secret');
     assert.match(api.html, /Total API budget/, 'the walk reached Summary');
     assert.doesNotMatch(api.html, /When quota runs out/);
+    // The limits step says what its limits cannot count, as the preview of this draft names it (Dashboard › Costs'
+    // line); with nothing named the line is hidden.
+    assert.match(api.budget, /id="budget-gaps"[^>]* hidden><\/div>/);
+    gaps = ['Light', 'Web search'];
+    const uncounted = await summary('limits-not-counted', '', 'google/gemini-3.8-flash', 'sk-or-v1-test-not-a-secret');
+    assert.match(uncounted.budget, /id="budget-gaps"[^>]*data-i18n-fmt="spend gaps">Not counted: Light, Web search \(price unknown\)\.<\/div>/);
+});
+
+// A key or an address being typed leaves the page only when the owner asks for the list (the Models step, Retry). A
+// read he did not ask for (an account connecting meanwhile) sends the access the wizard opened with.
+test('an account that connects while a key is being typed never sends that key; opening Models does', async () => {
+    const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
+    let connected = false;
+    const reads = [];
+    const fetch = async (url, init = {}) => {
+        let body = {};
+        if (String(url) === '/api/onboarding/model-catalog') {
+            reads.push(JSON.parse(init.body).OPENROUTER_API_KEY);
+            body = subscription.catalog;
+        } else if (String(url) === '/api/claudexor/status') {
+            body = { ...subscription.status, profiles: { ...subscription.status.profiles,
+                profiles: connected ? subscription.status.profiles.profiles : [] } };
+        } else if (String(url) === '/api/onboarding/subagents/preview') {
+            body = { ok: true, model_settings: {}, available_subagents: { enabled: true, items: [] } };
+        }
+        return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    };
+    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    await withWizard(BOOTSTRAP, 'typed-key-stays', async ({ doc }) => {
+        await settle();
+        const key = doc.getElementById('openrouter-key');
+        key.value = 'sk-or-v1-typed-not-a-secret';
+        key.fire('input');
+        connected = true;
+        await (await import('../modules/claudexor_status_store.js')).claudexorStatus.refresh();
+        await settle();
+        assert.deepEqual(reads, [''], 'the unasked read carries the access the wizard opened with');
+        doc.getElementById('next-btn').fire('click');   // Accounts → Models: the owner asks for the list
+        await settle();
+        assert.deepEqual(reads, ['', 'sk-or-v1-typed-not-a-secret']);
+    }, { fetch });
 });
 
 // Review R1 (C3): a model the local runtime serves is named Local in Summary, never by the cloud source its stored id implies.

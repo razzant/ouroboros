@@ -1229,7 +1229,7 @@ test('every card carries the Reviewer box and its Review cost; a marked API row 
     const plain = availableSubagentRowMarkup(apiRow(), QUIET_STATE, 0);
     assert.match(plain, /<label class="available-subagent-reviewer"><input class="ui-checkbox" type="checkbox" data-subagent-field="review_eligible" aria-label="Subagent 1 reviews"> Reviewer<\/label>/);
     assert.match(plain, /<div hidden><dt>Review cost<\/dt><dd data-subagent-review-facts><\/dd>/, 'nothing was measured or read: nothing is promised');
-    assert.match(plain, /<div hidden data-subagent-tariff><dt>Model tariff<\/dt><dd><\/dd>/, 'no catalog was read: no tariff');
+    assert.match(plain, /<div hidden data-subagent-tariff><dt>Model tariff<\/dt><dd data-i18n-fmt="model price"><\/dd>/, 'no catalog was read: no tariff');
     assert.match(plain, /data-subagent-delivery-field hidden>/, 'the delivery waits, rendered, for the mark');
 
     const marked = availableSubagentRowMarkup(apiRow({ review_eligible: true }), QUIET_STATE, 0);
@@ -1241,10 +1241,13 @@ test('every card carries the Reviewer box and its Review cost; a marked API row 
     const priced = { ...QUIET_STATE, modelCatalog: { read_state: 'ok', items: [
         { value: 'openai/gpt-5.6-luna', price: { input: 5, output: 25 } }, { value: 'vendor/unpriced' }] } };
     const tariffed = availableSubagentRowMarkup(apiRow({ review_eligible: true }), priced, 0);
-    assert.match(tariffed, /data-subagent-delivery-cost>\$5 in \/ \$25 out per 1M tokens<\/span>/);
-    assert.match(tariffed, /<div data-subagent-tariff><dt>Model tariff<\/dt><dd>\$5 in \/ \$25 out per 1M tokens<\/dd>/);
+    // The tariff is words composed through the translation seam: its two places are marked, so the overlay leaves
+    // them alone instead of reporting each price as a missing string.
+    assert.match(tariffed, /data-subagent-delivery-cost data-i18n-fmt="model price">\$5 in \/ \$25 out per 1M tokens<\/span>/);
+    assert.match(tariffed, /<div data-subagent-tariff><dt>Model tariff<\/dt><dd data-i18n-fmt="model price">\$5 in \/ \$25 out per 1M tokens<\/dd>/);
     assert.match(availableSubagentRowMarkup(apiRow({ review_eligible: true, route: { kind: ROUTE_KIND_API_MODEL, target_id: 'vendor/unpriced' } }), priced, 0),
-        /data-subagent-delivery-cost>Price unknown<\/span>[\s\S]*<div data-subagent-tariff><dt>Model tariff<\/dt><dd>Price unknown<\/dd>/);
+        /data-subagent-delivery-cost data-i18n-fmt="model price">Price unknown<\/span>[\s\S]*<dd data-i18n-fmt="model price">Price unknown<\/dd>/);
+    assert.match(marked, /data-subagent-delivery-cost><\/span>/, 'a line that is not a tariff carries no mark');
     assert.match(availableSubagentRowMarkup(apiRow({ review_eligible: true, delivery: 'packet' }), QUIET_STATE, 0),
         /<option value="packet" selected>Packet — for models without tool calling<\/option>/);
     // Effort left to Auto reviews at the top of the chat range, and its select says so.
@@ -1308,9 +1311,16 @@ test('a reviewer says its model\'s published tariff until a review is measured, 
     assert.equal(modelTariffText(api, catalog), tariff);
     assert.equal(modelTariffText(apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'vendor/unpriced' } }), catalog), 'Price unknown');
     assert.equal(modelTariffText(apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'vendor/unlisted' } }), catalog), 'Price unknown');
-    // Nothing is said where the figure would not be the row's: an unread or failed catalog, a session or subscription
+    // A row its own source listed keeps its tariff when another source of the read failed (a partial catalog, or a
+    // failed read that kept the earlier rows); a model no read listed is unknown only once the catalog is read whole.
+    for (const state of ['partial', 'transport']) {
+        assert.equal(modelTariffText(api, { ...catalog, read_state: state }), tariff);
+        assert.equal(modelTariffText(apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'vendor/unpriced' } }), { ...catalog, read_state: state }), 'Price unknown');
+        assert.equal(modelTariffText(apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'vendor/unlisted' } }), { ...catalog, read_state: state }), '');
+    }
+    // Nothing is said where the figure would not be the row's: an unread catalog, a session or subscription
     // seat, a local model, a Fast or Economy row (the row's own tier, else the install's).
-    for (const [row, read, tier] of [[api, {}, ''], [api, { ...catalog, read_state: 'transport' }, ''], [sessionRow(), catalog, ''],
+    for (const [row, read, tier] of [[api, {}, ''], [sessionRow(), catalog, ''],
         [apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'claudexor::codex-models=gpt' } }), catalog, ''],
         [apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'local-file.gguf' } }), catalog, ''],
         [apiRow({ processing_preference: 'fast' }), catalog, ''], [api, catalog, 'economy']]) {

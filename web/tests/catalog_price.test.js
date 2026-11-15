@@ -379,6 +379,48 @@ test('while Main or the default tier is on Fast or Economy the composer list nam
     assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'fast', OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'standard' } }), '');
 });
 
+test('a local role says the local model\'s window, never the window of a cloud id its slot still holds', async () => {
+    const wide = { ...OPUS, context_window: 1000000 };
+    const local = { provider_id: 'local', id: 'qwen.gguf', value: 'qwen.gguf (local)', name: 'qwen.gguf', use_local: true, context_window: 64000 };
+    const said = async (settings, items) => {
+        const { editor, host } = await mainRole(settings);
+        editor.adoptCatalog({ model_sources: [], items });
+        await new Promise((resolve) => setImmediate(resolve));
+        const text = host.querySelector('[data-model-role-group="main"] [data-model-role-status]').textContent;
+        editor.destroy();
+        return text;
+    };
+    assert.equal(await said({ USE_LOCAL_MAIN: true }, [wide, local]), 'Uses the local runtime. 64K window.');
+    assert.equal(await said({ USE_LOCAL_MAIN: true }, [wide]), 'Uses the local runtime.', 'no local row: no window is claimed');
+    assert.equal(await said({}, [wide, local]), '$4 in / $20 out per 1M tokens · 1M window', 'the same slot on its cloud route');
+});
+
+test('the window a route is sized with is said before the one its catalog publishes', async () => {
+    const { apiClient } = await import('../modules/api_client.js');
+    const { contract } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url), 'utf8'));
+    const { doc } = domDouble();
+    const host = doc.createElement('div');
+    host.id = 'roles';
+    doc.body.append(host);
+    Object.defineProperty(host, 'innerHTML', { set(html) { host.replaceChildren(); appendHtml(host, html); }, get: () => '' });
+    const preview = apiClient.responseLimitPreview;
+    apiClient.responseLimitPreview = async () => ({ route: { model: OPUS.value }, window_ack: false,
+        response_limit: { route_fp: 'fp', max_output_tokens: 0, source: 'auto' }, window: { tokens: 400000, source: 'provider_metadata' } });
+    try {
+        const editor = createModelRolesEditor({ hostId: 'roles', doc, showContext: true,
+            store: { snapshot: {}, accountsKnown: false, subscribe: () => () => {}, refresh: async () => {}, read: async () => {} },
+            catalogFetch: async () => ({ items: [], model_sources: [] }) });
+        editor.load({ OPENROUTER_API_KEY: 'k', OUROBOROS_MODEL: OPUS.value }, contract);
+        editor.adoptCatalog({ model_sources: [], items: [{ ...OPUS, context_window: 1000000 }] });
+        for (let turn = 0; turn < 6; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(host.querySelector('[data-model-role-group="main"] [data-model-role-status]').textContent,
+            '$4 in / $20 out per 1M tokens · 400K window');
+        editor.destroy();
+    } finally {
+        apiClient.responseLimitPreview = preview;
+    }
+});
+
 test('a role on a model stored with its local label says it runs locally, never Price unknown', async () => {
     const { editor, host } = await mainRole({ OUROBOROS_MODEL_VISION: 'qwen2.5-vl (local)' });
     assert.equal(host.querySelector('[data-model-role-group="vision"] [data-model-role-status]').textContent, 'Uses the local runtime.');

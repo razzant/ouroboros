@@ -203,7 +203,7 @@ An empty review pool is an explicit choice, not a production recommendation. Set
 
 `POST /api/onboarding/subagents/preview` takes the same body and returns, without saving, the agent roster and the model settings setup would produce, and `known_spend_gaps`: the names of what the draft's limits cannot count (roles on a route with no known price; empty when each has one).
 
-`POST /api/onboarding/model-catalog` takes the same body and answers as `GET /api/model-catalog` (§14) for the access the draft names: its keys, connection rows and local model, which no saved file holds yet. It reads only those access fields, so it answers while Main is blank, and it saves and records nothing. A connection whose kept key the draft would send to another address is not asked: it is an `errors` row with `stage: "kept_key"`.
+`POST /api/onboarding/model-catalog` takes the same body and answers as `GET /api/model-catalog` (§14) for the access the draft names: its keys, connection rows and local model, which no saved file holds yet. It reads only those access fields, so it answers while Main is blank, and it saves and records nothing. A connection whose kept key the draft would send to another address, or to the same address with certificate checking turned off, is not asked: it is an `errors` row with `stage: "kept_key"`. A key typed in the draft goes where the draft says.
 
 ### Completing setup in a host window
 

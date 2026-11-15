@@ -400,8 +400,10 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             // window this route is sized with when the server knows one, else the one its catalog publishes; an
             // unknown window is omitted. Where it comes from stays in the fold below.
             const routed = !local && !keyNote(row) && !note && Boolean(row.model);  // the line is about the model's own route
+            // A local role may keep a cloud id in its slot: its window is the local model's own row, never that id's.
+            const listed = local ? catalog.items.find((item) => item.use_local) : currentItem(row);
             const size = local || (routed && !(sourceId(row) && unlisted)) ? windowWords(row.windowPreview?.window?.tokens
-                || currentItem(row)?.max_context_window || currentItem(row)?.context_window) : '';
+                || listed?.max_context_window || listed?.context_window) : '';
             const sized = size && fmt('{window} window', { window: size });
             status.textContent = !sized ? plain : routed && !sourceId(row) ? `${price || translateString(PRICE_UNKNOWN)} · ${sized}`
                 : `${translateString(plain)} ${sized}.`;

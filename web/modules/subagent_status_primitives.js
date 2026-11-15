@@ -6,6 +6,7 @@
 // claim.
 
 import { accountRows, familyLabel, nextUpAccount } from './claudexor_status_store.js';
+import { translateString } from './i18n.js';
 import {
     ROUTE_KIND_AGENT_SESSION,
     describeExecutionEvidence,
@@ -337,15 +338,17 @@ export function rowTaskRun(row, state) {
 }
 
 /** The published tariff of an API row's model, in a role line's words (USD per 1M tokens: a rate, never an estimate
- * of one review): `Price unknown` where the catalog was read and states none for it; '' for a session or
- * subscription row, a local model, a Fast or Economy row (its calls pay another rate) and while the catalog is
- * not read whole (the section says that once). `catalog` is the editor's merged catalog. */
+ * of one review): `Price unknown` where its source listed the model, or the whole catalog was read, and no price is
+ * stated; '' for a session or subscription row, a local model, a Fast or Economy row (its calls pay another rate)
+ * and for a model no read listed while the catalog is not read whole (the section says that once). The words are
+ * composed through the translation seam. `catalog` is the editor's merged catalog. */
 export function modelTariffText(row, catalog = {}, processingPreference = '') {
     const target = String(row?.route?.target_id || '').trim();
     const item = (Array.isArray(catalog.items) ? catalog.items : []).find((entry) => entry.value === target);
-    if (!target || routeSupportsAccount(row.route) || catalog.read_state !== 'ok' || item?.use_local
-        || / \(local\)$/.test(target) || tierPriced(row.processing_preference || processingPreference)) return '';
-    return priceWords(item?.price, { unit: true }) || PRICE_UNKNOWN;
+    if (!target || routeSupportsAccount(row.route) || item?.use_local || / \(local\)$/.test(target)
+        || tierPriced(row.processing_preference || processingPreference)) return '';
+    // A row its own source listed is known even when another source of the read failed (a partial catalog).
+    return priceWords(item?.price, { unit: true }) || (item || catalog.read_state === 'ok' ? translateString(PRICE_UNKNOWN) : '');
 }
 
 /** The one money line beside a marked API row's delivery: what one review cost once reviews were measured (or its
@@ -354,7 +357,7 @@ export function modelTariffText(row, catalog = {}, processingPreference = '') {
 export function reviewMoneyLine(row, cost, tariff) {
     const measured = reviewCostText(row, cost);
     if (cost && cost.basis !== 'unknown') return measured;
-    return tariff && tariff !== PRICE_UNKNOWN ? tariff : measured || tariff;
+    return tariff && tariff !== translateString(PRICE_UNKNOWN) ? tariff : measured || tariff;
 }
 
 /** What one review by this row actually cost — the median of its measured reviews with their count

@@ -170,8 +170,8 @@ export async function confirmMainChange({ next, previous, census = null, dialog 
             else if (lists.followers === 0) count.textContent = 'No running work follows Main now.';
             else if (lists.followers === 1) count.textContent = '1 running work follows Main now.';
             else fmtInto(count, '{n} running works follow Main now.', { n: lists.followers });
-            const cache = line(translateString(MAIN_CACHE_NOTE) + (next.cacheWrite ? ` ${next.cacheWrite}` : ''));
-            cache.dataset.i18nFmt = 'main cache note';
+            const cache = line(next.cacheWrite ? `${translateString(MAIN_CACHE_NOTE)} ${next.cacheWrite}` : MAIN_CACHE_NOTE);
+            if (next.cacheWrite) cache.dataset.i18nFmt = 'main cache note';  // composed: the overlay leaves it alone
             container.append(row, facts, line(`${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`), cache, count);
             const sub = (text) => { const made = line(text); made.className = 'chat-model-sheet-sub'; return made; };
             const section = (entries, heading) => {

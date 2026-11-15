@@ -548,6 +548,19 @@ def test_a_price_states_the_cache_write_figure_of_the_installs_cache_tier_or_non
     assert ("cache_write" in price) is (expected is not None), "absent, never null"
 
 
+@pytest.mark.parametrize("stored, tier", [("1h", "1h"), ("5m", "5m"), ("1H", "1h"), ("", "1h"), ("weekly", "1h")])
+def test_the_catalog_reads_the_cache_tier_as_the_wire_resolves_it(monkeypatch, stored, tier):
+    """The figure shown is the tier's the install sends (`settings_scales.resolve_prompt_cache_ttl`: lower-cased, an
+    unknown or absent value is the shipped default), never the raw text of the setting."""
+    from ouroboros.config import SETTINGS_DEFAULTS
+
+    assert SETTINGS_DEFAULTS["OUROBOROS_PROMPT_CACHE_TTL"] == "1h"
+    seen = []
+    monkeypatch.setattr(model_catalog_api, "_connection_loader", lambda kind, target, record, cache_ttl="": seen.append(cache_ttl))
+    model_catalog_api._provider_specs({"OPENROUTER_API_KEY": "or-key", "OUROBOROS_PROMPT_CACHE_TTL": stored})
+    assert seen == [tier]
+
+
 def test_an_openrouter_row_shows_the_window_its_catalog_publishes():
     """Display only, beside the price (`context_window`): sizing reads its own evidence, never a catalog row."""
     rows = _openrouter_items([{"id": "vendor/wide", "context_length": 1000000}, {"id": "vendor/unsized"},
@@ -630,6 +643,35 @@ def test_a_draft_read_sends_a_kept_key_only_where_it_was_saved_for(monkeypatch, 
     monkeypatch.setattr(model_catalog_api, "load_settings", lambda: dict(saved))
     asyncio.run(model_catalog_api.api_model_catalog(None))
     assert asked == [("openai-compatible", "sk-kept-compatible-key-123456", "https://saved.example/v1", True)]
+
+
+def test_a_draft_read_binds_a_kept_key_to_its_own_saved_row_or_pair(monkeypatch, tmp_path):
+    """The binding is the kept key's own saved row or pair, whatever serves today (Provider Test prepares the same):
+    a draft that only switches a saved connection on, or clears the dedicated compatible pair to use the saved legacy
+    one, moved nothing and is asked; the same rows at another address are still refused."""
+    from ouroboros.gateway.secret_rows import mask_connections
+
+    row = {"kind": "openai-compatible", "name": "lab", "api_key": "sk-kept-lab-key-1234567890",
+           "base_url": "https://lab.example/v1", "enabled": False}
+    saved = {"OUROBOROS_CONNECTIONS": [row]}
+    [masked] = mask_connections([row])
+    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, {"OUROBOROS_CONNECTIONS": [{**masked, "enabled": True}]})
+    assert response.json()["errors"] == []
+    assert asked == [("openai-compatible", "sk-kept-lab-key-1234567890", "https://lab.example/v1", False)]
+    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, {"OUROBOROS_CONNECTIONS": [
+        {**masked, "enabled": True, "base_url": "https://elsewhere.example/v1"}]})
+    assert asked == [] and [error["stage"] for error in response.json()["errors"]] == ["kept_key"]
+    # A key typed into the row in this draft is its author's to send to the row's new address.
+    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, {"OUROBOROS_CONNECTIONS": [
+        {**masked, "enabled": True, "base_url": "https://elsewhere.example/v1", "api_key": "sk-typed-for-elsewhere-123456"}]})
+    assert asked == [("openai-compatible", "sk-typed-for-elsewhere-123456", "https://elsewhere.example/v1", False)]
+    assert response.json()["errors"] == []
+    # Both built-in compatible pairs saved; the draft clears the dedicated one and so reaches the legacy pair.
+    saved = {"OPENAI_COMPATIBLE_API_KEY": "sk-kept-dedicated-123456", "OPENAI_COMPATIBLE_BASE_URL": "https://dedicated.example/v1",
+             "OPENAI_API_KEY": "sk-kept-legacy-1234567890", "OPENAI_BASE_URL": "https://legacy.example/v1"}
+    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, {"OPENAI_COMPATIBLE_API_KEY": "", "OPENAI_COMPATIBLE_BASE_URL": ""})
+    assert response.json()["errors"] == [], response.json()["errors"]
+    assert [call[2] for call in asked] == ["https://legacy.example/v1"], "the pair the draft reaches, at its own saved address"
 
 
 def test_the_shown_price_is_the_catalog_row_fetch_openrouter_pricing_reads():

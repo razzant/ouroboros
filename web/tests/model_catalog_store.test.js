@@ -72,15 +72,38 @@ test('Settings\' own refresh feeds the store; the settings document\'s connectio
     assert.deepEqual(store.index().connections.map((entry) => [entry.id, entry.label, entry.enabled]), [['openai@old', 'OpenAI · Old', false]]);
 });
 
-test('another cache tier makes the held catalog stale: its cache-write prices are the old tier\'s', async () => {
+test('a cache-write price is said only for the cache tier its catalog was read under', async () => {
+    const { describeRoute } = await import('../modules/chat_model_routes.js');
+    const priced = (figure) => ({ items: [{ ...item('a/one'), price: { input: 4, output: 20, cache_write: figure } }] });
+    const said = (store) => describeRoute(store.index(), { model: 'a/one' }).cacheWrite;
     let reads = 0;
-    const store = createModelCatalogStore({ readCatalog: async () => { reads += 1; return { items: [item('a/one')] }; } });
+    let answer = () => priced(5);
+    const store = createModelCatalogStore({ readCatalog: async () => { reads += 1; return answer(); } });
     await store.read();
+    assert.equal(said(store), '', 'no settings document yet: no catalog price is said, this one included');
     store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m' });
     store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m', OUROBOROS_MODEL: 'a/one' });
     await store.read();
-    assert.equal(reads, 1, 'a settings document with the same tier leaves a fresh catalog alone');
+    assert.deepEqual([reads, said(store)], [1, 'Cache write: $5 per 1M tokens.'], 'the same tier leaves a fresh catalog alone');
+    // Another tier: the held figure is the old tier's, so it is unsaid at once, and a failed refresh never brings it back.
     store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
+    assert.equal(said(store), '');
+    answer = () => { throw new Error('offline'); };
     await store.read();
-    assert.equal(reads, 2);
+    assert.deepEqual([reads, said(store), store.status().failed], [2, '', true]);
+    answer = () => priced(8);
+    await store.read();
+    assert.deepEqual([reads, said(store)], [3, 'Cache write: $8 per 1M tokens.']);
+    // A read begun under one tier that answers after the setting moved is the old tier's: unsaid and still stale.
+    let release;
+    answer = () => new Promise((resolve) => { release = () => resolve(priced(5)); });
+    const late = store.read({ force: true });
+    await Promise.resolve();
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m' });
+    answer = () => priced(5);
+    release();
+    await late;
+    assert.equal(said(store), '', 'begun under 1h, landed under 5m');
+    await store.read();
+    assert.deepEqual([reads, said(store)], [5, 'Cache write: $5 per 1M tokens.']);
 });

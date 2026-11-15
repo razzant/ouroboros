@@ -38,22 +38,26 @@ async function fetchCatalog() {
 export function createModelCatalogStore({ readCatalog = fetchCatalog, readPreferences = () => apiClient.uiPreferences(),
     readSettings = () => apiClient.settings(), now = () => Date.now() } = {}) {
     const state = { catalog: null, readAt: 0, failed: false, reading: null, recents: [], recentsReading: null,
-        connections: null, connectionsReading: null, index: null, tiers: null, cacheTier: null };
+        connections: null, connectionsReading: null, index: null, tiers: null, cacheTier: null, catalogTier: null };
     const listeners = new Set();
     const notify = () => { state.index = null; listeners.forEach((listener) => listener()); };
 
-    function adopt(data) {
+    // `tier`: the cache tier known when this catalog's read began. Its cache-write prices are that tier's, so a
+    // catalog of another tier than the settings now name is stale at once, however late its answer came.
+    function adopt(data, tier = state.cacheTier) {
         state.catalog = mergeModelCatalog(state.catalog || {}, data);
-        state.readAt = now();
+        state.catalogTier = tier;
+        state.readAt = tier === state.cacheTier ? now() : 0;
         state.failed = false;
     }
 
     function read({ force = false } = {}) {
         if (state.reading) return state.reading;
         if (!force && state.catalog && !state.failed && now() - state.readAt < CATALOG_FRESH_MS) return Promise.resolve();
+        const tier = state.cacheTier;
         state.reading = (async () => {
             try {
-                adopt(await readCatalog());
+                adopt(await readCatalog(), tier);
             } catch (error) {
                 // A failed read keeps what an earlier one listed, and says so.
                 state.catalog = mergeModelCatalog(state.catalog || {}, { read_state: 'transport',
@@ -92,11 +96,13 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
         const fallback = String(settings?.[PROCESSING_PREFERENCE_KEY] || '');
         state.tiers = { main: tierPriced(String(roles?.main || fallback)), lead: tierPriced(fallback) };
         state.connectionsFailed = false;
-        // A row's cache-write figure is the one of the cache tier the catalog was read under: another tier makes
-        // the held catalog stale, so the next opened capsule reads it again.
+        // A row's cache-write figure is the one of the cache tier the catalog was read under. The first settings
+        // document names the tier a catalog read before it was read under; another tier later makes the held catalog
+        // stale (the next opened capsule reads it again) and its cache-write figure unsaid until then (`index`).
         const cacheTier = String(settings?.OUROBOROS_PROMPT_CACHE_TTL || '');
-        if (state.cacheTier !== null && state.cacheTier !== cacheTier) state.readAt = 0;
+        if (state.cacheTier === null && state.catalogTier === null) state.catalogTier = cacheTier;
         state.cacheTier = cacheTier;
+        if (state.catalog && state.catalogTier !== cacheTier) state.readAt = 0;
     }
 
     /** Whether a catalog price beside a model that `role` (`main`, `lead`) picks could be another tier's: so it is
@@ -125,7 +131,7 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
         /** The index of the catalog as last read (chat_model_routes.js), built once per change. It serves Main's
          *  capsule and its rooms' alike, so it names a catalog price only where Main and a lead both pay it. */
         index() { return state.index ||= buildModelIndex({ catalog: state.catalog || {}, connections: state.connections,
-            tierPriced: tierPricedFor('main') || tierPricedFor('lead') }); },
+            tierPriced: tierPricedFor('main') || tierPricedFor('lead'), cacheWriteKnown: state.catalogTier === state.cacheTier }); },
         tierPriced: tierPricedFor,
         recents: () => state.recents,
         /** `reading`: a read is in flight; `read`: one has answered; `failed`: the last one did not. */

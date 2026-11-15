@@ -295,7 +295,9 @@ def _provider_specs(
     from ouroboros.llm_routing import resolve_target
 
     rows = connection_rows(settings.get(CONNECTIONS_KEY))
-    cache_ttl = str(settings.get("OUROBOROS_PROMPT_CACHE_TTL") or "")  # the tier whose cache-write figure a row states
+    from ouroboros.settings_scales import resolve_prompt_cache_ttl
+
+    cache_ttl = resolve_prompt_cache_ttl(settings.get("OUROBOROS_PROMPT_CACHE_TTL") or "")  # the tier a row's cache-write figure is of
     specs = []
     for route in connection_routes(rows):
         kind, name = route.kind, route.connection
@@ -497,7 +499,33 @@ async def draft_catalog(saved: dict, draft: dict, typed: set) -> dict:
     no capability evidence. A connection whose kept secret the draft would send somewhere it was not saved for is
     not asked: its reason is its error row (``_saved_secret_moved``; ``typed`` is what the draft's author typed)."""
     subscription = await asyncio.to_thread(_subscription_model_catalog)
-    return await catalog_payload(draft, subscription, refused=lambda source_id: _saved_secret_moved(source_id, saved, draft, typed))
+    return await catalog_payload(draft, subscription, refused=lambda source_id: _saved_secret_moved(
+        source_id, *_kept_binding(source_id, saved, draft), typed))
+
+
+def _kept_binding(source_id: str, saved: dict, draft: dict) -> tuple[dict, dict]:
+    """The saved and draft settings ``_saved_secret_moved`` compares for one connection of a draft, prepared as
+    Provider Test prepares them: the kept key's binding is its own saved row or pair, whatever serves today. A saved
+    row counts as switched on (a draft may only switch it on), and the built-in compatible connection is read as
+    the one pair the draft reaches, so the other pair's saved address is never taken for this key's."""
+    from ouroboros.llm_routing import resolve_target
+
+    route = parse_model_route(f"{source_id}::")
+    own = (route.kind, route.connection or BUILTIN_CONNECTION)
+    saved = {**saved, CONNECTIONS_KEY: [{**row, "enabled": True} if (row.get("kind"), row.get("name")) == own else row
+                                        for row in connection_rows(saved.get(CONNECTIONS_KEY))]}
+    if own != ("openai-compatible", BUILTIN_CONNECTION):
+        return saved, draft
+
+    def reached(settings: dict) -> tuple:
+        try:
+            target = resolve_target(f"{source_id}::probe", settings)
+        except Exception:
+            return ()
+        return str(target.get("api_key") or ""), str(target.get("base_url") or "")
+
+    pairs = [(_pair_test_settings(saved, {}, key), _pair_test_settings(draft, {}, key)) for key in _COMPATIBLE_PAIRS]
+    return next((pair for pair in pairs if reached(pair[1]) and reached(pair[1]) == reached(draft)), (saved, draft))
 
 
 async def catalog_payload(settings: dict, subscription: dict, *, refused: Callable[[str], str] | None = None) -> dict:
