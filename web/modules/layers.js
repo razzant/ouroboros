@@ -15,7 +15,7 @@
  * History: while at least one layer is open there is exactly one same-URL history entry (`pushState`), so Back
  * closes a layer before it leaves the app; `popstate` pops one layer; closing the last layer programmatically
  * consumes that entry (`history.back()`) and the popstate it causes is swallowed. The entry is reconciled once per
- * task, so "close the drawer, open the Project" never leaves a stray entry (the b2 mockup's finding). No URL is ever
+ * microtask, so "close the drawer, open the Project" never leaves a stray entry (the b2 mockup's finding). No URL is ever
  * written: the desktop shell and the Telegram mini app have no address bar.
  *
  * Inert: a modal layer makes the rest of the shell inert (siblings along its ancestor path inside the shell's
