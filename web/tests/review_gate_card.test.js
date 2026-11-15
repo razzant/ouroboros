@@ -51,7 +51,8 @@ test('a skill left on over its review is its own part: its own headline alone, o
     assert.equal(record.items.length, 1);
     assert.equal(record.items[0].headline, 'Review returned FAIL or no verdict');
     assert.ok(record.items[0].body.endsWith('\n3 skills were left on over review problems or no verdict. Latest: Skill "calendar" '
-        + 'was left on although no review passed its current files. (task child-7)'));
+        + 'was left on although no review passed its current files (task child-7).'));
+    assert.equal(record.items[0].bodyFormat, 'text', 'its lines stay lines and a quoted finding is never read as Markdown');
     assert.equal(record.items[0].sourceTs, '2026-11-15T10:03:00+00:00');
     const accepted = { groupId: 'work-2', items: [] };
     syncReviewGateItem(accepted, { review_overrides: { skills: skills(1, 'weather', 'no_review_verdict', 'author_finish', 'work-2') } });

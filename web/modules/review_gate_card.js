@@ -26,9 +26,9 @@ const SKILL_EITHER = 'over review problems or no verdict';
 // How it came to be left on, for Details: the mind's own switch, the end of its review, or its author's acceptance.
 const SKILL_WHY = { review_problems: 'its review found problems', no_review_verdict: 'no review passed its current files' };
 const SKILL_DOOR = {
-    turned_on: (name, why) => `Ouroboros turned on skill ${name} although ${why}.`,
-    after_review: (name, why) => `Skill ${name} was left on although ${why}.`,
-    author_finish: (name, why) => `Skill ${name} stayed on because Ouroboros accepted it as its author, although ${why}.`,
+    turned_on: (name, why) => `Ouroboros turned on skill ${name} although ${why}`,
+    after_review: (name, why) => `Skill ${name} was left on although ${why}`,
+    author_finish: (name, why) => `Skill ${name} stayed on because Ouroboros accepted it as its author, although ${why}`,
 };
 const skillName = (skills) => `"${skills?.latest?.skill || 'unknown'}"`;
 
@@ -80,12 +80,12 @@ export function syncReviewGateItem(record, detail) {
             + (String(landed.latest?.sha || '').slice(0, 12) || 'not recorded') : '',
         counted(skills) ? (skills.count === 1 ? '' : `${skills.count} skills were left on ${SKILL_EITHER}. Latest: `)
             + door(skillName(skills), SKILL_WHY[skills.latest?.reason] || 'no review passed its current files')
-            + (skills.latest?.task_id && skills.latest.task_id !== record.groupId ? ` (task ${skills.latest.task_id})` : '') : '',
+            + (skills.latest?.task_id && skills.latest.task_id !== record.groupId ? ` (task ${skills.latest.task_id})` : '') + '.' : '',
     ].filter(Boolean).join('\n');
     const headline = reviewed ? 'Review returned FAIL or no verdict' : 'Skill left on without a passed review';
     const key = `review-gate|${record.groupId}`;
     const item = {
-        phase: 'warn', headline, fullHeadline: headline, body, fullBody: body, receipt: true, count: 1,
+        phase: 'warn', headline, fullHeadline: headline, body, fullBody: body, bodyFormat: 'text', receipt: true, count: 1,
         ts: '', sourceTs: at, dedupeKey: key,
         lineKey: `review-gate-${String(record.groupId).replace(/[^A-Za-z0-9_-]/g, '-')}`,
     };
