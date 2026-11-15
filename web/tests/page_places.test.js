@@ -70,6 +70,27 @@ test('disposal releases a room\'s places even before another page restore', () =
     assert.equal(box.scrollTop, 0);
 });
 
+test('each return restores its own nested scrolls and pressed row, falling back when that row is removed', () => {
+    const w = world(), root = w.page('page-skills');
+    const box = w.box(root);
+    Object.assign(root, { matches: () => false, querySelectorAll: () => [box] });
+    Object.assign(box, { scrollHeight: 1000, clientHeight: 100, scrollWidth: 700, clientWidth: 100 });
+    let focused;
+    const anchor = (name) => ({ isConnected: true, parentElement: root, matches: () => true,
+        closest: () => null, getClientRects: () => [1], focus: () => { focused = name; } });
+    const row = anchor('pressed'), next = anchor('next');
+    root.boxes.add(row); row.nextElementSibling = next;
+    box.scrollTop = 320; box.scrollLeft = 80;
+    const restore = w.restore.capture(root, row);
+    box.scrollTop = 640; box.scrollLeft = 180;
+    const later = w.restore.capture(root, row);
+    restore();
+    assert.deepEqual([box.scrollTop, box.scrollLeft, focused], [320, 80, 'pressed']);
+    row.isConnected = false;
+    later();
+    assert.deepEqual([box.scrollTop, box.scrollLeft, focused], [640, 180, 'next']);
+});
+
 test('Logs owns its actual scroller; generic page restoration still restores other boxes', () => {
     const w = world(), tab = w.page('dashboard-panel-logs');
     // Match the real IDs against the production selector rather than pre-answering `matches` as owned.

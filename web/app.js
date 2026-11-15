@@ -91,6 +91,7 @@ window.__ouroWs = ws;
 const beforePageLeaveHandlers = [];
 let settingsControls = null;
 let dashboardControls = null;
+let logsControls = null;
 const navState = {
     activeProjectId: null,
     mobileDrawerOpen: false,
@@ -246,6 +247,8 @@ function capturePlace(opener) {
     const project = projectId ? { id: projectId, name: projectPanelTitle.textContent } : null;
     const root = project ? projectInstances.get(projectId)?.page : document.getElementById(`page-${page}`);
     const reading = restorePlaces.capture(root, opener);
+    const feed = page === 'chat' ? (project ? projectInstances.get(projectId) : mainChat)?.captureReading()
+        : state.dashboardActiveSubtab === 'logs' && page === 'dashboard' ? logsControls?.captureReading() : null;
     const label = project?.name || (settings ? 'Settings' : dashboard?.label || (page === 'chat' ? 'Main' : pageLabel(page)));
     return { key: project ? `project:${projectId}` : settings ? `settings:${state.settingsPath}`
         : dashboard ? `dashboard:${state.dashboardActiveSubtab}` : page, label, title: settings?.title || label,
@@ -260,7 +263,7 @@ function capturePlace(opener) {
                     rooms.show(projectId);
                 }
             } });
-            return reading;
+            return () => { reading(); feed?.(); };
         } };
 }
 
@@ -1390,7 +1393,7 @@ setInterval(function pollShownRoomState() { if (state.activePage === 'chat' && !
 setInterval(() => refreshProjectsNav(false), 20000);
 settingsControls = initSettings({ ...ctx, layers });
 dashboardControls = initDashboard({ ...ctx, layers });
-initLogs({ ...ctx, mount: document.getElementById('dashboard-panel-logs'), setControls: dashboardControls.setControls });
+logsControls = initLogs({ ...ctx, mount: document.getElementById('dashboard-panel-logs'), setControls: dashboardControls.setControls });
 evolution = initEvolution({ ...ctx, mount: document.getElementById('dashboard-panel-evolution') });
 initUpdates({ ...ctx, mount: document.getElementById('dashboard-panel-updates') });
 initActivity({ ...ctx, mount: document.getElementById('dashboard-panel-activity') });

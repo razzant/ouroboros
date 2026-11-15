@@ -789,4 +789,8 @@ export function initLogs({ ws, state, mount, setControls }) {
     document.addEventListener('visibilitychange', show);
     setControls?.('logs', page.querySelector('.logs-filters'));
     show();
+    return { captureReading() {
+        const saved = { pinned, anchor: pinned ? null : captureAnchor() };
+        return () => { pinned = saved.pinned; anchor = saved.anchor; settleSoon(); };
+    } };
 }

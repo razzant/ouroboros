@@ -42,6 +42,21 @@ test('explicit navigation clears approximate position and immediately republishe
     assert.equal(f.changed(), 2, 'the persistent notice clears without waiting for another history read');
 });
 
+test('a jump keeps its own reading intent when a later visit moves the same room', t => {
+    const f = fixture(t, false, null);
+    f.feed.scrollHeight = 5000;
+    const restore = f.reading.capture();
+    f.reading.cancel();
+    f.reading.top = 3500;
+    f.reading.request();
+    assert.equal(f.reading.target.scrollTop, 3500);
+    restore();
+    assert.equal(f.reading.target.scrollTop, 2400, 'the earlier jump keeps the earlier passage');
+    f.ready(); f.reading.position(); f.frame(); f.frame();
+    assert.equal(f.feed.scrollTop, 2400);
+    assert.equal(f.reading.pending, false);
+});
+
 test('an exact second positioning pass clears the earlier approximation', t => {
     let exact = false;
     const f = fixture(t, () => exact);

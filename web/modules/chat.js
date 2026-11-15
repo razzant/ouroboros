@@ -3505,7 +3505,7 @@ export function createChatInstance({
         showLatest,
         resume,
         ws,
-        // Shell exposure after its motion: present retained notice state, without fetching or scrolling.
+        captureReading: () => reading.capture(),
         showHistoryNotice: () => { if (!destroyed) historyControls.showNotice(); },
         refreshHistory: readReceipt.refresh,
         revealQuestion,
