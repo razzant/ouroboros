@@ -589,6 +589,11 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     };
     const WHERE = ['ouro:settings-page-shown'];
     const onPlaces = () => renew(['places']);
+    const onTools = (event) => {
+        if (hidden || !root.getClientRects?.().length) return;
+        facts.tools = event.detail;
+        paint();
+    };
     // A choice of this device made on a page beside the list (the theme's strip, a notification switch) is the list's
     // answer at once. Their own modules store it from the document's handlers (theme.js, notifications.js); the window
     // hears the same press after the document, so the choice is stored by then.
@@ -607,6 +612,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     searchEl.addEventListener('input', onType);
     globalThis.window?.addEventListener?.('ouro:settings-updated', onSaved);
     globalThis.window?.addEventListener?.(PLACES_CHANGED_EVENT, onPlaces);
+    globalThis.window?.addEventListener?.('ouro:mcp-status-updated', onTools);
     WHERE.forEach((type) => globalThis.window?.addEventListener?.(type, onWhere));
     const DEVICE_EVENTS = ['click', 'keydown', 'change'];
     DEVICE_EVENTS.forEach((type) => globalThis.window?.addEventListener?.(type, onDevice));
@@ -634,6 +640,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
             searchEl.removeEventListener('input', onType);
             globalThis.window?.removeEventListener?.('ouro:settings-updated', onSaved);
             globalThis.window?.removeEventListener?.(PLACES_CHANGED_EVENT, onPlaces);
+            globalThis.window?.removeEventListener?.('ouro:mcp-status-updated', onTools);
             WHERE.forEach((type) => globalThis.window?.removeEventListener?.(type, onWhere));
             DEVICE_EVENTS.forEach((type) => globalThis.window?.removeEventListener?.(type, onDevice));
         },
