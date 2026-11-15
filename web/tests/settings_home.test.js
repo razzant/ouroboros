@@ -442,11 +442,11 @@ test('the Accounts row counts the accounts beside every page: the home\'s passiv
     assert.deepEqual([answer(), passive()], ['4 accounts, 2 API keys', before]);
 });
 
-test('a door from a one-column Settings level keeps its history entry until the destination return is ready', async (t) => {
+test('a Settings door keeps one history entry from the list or a page, and a refused leave keeps its levels', async (t) => {
     const { createLayerStack } = await import('../modules/layers.js');
     const { registerSettingsPage } = await import('../modules/settings_pages.js');
-    for (const door of ['page:skills', 'dashboard:costs']) for (const allowed of [true, false]) {
-        await t.test(`${door}/${allowed}`, async (sub) => {
+    for (const origin of ['list', 'one-column', 'two-pane']) for (const door of ['page:skills', 'dashboard:costs']) for (const allowed of [true, false]) {
+        await t.test(`${origin}/${door}/${allowed}`, async (sub) => {
             const { env, content, state } = world(sub);
             const calls = [];
             const layers = createLayerStack({ win: null, doc: null, history: {
@@ -468,15 +468,19 @@ test('a door from a one-column Settings level keeps its history entry until the 
             const controls = initSettings({ state, ws: env.ws, layers, showPage, openDashboardTab: async () => {
                 if (await showPage('dashboard')) layers.push({ id: 'dashboard-back', page: true, focus: false });
             } });
-            content.querySelector('[data-settings-home]').getClientRects = () => [];
-            await controls.open('test-door-history');
+            const home = content.querySelector('[data-settings-home]');
+            home.getClientRects = () => origin === 'one-column' ? [] : [{}];
+            await controls.open(origin === 'list' ? '' : 'test-door-history');
             await settle();
-            assert.deepEqual(calls, ['push']);
-            await leave(door);
+            const hadLayer = origin === 'one-column';
+            assert.deepEqual(calls, hadLayer ? ['push'] : []);
+            if (origin === 'list') await home.fire('click', { target: home.querySelector(`[data-settings-open="${door}"]`) });
+            else await leave(door);
             await settle();
-            assert.deepEqual(calls, ['push'], 'the handover never consumes and replaces the existing history entry');
-            assert.equal(layers.size(), 1);
-            assert.equal(layers.top(), allowed ? (door === 'page:skills' ? 'settings-door-back' : 'dashboard-back') : 'settings-level-1');
+            assert.deepEqual(calls, hadLayer || allowed ? ['push'] : [], 'the handover never consumes and replaces an existing history entry');
+            assert.equal(layers.size(), hadLayer || allowed ? 1 : 0);
+            assert.equal(layers.top(), allowed ? (door === 'page:skills' ? 'settings-door-back' : 'dashboard-back') : hadLayer ? 'settings-level-1' : null);
+            assert.equal(state.activePage, allowed ? (door === 'page:skills' ? 'skills' : 'dashboard') : 'settings');
         });
     }
 });
