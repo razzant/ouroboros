@@ -79,8 +79,8 @@ Continue with it: 980×780 already on a 1366×768 laptop at 100 %, either deskto
 comes first is unproven: each lowers the minimum where it exceeds the area (WinForms otherwise restores it), then sizes
 the form to the area at most and moves it inside, in the form's own pixels. A form that fits is not touched, nothing is
 maximized or shown, and a failure is logged and never keeps the window from opening. The macOS and Linux window managers
-constrain a window to the visible frame themselves. All of it is read from pywebview's and WinForms' sources: the home
-test's native case runs only on Windows with pywebview and pythonnet installed.
+constrain a window to the visible frame themselves. The home test's native case measures a real window; it needs
+Windows with pywebview and pythonnet, which ``.github/workflows/desktop-window.yml`` provides (100 % scale only).
 """
 
 from __future__ import annotations
