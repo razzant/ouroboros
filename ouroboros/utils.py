@@ -355,7 +355,8 @@ def write_text_atomic(path: pathlib.Path, content: str, *, fsync: bool = False) 
 
 
 def machine_json(payload: Any) -> str:
-    """The one compact text of machine JSON state (files and the current store's task bodies)."""
+    """The one compact text of machine JSON: state files, the current store's task bodies and every row
+    ``append_jsonl`` writes (a row keeps each value; only the separators' spaces are not written)."""
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -581,8 +582,7 @@ def append_jsonl(
         raise TypeError(f"append_jsonl: path must be pathlib.Path, got {type(path).__name__}")
     assert_test_data_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(obj, ensure_ascii=False)
-    data = (line + "\n").encode("utf-8")
+    data = (machine_json(obj) + "\n").encode("utf-8")
 
     write_retries = 3
     retry_sleep_base_sec = 0.01

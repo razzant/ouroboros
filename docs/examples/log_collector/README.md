@@ -20,7 +20,9 @@ passport). The collector follows it:
 
 - `logs/events.jsonl`, `logs/tools.jsonl` and `logs/supervisor.jsonl` under the data root. Ouroboros
   renames each one into `archive/` at about 800 KB; the `device_and_inode` fingerprint lets Vector
-  finish the renamed file and pick up the new one.
+  finish the renamed file and pick up the new one. A row is one JSON object a line. New rows are written
+  without spaces after `,` and `:`; rows of earlier releases, and the few rows another writer adds, carry
+  them: parse a row, never match its text.
 - `archive/{events,tools,supervisor}_*.jsonl`, so that generations rotated while Vector was stopped are
   still read; a generation Vector already read keeps its inode and checkpoint. `ignore_older_secs`
   (one day) keeps the tail off older history: to ship that, run a one-time backfill over the archive.
