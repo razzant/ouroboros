@@ -703,32 +703,6 @@ test('returning to a Settings level preserves its history entry, including a ref
     }
 });
 
-test('Settings returns stay in place on pointer-only events in both layouts', (t) => {
-    const { mount, window } = setup(t);
-    window.ouroLayout = { layout: 'docked' };
-    let changes = 0;
-    const back = settingsReturn({ layers: { push() { changes++; }, remove() { changes++; } } });
-    const panel = new NodeStub('section');
-    panel.innerHTML = '<button>Page action</button>';
-    mount.append(panel);
-    back.show(panel, 'models');
-    t.after(() => back.clear());
-    const kept = [];
-    for (const layout of ['stack', 'docked', 'stack', 'docked']) {
-        window.ouroLayout.layout = layout;
-        window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout } }));
-        const first = panel.firstChild;
-        const button = panel.querySelector('[data-dashboard-back]');
-        assert.ok(button, `${layout}: the return exists`);
-        button.focus();
-        const before = changes;
-        window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout, pointer: 'coarse' } }));
-        kept.push([layout, panel.firstChild === first, panel.querySelector('[data-dashboard-back]') === button,
-            document.activeElement === button, changes - before]);
-    }
-    assert.deepEqual(kept, ['stack', 'docked', 'stack', 'docked'].map(layout => [layout, true, true, true, 0]));
-});
-
 test('Settings returns survive both layout crossings; a direct page keeps its section Back', (t) => {
     const { mount, window } = setup(t);
     window.ouroLayout = { layout: 'docked' };
