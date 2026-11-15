@@ -90,15 +90,18 @@ test('a cache-write figure is said only while the settings name the cache tier i
     store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
     assert.equal(said(store), '');
     // A refresh that fails, or that answers with that provider's error (a 200 whose rows the merge keeps), never
-    // brings the old figure back, and leaves the catalog stale.
+    // brings the old figure back.
     answer = () => { throw new Error('offline'); };
     await store.read();
     assert.deepEqual([reads, said(store), store.status().failed], [2, '', true]);
     answer = () => ({ items: [], errors: [{ provider_id: 'openrouter', error: 'timed out' }] });
     await store.read();
     assert.deepEqual([reads, said(store), store.catalog().items.length], [3, '', 1], 'the row is kept, its figure unsaid');
-    answer = () => priced(8, '1h');
+    // That read was begun under the tier the settings name, so the catalog keeps its usual life: no read per capsule.
     await store.read();
+    assert.equal(reads, 3);
+    answer = () => priced(8, '1h');
+    await store.read({ force: true });  // its next read: five minutes on, or Settings' own Refresh
     assert.deepEqual([reads, said(store)], [4, 'Cache write: $8 per 1M tokens.']);
     // A read begun under one tier that answers after the setting moved is the old tier's: unsaid and still stale.
     let release;
@@ -137,6 +140,24 @@ test('another cache tier makes a held catalog stale even where it states no figu
     store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
     await store.read();
     assert.equal(reads, 2);
+});
+
+test('a figure of a tier the settings do not name asks for one more read under that name, then the catalog keeps its life', async () => {
+    const { describeRoute } = await import('../modules/chat_model_routes.js');
+    let reads = 0;
+    const store = createModelCatalogStore({ readCatalog: async () => {
+        reads += 1;
+        return { items: [{ ...item('a/one'), price: { input: 4, output: 20, cache_write: 8, cache_write_ttl: '1h' } }] };
+    } });
+    await store.read();                                        // read before any settings document
+    // A hand-edited value the server resolves to its default: no answer will carry it.
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: 'weekly' });
+    await store.read();
+    assert.equal(reads, 2, 'the first document names another tier than the held figure: one more read');
+    await store.read();
+    await store.read();
+    assert.equal(reads, 2, 'and then none per opened capsule');
+    assert.equal(describeRoute(store.index(), { model: 'a/one' }).cacheWrite, '', 'the figure is never said under another name');
 });
 
 test('a first catalog read that began before any settings document says the figure of the tier that document names', async () => {

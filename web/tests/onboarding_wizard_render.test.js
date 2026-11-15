@@ -859,12 +859,14 @@ test('Summary says what an exhausted subscription quota does, with and without a
 // A read in flight for another access is no longer wanted once the draft is back at an access already read: its late
 // answer (the list of a key since replaced) must not land. This stand-in DOM paints no model list, so the test reads
 // what a landed answer changes on the wire: the wizard would hold the replaced key's list as the one read whole and
-// ask again for the first key's when Models reopens. No account is connected here, so nothing but the owner's own
-// asks reads the catalog. And the limits line speaks only for an answered preview.
-test('a replaced key\'s catalog never lands late, and a failed preview leaves the limits line unsaid', async () => {
+// ask again for the first key's when Models reopens. No account is connected until the end, so until then nothing
+// but the owner's own asks reads the catalog; the account that connects then reads with the key he last asked with.
+// And the limits line speaks only for an answered preview.
+test('a replaced key\'s catalog never lands late, the key asked again stays the asked one, and a failed preview leaves the limits line unsaid', async () => {
     const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
     const held = [];
     const reads = [];
+    let accounts = 0;
     let previewFails = false;
     const answer = (body, status = 200) => ({ ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body) });
     const listed = (id) => ({ items: [{ provider_id: 'openrouter', id, value: id, name: id }], model_sources: [], errors: [] });
@@ -876,7 +878,8 @@ test('a replaced key\'s catalog never lands late, and a failed preview leaves th
             return new Promise((resolve) => held.push(() => resolve(answer(listed('late/from-replaced-key')))));
         }
         if (String(url) === '/api/claudexor/status') {
-            return answer({ ...subscription.status, profiles: { ...subscription.status.profiles, profiles: [] } });
+            return answer({ ...subscription.status, profiles: { ...subscription.status.profiles,
+                profiles: subscription.status.profiles.profiles.slice(0, accounts) } });
         }
         if (String(url) === '/api/onboarding/subagents/preview') {
             return previewFails ? answer({ ok: false, error: 'Automatic assignments unavailable.', saved: false }, 503)
@@ -911,6 +914,13 @@ test('a replaced key\'s catalog never lands late, and a failed preview leaves th
         await click('next-btn');                                        // a forced preview that fails
         const line = doc.getElementById('budget-gaps');
         assert.deepEqual([line.hidden, line.textContent], [true, ''], 'no answered preview of this draft: nothing is claimed');
+        // Going back to the first key and opening Models reused its list, and was still his ask: an account that
+        // connects now reads with that key, not with the access the wizard opened with.
+        const asked = reads.length;
+        accounts = 1;
+        await (await import('../modules/claudexor_status_store.js')).claudexorStatus.refresh();
+        await settle();
+        assert.deepEqual(reads.slice(asked), ['first'], 'the unasked read sends the key he last asked with');
     }, { fetch });
 });
 

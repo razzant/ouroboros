@@ -564,6 +564,24 @@ def test_the_catalog_reads_the_cache_tier_as_the_wire_resolves_it(monkeypatch, s
     assert seen == [tier]
 
 
+@pytest.mark.parametrize("stored, figure, tier", [("5m", 5.0, "5m"), ("1h", 8.0, "1h"), ("default", 5.0, "default"), ("", 8.0, "1h")])
+def test_the_settings_cache_tier_reaches_the_row_through_the_real_loader(stored, figure, tier):
+    """From a settings document to a catalog row with nothing replaced but the network: the loader the catalog runs
+    hands the resolved tier to the price, so the row's figure is that tier's and says so (`cache_write_ttl`)."""
+    record = {"id": "vendor/model", "name": "Vendor: Model", "pricing": {
+        "prompt": "0.000004", "completion": "0.00002", "input_cache_write": "0.000005", "input_cache_write_1h": "0.000008"}}
+
+    class Client:
+        async def get(self, _url, **_kwargs):
+            return httpx.Response(200, json={"data": [record]}, request=httpx.Request("GET", _url))
+
+    [(source, loader)] = model_catalog_api._provider_specs(
+        {"OPENROUTER_API_KEY": "or-key", "OUROBOROS_PROMPT_CACHE_TTL": stored}, record_image_input=False)
+    [row] = asyncio.run(loader(Client()))
+    assert source == "openrouter"
+    assert (row["price"]["cache_write"], row["price"]["cache_write_ttl"]) == (figure, tier)
+
+
 def test_an_openrouter_row_shows_the_window_its_catalog_publishes():
     """Display only, beside the price (`context_window`): sizing reads its own evidence, never a catalog row."""
     rows = _openrouter_items([{"id": "vendor/wide", "context_length": 1000000}, {"id": "vendor/unsized"},

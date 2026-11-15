@@ -174,6 +174,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         const current = draftSettings();
         const draft = asked || own(current) === askedAccess ? current : openedDraft;
         const access = JSON.stringify([state.agentsConnected, own(draft)]);
+        if (asked) askedAccess = own(draft);  // his ask, also when its list is already read or in flight
         if (catalogRequest?.access === access) return catalogRequest.promise;
         // A read in flight for another access is no longer wanted, also when this access needs none.
         catalogRequest?.abort();
@@ -183,7 +184,6 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
             syncCurrentStepActionState();
             return Promise.resolve();
         }
-        if (asked) askedAccess = own(draft);
         const request = catalogRequest = { access, ...readDraftCatalog(draft) };
         request.promise = request.promise.then((catalog) => {
             if (generation !== catalogGeneration) return;

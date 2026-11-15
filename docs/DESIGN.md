@@ -489,7 +489,8 @@ own; then the name is that source. Closed, it always shows the room's choice, ne
 wears no mark for one; open, its hint adds one fact line when works here run on other
 models, over `Applies to new work here; running work keeps its model.` In the Main chat the capsule is Main itself:
 a pick asks first in the shared confirm dialog (what Main becomes and was, the route's facts,
-`model_roles.MAIN_FOLLOW_NOTE`, and in one line the pinned account and manual window it resets), then writes Main.
+`model_roles.MAIN_FOLLOW_NOTE`, `composer_model.MAIN_CACHE_NOTE` with the catalog's cache-write price where it
+states one (§7), and in one line the pinned account and manual window it resets), then writes Main.
 **The sheet also says what the change does not move**: how many running works follow Main (said as unknown, never as zero, while the list
 of works is incomplete), then what is not on Main now — running and queued works on other models, each with why
 (`you chose it`, `its room's model`, `Ouroboros switched to it`, `fallback since 02:14` in amber) and its room, and
