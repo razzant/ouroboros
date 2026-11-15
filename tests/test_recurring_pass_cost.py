@@ -800,6 +800,21 @@ def test_l1_memo_a_write_decodes_only_the_rows_that_moved(tmp_path, monkeypatch)
     write_task_result(root, child, "scheduled", launch_handoffs=other)
     monkeypatch.setattr(delegate_custody_current, "tree_task_ids", gap)
     assert tree_census.writer_facts(root, target).rows[joined]["launch_handoffs"] == {**other, **claim}
+    monkeypatch.setattr(delegate_custody_current, "tree_task_ids", tree_ids)
+    write_task_result(root, joined, "scheduled", launch_handoffs=other)
+    tree_census.writer_facts(root, target)
+    write_task_result(root, child, "scheduled", launch_handoffs=claim)
+    handed = []
+
+    def hand_off(r, tid, **kw):  # while the moved member is read, a kept one claims and the moved one returns
+        if tid == child and not handed:
+            handed.append(tid)
+            write_task_result(root, joined, "scheduled", launch_handoffs={**other, **claim})
+            write_task_result(root, child, "scheduled", launch_handoffs={})
+        return load(r, tid, **kw)
+    monkeypatch.setattr(task_results, "load_task_result", hand_off)
+    rows = tree_census.writer_facts(root, target).rows
+    assert handed and rows[joined]["launch_handoffs"] == {**other, **claim}, "a kept row is confirmed after the reads"
 
 
 def test_l1_memo_a_fact_no_revision_names_is_derived_fresh_on_a_hit(tmp_path, monkeypatch, meter):

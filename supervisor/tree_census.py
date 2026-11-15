@@ -97,7 +97,7 @@ def read_revision(root: pathlib.Path, tree: str, asked: Iterable[str] = ()) -> O
         if int(txn.meta("schema_version") or VERSION) < VERSION:
             return None
         # Each row by its store signature (``task_store.signature``): a row deleted and written again restarts
-        # its sequence, never its write time.
+        # its sequence, and a writer that stamps the time (``write_task_result``) moves the signature.
         rows = sorted((row["task_id"], (row["write_seq"], row["updated_at"])) for row in txn.conn.execute(
             "SELECT task_id,write_seq,updated_at FROM tasks WHERE root_task_id=? UNION ALL SELECT task_id,write_seq,"
             "updated_at FROM tasks INDEXED BY tasks_underived_root WHERE root_task_id IS NULL", (tree,)))
