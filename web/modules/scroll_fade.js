@@ -1,10 +1,22 @@
 /** Reveal in this scroller alone, clear of its actual CSS fade, including rows inside the box but under the mask.
  * The sheet owns the edge size; Settings and the Dashboard read that same token, never a second pixel constant. */
-export function revealPastFade(scroller, row) {
-    const style = scroller.ownerDocument?.defaultView?.getComputedStyle(scroller);
+const activeBindings = new WeakMap();
+
+export function revealPastFade(scroller, row, { axis = 'y' } = {}) {
+    const style = scroller.ownerDocument?.defaultView?.getComputedStyle?.(scroller);
     const edge = parseFloat(style?.getPropertyValue?.('--scroll-fade-edge')) || 0;
     const bounds = scroller.getBoundingClientRect();
     const rect = row.getBoundingClientRect();
+    if (axis === 'x') {
+        const start = scroller.scrollLeft > 1 ? edge : 0;
+        const end = scroller.scrollWidth - scroller.clientWidth - scroller.scrollLeft > 1 ? edge : 0;
+        const left = bounds.left + (scroller.clientLeft || 0) + (parseFloat(style?.scrollPaddingInlineStart) || 0) + start;
+        const right = bounds.left + (scroller.clientLeft || 0) + scroller.clientWidth
+            - (parseFloat(style?.scrollPaddingInlineEnd) || 0) - end;
+        if (rect.left < left) scroller.scrollLeft += rect.left - left;
+        else if (rect.right > right) scroller.scrollLeft += rect.right - right;
+        return;
+    }
     const above = scroller.scrollTop > 1 ? edge : 0;
     const below = scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop > 1 ? edge : 0;
     const top = bounds.top + (scroller.clientTop || 0) + (parseFloat(style?.scrollPaddingTop) || 0) + above;
@@ -18,6 +30,9 @@ export function revealPastFade(scroller, row) {
  * scrolls on its axis is also a named region the keyboard can focus and scroll, as a cut table or notice stack is
  * (WebKit gives no other way into a scroller with nothing focusable inside); hidden or short, it is no tab stop. */
 export function bindScrollFade(scroller, { axis = 'y', region = '' } = {}) {
+    if (!scroller) return () => {};
+    const existing = activeBindings.get(scroller);
+    if (existing) return existing;
     const win = scroller.ownerDocument?.defaultView;
     // Decoration only: a host without the observers (a unit-test DOM) keeps the strip undecorated.
     if (!win?.ResizeObserver || !win.MutationObserver || !win.requestAnimationFrame) return () => {};
@@ -37,6 +52,11 @@ export function bindScrollFade(scroller, { axis = 'y', region = '' } = {}) {
     const schedule = () => {
         if (!disposed && frame === null) frame = win.requestAnimationFrame(update);
     };
+    const onFocus = (event) => {
+        if (axis !== 'x' && event.target && scroller.contains?.(event.target)) revealPastFade(scroller, event.target);
+        else if (axis === 'x' && event.target && scroller.contains?.(event.target)) revealPastFade(scroller, event.target, { axis });
+        schedule();
+    };
     const resize = new win.ResizeObserver(schedule);
     const observeContent = () => {
         resize.disconnect();
@@ -49,14 +69,19 @@ export function bindScrollFade(scroller, { axis = 'y', region = '' } = {}) {
     const mutations = new win.MutationObserver(observeContent);
     mutations.observe(scroller, { childList: true });
     scroller.addEventListener('scroll', schedule, { passive: true });
+    scroller.addEventListener('focusin', onFocus);
     observeContent();
-    return () => {
+    const dispose = () => {
         disposed = true;
         if (frame !== null) win.cancelAnimationFrame(frame);
         resize.disconnect();
         mutations.disconnect();
         scroller.removeEventListener('scroll', schedule);
+        scroller.removeEventListener('focusin', onFocus);
+        if (activeBindings.get(scroller) === dispose) activeBindings.delete(scroller);
     };
+    activeBindings.set(scroller, dispose);
+    return dispose;
 }
 
 function markRegion(scroller, name) {
