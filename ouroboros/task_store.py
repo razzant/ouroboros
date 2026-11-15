@@ -365,12 +365,29 @@ def lineage_where(parent: str, root_id: str, *, direct_only: bool,
 
 
 def select_lineage(root: Any, parent: str, root_id: str, *, direct_only: bool = False,
-                   queue_members: Iterable[str] = ()) -> List[Dict[str, Any]]:
-    """The child-lookup candidates in ``task_id`` order (``lineage_where``); the Python projection decides the rest."""
+                   queue_members: Iterable[str] = (), unread: Iterable[str] = (),
+                   skipped: Optional[set] = None) -> List[Dict[str, Any]]:
+    """The child-lookup candidates in ``task_id`` order (``lineage_where``); the Python projection decides the rest.
+    A candidate named in UNREAD that no retry or supersession pointer redirects (its effective row is its own) is not
+    fetched: its id goes, in the same read, to SKIPPED, the set a caller passing UNREAD passes with it
+    (``task_status.find_child_tasks(settled=...)``)."""
     where, params = lineage_where(str(parent or ""), str(root_id or ""), direct_only=direct_only,
                                   queue_members=queue_members)
+    names = sorted({str(task_id) for task_id in unread if str(task_id or "")})
+    if names and skipped is None:
+        raise TypeError("select_lineage: UNREAD needs the SKIPPED set that receives the rows not fetched")
+    captured = None
     with open_store(root, write=False) as txn:
+        if names:
+            held = ("t.task_id IN (SELECT value FROM json_each(?)) AND t.superseded_by IS NULL "
+                    "AND t.retry_task_id IS NULL")
+            params = (*params, json.dumps(names))
+            captured = capture(txn.conn, "SELECT t.task_id FROM tasks AS t JOIN task_bodies AS b "
+                               f"ON b.task_id = t.task_id WHERE ({where}) AND {held}", params, ("task_id",))
+            where = f"({where}) AND NOT ({held})"
         fetched = _fetch(txn, where, params)
+    if captured is not None:
+        skipped.update(row[0] for row in captured.tuples())
     return _decode(fetched)
 
 
