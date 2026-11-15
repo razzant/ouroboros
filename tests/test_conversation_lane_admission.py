@@ -474,8 +474,8 @@ def test_a_damaged_cancel_intent_projection_holds_only_what_it_cannot_read(lane)
     assert free in handed and quarantined not in handed
     path.write_text("{not json", encoding="utf-8")
     assert quarantined in _dispatched_once_carriers_are_ready()  # an unreadable projection holds nothing
-    trail = (queue.DRIVE_ROOT / "logs" / "supervisor.jsonl").read_text(encoding="utf-8")
-    assert '"op": "active_intents"' in trail and '"op": "active_intents_row"' in trail  # both disclosed
+    trail = (queue.DRIVE_ROOT / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()
+    assert {"active_intents", "active_intents_row"} <= {json.loads(row).get("op") for row in trail}  # both disclosed
 
 
 def test_custody_publishes_only_its_own_row_never_a_resend_admitted_under_the_same_id(lane, monkeypatch):
