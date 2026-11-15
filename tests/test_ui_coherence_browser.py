@@ -254,7 +254,7 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
     page.wait_for_selector(".nav-project-row")
     sidebar = page.locator("#primary-sidebar")
     scrollers = """el => [...el.querySelectorAll('*')].filter(e =>
-        ['auto','scroll'].includes(getComputedStyle(e).overflowY) && e.scrollHeight>e.clientHeight+1).map(e=>e.className)"""
+        ['auto','scroll'].includes(getComputedStyle(e).overflowY) && e.scrollHeight>e.clientHeight+1).map(e=>e.id || e.className)"""
     main_top = lambda: page.locator(".nav-row-main").evaluate("el => el.getBoundingClientRect().top")
     # Three zones (DESIGN "Shell"): a window this short cannot hold the pinned zones, so the column itself is the
     # ONE scroller with Main sticky at its top, and the Projects list shows every row in flow (no inner scroller).
@@ -280,7 +280,8 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
     page.set_viewport_size({"width": 844, "height": 320})
     page.locator('[data-nav-page="dashboard"]').click()
     page.locator('[data-dashboard-tab="costs"]').click()
-    page.wait_for_function("document.querySelector('#cost-known-limit').textContent==='$25.00 of $200.00'")
+    page.wait_for_function(  # a whole-dollar limit reads in whole dollars (DESIGN "A limit's card")
+        "document.querySelector('#cost-spent').textContent==='$25' && document.querySelector('#cost-of').textContent==='of $200'")
     for width in [390, 641, 768, 981]:
         page.set_viewport_size({"width": width, "height": 600})
         if width <= 640:
