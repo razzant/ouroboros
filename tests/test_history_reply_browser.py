@@ -445,8 +445,7 @@ _SEARCH_LANDED = """([page, words]) => {
     const node = (""" + _SEARCH_ROW + """)([page, words]);
     if (!node) return null;
     const box = node.getBoundingClientRect(), feed = node.closest('.chat-messages, #chat-messages').getBoundingClientRect();
-    return {top: box.top, bottom: box.bottom, feedBottom: feed.bottom,
-            target: node.classList.contains('is-quote-target') || window.__lastQuoteTarget === node,
+    return {top: box.top, bottom: box.bottom, feedBottom: feed.bottom, target: window.__quoteMarks.includes(node),
             highlighted: CSS.highlights ? CSS.highlights.has('ouro-chat-find') : null};
 }"""
 
@@ -461,16 +460,29 @@ def _search_evidence(tmp_path):
 SEARCH_CATALOG = {"items": [], "errors": [], "model_sources": []}
 
 
-# The landing marks its row for 1.6 s (chat_reply.js TARGET_MS); a slow runner can read the row after the mark has
-# faded. The row the landing last marked is recorded as the mark is set, so a check after a settle still sees it.
+# A landing marks its row for 1.6 s (chat_reply.js markTarget, TARGET_MS), which a slow runner can outlast before it
+# reads the row. Every mark is recorded as it is set: the class arrives on the row and is still on when the change is
+# seen (a row marked again counts again). `_land` starts a landing's own record, so a check reads that landing's marks.
 _RECORD_QUOTE_TARGET = """() => {
-    window.__lastQuoteTarget = null;
+    window.__quoteMarks = [];
+    const marked = value => String(value || '').split(/\\s+/).includes('is-quote-target');
     new MutationObserver(changes => {
-        for (const change of changes) {
-            if (change.target.classList?.contains('is-quote-target')) window.__lastQuoteTarget = change.target;
+        const after = new Map();  // a row's class right after the change being read, newest change first
+        for (let index = changes.length - 1; index >= 0; index -= 1) {
+            const {target, oldValue} = changes[index];
+            const value = after.has(target) ? after.get(target) : target.getAttribute('class');
+            if (!marked(oldValue) && marked(value) && target.classList.contains('is-quote-target')
+                && !window.__quoteMarks.includes(target)) window.__quoteMarks.push(target);
+            after.set(target, oldValue);
         }
-    }).observe(document, {subtree: true, attributes: true, attributeFilter: ['class']});
+    }).observe(document, {subtree: true, attributes: true, attributeFilter: ['class'], attributeOldValue: true});
 }"""
+
+
+def _land(page, key="Enter"):
+    """Land on the search's current match with ``key``; the mark record holds what this landing marks alone."""
+    page.evaluate("() => { window.__quoteMarks = []; }")
+    page.keyboard.press(key)
 
 
 def _open_main_for_search(page, url):
@@ -562,7 +574,7 @@ def test_ctrl_f_finds_saved_messages_of_the_room_in_front_and_lands_on_them(dire
             assert "Ouroboros" in state["results"][0]["meta"] and "You" in state["results"][1]["meta"], state
             _search_both_themes(page, shots / f"{browser_engine}-main-results.png")
 
-            page.keyboard.press("Enter")  # the newest match, loaded already
+            _land(page)  # the newest match, loaded already
             landed = _search_landed(page, "#page-chat", "Remember the kingfisher photo?")
             assert landed["target"], landed
             state = _search_state(page, "#page-chat")
@@ -603,7 +615,7 @@ def test_ctrl_f_finds_saved_messages_of_the_room_in_front_and_lands_on_them(dire
             _wait_search_results(page, panel, 1)
             assert _search_state(page, panel)["results"][0]["snippet"] == (
                 f"{SEARCH_QUESTION} {SEARCH_QUESTION_STAKE} River {SEARCH_QUESTION_DETAIL} Weir")
-            page.keyboard.press("Enter")
+            _land(page)
             assert _search_landed(page, panel, SEARCH_QUESTION)["target"]
             # Its stake's label stands in a span of its own (mountQuizStake), the words a search leaves out.
             stake = page.evaluate("""feed => [...document.querySelectorAll(`${feed} .chat-quiz-stake`)].map(stake => ({
@@ -733,7 +745,7 @@ def test_an_answered_questions_owner_words_are_found_and_marked_where_its_card_d
             _wait_search_results(page, panel, 1)
             result = _search_state(page, panel)["results"][0]
             assert result["marks"] == ["heron upstream"] and SEARCH_OWNER_ANSWER in result["snippet"], result
-            page.keyboard.press("Enter")
+            _land(page)
             assert _search_landed(page, panel, SEARCH_QUESTION)["target"]
             page.wait_for_function("""feed => [...(CSS.highlights?.get('ouro-chat-find') || [])]
                 .some(range => document.querySelector(feed).contains(range.startContainer))""", arg=feed, timeout=30_000)
@@ -1055,7 +1067,7 @@ def test_a_long_reply_lands_on_its_matched_words_and_a_fold_says_where_they_are(
 
             page.fill("#page-chat .chat-find-input", "osprey")
             _wait_search_results(page, "#page-chat", 1)
-            page.keyboard.press("Enter")
+            _land(page)
             page.wait_for_function("() => document.querySelector('#page-chat .chat-find-note')?.textContent.includes('folded')",
                                    timeout=30_000)
             page.evaluate(_SETTLE_RESTORE_FRAMES)
@@ -1063,7 +1075,7 @@ def test_a_long_reply_lands_on_its_matched_words_and_a_fold_says_where_they_are(
             assert state["note"] == "The words are in the folded part of this answer: its Project shows it in full.", state
             folded = page.evaluate("""() => {
                 const row = [...document.querySelectorAll('#page-chat .chat-bubble.project-answer.is-folded')].find(
-                    node => node.classList.contains('is-quote-target') || window.__lastQuoteTarget === node);
+                    node => window.__quoteMarks.includes(node));
                 return row && {top: row.getBoundingClientRect().top, bottom: row.getBoundingClientRect().bottom};
             }""")
             assert folded and folded["top"] >= state["bottom"] - 1, (folded, state)
