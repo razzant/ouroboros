@@ -15,7 +15,7 @@
     "id": "test_degraded_outcomes_render_with_typed_severity",
     "path": "web/modules/log_events.js",
     "kind": "contains",
-    "value": "((lifecycle === 'failed' || execution === 'failed') && !unanswered)\n        || execution === 'infra_failed'"
+    "value": "((lifecycle === 'failed' && !deliveredAnswerCause(record) || execution === 'failed') && !unanswered)\n        || (execution === 'infra_failed' && !deliveredAnswerCause(record))"
   },
   {
     "id": "test_degraded_outcomes_render_with_typed_severity",

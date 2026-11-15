@@ -494,6 +494,17 @@ def final_answer_registered(root: Any, task_id: str) -> bool:
 REASON_FINALIZATION_INCOMPLETE = "finalization_incomplete"
 
 
+def delivered_answer_cause(record: Dict[str, Any], reason: str = REASON_FINALIZATION_INCOMPLETE) -> str:
+    """The display cause of an adopted answer (owner, 15.11): the model's own final that reached the chat before
+    its task's finalization was cut reads Done with this cause, the stored row keeps ``failed``/``infra_failed``.
+    ``""`` for every other record: a salvage receipt, an owed, given-up or unproven answer keep their word."""
+    recovery = record.get("finalization_recovery")
+    delivered = (reason == REASON_FINALIZATION_INCOMPLETE == str(record.get("reason_code") or "")
+                 and str(record.get("terminal_origin") or "") == "model_final"
+                 and isinstance(recovery, dict) and recovery.get("answer") == "delivered")
+    return f"{REASON_FINALIZATION_INCOMPLETE}_delivered" if delivered else ""
+
+
 def registered_answer(root: Any, task_id: str) -> Dict[str, Any]:
     """The answer the host already holds for this task, read from the outbox owner; ``{}`` when none.
 
