@@ -388,7 +388,7 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         page.locator('#page-costs').wait_for(state='visible')
         assert page.locator('#page-dashboard .app-page-header [data-dashboard-lead-name]').inner_text() == 'Costs'
         assert page.evaluate(BAR, 'dashboard')['height'] <= 56
-        page.locator('#page-dashboard .app-page-header [data-dashboard-list-back]').click()
+        page.locator('#page-dashboard .app-page-header [data-shell-back]').click()
         assert page.evaluate("document.activeElement?.dataset.dashboardTab === 'costs'")
         setup_browser.capture(page, f'bar-a-dashboard-{engine}-390')
         page.set_viewport_size({'width': 1280, 'height': 801})
@@ -664,7 +664,7 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
         assert page.locator('.files-editor').input_value() == 'Draft kept while the sidebar and window change width.'
         # Back to the list, where `+ File` is shown: the same nodes and a focused action keep their place through the
         # same two moves.
-        page.locator('[data-files-back]').click()
+        page.locator('[data-shell-back]').click()
         page.locator('#files-new-file').focus()
         widen_then_phone()
         assert kept('window.__filesNodes[1]')

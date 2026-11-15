@@ -87,7 +87,7 @@ def test_search_opens_a_row_where_it_lives_and_the_ask_line_leaves_a_draft(subsc
     level = settings_page(page, "skill-sources")
     level.wait_for(state="visible")
     page.wait_for_function("() => document.activeElement?.id === 'setting-OUROBOROS_CLAWHUB_REGISTRY_URL'")
-    assert level.locator(".settings-page-title").inner_text().strip() == "Skill sources"
+    assert page.locator("#page-settings [data-settings-lead-name]").inner_text().strip() == "Skill sources"
 
     # Words no setting has: the list says so, and the last line hands them to Ouroboros.
     open_settings(page, "")
@@ -137,10 +137,10 @@ def test_a_skill_form_opened_from_skills_leads_back_to_skills(subscription_ui):
     level = settings_page(page, "skill/gate_skill_7")
     level.wait_for(state="visible")
     level.locator("[data-extension-settings-form]").wait_for(state="visible")
-    back = level.locator("[data-settings-back]")
+    back = page.locator("#page-settings > .app-page-header [data-shell-back]")
     assert back.inner_text().strip() == "Skills" and back.get_attribute("aria-label") == "Back to Skills"
-    assert level.locator(".settings-page-title").inner_text().strip() == "Gate skill settings"
-    assert page.locator("#page-settings .app-page-header [data-mobile-nav-toggle]").is_visible()
+    assert page.locator("#page-settings [data-settings-lead-name]").inner_text().strip() == "Gate skill settings"
+    assert page.locator("#page-settings .app-page-header [data-mobile-nav-toggle]").is_hidden()
     assert page.locator("#extension-settings-sections").count() == 1
     # Only the opened skill's route was read for values.
     assert [path for path in _paths(ui) if path.startswith("api/extensions/")] == ["api/extensions/gate_skill_7/settings"]
@@ -149,9 +149,9 @@ def test_a_skill_form_opened_from_skills_leads_back_to_skills(subscription_ui):
     page.locator("#page-skills").wait_for(state="visible")
     assert top_path(page) == ""
     assert page.evaluate("() => document.querySelector('#page-skills .skills-scroll').scrollTop") == kept
-    # The first row's Back does the same.
+    # The named header Back does the same.
     open_form()
     level.wait_for(state="visible")
-    level.locator("[data-settings-back]").click()
+    page.locator("#page-settings > .app-page-header [data-shell-back]").click()
     page.locator("#page-skills").wait_for(state="visible")
     page.close()

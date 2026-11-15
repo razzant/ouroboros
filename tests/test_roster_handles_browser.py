@@ -94,7 +94,7 @@ def test_duplicate_is_an_unsaved_agent_whose_page_names_its_twin_until_the_engin
     form.locator("[data-subagent-duplicate]").click()
     copy = _level(page, "agents/new").locator("[data-subagent-row]")
     copy.wait_for(state="visible")
-    assert _level(page, "agents/new").locator("[data-settings-back]").inner_text().strip() == "gpt-test-0"
+    assert page.locator("#page-settings > .app-page-header [data-shell-back]").inner_text().strip() == "gpt-test-0"
     # Named on the page BEFORE any Save, tinted as an error, in the agents' names (a page has no numbers).
     meta = copy.locator("[data-subagent-meta]")
     assert "gpt-test-0 runs the same engine as gpt-test-0" in meta.text_content()

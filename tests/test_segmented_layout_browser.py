@@ -103,7 +103,7 @@ _TRUST = """async () => {
 
 def _go(page, place: str) -> None:
     toggle = page.locator("[data-mobile-nav-toggle]:visible")
-    while not toggle.count() and page.locator("#page-settings.active .app-page-header [data-settings-back]").is_visible():
+    while not toggle.count() and page.locator("#page-settings.active .app-page-header [data-shell-back]").is_visible():
         go_back(page)
     if toggle.count():
         toggle.first.click()
@@ -239,7 +239,7 @@ def test_every_strip_fits_its_row_and_shows_its_choice(direct_server_with_data, 
                 page.locator(STRIPS['OUROBOROS_CONSCIOUSNESS_AUTONOMY'][0]).wait_for(state='visible')
                 measure('OUROBOROS_CONSCIOUSNESS_AUTONOMY')
                 if not page.locator('[data-dashboard-tab="evolution"]').is_visible():
-                    page.locator('#page-dashboard [data-dashboard-list-back]').click()
+                    page.locator('#page-dashboard [data-shell-back]').click()
                 page.locator('[data-dashboard-tab="evolution"]').click()
                 page.locator(".evo-measures").wait_for(state="visible", timeout=30_000)
                 measure("evolution-measures")

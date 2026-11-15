@@ -60,7 +60,7 @@ def _page(browser, engine, *, width=1440, height=900, theme="light"):
 def _nav(page, target: str) -> None:
     """A page of the shell from its navigation, through the phone's drawer where the bar is narrow."""
     if page.evaluate("document.documentElement.dataset.layout === 'stack'"):
-        back = page.locator('.page.active [data-dashboard-list-back]:visible')
+        back = page.locator('.page.active [data-shell-back]:visible')
         if back.count():
             back.click()
     toggle = page.locator(".page.active [data-mobile-nav-toggle]:visible")

@@ -227,7 +227,7 @@ FILES_BACK_FACTS = """() => {
         editor: document.querySelector('.files-editor')?.value ?? null,
         unsaved: [...document.querySelectorAll('.files-entry')].filter(row => shown(row.querySelector('.files-entry-unsaved')))
             .map(row => row.dataset.path || ''),
-        focus: active?.closest?.('.files-entry')?.dataset.path ?? (active?.matches?.('[data-files-back]') ? 'back' : active?.tagName),
+        focus: active?.closest?.('.files-entry')?.dataset.path ?? (active?.matches?.('[data-shell-back]') ? 'back' : active?.tagName),
         telegramBack: window.Telegram?.WebApp?.BackButton?.isVisible ?? null};
 }"""
 

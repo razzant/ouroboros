@@ -597,7 +597,7 @@ def test_catalog_settings_save_and_client_devices(subscription_ui, monkeypatch, 
     # then Calls again: the form is
     # drawn anew and the skill binds it again, so its device controls and its autosave still work.
     form.locator('[data-call-processing="echoCancellation"]').check()
-    back = page.locator('#page-settings .app-page-header [data-settings-back]')
+    back = page.locator('#page-settings .app-page-header [data-shell-back]')
     if back.is_visible():
         back.click()
     else:

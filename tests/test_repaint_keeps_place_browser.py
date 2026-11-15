@@ -128,7 +128,7 @@ def test_a_repaint_keeps_every_scrolled_box_where_the_owner_left_it(gate_ui, tmp
                 tab = 'page'
                 if tabs:
                     if name == 'dashboard' and not tabs[index].is_visible():
-                        page.locator('#page-dashboard [data-dashboard-list-back]').click()
+                        page.locator('#page-dashboard [data-shell-back]').click()
                         rest(page)
                     tabs[index].click()
                     tab = tabs[index].get_attribute('data-dashboard-tab') if name == 'dashboard' else tabs[index].inner_text().strip()

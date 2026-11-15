@@ -220,7 +220,7 @@ def test_a_wide_page_box_shows_the_home_beside_the_page_with_no_layer(subscripti
     assert heading.inner_text().strip() == "Your rules"
     assert heading.evaluate("n => n.tagName") == "H2"
     assert heading.evaluate("n => getComputedStyle(n).clipPath") == "inset(50%)"
-    assert level.locator('[data-settings-back], .settings-page-title').count() == 0
+    assert level.locator('[data-shell-back], .settings-page-title').count() == 0
     assert not page.locator(f"{HOME} [data-being-needs]").is_visible()
     # Another home row replaces the page.
     page.locator(f'{HOME} [data-settings-open="appearance"]').click()
