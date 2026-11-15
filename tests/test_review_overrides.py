@@ -242,9 +242,9 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
     at what its review record holds now (REV6 C1): passed since, it is gone over by nothing; failed since, by its FAIL;
     still open, by no verdict; with no readable record, as open as the gate saw it. A landing names the continued
     attempt's outcome before this call's own check (REV6 A9). An attempt the gate kept no reason on is gone over only
-    when its record is a refusal to dispatch (a free replay at the spent paid ceiling): by that refusal, as no verdict.
-    The budget fence's refusal was counted by the call that met it: its row rebuilt from the record keeps that reason,
-    so going on over it adds the continuation and the landing, never a second outcome."""
+    when its record dispatched no review (a free replay at the spent paid ceiling, a wave that failed before its send):
+    by that refusal or reason, as no verdict. An outcome the call that met it counted keeps its reason on a row rebuilt
+    from the record too, so going on over it adds the continuation and the landing, never a second outcome."""
     from ouroboros.review_overrides import _went_on_over
     from ouroboros.tools.review_change_custody import recorded_commit_source
 
@@ -281,7 +281,7 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
             (open_wave, "corrupt", open_wave), (open_wave, "bare", open_wave), (open_wave, "", open_wave),
             ("critical_findings", "pass", "critical_findings"), ("preflight", "pass", "preflight"),
             ("review_quorum", "", "review_quorum"), ("", "fail", ""), ("", "", ""),
-            ("", "refused", "review_cycles_exhausted"), ("", "undispatched", ""),
+            ("", "refused", "review_cycles_exhausted"), ("", "undispatched", "nothing_dispatched"),
             ("", "pass", ""), ("", "open", ""), ("", "corrupt", ""), ("", "missing", ""),
             (open_wave, "open_fail", "critical_findings"), (open_wave, "open_adviser_fail", open_wave),
             ("preflight", "fail", "critical_findings"), ("preflight", "open_fail", "critical_findings"),
@@ -330,18 +330,21 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
     note_override_landing(ctx, "d" * 40)
     assert _fact(ctx.drive_root, "root-1") == fact and landed_outcome(ctx.drive_root, "d" * 40) == ""
     # Free rows the attempt window dropped are rebuilt from their records: the ceiling's replay with no kept reason,
-    # the budget fence's refusal with the reason the call that met it counted.
+    # an outcome its own call counted (the budget fence, a wave that failed before its send or sent nothing) with it.
     fence = "review_wave_budget_insufficient"
+    bound = {"task_id": "root-1", "surface": "commit_gate", "state": "settled", "fingerprints": {"binding": "bytes"}}
     for name, kind in (("refused", "review_cycles_exhausted"), ("fenced", fence)):
-        records[name] = {**records["refused"], "dispatch_refusal": {"kind": kind, "message": ""}, "task_id": "root-1",
-                         "surface": "commit_gate", "state": "settled", "fingerprints": {"binding": "bytes"}}
+        records[name] = {**records["refused"], "dispatch_refusal": {"kind": kind, "message": ""}, **bound}
+    records["sent_nothing"] = {**records["undispatched"], **bound}
+    records["crashed"] = {"verdict": {**records["undispatched"]["verdict"], "degraded_reasons": ["gate_block:infra_failure"]}, **bound}
 
     def rebuilt(record_id):
         reference = {"review_record_id": record_id, "task_id": "root-1", "tool_name": "commit_reviewed", "attempt": 0,
                      "repo_key": "repo", "pre_review_fingerprint": "bytes"}
         return recorded_commit_source(ctx, reference, SimpleNamespace(attempts=[]))
 
-    assert (rebuilt("refused").review_override_reason, rebuilt("fenced").review_override_reason) == ("", fence)
+    assert [rebuilt(name).review_override_reason for name in ("refused", "fenced", "sent_nothing", "crashed")] == [
+        "", fence, "review_quorum", "infra_failure"]
     _decide(ctx, fence, "the wave's budget fence sent no seat")  # counted when met, with no record yet
     ctx._author_commit_source, ctx._review_override_this_call = rebuilt("fenced"), ""
     note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})

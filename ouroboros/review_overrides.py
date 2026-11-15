@@ -170,8 +170,9 @@ def _went_on_over(ctx: Any, source: Any) -> str:
     was known (a wave handed back still open, or a failed free check ahead of the panel): then its review record says
     what it holds now. A panel FAIL on the record, or a counted seat's FAIL on a record still open, is gone over as
     that FAIL; otherwise a failed check stands, and an open wave stands at its record's outcome (nothing once passed).
-    An attempt the gate kept no reason on stands at no verdict only when its record is a refusal to dispatch (a free
-    replay at a spent paid ceiling or over a pending wave): the refusal's own kind, since no call counts that outcome."""
+    An attempt the gate kept no reason on stands at no verdict only when its record dispatched no review (a free replay
+    at a spent paid ceiling or over a pending wave, a wave that failed before its send): the refusal's kind, else the
+    record's reason, since no call counted that outcome (one that did kept its reason, also on a rebuilt row)."""
     kept, record_id = (str(getattr(source, name, "") or "") for name in ("review_override_reason", "review_record_id"))
     if not record_id or (kept and kept != _OPEN and kept not in _CHECK_REASONS):
         return kept
@@ -188,7 +189,7 @@ def _went_on_over(ctx: Any, source: Any) -> str:
     reason = str(verdict.get("reason") or "")
     if not kept:  # every other outcome was counted, or left uncounted, by the call that met it
         refusal = record.get("dispatch_refusal") if isinstance(record.get("dispatch_refusal"), dict) else {}
-        return str(refusal.get("kind") or "") if verdict["aggregate"] == "NOT_DISPATCHED" else ""
+        return (str(refusal.get("kind") or "") or reason) if verdict["aggregate"] == "NOT_DISPATCHED" else ""
     counted = {str(row.get("seat_id") or "") for row in record.get("rows") or []
                if isinstance(row, Mapping) and not row.get("additional")}
     if reason == _OPEN and any(seat in counted and value == "FAIL"

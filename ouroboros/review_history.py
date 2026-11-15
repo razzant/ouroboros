@@ -28,7 +28,7 @@ def _attempts(drive_root: Any, repo_root: Any, task_id: str, attempts_root: Any 
         return []
     key = make_repo_key(pathlib.Path(repo_root))
     folders = [pathlib.Path(drive_root)]
-    if attempts_root is not None and pathlib.Path(attempts_root).resolve() != folders[0].resolve():
+    if attempts_root and pathlib.Path(attempts_root).resolve() != folders[0].resolve():
         folders.append(pathlib.Path(attempts_root))
     # Exact task/repository identity, never the lifecycle reader's legacy fallback
     # and never root_task_id (a sibling task's paid budget is not its dispute).
