@@ -1,9 +1,31 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createLayerStack } from '../modules/layers.js';
-import { createPageNavigation } from '../modules/page_navigation.js';
+import { capturePagePlace, createPageNavigation } from '../modules/page_navigation.js';
 
 const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+
+test('a captured place restores its retained owners before their independent reading snapshots', () => {
+    for (const page of ['settings', 'dashboard', 'skills', 'chat']) {
+        const restored = [], opener = {}, root = {}, state = { activePage: page, settingsPath: 'tools', dashboardActiveSubtab: 'logs' };
+        const owner = { capture: () => ({ label: 'Logs', title: 'Settings › Tools', restore: () => restored.push('level') }) };
+        const captured = capturePagePlace({ state, navState: {}, settingsControls: owner, dashboardControls: owner,
+            skillsControls: { capture: () => () => restored.push('tab') },
+            mainChat: { captureReading: () => () => restored.push('feed') }, logsControls: { captureReading: () => () => restored.push('logs') },
+            doc: { getElementById: () => root }, restorePlaces: { capture: (place, pressed) => {
+                assert.equal(place, root); assert.equal(pressed, opener); return () => restored.push('scroll/focus');
+            } }, commitPage: (name, options) => { assert.equal(name, page); assert.equal(options.reveal, true); options.enter(); },
+        }, opener);
+        state.activePage = 'widgets'; state.settingsPath = ''; state.dashboardActiveSubtab = 'costs';
+        const reading = captured.restore();
+        assert.deepEqual(restored, page === 'skills' ? ['tab'] : ['settings', 'dashboard'].includes(page) ? ['level'] : []);
+        reading();
+        assert.ok(restored.includes('scroll/focus'));
+        assert.equal(restored.includes('feed'), page === 'chat');
+        assert.equal(restored.includes('logs'), page === 'dashboard');
+        assert.equal(captured.key, ({ settings: 'settings:tools', dashboard: 'dashboard:logs', skills: 'skills', chat: 'chat' })[page]);
+    }
+});
 
 test('jumps stack after the veto, section choices retain them, the map clears them, and Back restores each retained place atomically', async () => {
     const history = [], changes = [];

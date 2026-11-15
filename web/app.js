@@ -40,7 +40,7 @@ import { getInterfaceSize } from './modules/interface_size.js';
 import { initDashboard } from './modules/dashboard.js';
 import { initStorage } from './modules/storage.js';
 import { SHELL_ICONS } from './modules/page_icons.js';
-import { pageLabel, renderNavRows, renderProjectsHeader } from './modules/pages.js';
+import { renderNavRows, renderProjectsHeader } from './modules/pages.js';
 import { bindPageBack, renderPageHeader } from './modules/page_header.js';
 import { createRoomHeader, panicButtonHtml } from './modules/chat_header.js';
 import { isCoarsePointer, isStackLayout, measurePinnedBars, onLayoutChange, pinchMagnified, roomCoversMain } from './modules/layout.js';
@@ -49,7 +49,7 @@ import { afterMotion, reducedMotion } from './modules/motion.js';
 import { createShellMotion } from './modules/shell_motion.js';
 import { createRoomRetirement, roomSocket } from './modules/room_retire.js';
 import { initPagePlaces } from './modules/page_places.js';
-import { createPageNavigation } from './modules/page_navigation.js';
+import { capturePagePlace, createPageNavigation } from './modules/page_navigation.js';
 import { setupResizablePanels } from './modules/panel_widths.js';
 import { createTelegramHost } from './modules/host_telegram.js';
 import { DRAWER_DRAG, bindDrawerDrag } from './modules/drawer_drag.js';
@@ -106,7 +106,10 @@ window.__ouroLayers = layers;
 syncMarkPhases(document);
 // What the owner scrolled keeps its place while hidden (page_places.js), registered before any page's own show handler.
 const restorePlaces = initPagePlaces();
-const pageNavigation = createPageNavigation({ layers, capture: capturePlace, canLeave: async (key) => {
+const pageNavigation = createPageNavigation({ layers, capture: opener => capturePagePlace({
+    state, navState, settingsControls, dashboardControls, skillsControls,
+    projectInstances, projectPanelTitle, rooms, mainChat, logsControls, restorePlaces, commitPage,
+}, opener), canLeave: async (key) => {
     const to = key.startsWith('project:') ? 'chat' : key.split(':')[0];
     if (to === state.activePage) return true;
     for (const handler of beforePageLeaveHandlers) if (await handler({ from: state.activePage, to }) === false) return false;
@@ -239,35 +242,6 @@ function commitPage(pageName, options = {}) {
     if (options.closeDrawer !== false) navState.mobileDrawerOpen = false;
     options.enter?.();
     if (options.sync !== false) syncNavigationState();
-}
-
-function capturePlace(opener) {
-    const page = state.activePage, projectId = navState.activeProjectId;
-    const settings = page === 'settings' ? settingsControls?.capture() : null;
-    const dashboard = page === 'dashboard' ? dashboardControls?.capture() : null;
-    const skills = page === 'skills' ? skillsControls?.capture() : null;
-    const project = projectId ? { id: projectId, name: projectPanelTitle.textContent } : null;
-    const root = project ? projectInstances.get(projectId)?.page : document.getElementById(`page-${page}`);
-    const reading = restorePlaces.capture(root, opener);
-    const feed = page === 'chat' ? (project ? projectInstances.get(projectId) : mainChat)?.captureReading()
-        : state.dashboardActiveSubtab === 'logs' && page === 'dashboard' ? logsControls?.captureReading() : null;
-    const label = project?.name || (settings ? 'Settings' : dashboard?.label || (page === 'chat' ? 'Main' : pageLabel(page)));
-    return { key: project ? `project:${projectId}` : settings ? `settings:${state.settingsPath}`
-        : dashboard ? `dashboard:${state.dashboardActiveSubtab}` : page, label, title: settings?.title || label,
-        restore() {
-            commitPage(page, { reveal: true, enter: () => {
-                settings?.restore();
-                dashboard?.restore();
-                skills?.();
-                if (project && projectInstances.has(projectId)) {
-                    navState.activeProjectId = projectId;
-                    projectPanelTitle.textContent = projectPanelTitle.title = project.name;
-                    projectInstances.get(projectId).page.hidden = false;
-                    rooms.show(projectId);
-                }
-            } });
-            return () => { reading(); feed?.(); };
-        } };
 }
 
 async function openSettings(path = '', options = {}) {
@@ -575,11 +549,9 @@ onLayoutChange((layout) => {
 // first-level page stays as it stands and a deeper level returns to its section's first-level page; in one column the
 // list comes back. Pressed in the open drawer it closes the drawer, as every other place pressed there does.
 function pressNavPage(name) {
-    if (name === 'settings' && state.activePage === 'settings' && settingsControls) {
-        void showPage(name, { map: true, enter: () => settingsControls.pressedAgain() });
-        return;
-    }
-    showPage(name, { map: true, enter: name === 'dashboard' ? () => dashboardControls?.pressedAgain() : null });
+    const section = name === 'dashboard' ? dashboardControls
+        : name === 'settings' && state.activePage === 'settings' ? settingsControls : null;
+    void showPage(name, { map: true, enter: () => section?.pressedAgain() });
 }
 document.querySelectorAll('[data-nav-page]').forEach(btn => {
     btn.addEventListener('click', () => pressNavPage(btn.dataset.navPage));

@@ -3391,36 +3391,33 @@ Telegram, and nothing depends on a haptic (`web/modules/haptics.js`).
 
 ### Layers and dismissal
 
-A jump leaves a named return in the one stack (`web/modules/layers.js`), under overlays. Every move except a sidebar
-or drawer choice, a section's own list row or a tab is a jump; another stacks. Sidebar and drawer choices clear the
-returns; section rows and tabs keep them. Returning restores the page, its levels, reading place and pressed row.
-The drawer, Project panel, section levels and a file shown alone in Files use that same stack. Escape, browser,
-system, mouse and Telegram Back, and ⌘[ (Ctrl+[ elsewhere) use one Back: a popup first, then the top layer. Dialogs,
-menus and the work list keep their dismissal; Escape clears a filled search first. × and the scrim close their layer.
-A Project that covers Main (the phone's card, a finger's docked column) is modal with the docked sidebar live,
-its covered room inert once it arrives. A modal layer makes the rest of the shell inert, never what opens over it;
-closing refocuses the opener unless focus moved somewhere live. While any layer is open the page holds one
-same-address history entry, so Back closes it before leaving the app; no navigation is written into the address.
-The shell draws one close glyph and one More glyph (`web/modules/page_icons.js`).
+A jump leaves a named page layer under overlays in `web/modules/layers.js`. Every move except a sidebar/drawer
+choice, section list row or tab is a jump. Jumps stack; sidebar/drawer choices clear returns; section choices keep
+them. Back restores the page, levels, reading place and pressed row. Drawer, Project, section levels and Files'
+preview share this stack. Escape, browser, system, mouse, Telegram and ⌘[ (Ctrl+[ elsewhere) use one Back: popup
+first, then top layer. Dialogs, menus and the work list keep their dismissal; Escape clears a filled search first.
+× and the scrim close their layer. A Project covering Main (phone card or finger's docked column) is modal, with
+the docked sidebar live and covered room inert once it arrives. Modal layers make the shell inert, never overlays;
+closing refocuses the opener unless focus moved somewhere live. One same-address history entry exists while any
+layer is open: Back closes it before leaving the app, without address routing. Close and More use the shared
+glyphs (`web/modules/page_icons.js`).
 
 ### Page header
 
-One component (`web/modules/page_header.js`) draws the page's row, including a Project's. Its first capsule is the
-top page layer's named return, before controls: ‹ Settings, ‹ Main, or a level's parent. The word ellipsizes before
-controls yield; its chevron stays. Two panes place it over the page; one column replaces the leading picture. On docked, a section without pages that the column already
-names shows no title: its tabs or Files' location take that place and its actions the end, on Main's line, so the
-bar has two ends as Main's does; tabs and filters share one sideways-scrolling rail, as does a location that does not fit (it
-rests at the folder you are in, no folder wider than the bar's start), and in the macOS window its empty parts
-still move the window. A section with pages keeps its heading for readers; its chosen row names the pane. A deeper Settings level keeps its name. A header with nothing to
-show draws no bar, and its page starts at the window's top edge: the band under the macOS title bar stays the
-window's (owner 22.10), the page's first row starts below it, and the Widgets board's cards pass under it with
-crisp edges (owner 20.10), as a room's feed does (owner 21.10), while a plain press in the empty band still moves
-the window. A Project shows its name. In the stack layout the row is at most 56 px and is the only header row:
-the leading control (Ouroboros's picture at a room or a section's list, Back on a page), the destination's name,
-its status, then a room's consciousness chip and Panic; tabs or filters occupy at most one line below the row.
-Logs keeps Clear at the row's end. Files' location and actions stay in the band. The name wins over the
-status word, which a short row drops whole after its start step, keeping its mark, and Main's title ellipsizes
-before its chip or Panic yields.
+The shared header (`web/modules/page_header.js`) draws one row, without decorative icons. Its first capsule is the
+top page layer's return: ‹ Settings, ‹ Main, or a level's parent. Its tooltip and accessible name give the full path.
+The word ellipsizes before controls yield; the chevron stays. Two panes place it over the page column; one column
+replaces the leading picture. Docked, the sidebar names a section without pages: tabs or Files' location lead its
+band, actions end it, on Main's line. Tabs, filters and location use one sideways rail; location reveals the current
+folder, none wider than the rail. Section headings follow
+“A section with pages”; a Project shows its name.
+An empty header draws nothing. The page reaches the window's top edge; its first row starts below the macOS band,
+which stays the window's (owner 22.10). Widgets cards pass under it with crisp edges (owner 20.10), as a room's feed
+does (owner 21.10); empty band space still drags the window. In stack layout the header row is at most 56 px: one
+leading control (the picture on a room or section list, the named Back when owed), destination name, status, then a
+room's consciousness chip and Panic. Tabs or filters occupy at most one line below; Logs keeps Clear at the row's
+end. A short row drops the status word whole after its start step, keeping its mark; Main's title ellipsizes before
+its chip or Panic yields.
 A Project's name keeps one line inside its capsule, at the controls' size and weight (`--type-body`, 600), and ends
 in an ellipsis, so its capsule keeps the bar's height (owner 2026-11-01, A·14; it replaces the second line of
 2026-10-28). The name keeps its own direction, so a right-to-left interface still shows a Latin name's start. The
@@ -3525,15 +3522,12 @@ opens and holds the field, the row and the pressed control still.
 
 ### Telegram
 
-Inside the Telegram Mini App the page tells Telegram it is ready,
-fills the screen (fullscreen if granted, the owner's to leave), turns off
-Telegram's swipe-down so lists scroll, shows
-Telegram's Back while a layer is open and its Close otherwise (the page then draws no Back), gives Telegram's
-header and bottom bar the room's colour, follows Telegram's light or dark as the
-System appearance, and respects Telegram's safe areas on all four sides. In fullscreen a section shares Telegram's
-row: its name and at most one page action between fixed safe sides (96 px, 88 px), its rail one line below.
-Skills' other action starts its list. Rooms keep their own bar placement
-(`web/modules/host_telegram.js`). Everything else is the same page.
+Inside Telegram the page announces readiness, fills the screen (fullscreen if granted, the owner's to leave),
+and disables swipe-down so lists scroll. Telegram owns Back while a layer is open, Close otherwise; the page
+then draws no Back. Its bars take the room's colour; System appearance follows Telegram's theme. Safe areas apply
+on all sides (`web/modules/host_telegram.js`). In fullscreen a section shares Telegram's row: its name and one
+action between fixed safe sides (96 px, 88 px), its rail below. Skills' other action starts its list. Rooms keep
+their bar placement.
 
 Enforcement: `tests/test_design_system_gate_browser.py` visits every registered
 page and Settings' home and pages in WebKit and Chromium at 320, 360, 390, a Telegram-like

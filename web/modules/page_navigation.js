@@ -1,3 +1,5 @@
+import { pageLabel } from './pages.js';
+
 /** A jump is a page layer, never another history. The shell supplies the current retained place and the leave
  * guard; the destination commits synchronously with its return, after that guard has allowed the move. */
 export function createPageNavigation({ layers, capture, canLeave, doc = document } = {}) {
@@ -39,4 +41,35 @@ export function createPageNavigation({ layers, capture, canLeave, doc = document
         return true;
     }
     return { go, clear, capture: currentPlace, destroy: () => doc.removeEventListener('click', onPress, true) };
+}
+
+/** Capture from the existing page, level and reading owners; each return holds its own retained snapshot. */
+export function capturePagePlace({ state, navState, settingsControls, dashboardControls, skillsControls,
+    projectInstances, projectPanelTitle, rooms, mainChat, logsControls, restorePlaces, commitPage, doc = document }, opener) {
+    const page = state.activePage, projectId = navState.activeProjectId;
+    const settings = page === 'settings' ? settingsControls?.capture() : null;
+    const dashboard = page === 'dashboard' ? dashboardControls?.capture() : null;
+    const skills = page === 'skills' ? skillsControls?.capture() : null;
+    const project = projectId ? { id: projectId, name: projectPanelTitle.textContent } : null;
+    const root = project ? projectInstances.get(projectId)?.page : doc.getElementById(`page-${page}`);
+    const reading = restorePlaces.capture(root, opener);
+    const feed = page === 'chat' ? (project ? projectInstances.get(projectId) : mainChat)?.captureReading()
+        : state.dashboardActiveSubtab === 'logs' && page === 'dashboard' ? logsControls?.captureReading() : null;
+    const label = project?.name || (settings ? 'Settings' : dashboard?.label || (page === 'chat' ? 'Main' : pageLabel(page)));
+    return { key: project ? `project:${projectId}` : settings ? `settings:${state.settingsPath}`
+        : dashboard ? `dashboard:${state.dashboardActiveSubtab}` : page, label, title: settings?.title || label,
+        restore() {
+            commitPage(page, { reveal: true, enter: () => {
+                settings?.restore();
+                dashboard?.restore();
+                skills?.();
+                if (project && projectInstances.has(projectId)) {
+                    navState.activeProjectId = projectId;
+                    projectPanelTitle.textContent = projectPanelTitle.title = project.name;
+                    projectInstances.get(projectId).page.hidden = false;
+                    rooms.show(projectId);
+                }
+            } });
+            return () => { reading(); feed?.(); };
+        } };
 }
