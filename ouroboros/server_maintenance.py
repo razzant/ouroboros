@@ -1285,18 +1285,9 @@ def _run_drive_custody_pass(stop_event: Any = None) -> None:
                     continue  # record_rest already put this drive in the durable map this pass
                 if skipped.get("reason") not in ("younger_than_retention", "custody_unchanged"):
                     holds.note(skipped.get("reason"), task_id)
-        maintenance_jobs.record_pass(root, "drive_settlement", {
-            **maintenance_jobs.pass_report(released, holds, errors), "mailboxes": mailboxes,
-            **{key: _recorded_layout(reports[key]) for key in ("headless", "direct")}}, event="headless_task_drive_prune")
-
-
-def _recorded_layout(report: dict) -> dict:
-    """A layout's prune report as the pass's event keeps it: a drive still inside its retention term is counted
-    (``younger_than_retention``), not listed. The term's wait is no hold, the same drives would be listed again by
-    every recorded pass, and which they were follows from each task's terminal time; every other skip stays listed."""
-    skipped = [row for row in report.get("skipped") or () if isinstance(row, dict)]
-    listed = [row for row in skipped if row.get("reason") != "younger_than_retention"]
-    return {**report, "skipped": listed, "younger_than_retention": len(skipped) - len(listed)}
+        maintenance_jobs.record_pass(root, "drive_settlement", {**maintenance_jobs.pass_report(released, holds, errors),
+                                                                "headless": reports["headless"], "direct": reports["direct"],
+                                                                "mailboxes": mailboxes}, event="headless_task_drive_prune")
 
 
 def _periodic_zombie_reconcile(*, stop_event: Any = None) -> None:
