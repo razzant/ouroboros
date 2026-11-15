@@ -169,13 +169,33 @@ export function heldCallPhrase(tool, status) {
         : fmt('{noun} was not run: the Safety Supervisor could not read it', { noun });
 }
 
-/** The headline of a finished step that did not succeed: held by Safety (never "failed"), a command's exit, or a
- *  failed step. */
+// What ended a call before it returned, by the word its row names (tools.jsonl ``control_reason``, written by
+// ``tool_call_log.host_settlement``); any other word reads "Interrupted".
+const INTERRUPTED_BY = {
+    pause: 'Interrupted by Pause', stop: 'Interrupted by Stop', wrap_up: 'Interrupted by Wrap up',
+    time_limit: 'Interrupted: time limit', spend_limit: 'Interrupted: spend limit',
+    task_ended: 'Interrupted: the task ended', call_end: 'Interrupted: the call ended', other: 'Interrupted',
+};
+const CONTROL_KIND = {
+    owner_pause: 'pause', pausing: 'pause', owner_pause_before_review_launch: 'pause', cancelled: 'stop',
+    owner_stopped_direct_chat_turn: 'stop', finalize_requested: 'wrap_up', deadline: 'time_limit',
+    execution_deadline: 'time_limit', absolute_ceiling: 'time_limit', spend_limit_global: 'spend_limit',
+    spend_limit_root: 'spend_limit', task_ended: 'task_ended', "the call's end": 'call_end',  // live_tool_lane.CALL_END
+};
+const interruptedBy = (reason) => {
+    const kind = Object.hasOwn(CONTROL_KIND, reason) ? CONTROL_KIND[reason] : 'other';
+    return tr(`task.interrupted.${kind}`, INTERRUPTED_BY[kind]);
+};
+
+/** The headline of a finished step that did not succeed: held by Safety (never "failed"), ended by a control (never
+ *  "failed"), a command's exit, or a failed step. */
 export function failedStepHeadline(evt = {}) {
     const exitCode = Number(evt.exit_code);
+    const tool = evt.tool ? ` · ${evt.tool}` : '';
+    if (evt.status === 'interrupted') return `${interruptedBy(evt.control_reason)}${tool}`;
     return heldCallPhrase(evt.tool, evt.status) || (evt.status === 'non_zero_exit'
         ? `A command returned ${Number.isFinite(exitCode) ? `exit code ${exitCode}` : 'a non-zero exit code'}`
-        : `One of the steps failed${evt.tool ? ` · ${evt.tool}` : ''}`);
+        : `One of the steps failed${tool}`);
 }
 
 // The first error of both lists a view names (unresolved first), how many more, and whether a capped list is named
