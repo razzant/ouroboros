@@ -106,7 +106,7 @@ def test_the_save_names_rows_left_pointing_at_a_removed_connection(settings_clie
 def _catalog(monkeypatch, settings):
     seen = []
 
-    async def fake_openrouter(_client, api_key):
+    async def fake_openrouter(_client, api_key, _cache_ttl=""):
         seen.append(("openrouter", api_key))
         return [models_api._build_model_catalog_entry("openrouter", "Anthropic", "anthropic/claude-opus-5.5",
                                                       "Claude Opus 5.5", source="OpenRouter")]

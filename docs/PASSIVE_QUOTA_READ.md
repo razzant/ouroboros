@@ -56,8 +56,9 @@ object-list `profiles` (rows need `profile.harness_id` / `profile.profile_id`, a
 unread. Its rows without `accountPools`: `account_model_unsupported`, not malformed.
 An unread roster is never authoritative removal or an empty account set.
 
-Full Accounts adds `profiles.login_capable_harnesses`: manifest-derived IDs, or
-`null` for its existing unread-manifest fail-open. The shared browser retains this
+Full Accounts adds `profiles.login_capable_harnesses`: login-eligible IDs (the
+catalog's `setupLogin`, or the manifests when the catalog is not current evidence),
+or `null` for its unread fail-open. The shared browser retains this
 policy when projecting raw passive rows, independently of catalog membership and
 read completion order. Before the first full policy, raw rows wait; legacy full
 answers retain fail-open behavior. The passive endpoint's envelope stays unchanged.

@@ -200,7 +200,7 @@ def test_admission_snapshots_the_room_once_and_records_mains_reference(room, mon
     assert "lead" not in gone["metadata"]
     def broken(*_args, **_kwargs):
         raise TypeError("programming error")
-    monkeypatch.setattr("ouroboros.composer_cognition.read_model_choice", broken)
+    monkeypatch.setattr("ouroboros.composer_cognition.read_room", broken)  # the one room reader of admission
     with pytest.raises(TypeError):
         route_choice.capture_lead({"id": "new"}, root)
 
@@ -478,10 +478,10 @@ def test_unreadable_room_leaves_no_follow_fact_and_a_later_door_can_stamp_it(roo
     client.post("/api/owner/chat-model", json={**CHOSEN, "project_id": "alpha"})
     task = {"id": "unreadable-room", "project_id": "alpha"}
     with monkeypatch.context() as patch:
-        patch.setattr("ouroboros.composer_cognition.read_model_choice",
+        patch.setattr("ouroboros.composer_cognition.read_room",
                       lambda *_a, **_k: (_ for _ in ()).throw(OSError("unreadable registry")))
         route_choice.capture_lead(task, root)
-    assert "lead" not in task["metadata"]
+    assert "lead" not in task["metadata"] and "processing" not in task["metadata"]
     assert "Room model choice unreadable" in caplog.text
     ctx = _ctx(task["metadata"])
     route_choice.bind_task_route(ctx, task["metadata"], presence=False)

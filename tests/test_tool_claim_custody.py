@@ -218,6 +218,28 @@ def test_a_failed_retirement_is_owed_by_the_process_not_left_as_a_witness(tmp_pa
     assert _retired(tmp_path, "t1")["op-a"]["effect_outcome"] == "unknown"
 
 
+def test_an_addressed_repair_reads_only_the_members_that_hold_a_claimed_launch(tmp_path, monkeypatch):
+    """A tree's repair decodes no body of a member without a claimed launch row (each Continue, Resume and held
+    re-check of a large tree read every member's whole body for nothing); the claim's ended owner still retires."""
+    from ouroboros import task_results
+
+    _platform(monkeypatch, gone={111, 112, 222})
+    quiet = {"root", "returned", *(f"quiet-{index}" for index in range(8))}
+    for task_id in quiet - {"returned"}:
+        write_task_result(tmp_path, task_id, "completed", root_task_id="root")
+    _claim(tmp_path, "returned", "op-returned", pid=222, state="returned")
+    _claim(tmp_path, "holder", "op-dead", pid=111)
+    _claim(tmp_path, "elsewhere", "op-elsewhere", pid=112, tree="other")  # another tree's claim of a gone owner
+    reads, load = [], task_results.load_task_result
+    monkeypatch.setattr(task_results, "load_task_result", lambda root, task_id, **kw: reads.append(task_id) or load(
+        root, task_id, **kw))
+    retired = repair.repair_ended_local_custody(tmp_path, quiet | {" holder "}, root_task_id="root")  # as read strictly
+    assert "holder" in reads and not (quiet | {"elsewhere"}) & set(reads), "only this tree's claimed holder is read"
+    assert [row["task_id"] for row in retired] == ["holder"] and "op-dead" not in _claims(tmp_path, "holder")
+    assert "op-returned" in _claims(tmp_path, "returned"), "a returned row is not custody to retire"
+    assert "op-elsewhere" in _claims(tmp_path, "elsewhere"), "another tree's claim waits for its own action"
+
+
 # --- replicas carry results, not custody ------------------------------------------------------------------------
 
 

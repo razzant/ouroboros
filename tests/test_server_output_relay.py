@@ -1022,19 +1022,45 @@ def test_diagnostic_relay_preparation_failure_refuses_before_child_start(monkeyp
 
 
 def test_exit_hooks_share_one_deadline_even_when_reader_makes_no_progress(monkeypatch):
+    """Exit hooks share the first deadline despite early wakes or a late scheduler; a later hook adds no grace.
+    Script only the relay clock and waits. The fake writer makes no progress, so the test checks the deadline
+    and remaining wait directly rather than the scheduling latency of the machine running pytest."""
     from types import SimpleNamespace
     from ouroboros import process_logging
 
+    class Clock:  # the relay module's ``time``: a scripted ``monotonic``, everything else real
+        now = 100.0
+
+        def monotonic(self):
+            return self.now
+
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+    clock, waits = Clock(), []
+
+    def wait(timeout=None):  # finish_output_relay swallows a raise: ``waits`` keeps the evidence
+        waits.append(timeout)
+        if timeout is None or len(waits) > 4:
+            raise RuntimeError("an unbounded wait")
+        clock.now += 0.03 if len(waits) == 1 else timeout + 0.05  # woken early without progress, then late
+
     relay = process_logging._OutputRelay(-1, 1024, 0.08)
     relay.thread = SimpleNamespace(is_alive=lambda: True)
-    relay.queued = 1
+    relay.queued = 1  # a byte the stopped reader never takes
+    monkeypatch.setattr(relay.cond, "wait", wait)
+    monkeypatch.setattr(process_logging, "time", clock)
     monkeypatch.setattr(process_logging, "_relay", relay)
-    start = time.monotonic()
     process_logging.finish_output_relay()
     first_deadline = relay.finish_deadline
+    assert first_deadline == pytest.approx(100.08)
+    assert waits == pytest.approx([0.08, 0.05])  # each wait ends at that deadline, however early the wake
+    assert clock.now > first_deadline
+    waits.clear()
+    clock.now += 1.0  # the next hook runs long after the grace
     process_logging.finish_output_relay()
     assert relay.finish_deadline == first_deadline
-    assert time.monotonic() - start < 0.14
+    assert waits == []
 
 
 def test_a_gap_queued_beside_an_idle_writer_reaches_a_reading_launcher_without_waiting(monkeypatch):
