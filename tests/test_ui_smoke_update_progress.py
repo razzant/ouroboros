@@ -34,6 +34,14 @@ def test_update_progress_pending_reopen_and_failure(direct_server, tmp_path, wid
         browser = pw.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": width, "height": 900})
         pending_apply = []
+
+        def switch_to(tab):
+            # A phone's Dashboard shows its list or one of its pages (docs/DESIGN.md "One spine of depth"): the page's
+            # Back brings the list, whose row opens the next page. A desk keeps the list beside the page.
+            if width < 980:
+                page.click("[data-dashboard-list-back]")
+            page.click(f'[data-dashboard-tab="{tab}"]')
+
         try:
             page.add_init_script(f"({_CAPTURE_TEST_SOCKET})();")
             def source_install_state(route):
@@ -67,8 +75,8 @@ def test_update_progress_pending_reopen_and_failure(direct_server, tmp_path, wid
             expect(page.locator("#updates-summary")).to_have_text("Applying the update…")
             expect(page.locator("#btn-update-primary")).to_be_disabled()
             page.evaluate("window.__testSockets = [window.__testSockets.at(-1)]")
-            page.click('[data-dashboard-tab="logs"]')
-            page.click('[data-dashboard-tab="updates"]')
+            switch_to("logs")
+            switch_to("updates")
             expect(page.locator("#updates-summary")).to_have_text("Applying the update…")
             expect(page.locator("#btn-update-primary")).to_be_disabled()
             status["update_progress"] = {
@@ -82,8 +90,8 @@ def test_update_progress_pending_reopen_and_failure(direct_server, tmp_path, wid
             expect(page.locator("#btn-update-primary")).to_be_disabled()
             page.screenshot(path=str(evidence / f"updates-{width}-after.png"), full_page=True)
 
-            page.click('[data-dashboard-tab="logs"]')
-            page.click('[data-dashboard-tab="updates"]')
+            switch_to("logs")
+            switch_to("updates")
             expect(page.locator("#updates-summary")).to_have_text("Stopping worker processes…")
             status["update_progress"].update(stage="checking")
             _emit_ws_frame(page, {"type": "update_progress_changed"})
