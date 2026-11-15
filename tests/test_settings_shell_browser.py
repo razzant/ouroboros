@@ -65,7 +65,7 @@ def _open_from_home(page, target):
     return level, kept
 
 
-@pytest.mark.parametrize("width,height", [(900, 700), (320, 640)])
+@pytest.mark.parametrize("width,height", [(900, 700), (1087, 744), (320, 640)])
 def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui, width, height):
     ui = subscription_ui
     page = ui["new_page"](viewport={"width": width, "height": height}, has_touch=width < 720)
@@ -80,7 +80,8 @@ def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui,
     page.locator(HOME).wait_for(state="visible")
     page.evaluate(TEST_PAGE)
     assert _layout(page) == ("stack" if width < 720 else "docked")
-    assert page.locator("#page-settings").bounding_box()["width"] == (627 if width == 1087 else width)
+    content_width = page.locator("#page-settings").bounding_box()["width"]
+    assert content_width == (627 if width == 1087 else width if width < 720 else page.locator("#content").bounding_box()["width"])
     assert _menu_visible(page)
     if width == 320:
         # A phone's home has one band; Search starts the list right under it, where the band's second row stood.

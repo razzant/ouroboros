@@ -205,6 +205,17 @@ function listOf(t, { listableCount = 3, reserved = [] } = {}) {
     return { nav, header, commands, document, list, feed };
 }
 
+test('Project actions publishes and clears its focus for the coarse-pointer row mark', async (t) => {
+    const { nav, list } = listOf(t);
+    nav.paint();
+    const control = list.querySelector('.nav-project-kebab');
+    assert.equal(control.hasAttribute('data-focused'), false);
+    await control.fire('focus');
+    assert.equal(control.hasAttribute('data-focused'), true);
+    await control.fire('blur');
+    assert.equal(control.hasAttribute('data-focused'), false);
+});
+
 test('a row leaving the feed hands lost keyboard focus to Find, while kept rows and live focus retain it', (t) => {
     const { nav, header, document, list, feed } = listOf(t);
     const elsewhere = new NodeStub('textarea');
