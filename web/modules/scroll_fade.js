@@ -53,8 +53,10 @@ export function bindScrollFade(scroller, { axis = 'y', region = '' } = {}) {
         if (!disposed && frame === null) frame = win.requestAnimationFrame(update);
     };
     const onFocus = (event) => {
-        if (axis !== 'x' && event.target && scroller.contains?.(event.target)) revealPastFade(scroller, event.target);
-        else if (axis === 'x' && event.target && scroller.contains?.(event.target)) revealPastFade(scroller, event.target, { axis });
+        // Pointer focus precedes its click: moving the pressed control now loses the release to another row.
+        if (event.target && !event.target.matches?.(':active') && scroller.contains?.(event.target)) {
+            revealPastFade(scroller, event.target, { axis });
+        }
         schedule();
     };
     const resize = new win.ResizeObserver(schedule);

@@ -89,14 +89,18 @@ test('a named body is a keyboard region exactly while it scrolls, and nothing wi
     assert.doesNotThrow(() => { bindScrollFade(plain.scroller); plain.flush(); });
 });
 
-test('focus-in clears the shared fade before the focused row is read', () => {
+test('keyboard focus clears the fade, while pointer focus leaves its pressed row under the release', () => {
     const f = fixture();
     f.scroller.ownerDocument.defaultView.getComputedStyle = () => ({ getPropertyValue: () => '32px' });
-    const row = { getBoundingClientRect: () => ({ top: 20, bottom: 50 }) };
+    let pressed = true;
+    const row = { getBoundingClientRect: () => ({ top: 20, bottom: 50 }), matches: selector => selector === ':active' && pressed };
     f.scroller.contains = (node) => node === row;
     f.scroller.getBoundingClientRect = () => ({ top: 0, bottom: 100 });
     f.scroller.scrollTop = 200;
     bindScrollFade(f.scroller);
+    f.listeners.get('focusin')({ target: row });
+    assert.equal(f.scroller.scrollTop, 200, 'the pointer release must still hit the pressed row');
+    pressed = false;
     f.listeners.get('focusin')({ target: row });
     assert.equal(f.scroller.scrollTop, 188, 'the row clears the 32px top fade before focus is visible');
 });
