@@ -578,6 +578,8 @@ def _project(drive_root: Any, owners: List[Mapping[str, Any]], raw: Dict[str, Ma
                     project_id=str(room_row.get("project_id") or ""), since=_since(room_row), controls=controls)
         if current_row is not None and current_row.get("lead"):
             work["lead"] = current_row["lead"]
+            if isinstance(current_row.get("processing"), dict):
+                work["processing"] = current_row["processing"]
         cmid = str(room_row.get("client_message_id") or "")
         if cmid:
             work["client_message_id"] = cmid

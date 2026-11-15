@@ -345,6 +345,8 @@ def apply_processing_preference(target: Dict[str, Any], payload: Dict[str, Any])
         target["processing_native_origin"] = "native_override"
         return
     provider = target.get("provider")
+    if preference == "ultrafast" and provider in {"openai", "openrouter", "anthropic"}:
+        return  # no documented native field: honestly not submitted, never an invented service tier
     if provider in {"openai", "openrouter"}:
         payload["service_tier"] = {
             "standard": "default", "fast": "priority", "economy": "flex",

@@ -560,8 +560,8 @@ class _ModelInvocation:
                             and context.get("generationStarted") is False
                             and context.get("processingFallback") == "standard"
                             and context.get("processingRefusal") in {"capacity", "unsupported"}
-                            and self.target.get("processing_preference") in {"fast", "economy"}
-                            and options.get("processingPreference") in {"fast", "economy"}
+                            and self.target.get("processing_preference") in {"fast", "economy", "ultrafast"}
+                            and options.get("processingPreference") in {"fast", "economy", "ultrafast"}
                             and not options.get("serviceTier")):
                         # response_received describes the refusal envelope. The
                         # engine separately proves generation never started.
@@ -683,6 +683,13 @@ class _ModelInvocation:
 
     def finish(self, result: dict) -> tuple[dict, dict]:
         usage, cost, final = self.extract_usage(result)
+        # After the host's Standard retry of a refused tier (``_unstarted_repair``) the engine's receipt answers that
+        # Standard request; this logical call still asked the work's tier, which its receipt keeps beside what was
+        # sent and served (the physical attempt's own row keeps the engine's receipt).
+        wanted, sent = self.target.get("processing_preference"), (self.payload.get("options") or {}).get("processingPreference")
+        receipt = usage.get("processing")
+        if isinstance(receipt, dict) and wanted and sent and sent != wanted and receipt.get("requested") != wanted:
+            usage["processing"] = {**receipt, "requested": wanted, "reason": receipt.get("reason") or "submitted_mode_differs"}
         route = result.get("route") or {}
         usage.pop("wire_layout", None)  # host-owned: the projection fact of THIS call's target
         usage.update(provider="claudexor", resolved_model=self.target["usage_model"], cost=cost, cost_final=final,
@@ -855,7 +862,7 @@ def _processing_retry_payload(payload: dict, error: ClaudexorModelNotDispatched)
             or context.get("generationStarted") is not False
             or context.get("processingFallback") != "standard"
             or context.get("processingRefusal") not in {"capacity", "unsupported"}
-            or options.get("processingPreference") not in {"fast", "economy"}
+            or options.get("processingPreference") not in {"fast", "economy", "ultrafast"}
             or options.get("serviceTier")):
         return None
     updated = copy.deepcopy(payload)

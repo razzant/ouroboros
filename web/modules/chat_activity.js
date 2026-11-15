@@ -1530,6 +1530,8 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         ['Supervision', supervision && (rounds || toolCalls)
             ? `${[rounds, toolCalls].filter(Boolean).join(META_PART_SEPARATOR)} (supervising agent; executor session counts are not reported)` : ''],
         ['Updated', escapeHtml(updated)],
+        // Its tier and what its newest call was asked, sent and served as (card_model.js; CLIENT_CONTRACT works[].processing).
+        ['Processing', record.processingDetail ? `<span data-i18n-skip>${escapeHtml(record.processingDetail)}</span>` : ''],
         ...(record.costBreakdownRows || []),  // a root's detail: where its money and work went
     ]);
     const detailChanged = paintLiveDetail(record, 'liveCostDetail', String(record.costMeta?.detail || ''));

@@ -173,7 +173,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     function changed(slot = '') { onChange(collect(), { slot }); }
     function rowErrors(row) {
         const errors = [];
-        if (row.processing_preference && !PROCESSING_CHOICES.includes(row.processing_preference)) errors.push({ field: '[data-model-role-processing]', message: `${row.slot.label}: choose Standard, Fast, Economy or inherited processing.` });
+        if (row.processing_preference && !PROCESSING_CHOICES.includes(row.processing_preference)) errors.push({ field: '[data-model-role-processing]', message: `${row.slot.label}: choose Standard, Fast, Flex or inherited processing.` });
         if (['main', 'fallback'].includes(row.slot.slot) && !row.model.trim()) {
             errors.push({ field: '[data-model-role-model]', message: `${row.slot.label}: choose a model${row.slot.slot === 'fallback' ? ' or remove this fallback' : ''}.` });
         }
@@ -184,7 +184,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         return errors;
     }
     function validateAll() { return [
-        ...(processingPreference && !PROCESSING_CHOICES.includes(processingPreference) ? ['Choose Standard, Fast, Economy or route defaults for Processing.'] : []),
+        ...(processingPreference && !PROCESSING_CHOICES.includes(processingPreference) ? ['Choose Standard, Fast, Flex or route defaults for Processing.'] : []),
         ...rows.flatMap((row) => rowErrors(row).map(({ message }) => message)),
     ]; }
     // The row an empty role resolves to, along its inherit chain (safety → light → main).
@@ -310,7 +310,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             element.innerHTML = slot?.managed ? fixedGroupHtml(slot) : row ? rowHtml(row, only.index || 0, 1) : '';
         } else element.innerHTML = (showContext ? `<section class="model-role-group"><label class="ui-field">Processing
             ${processingSelectHtml('data-global-processing aria-label="Global processing"', processingPreference, { global: true })}</label>
-            <p class="model-role-copy">Applies to new tasks. Fast permits accelerated paid service within existing limits. Economy may fall back to the ordinary rate. Model and reasoning effort stay the same.</p>
+            <p class="model-role-copy">Applies to new tasks. Fast permits accelerated paid service within existing limits. Flex may fall back to the ordinary rate. Model and reasoning effort stay the same.</p>
             <details class="model-role-details ui-disclosure"><summary>Details</summary><div class="ui-field-help">Keep route defaults preserves existing native choices. Explicit native service choices take precedence; the requested mode is not proof of the mode served.</div></details></section>` : '') + offeredSlots.map((slot) => {
             if (slot.managed) return fixedGroupHtml(slot);
             const matching = rows.filter((row) => row.slot.slot === slot.slot);
