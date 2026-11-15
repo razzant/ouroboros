@@ -187,6 +187,10 @@ def _retained_paths(text):
     return re.findall(r"retained as (.+?)\]", text)
 
 
+def _resource_paths(text):
+    return re.findall(r"task artifact (.+?); sha256 [0-9a-f]{64}\]", text)
+
+
 def _no_base64_text(text):
     """No long base64 run outside image data URLs; masking inside base64 cannot fool this oracle."""
     return not re.search(r"[A-Za-z0-9+/=]{200,}", re.sub(r"data:image/[\w.+-]+;base64,[A-Za-z0-9+/=]+", "", text))
@@ -309,8 +313,185 @@ def test_mixed_annotated_parts_keep_text_and_data_while_every_binary_leaves_the_
     retained = json.loads(artifacts.read_actor_source_bytes(mcp.data, TASK, result.meta["mcp_response_source"]))
     assert retained == mcp.peer.result.model_dump(mode="json", by_alias=True)
     assert [pathlib.Path(path).read_bytes() for path in _retained_paths(result.text)] == [PNG, second]
+    assert [pathlib.Path(path).read_bytes() for path in _resource_paths(result.text)] == [second, b"\x00\x01\x02\x03"]
+    assert all(artifacts.registered_task_artifact(mcp.data, TASK, pathlib.Path(path).name)
+               for path in _resource_paths(result.text))
     messages, trace = _batch(mcp, [_row(result)])
     assert _items(trace) == ("attached", [(1, "attached"), (2, "attached")]) and _pixels(messages) == [PNG, second]
+
+
+@pytest.mark.parametrize("mime,payload,suffix", [
+    ("application/pdf", b"%PDF-1.7\n\x00\xff", ".pdf"),
+    ("text/csv", b"name,score\r\nA,1\r\n", ".csv"),
+    ("application/zip", b"PK\x03\x04\x00\xff", ".zip"),
+])
+def test_binary_only_resource_is_registered_and_readable_after_disconnect(mcp, mime, payload, suffix):
+    from ouroboros import mcp_client
+
+    encoded = base64.b64encode(payload).decode()
+    mcp.peer.result = mcp_types.CallToolResult(content=[_blob(encoded, mime=mime)])
+    result = mcp.registry.execute_result(TOOL, {})
+    assert (result.status, result.code) == ("ok", "OK") and mcp.peer.calls == 1
+    assert encoded not in result.text and "mcp_image_owner" not in result.meta
+    retained = json.loads(artifacts.read_actor_source_bytes(mcp.data, TASK, result.meta["mcp_response_source"]))
+    assert retained["content"][0]["resource"]["blob"] == encoded
+    (path,) = _resource_paths(result.text)
+    path = pathlib.Path(path)
+    assert path.suffix == suffix and path.read_bytes() == payload
+    record = artifacts.registered_task_artifact(mcp.data, TASK, path.name)
+    assert record["kind"] == "mcp_resource" and record["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert record["immutable"] is True
+    mcp_client.reset_manager_for_tests()  # the task artifact is independent of the MCP connection
+    assert path.read_bytes() == payload
+    assert artifacts.registered_task_artifact(mcp.data, TASK, path.name)["status"] == "ready"
+    if mime == "text/csv":
+        read = mcp.registry.execute_result("read_file", {"root": "artifact_store", "path": path.name})
+        assert read.status == "ok" and "name,score" in read.text
+    messages, trace = _batch(mcp, [_row(result)])
+    assert _pixels(messages) == [] and "image_attachment" not in trace["tool_calls"][0]
+
+
+def test_mixed_image_and_resource_registers_blob_and_attaches_only_image(mcp):
+    payload = b"PK\x03\x04\xff\x00"
+    encoded = base64.b64encode(payload).decode()
+    mcp.peer.result = mcp_types.CallToolResult(content=[_text("result"), _image(),
+        _blob(encoded, mime="application/zip"), _text("end")])
+    result = mcp.registry.execute_result(TOOL, {})
+    assert encoded not in result.text and len(_resource_paths(result.text)) == 1
+    assert pathlib.Path(_resource_paths(result.text)[0]).read_bytes() == payload
+    assert artifacts.registered_task_artifact(mcp.data, TASK, pathlib.Path(_resource_paths(result.text)[0]).name)
+    messages, trace = _batch(mcp, [_row(result)])
+    assert _items(trace) == ("attached", [(1, "attached")]) and _pixels(messages) == [PNG]
+
+
+def test_bad_resource_base64_names_gap_and_keeps_exact_source(mcp):
+    mcp.peer.result = mcp_types.CallToolResult(content=[_blob("%%%bad-base64%%%", mime="application/pdf")])
+    result = mcp.registry.execute_result(TOOL, {})
+    retained = json.loads(artifacts.read_actor_source_bytes(mcp.data, TASK, result.meta["mcp_response_source"]))
+    assert retained["content"][0]["resource"]["blob"] == "%%%bad-base64%%%"
+    assert "resource data is not valid base64" in result.text and not _resource_paths(result.text)
+    assert "mcp_image_owner" not in result.meta and not artifacts.collect_task_artifact_records(mcp.data, TASK)
+
+
+def test_resource_storage_failure_keeps_success_and_retained_bytes(mcp, monkeypatch):
+    encoded = base64.b64encode(b"%PDF-1.7\n").decode()
+    mcp.peer.result = mcp_types.CallToolResult(content=[_blob(encoded, mime="application/pdf")])
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(artifacts, "store_task_artifact_bytes", refuse)
+    result = mcp.registry.execute_result(TOOL, {})
+    assert (result.status, result.code) == ("ok", "OK") and mcp.peer.calls == 1
+    assert "resource artifact not saved (OSError)" in result.text and not _resource_paths(result.text)
+    assert encoded not in result.text
+    retained = json.loads(artifacts.read_actor_source_bytes(mcp.data, TASK, result.meta["mcp_response_source"]))
+    assert retained["content"][0]["resource"]["blob"] == encoded
+
+
+def _big_blob(mime="application/zip"):
+    """A blob long enough for ``_no_base64_text`` to see it, beside the base64 of a real image."""
+    payload = b"PK\x03\x04" + bytes(range(256)) * 4
+    return payload, base64.b64encode(payload).decode()
+
+
+def test_binary_only_source_retention_failure_describes_the_blob_never_inline(mcp, monkeypatch):
+    payload, encoded = _big_blob()
+    mcp.peer.result = mcp_types.CallToolResult(content=[_blob(encoded, mime="application/zip")])
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(artifacts, "store_actor_source_bytes", refuse)
+    result = mcp.registry.execute_result(TOOL, {})
+    assert (result.status, result.code) == ("ok", "OK") and mcp.peer.calls == 1
+    assert encoded not in result.text and _no_base64_text(result.text)
+    assert (f"[binary resource, about {len(payload)} bytes, not shown: response retention failed (OSError)]"
+            in result.text) and "file:///never-read.png" in result.text and "application/zip" in result.text
+    assert result.meta["mcp_response_retention_gap"] == "OSError"
+    assert "mcp_response_source" not in result.meta and not _resource_paths(result.text)
+    assert not artifacts.collect_task_artifact_records(mcp.data, TASK)
+
+
+@pytest.mark.parametrize("error", [False, True], ids=["ok", "error"])
+def test_a_blob_without_an_owning_task_is_described_and_its_uri_never_read(mcp, error):
+    """No task store to keep it: the ordinary projection would print the whole base64 (Fable, 12 Nov 2026)."""
+    from ouroboros.mcp_client import _stringify_call_result
+
+    payload, encoded = _big_blob()
+    planted = mcp.data / "planted.zip"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_bytes(b"LOCAL FILE SENTINEL")
+    raw = mcp_types.CallToolResult(isError=error, content=[_text("export"), mcp_types.EmbeddedResource(
+        type="resource", resource=mcp_types.BlobResourceContents(uri=planted.as_uri(), mimeType="application/zip",
+                                                                 blob=encoded))])
+    mcp.peer.result = raw
+    assert encoded in _stringify_call_result(raw)  # the ordinary rendering this replaces
+    contextless = mcp.manager.call_tool(TOOL, {})
+    mcp.ctx.task_id = None
+    result = mcp.registry.execute_result(TOOL, {})
+    for text in (contextless, result.text):
+        assert encoded not in text and _no_base64_text(text) and "LOCAL FILE SENTINEL" not in text, text
+        assert f"about {len(payload)} bytes, not shown: no task owns this call" in text
+        assert planted.as_uri() in text and "export" in text and text.count("MCP_TOOL_ERROR") == int(error)
+    assert (result.status, result.code) == (("error", "MCP_ERROR") if error else ("ok", "OK"))
+    assert result.meta["mcp_resource_gap"] == "no task owns this call" and "mcp_response_source" not in result.meta
+    assert not list(mcp.data.rglob("source_handles")) and mcp.peer.calls == 2
+
+
+@pytest.mark.parametrize("seam", ["_projected_body", "_protocol_view"], ids=["render", "render-and-retention"])
+def test_a_projection_fault_never_falls_back_to_a_blob_s_base64(mcp, monkeypatch, seam):
+    """The image fallback keeps the ordinary text; a blob's is a count with the error bit, never its base64."""
+    from ouroboros import mcp_result_images
+
+    _payload, encoded = _big_blob()
+    mcp.peer.result = mcp_types.CallToolResult(content=[_text("export"), _blob(encoded, mime="application/zip")])
+
+    def fault(*_args, **_kwargs):
+        raise RuntimeError("fault")
+
+    monkeypatch.setattr(mcp_result_images, seam, fault)
+    result = mcp.registry.execute_result(TOOL, {})
+    assert (result.status, result.code) == ("ok", "OK") and mcp.peer.calls == 1
+    assert encoded not in result.text and _no_base64_text(result.text), result.text
+    assert "projection failed (RuntimeError)" in result.text and result.meta["mcp_response_projection_gap"] == "RuntimeError"
+    assert "an MCP result with 1 embedded binary resource(s), not shown" in result.text
+    assert ("kept exactly in the retained response" in result.text) == (seam == "_projected_body")
+
+
+def test_error_resource_is_registered_without_image_attachment(mcp):
+    encoded = base64.b64encode(b"a,b\n1,2\n").decode()
+    mcp.peer.result = mcp_types.CallToolResult(isError=True, content=[_text("failed"), _blob(encoded, mime="text/csv")])
+    result = mcp.registry.execute_result(TOOL, {})
+    assert (result.status, result.code) == ("error", "MCP_ERROR") and "failed" in result.text
+    assert pathlib.Path(_resource_paths(result.text)[0]).read_bytes() == b"a,b\n1,2\n"
+    assert "mcp_image_owner" not in result.meta
+    messages, trace = _batch(mcp, [_row(result)])
+    assert _pixels(messages) == [] and "image_attachment" not in trace["tool_calls"][0]
+
+
+def test_resource_protocol_masking_and_repeat_digest_reuse(mcp):
+    payload = b"%PDF-1.7\nsecret\x00"
+    encoded = base64.b64encode(payload).decode()
+    planted = mcp.data / f"{SECRET}.pdf"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_bytes(b"unrelated local file")
+    mcp.peer.result = mcp_types.CallToolResult(content=[_text(f"echo {SECRET}"),
+        mcp_types.EmbeddedResource(type="resource", resource=mcp_types.BlobResourceContents(
+            uri=planted.as_uri(), mimeType=f"application/pdf; name={SECRET}", blob=encoded))])
+    first = mcp.registry.execute_result(TOOL, {})
+    second = mcp.registry.execute_result(TOOL, {})
+    assert first.meta["mcp_response_source"]["sha256"] == second.meta["mcp_response_source"]["sha256"]
+    assert _resource_paths(first.text) == _resource_paths(second.text)
+    (path,) = _resource_paths(first.text)
+    assert pathlib.Path(path).read_bytes() == payload
+    assert pathlib.Path(path).parent == artifacts.task_artifact_dir_path(mcp.data, TASK)
+    assert SECRET not in first.text
+    retained = json.loads(artifacts.read_actor_source_bytes(mcp.data, TASK, first.meta["mcp_response_source"]))
+    resource = retained["content"][1]["resource"]
+    assert resource["blob"] == encoded and resource["mimeType"] == "application/pdf; name=<redacted:mcp-auth-token>"
+    assert SECRET not in resource["uri"]
+    assert artifacts.registered_task_artifact(mcp.data, TASK, pathlib.Path(path).name)["sha256"] == hashlib.sha256(payload).hexdigest()
 
 
 def test_error_result_keeps_its_status_and_offers_its_image_only_by_path(mcp):
@@ -426,19 +607,187 @@ def _child_call(child, call_id, messages, trace):
     return trace["tool_calls"][-1]
 
 
-def _retire(env, drive, trace):
+def _retire(env, drive, trace, **fields):
     """The host's whole terminal path: copy-back, ref promotion, settlement and trash removal."""
     from ouroboros import headless, task_custody
     from ouroboros.task_results import write_task_result
 
     write_task_result(drive, CHILD, "completed", result="done", artifact_status="ready", trace_refs={
-        "tool_call_refs": [{"manifest_ref": row["trace_ref"]["manifest_ref"]} for row in trace["tool_calls"]]})
+        "tool_call_refs": [{"manifest_ref": row["trace_ref"]["manifest_ref"]} for row in trace["tool_calls"]]},
+        **fields)
     headless.copy_child_task_result(env.data, {"id": CHILD, "drive_root": str(drive)})
     promoted = headless.retry_child_task_refs(env.data, drive, CHILD)
     assert promoted["child_ref_promotion"]["status"] == "complete", promoted["child_ref_promotion"]
     assert task_custody.settle_child_drive(env.data, CHILD, drive, live=lambda _: False)["status"] == "removed"
     assert task_custody.remove_custody_trash(env.data)["removed"] == 1
     assert not drive.exists()
+
+
+def _zip(member="export/rows.csv", text="a,b\n1,2\n"):
+    import zipfile
+
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as zipped:
+        zipped.writestr(member, text)
+    return out.getvalue()
+
+
+def _split_export(env, content, error=False):
+    """A delegated child, its parent and one call whose result carries ``content``, through the real loop."""
+    from ouroboros.task_results import write_task_result
+
+    child = _delegated_child(env, attempt=1)
+    write_task_result(env.data, PARENT, "running")
+    write_task_result(env.data, CHILD, "running", child_drive_root=str(child.drive))
+    env.peer.result = mcp_types.CallToolResult(isError=error, content=content)
+    trace = {"tool_calls": []}
+    return child, trace, _child_call(child, "call-export", [{"role": "user", "content": "export"}], trace)["result"]
+
+
+def _stored_child_result(env, child, trace):
+    """The pipeline's own terminal store for the child, on its execution drive (``_store_task_result``)."""
+    from ouroboros.agent_task_pipeline import _store_task_result
+    from ouroboros.task_results import load_task_result
+
+    task = {"id": CHILD, "type": "task", "text": "export", "parent_task_id": PARENT, "root_task_id": PARENT}
+    _store_task_result(SimpleNamespace(drive_root=child.drive, repo_dir=env.repo), task, "done",
+                       {"rounds": 1, "cost": 0}, trace)
+    return load_task_result(child.drive, CHILD)
+
+
+@pytest.mark.parametrize("shape", ["zip", "error_csv", "image_blob", "empty"])
+def test_a_split_drive_child_s_embedded_blob_is_one_deliverable_for_every_lifecycle_reader(mcp, shape):
+    """A delegated child runs on its own execution drive. The blob it receives is a deliverable of that drive's store,
+    where its own readers, the pipeline's stored row and sealed manifest, copy-back and settlement find it; the
+    path it prints is the canonical twin of the same bytes and name, so that address, like the sources beside it,
+    still reads after retirement, and the durable row names it, once, in both effective views."""
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.result_material import produced_material
+    from ouroboros.task_finalization import build_sealed_final_package
+    from ouroboros.task_results import load_task_result
+    from ouroboros.task_status import effective_task_result
+    from ouroboros.tools.core_artifacts import _delivery_path
+
+    payload, mime = {"zip": (_zip(), "application/zip"), "error_csv": (b"a,b\n1,2\n", "text/csv"),
+                     "image_blob": (PNG, "image/png"), "empty": (b"", "application/octet-stream")}[shape]
+    child, trace, result = _split_export(
+        mcp, [_text("export"), _blob(base64.b64encode(payload).decode(), mime=mime)], error=shape == "error_csv")
+    (printed,) = _resource_paths(result)
+    name = pathlib.Path(printed).name
+    kept = task_artifact_dir_path(mcp.data, CHILD) / name  # the canonical twin the result prints
+    assert pathlib.Path(printed) == kept and kept.read_bytes() == payload and "canonical copy not saved" not in result
+    assert (task_artifact_dir_path(child.drive, CHILD) / name).read_bytes() == payload
+    assert len(_retained_paths(result)) == (shape == "image_blob")
+    for path in _retained_paths(result):  # an image stays a canonical source, as before
+        assert pathlib.Path(path).is_relative_to(task_artifact_dir_path(mcp.data, CHILD) / "source_handles")
+
+    # In the task: its own store lists it and answers by name, the printed path by itself; one production.
+    assert name in child.registry.execute_result("list_files", {"root": "artifact_store", "path": "."}).text
+    if shape == "zip":
+        for arguments in ({"root": "artifact_store", "path": name}, {"path": printed}):
+            assert "export/rows.csv" in child.registry.execute_result("read_archive", arguments).text, arguments
+    if shape == "error_csv":
+        for arguments in ({"root": "artifact_store", "path": name}, {"path": printed}):
+            assert "1,2" in child.registry.execute_result("read_file", arguments).text, arguments
+    assert _delivery_path(child.ctx, printed)[0].read_bytes() == payload  # send_file's file preparation
+    produced = [row for row in produced_material(child.ctx)["files"] if row.get("kind") == "artifact"]
+    assert [pathlib.Path(row["path"]).name for row in produced] == [name], produced
+
+    stored = _stored_child_result(mcp, child, trace)
+    rows = [row for row in stored["artifacts"] if row.get("name") == name]
+    assert len(rows) == 1 and rows[0]["sha256"] == hashlib.sha256(payload).hexdigest(), stored["artifacts"]
+    assert stored["artifact_bundle"]["status"] == "ready", stored["artifact_bundle"]
+    sealed = build_sealed_final_package(stored, "done")
+    assert [row["name"] for row in sealed["artifact_manifest"]].count(name) == 1, sealed
+    live = effective_task_result(mcp.data, load_task_result(mcp.data, CHILD))  # the parent's view while it runs
+    assert [pathlib.Path(str(row.get("path"))).name for row in live.get("artifacts") or []].count(name) == 1, live
+
+    _retire(mcp, child.drive, trace, artifacts=stored["artifacts"])
+    durable = load_task_result(mcp.data, CHILD)
+    assert kept.read_bytes() == payload and not (task_artifact_dir_path(child.drive, CHILD) / name).exists()
+    (row,) = [row for row in durable["artifacts"] if pathlib.Path(row["path"]).name == name]
+    assert (row["path"], row["sha256"], row.get("immutable")) == (str(kept), rows[0]["sha256"], True)
+    for materialize in (False, True):  # the listing cards and SSE read, and the detail/wait read
+        view = effective_task_result(mcp.data, durable, materialize_artifacts=materialize)
+        assert [item["path"] for item in view["artifacts"]].count(str(kept)) == 1, (materialize, view["artifacts"])
+        assert view["artifact_bundle"]["status"] == "ready" and view.get("artifact_status") == "ready", view
+    reopened = _delegated_child(mcp, attempt=2)
+    for consumer in (reopened, _context(mcp, mcp.data, PARENT)):  # the printed path still reads after retirement
+        assert _delivery_path(consumer.ctx, printed)[0].read_bytes() == payload
+        if shape == "zip":
+            assert "export/rows.csv" in consumer.registry.execute_result("read_archive", {"path": printed}).text
+
+
+def test_a_split_drive_blob_whose_canonical_twin_fails_keeps_its_execution_copy(mcp, monkeypatch):
+    """The execution store is the deliverable's authority: a canonical twin that cannot be written keeps the saved
+    file, prints its execution path with that path's lifetime, never calls the server again, and the drive's custody
+    then publishes the copy the durable row names."""
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.task_results import load_task_result
+
+    real = artifacts.store_task_artifact_bytes
+
+    def canonical_refused(drive_root, *args, **kwargs):
+        if pathlib.Path(drive_root).resolve() == mcp.data.resolve():
+            raise OSError("canonical store refused")
+        return real(drive_root, *args, **kwargs)
+
+    monkeypatch.setattr(artifacts, "store_task_artifact_bytes", canonical_refused)
+    child, trace, result = _split_export(mcp, [_blob("AAECAw==", mime="application/octet-stream")])
+    assert mcp.peer.calls == 1
+    (printed,) = _resource_paths(result)
+    name = pathlib.Path(printed).name
+    assert pathlib.Path(printed) == task_artifact_dir_path(child.drive, CHILD) / name
+    assert pathlib.Path(printed).read_bytes() == b"\x00\x01\x02\x03" and "artifact not saved" not in result
+    assert "canonical copy not saved (OSError): this execution-drive path lasts until the drive retires" in result
+    assert not (task_artifact_dir_path(mcp.data, CHILD) / name).exists()
+    monkeypatch.setattr(artifacts, "store_task_artifact_bytes", real)
+    stored = _stored_child_result(mcp, child, trace)
+    _retire(mcp, child.drive, trace, artifacts=stored["artifacts"])
+    (row,) = [row for row in load_task_result(mcp.data, CHILD)["artifacts"] if pathlib.Path(row["path"]).name == name]
+    kept = task_artifact_dir_path(mcp.data, CHILD) / name
+    assert row["path"] == str(kept) and kept.read_bytes() == b"\x00\x01\x02\x03" and mcp.peer.calls == 1
+
+
+def test_a_split_drive_root_s_terminal_emit_names_its_mcp_blob_in_its_events_and_sealed_package(mcp, monkeypatch):
+    """A root on its own execution drive (a headless split root) ends through the real ``emit_task_results``: the
+    stored result, the ``task_done`` event and the sealed final package its post-task receives each name the blob it
+    received once, ready. Nothing leaves the process: no event queue, and the post-task stage is held at its seam."""
+    from ouroboros import agent_task_pipeline as pipeline, headless
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.loop_tool_execution import StatefulToolExecutor, handle_tool_calls
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    task_id, payload = "mcp-split-root", _zip()
+    root = _context(mcp, headless.prepare_task_drive(mcp.data, task_id, "empty"), task_id, root_task_id=task_id)
+    write_task_result(mcp.data, task_id, "running", child_drive_root=str(root.drive))
+    mcp.peer.result = mcp_types.CallToolResult(content=[
+        _text("export"), _blob(base64.b64encode(payload).decode(), mime="application/zip")])
+    call = {"id": "call-export", "type": "function", "function": {"name": TOOL, "arguments": "{}"}}
+    messages = [{"role": "user", "content": "export"}, {"role": "assistant", "content": "", "tool_calls": [call]}]
+    trace = {"tool_calls": [], "reasoning_notes": []}
+    handle_tool_calls([call], root.registry, root.drive / "logs", task_id, StatefulToolExecutor(), messages, trace,
+                      lambda *_a, **_k: None)
+    (printed,) = _resource_paths(trace["tool_calls"][-1]["result"])
+    name = pathlib.Path(printed).name
+    assert pathlib.Path(printed) == task_artifact_dir_path(mcp.data, task_id) / name  # the durable twin is printed
+    sealed, pending = [], []
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *_a, **kw: sealed.append(kw["sealed_final"]))
+    task = {"id": task_id, "root_task_id": task_id, "type": "task", "chat_id": 1, "text": "export",
+            "budget_drive_root": str(mcp.data)}
+    pipeline.emit_task_results(SimpleNamespace(drive_root=root.drive, repo_dir=mcp.repo), None, None, pending, task,
+                               "Exported.", {"rounds": 1}, trace, 0, root.drive / "logs", ctx=root.ctx)
+
+    stored = load_task_result(root.drive, task_id)
+    assert [row["name"] for row in stored["artifacts"]].count(name) == 1 and stored["artifact_bundle"]["status"] == "ready"
+    (done,) = [event for event in pending if event["type"] == "task_done"]
+    assert done["artifact_status"] == "ready", done
+    assert [row["name"] for row in done["artifact_bundle"]["artifacts"]].count(name) == 1, done["artifact_bundle"]
+    (send,) = [event for event in pending if event["type"] == "send_message"]
+    assert send["text"] == "Exported." and send["task_id"] == task_id
+    (package,) = sealed
+    assert [row["name"] for row in package["artifact_manifest"]].count(name) == 1, package["artifact_manifest"]
+    assert package["final_result_text"] == "Exported." and mcp.peer.calls == 1
 
 
 def _printed_read(text):
@@ -574,16 +923,16 @@ def test_a_projection_fault_after_the_remote_call_is_a_named_gap_never_a_failure
     assert _pixels(messages) == [] and "image_attachment" not in trace["tool_calls"][0]
 
 
-def test_only_an_image_bearing_response_carries_its_sdk_value():
+def test_only_an_image_or_embedded_blob_response_carries_its_sdk_value():
     from ouroboros.mcp_result_images import ReturnedResult, with_returned
     from ouroboros.tools.tool_result import ToolResult
 
     plain = ToolResult(status="ok", code="OK", text="adapted")
     for raw in (mcp_types.CallToolResult(content=[_text("plain")]), mcp_types.CallToolResult(content=[]),
-                mcp_types.CallToolResult(content=[_blob("AAECAw==", mime="application/octet-stream")]),
                 mcp_types.CallToolResult(content=[mcp_types.AudioContent(type="audio", mimeType="audio/wav", data="AAAA")])):
         assert with_returned(plain, raw) is plain
-    for raw in (mcp_types.CallToolResult(content=[_image()]), mcp_types.CallToolResult(content=[_blob()])):
+    for raw in (mcp_types.CallToolResult(content=[_image()]), mcp_types.CallToolResult(content=[_blob()]),
+                mcp_types.CallToolResult(content=[_blob("AAECAw==", mime="application/octet-stream")])):
         carried = with_returned(plain, raw)
         assert type(carried) is ReturnedResult and carried.returned is raw and B64 not in repr(carried)
 
