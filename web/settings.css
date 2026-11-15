@@ -1304,9 +1304,10 @@ html[data-layout="stack"] .settings-search { height: 44px; }
 .settings-row-result:empty,
 .settings-row-fact:empty { display: none; }
 /* A row with nothing under its name stands on one line: its meta line takes no room and its name is centred against
-   the control. The words of a meta line stand in its child elements, as settingsRow draws them. */
-.settings-row > .ui-row-meta:has(> *):not(:has(> :not(:empty))) { display: none; }
-.settings-row > .ui-row-title:not(:has(+ .ui-row-meta > :not(:empty))) { grid-row: 1 / span 2; }
+   the control. The row says so itself (`data-no-meta`, written with the line's words: ui_primitives.js setRowMeta),
+   since WebKit does not re-match `:empty` inside `:has()` when the words come after the row was painted. */
+.settings-row[data-no-meta] > .ui-row-meta { display: none; }
+.settings-row[data-no-meta] > .ui-row-title { grid-row: 1 / span 2; }
 .settings-row > .ui-row-actions > .ui-control { width: 14rem; max-width: 100%; }
 .settings-row[data-kind="text"] > .ui-row-actions > .ui-control { width: 18rem; }
 .settings-row > .ui-row-actions > select.ui-control,
@@ -1555,7 +1556,6 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
 .models-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); align-items: start; gap: var(--space-3); }
 .model-role-field { min-width: 0; }
 .model-role-field > :is(select, .ui-model-chooser) { width: 100%; min-width: 0; }
-.model-role-row[data-solo] > .model-role-notes:not(:has(> :not(:empty))) { display: none; }
 .model-role-row[data-solo] .model-role-meta { margin-top: 0; }
 .model-role-row[data-solo] > .model-role-details { margin-top: 0; }
 .models-role .model-role-copy { margin: 0; }

@@ -168,6 +168,13 @@ export function setResult(node, { text = '', tone = 'muted', details = '', ends 
     }
 }
 
+/** A Settings row's meta words (`part`, inside its `.ui-row-meta`): every writer comes here, so the row says when its
+ *  line has none (`data-no-meta`, settings.css): WebKit does not re-match `:empty` inside `:has()` when words come later. */
+export function setRowMeta(part, text) {
+    if (part && part.textContent !== text) part.textContent = text;
+    part?.closest?.('.settings-row')?.toggleAttribute('data-no-meta', !part.closest('.ui-row-meta')?.textContent);
+}
+
 /** An edit in the same subject (the form or section the action belongs to) clears its result; returns the disposer. */
 export function clearResultOnEdit(subject, node) {
     if (!subject?.addEventListener || !node) return () => {};
