@@ -98,5 +98,5 @@ test('a call a control ended reads by its control outside the error phase, and t
     assert.equal(record.toolFold.calls.get([...record.toolFold.calls.keys()][0]).status, 'ok');
     const logged = summarizeLogEvent({ type: 'tool_call', tool: 'run_command', is_error: true, status: 'interrupted',
         control_reason: 'owner_pause' });
-    assert.deepEqual([logged.phase, logged.headline], ['info', 'run_command interrupted (owner_pause)']);
+    assert.deepEqual([logged.phase, logged.headline], ['info', 'Run command interrupted (owner_pause)']);
 });
