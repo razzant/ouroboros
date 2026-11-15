@@ -1,8 +1,8 @@
 """``/api/state`` sends the task bindings map only when the client's revision no longer stands.
 
 An open chat page reads the state every three seconds; on a long-lived install the bindings map
-is most of each answer (273 KB of 399 KB). Old clients, the Telegram mini app and phones send no
-``bindings_since`` and keep receiving the whole map.
+is most of each answer. A read without ``bindings_since`` (a page's first read, an older client)
+receives the whole map: each bound task's Project id and room, never the Project's name.
 """
 
 from __future__ import annotations
@@ -105,10 +105,10 @@ def test_a_failed_read_is_never_unchanged(read_state):
 
 
 def test_a_registry_that_vouches_for_no_room_leaves_the_map_and_its_revision_standing(read_state):
-    """The map a reader receives comes from the bindings file alone (it names no Project): while the registry vouches
-    for no room (lost beside its commit witness, or only invalid rows) the room set and the feed's count are unknown,
-    and the map keeps its revision, so a reader is not sent the whole map again at every read. A bindings file that
-    cannot be read still leaves the map without a revision."""
+    """The map a reader receives names no Project: while the registry vouches for no room (lost beside its commit
+    witness, or only invalid rows) the room set and the feed's count are unknown, and the map keeps its revision, so
+    a reader is not sent the whole map again at every read. A registry or a bindings file that cannot be read still
+    leaves the map without a revision (the server's own map reads the registry for the census's names)."""
     root, read = read_state
     registry.create_project(root, "beta", name="Beta")
     registry.bind_task_to_project(root, "t3", "beta", origin={"absent": "system"})
@@ -125,6 +125,9 @@ def test_a_registry_that_vouches_for_no_room_leaves_the_map_and_its_revision_sta
         assert body["task_bindings_revision"] == healthy["task_bindings_revision"], unknown
         assert read()["task_bindings"] == healthy["task_bindings"], unknown
         assert body["project_chat_ids"] is None and body["project_listable_count"] is None, unknown
+    path.write_text("{torn", encoding="utf-8")  # a registry that cannot be read at all fails the bindings read
+    unreadable = read(healthy["task_bindings_revision"])
+    assert unreadable["task_bindings_revision"] == "" and unreadable["task_bindings_unchanged"] is False
     path.write_bytes(intact)
     assert read()["task_bindings_revision"] == healthy["task_bindings_revision"]
     registry._bindings_path(root).write_text("{torn", encoding="utf-8")

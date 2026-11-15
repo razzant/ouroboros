@@ -310,7 +310,8 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         project_chat_ids = None
     if project_chat_ids is None:
         # The same registry counts the feed: while it vouches for no room, the count is unknown too (never "none
-        # listed"). The bindings map a reader receives names no Project, so it keeps its revision.
+        # listed"). The bindings map a reader receives names no Project, so a registry that reads but vouches for no
+        # room leaves its revision standing; one that cannot be read fails the bindings read too.
         project_listable_count = None
     from ouroboros.gateway.ui_preferences import main_room_revision
 

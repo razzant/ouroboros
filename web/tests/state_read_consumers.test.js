@@ -222,8 +222,11 @@ test('a reader of other fields names the bindings revision the page last saw and
     const [named, fresh] = await ask(api.apiClient.state);
     assert.deepEqual([named, fresh.github_token_configured, fresh.task_bindings], ['/api/state?bindings_since=rev%20a', true, null]);
     assert.equal((await ask(() => api.readState()))[0], '/api/state?bindings_since=rev%20a', 'the bounded read without a path');
-    // A reader of the map passes its own path: the page's token never hides the map from it.
+    // A reader of the map passes its own path: the page's token never hides the map from it. What it is answered
+    // moves the token as any state read does (it is the page's main reader, so the others name its revision).
+    body = { ...CENSUS, task_bindings: map, task_bindings_revision: 'rev seen by the map reader' };
     assert.equal((await ask(() => api.readState('/api/state')))[0], '/api/state');
+    assert.equal((await ask(api.apiClient.state))[0], '/api/state?bindings_since=rev%20seen%20by%20the%20map%20reader');
     // The token follows the newest body: a new revision, then none after a failed bindings read ('') ...
     body = { ...CENSUS, task_bindings: map, task_bindings_revision: 'rev-b' };
     await api.apiClient.state();

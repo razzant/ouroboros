@@ -212,6 +212,10 @@ OWNER_ATTESTATION: List[str] = [
     "upgrade) and none REQUIRES cost_usd/cost_usd_with_children/"
     "telegram_chat_id in live outbound frames (the ABI emits the honest names "
     "and transport metadata only).",
+    "No custom gateway client reads project_name inside the entries of "
+    "/api/state task_bindings: an entry carries project_id and chat_id, and a "
+    "Project's name is in projects, GET /api/projects and a census row's "
+    "project_name.",
     "No external automation treats the retired reviewer comma-list keys "
     "(RETIRED_COMMA_LIST_SETTING_KEYS) as a SETTINGS surface; the env "
     "spellings survive only as the derived runtime projection.",
