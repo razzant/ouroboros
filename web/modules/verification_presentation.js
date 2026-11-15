@@ -58,6 +58,27 @@ export function checkFailureCause(evt, check) {
     return tr('task.check.not_confirmed', 'criterion not confirmed');
 }
 
+/** The task's detail sentence for its recorded red check (`outcome_axes.objective.verification_red`, the host's
+ *  `_outcome_receipts.red_check_fact`): the cause in this row's own words and whether any check passed after it, or ''
+ *  when the record holds no such fact (its stored sentence stands). Twin: tool_error_words.red_check_phrase. */
+export function redCheckPhrase(objective) {
+    const fact = objective?.verification_red;
+    if (!fact || typeof fact !== 'object') return '';
+    const count = (value) => (Number.isInteger(value) && value > 0 ? value : 0);
+    const cause = fact.kind === 'artifact_observation'  // the host looked for the named files and ran no command
+        ? (fact.paths_named ? tr('task.check.file_not_found', 'a named file was not found') : tr('task.check.no_files_named', 'no files were named'))
+        : !fact.signal && !Number.isInteger(fact.exit_code) ? tr('task.check.no_exit_code', 'no exit code')
+            : fact.signal || fact.exit_code !== 0 ? checkFailureCause(fact, fact)  // the row beside says the process exited 0; this line says it itself
+                : fmt('exit code 0; {cause}', { cause: checkFailureCause(fact, fact) });
+    const after = count(fact.passed_after), more = count(fact.more);
+    const head = after === 1 ? fmt('A recorded check did not pass ({cause}); 1 check passed after it, none recorded as a rerun of it', { cause })
+        : after ? fmt('A recorded check did not pass ({cause}); {n} checks passed after it, none recorded as a rerun of it', { cause, n: after })
+            : fmt('The last recorded check did not pass ({cause}); no check passed after it', { cause });
+    const tail = more === 1 ? tr('task.check.more_one', '; 1 more failed check has no recorded passing rerun')
+        : more ? fmt('; {n} more failed checks have no recorded passing rerun', { n: more }) : '';
+    return `${head}${tail}.`;
+}
+
 /** The diagnostic row for one failed check, or null. `callKey` is the call's own
  *  timeline key; a failed CALL (is_error) keeps its existing error row instead. */
 export function checkFailureView(evt, callKey) {

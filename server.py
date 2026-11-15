@@ -31,8 +31,8 @@ from ouroboros.server_auth import (
     validate_network_auth_configuration,
 )
 from ouroboros.server_entrypoint import (ServerAdmissionRefused, admit_data_root, bound_service_socket,
-                                         find_free_port, parse_server_args, reserved_service_ports, shorten_switch_interval,
-                                         write_port_file)
+                                         find_free_port, parse_server_args, raise_gc_threshold, reserved_service_ports,
+                                         shorten_switch_interval, write_port_file)
 from ouroboros.launcher_bootstrap import automatic_launch_allowed
 from ouroboros import body_adoption, places, process_scope, server_boot, store_switch
 from ouroboros.server_web import ServedUI
@@ -1446,6 +1446,7 @@ def main() -> int:
     configure_process_logging(drive_logs=None if _pytest_default_real_data_dir else DATA_DIR / "logs")
     raise_open_file_limit()  # the body follows each live run on its own transport: hundreds of runs are hundreds of files
     shorten_switch_interval()  # a computing thread is asked to hand over after 1 ms, not 5, when another waits
+    raise_gc_threshold()  # a large JSON decode no longer starts a collection every 700 new objects
     if not _pytest_default_real_data_dir:  # a pending Panic sweep ends and the installation marker is planted before any child (§9)
         process_scope.initialize_installation_scope(DATA_DIR)
     if not automatic_launch_allowed(os.environ.get("OUROBOROS_LAUNCH_INTENT", "owner"), DATA_DIR, log):
