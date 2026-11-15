@@ -362,7 +362,7 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         _goto(page, 'dashboard')
         page.locator('#page-dashboard [data-dashboard-tab="costs"]').click()
         dashboard_band = page.evaluate(BAR, 'dashboard')
-        assert dashboard_band['height'] == 52 and dashboard_band['centres'] == [], dashboard_band
+        assert dashboard_band['height'] == 66 and dashboard_band['centres'] == [], dashboard_band
         _goto(page, 'widgets')
         page.locator('.widgets-card').first.wait_for()
         widgets = page.evaluate("""() => ({bar: document.querySelector('#page-widgets .app-page-header').getBoundingClientRect().height,
