@@ -665,12 +665,23 @@ test('Costs reads subscriptions only through the passive view, on show and Refre
     await block.fire('click', { target: doors[0] });
     await block.fire('click', { target: doors[2] });
     assert.deepEqual(opened, [['accounts/codex', undefined], ['accounts', undefined]], 'links need no return callback');
+    doors[0].focus();
+    shown(window, 'costs');
+    await settle();
+    assert.equal(block.querySelector('[data-costs-account="accounts/codex"]'), doors[0], 'return refresh retains the pressed row');
+    assert.equal(document.activeElement, doors[0], 'its focus survives the asynchronous answer');
     // A read that fails keeps the one door, saying why.
     routes.set('/api/claudexor/status?view=quota', response({ error: 'down' }, 502));
     mount.querySelector('#btn-refresh-costs').fire('click');
     await settle();
     assert.deepEqual(block.querySelectorAll('[data-costs-account]').map((door) => [door.dataset.costsAccount, door.querySelector('.ui-row-meta').textContent]),
         [['accounts', 'The accounts could not be read now.']]);
+    assert.equal(document.activeElement, doors[2], 'a vanished account returns to its surviving Accounts anchor');
+    const elsewhere = mount.querySelector('#btn-refresh-costs');
+    elsewhere.focus();
+    shown(window, 'costs');
+    await settle();
+    assert.equal(document.activeElement, elsewhere, 'a refresh does not take focus from elsewhere');
 });
 
 test('in a wide window the Dashboard holds its list beside a page; an engine without container queries gets the list, then a page with Back', (t) => {
