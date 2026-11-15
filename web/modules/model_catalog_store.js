@@ -123,7 +123,7 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
     return {
         read, readRecents, readConnections,
         /** Another reader's `/api/model-catalog` answer (Settings › Models' Refresh). */
-        adopt(data) { if (Array.isArray(data?.items)) { adopt(data); notify(); } },
+        adopt(data) { if (Array.isArray(data?.items)) { adopt(data, state.catalogTier ?? state.cacheTier); notify(); } },
         /** The settings document Settings loaded or saved: a changed tier or key reaches the list without a read. */
         adoptSettings(settings) { if (settings && typeof settings === 'object') { adoptSettings(settings); notify(); } },
         /** The catalog as last read (the merged `/api/model-catalog` answer), or null before any read. */

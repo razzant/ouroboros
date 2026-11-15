@@ -32,7 +32,7 @@ import { revealNewRow } from './ui_helpers.js';
 import { setResult } from './ui_primitives.js';
 import { effortLabel } from './effort_levels.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
-import { currentLanguage } from './i18n.js';
+import { currentLanguage, dictionaryRevision } from './i18n.js';
 
 export const MAX_AVAILABLE_SUBAGENTS = 26;
 const KEY = 'OUROBOROS_SUBAGENTS';
@@ -648,7 +648,7 @@ export function availableSubagentsRenderSignature(state, nowMs = Date.now()) {
         state.apiModels, state.modelSources, state.modelCatalog, state.modelCatalogNote, state.processingPreference,
         state.providers, state.connections, state.providerProfiles, state.reviewPool, state.allowEmptyReviewPool,
         state.filter, state.tickCaption, state.unsavedId,
-        currentLanguage(),  // the suggestions' prices are composed words: another language is another paint
+        currentLanguage(), dictionaryRevision(),  // prices and tariffs are composed words: another language, or its dictionary arriving, is another paint
     ]);
 }
 

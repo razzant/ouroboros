@@ -106,4 +106,27 @@ test('a cache-write price is said only for the cache tier its catalog was read u
     assert.equal(said(store), '', 'begun under 1h, landed under 5m');
     await store.read();
     assert.deepEqual([reads, said(store)], [5, 'Cache write: $5 per 1M tokens.']);
+    // Settings' own refresh hands its catalog over (`adopt`): it may have begun before a tier was saved, so it is held
+    // under the tier the store's catalog had, never certified under the new one.
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
+    store.adopt(priced(5));
+    assert.equal(said(store), '', 'a handed-over catalog of unknown tier after the setting moved');
+    await store.read();
+    assert.deepEqual([reads, said(store)], [6, 'Cache write: $5 per 1M tokens.']);
+});
+
+test('a first catalog read that began before any settings document keeps the tier that document names', async () => {
+    const { describeRoute } = await import('../modules/chat_model_routes.js');
+    let release;
+    let reads = 0;
+    const store = createModelCatalogStore({ readCatalog: () => { reads += 1; return new Promise((resolve) => {
+        release = () => resolve({ items: [{ ...item('a/one'), price: { input: 4, output: 20, cache_write: 8 } }] }); }); } });
+    const first = store.read();
+    await Promise.resolve();
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });   // the settings answer first: a local read
+    release();
+    await first;
+    assert.equal(describeRoute(store.index(), { model: 'a/one' }).cacheWrite, 'Cache write: $8 per 1M tokens.');
+    await store.read();
+    assert.equal(reads, 1, 'and the catalog is fresh: no second read');
 });

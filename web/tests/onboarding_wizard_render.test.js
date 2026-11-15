@@ -857,20 +857,27 @@ test('Summary says what an exhausted subscription quota does, with and without a
 });
 
 // A read in flight for another access is no longer wanted once the draft is back at an access already read: its late
-// answer (the list of a key since deleted) must not land. And the limits line speaks only for an answered preview.
-test('a deleted key\'s catalog never lands late, and a failed preview leaves the limits line unsaid', async () => {
+// answer (the list of a key since replaced) must not land. This stand-in DOM paints no model list, so the test reads
+// what a landed answer changes on the wire: the wizard would hold the replaced key's list as the one read whole and
+// ask again for the first key's when Models reopens. No account is connected here, so nothing but the owner's own
+// asks reads the catalog. And the limits line speaks only for an answered preview.
+test('a replaced key\'s catalog never lands late, and a failed preview leaves the limits line unsaid', async () => {
     const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
     const held = [];
+    const reads = [];
     let previewFails = false;
     const answer = (body, status = 200) => ({ ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body) });
+    const listed = (id) => ({ items: [{ provider_id: 'openrouter', id, value: id, name: id }], model_sources: [], errors: [] });
     const fetch = async (url, init = {}) => {
         if (String(url) === '/api/onboarding/model-catalog') {
             const typed = JSON.parse(init.body).OPENROUTER_API_KEY;
-            if (!typed) return answer(subscription.catalog);
-            return new Promise((resolve) => held.push(() => resolve(answer({ ...subscription.catalog,
-                items: [...subscription.catalog.items, { provider_id: 'openrouter', id: 'late/from-deleted-key', value: 'late/from-deleted-key', name: 'late' }] }))));
+            reads.push(typed.split('-')[3]);
+            if (typed !== 'sk-or-v1-second-not-a-secret') return answer(listed('first/model'));
+            return new Promise((resolve) => held.push(() => resolve(answer(listed('late/from-replaced-key')))));
         }
-        if (String(url) === '/api/claudexor/status') return answer(subscription.status);
+        if (String(url) === '/api/claudexor/status') {
+            return answer({ ...subscription.status, profiles: { ...subscription.status.profiles, profiles: [] } });
+        }
         if (String(url) === '/api/onboarding/subagents/preview') {
             return previewFails ? answer({ ok: false, error: 'Automatic assignments unavailable.', saved: false }, 503)
                 : answer({ ok: true, model_settings: {}, available_subagents: { enabled: true, items: [] }, known_spend_gaps: ['Light'] });
@@ -878,41 +885,41 @@ test('a deleted key\'s catalog never lands late, and a failed preview leaves the
         return answer({});
     };
     const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
-    const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, mainModel: 'claudexor::codex=gpt-test', automaticModels: [] } };
+    const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, mainModel: 'first/model', automaticModels: [] } };
     await withWizard(bootstrap, 'late-catalog', async ({ doc }) => {
         await settle();
-        const key = doc.getElementById('openrouter-key');
-        const type = (value) => { key.value = value; key.fire('input'); };
-        type('sk-or-v1-typed-not-a-secret');
-        doc.getElementById('onboarding-access-retry').fire('click');   // the owner asks: a read with the typed key, held
-        await settle();
+        const type = (value) => { const key = doc.getElementById('openrouter-key'); key.value = value; key.fire('input'); };
+        const click = async (id) => { doc.getElementById(id).fire('click'); await settle(); };
+        type('sk-or-v1-first-not-a-secret');
+        await click('next-btn');                                        // Accounts → Models: this access is read whole
+        await click('back-btn');
+        type('sk-or-v1-second-not-a-secret');
+        await click('onboarding-access-retry');                         // the owner asks again: a read with the second key, held
         assert.equal(held.length, 1);
-        type('');                                                       // the key is deleted before that read answers
-        doc.getElementById('next-btn').fire('click');                   // Accounts → Models: this access was read already
-        await settle();
+        type('sk-or-v1-first-not-a-secret');                            // back to the key already read
+        await click('next-btn');                                        // Models opens: nothing to read, the held read is dropped
         held.forEach((release) => release());
         await settle();
-        assert.doesNotMatch(JSON.stringify(doc.getElementById('root').innerHTML), /late\/from-deleted-key/);
-        doc.getElementById('next-btn').fire('click');                   // Models → Access
-        await settle();
-        doc.getElementById('next-btn').fire('click');                   // Access → limits: the answered preview's line
-        await settle();
+        await click('back-btn');
+        await click('next-btn');                                        // Models again, same key: still the list read whole
+        assert.deepEqual(reads, ['first', 'second'], 'the late answer did not become the list read whole');
+        await click('next-btn');                                        // Models → Access
+        await click('next-btn');                                        // Access → limits: the answered preview's line
         assert.match(doc.getElementById('root').innerHTML, /id="budget-gaps"[^>]*>Not counted: Light \(price unknown\)\.</);
         previewFails = true;
-        doc.getElementById('back-btn').fire('click');
-        await settle();
-        doc.getElementById('next-btn').fire('click');                   // a forced preview that fails
-        await settle();
+        await click('back-btn');
+        await click('next-btn');                                        // a forced preview that fails
         const line = doc.getElementById('budget-gaps');
         assert.deepEqual([line.hidden, line.textContent], [true, ''], 'no answered preview of this draft: nothing is claimed');
     }, { fetch });
 });
 
 // A key or an address being typed leaves the page only when the owner asks for the list (the Models step, Retry). A
-// read he did not ask for (an account connecting meanwhile) sends the access the wizard opened with.
+// read he did not ask for (an account connecting meanwhile) sends the access the wizard opened with, and it is made
+// for every such change: a second account of a family already connected is read too.
 test('an account that connects while a key is being typed never sends that key; opening Models does', async () => {
     const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
-    let connected = false;
+    let accounts = 0;
     const reads = [];
     const fetch = async (url, init = {}) => {
         let body = {};
@@ -921,7 +928,7 @@ test('an account that connects while a key is being typed never sends that key; 
             body = subscription.catalog;
         } else if (String(url) === '/api/claudexor/status') {
             body = { ...subscription.status, profiles: { ...subscription.status.profiles,
-                profiles: connected ? subscription.status.profiles.profiles : [] } };
+                profiles: subscription.status.profiles.profiles.slice(0, accounts) } };
         } else if (String(url) === '/api/onboarding/subagents/preview') {
             body = { ok: true, model_settings: {}, available_subagents: { enabled: true, items: [] } };
         }
@@ -933,13 +940,27 @@ test('an account that connects while a key is being typed never sends that key; 
         const key = doc.getElementById('openrouter-key');
         key.value = 'sk-or-v1-typed-not-a-secret';
         key.fire('input');
-        connected = true;
-        await (await import('../modules/claudexor_status_store.js')).claudexorStatus.refresh();
+        const { claudexorStatus } = await import('../modules/claudexor_status_store.js');
+        accounts = 1;
+        await claudexorStatus.refresh();
         await settle();
         assert.deepEqual(reads, [''], 'the unasked read carries the access the wizard opened with');
+        accounts = 2;                                    // a second account of the same family
+        await claudexorStatus.refresh();
+        await settle();
+        assert.deepEqual(reads, ['', ''], 'its list is read too, still without the key being typed');
         doc.getElementById('next-btn').fire('click');   // Accounts → Models: the owner asks for the list
         await settle();
-        assert.deepEqual(reads, ['', 'sk-or-v1-typed-not-a-secret']);
+        assert.deepEqual(reads, ['', '', 'sk-or-v1-typed-not-a-secret']);
+        doc.getElementById('back-btn').fire('click');
+        await settle();
+        const asked = reads.length;                      // while the draft is the one he asked with, it may be read again
+        key.value = '';
+        key.fire('input');                               // the key he asked with is deleted
+        accounts = 1;                                    // and an account leaves meanwhile
+        await claudexorStatus.refresh();
+        await settle();
+        assert.deepEqual(reads.slice(asked), [''], 'a key deleted since he last asked is not sent again');
     }, { fetch });
 });
 

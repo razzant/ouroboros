@@ -108,7 +108,6 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
     let modelCatalog = {};
     let catalogRequest = null;
     let catalogRead = '';  // the access whose catalog was read whole
-    let catalogAsked = '';  // the access of the last read begun
     let askedAccess = '';  // the keys, rows and local model the owner last asked the model catalog with (the Models step, Retry)
     let disposed = false;
     let disposeLanguage = null;
@@ -176,7 +175,6 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         const draft = asked || own(current) === askedAccess ? current : openedDraft;
         const access = JSON.stringify([state.agentsConnected, own(draft)]);
         if (catalogRequest?.access === access) return catalogRequest.promise;
-        if (!asked && access === catalogAsked) return Promise.resolve();
         // A read in flight for another access is no longer wanted, also when this access needs none.
         catalogRequest?.abort();
         const generation = ++catalogGeneration;
@@ -186,7 +184,6 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
             return Promise.resolve();
         }
         if (asked) askedAccess = own(draft);
-        catalogAsked = access;
         const request = catalogRequest = { access, ...readDraftCatalog(draft) };
         request.promise = request.promise.then((catalog) => {
             if (generation !== catalogGeneration) return;

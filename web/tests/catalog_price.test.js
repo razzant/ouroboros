@@ -348,17 +348,24 @@ test('a language change says the price under a role again, in the new language',
     }
 });
 
-test('the Agents editor paints again for another language: its prices are composed words', async () => {
+test('the Agents editor paints again for another language, and for its dictionary arriving: its prices are composed words', async () => {
     const { availableSubagentsRenderSignature } = await import('../modules/subagents_settings.js');
     const state = { loaded: true, setting: { items: [] } };
-    const english = availableSubagentsRenderSignature(state, 0);
-    applyPayload({ language: 'ru', english: false, revision: 61, entries: {} });
+    const paint = () => availableSubagentsRenderSignature(state, 0);
+    applyPayload({ language: '', english: true, revision: 60, entries: {} });
+    const english = paint();
     try {
-        assert.notEqual(availableSubagentsRenderSignature(state, 0), english);
+        applyPayload({ language: 'ru', english: false, revision: 60, entries: {} });
+        const bare = paint();
+        assert.notEqual(bare, english, 'another language');
+        // The same language, its dictionary read again (a later revision): the composed words may read differently.
+        applyPayload({ language: 'ru', english: false, revision: 61, entries: {
+            '{input} in / {output} out per 1M tokens': { text: '{input} вход / {output} выход за 1 млн токенов' } } });
+        assert.notEqual(paint(), bare, 'the dictionary arrived');
     } finally {
-        applyPayload({ language: '', english: true, revision: 62, entries: {} });
+        applyPayload({ language: '', english: true, revision: 60, entries: {} });
     }
-    assert.equal(availableSubagentsRenderSignature(state, 0), english);
+    assert.equal(paint(), english, 'the same language and dictionary: nothing to paint again');
 });
 
 test('while Main or the default tier is on Fast or Economy the composer list names no catalog price; on Standard it does', async () => {

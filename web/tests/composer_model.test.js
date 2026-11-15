@@ -257,6 +257,8 @@ test('the confirming sheet says what Main becomes, what running work does, and i
     const priced = doc.createElement('section');
     calls[1].content.mount(priced);
     assert.equal(priced.children[3].textContent, `${MAIN_CACHE_NOTE} Cache write: $16 per 1M tokens.`);
+    assert.deepEqual([content.children[3].dataset.i18nFmt, priced.children[3].dataset.i18nFmt], [undefined, 'main cache note'],
+        'only the line that carries a figure is composed; the plain sentence stays the overlay\'s to translate');
     // The same subscription keeps Main's account, so only the window is said.
     await confirmMainChange({ next: { ...next, source: 'subscription:codex', lane: 'subscription' }, previous, dialog, doc });
     assert.equal(calls[2].body, 'A context window set by hand for Main is cleared.');
