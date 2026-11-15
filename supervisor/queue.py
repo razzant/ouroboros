@@ -135,7 +135,7 @@ ACCEPTANCE_FENCES: Dict[str, Dict[str, Any]] = {}
 ADMISSION_RESERVATIONS: Dict[str, str] = {}
 # This generation's returning stop (planned or owner Restart) that copied PENDING for its
 # returns, under Q (``name_queue_returns``). The off-loop schedule duty reads it under Q before its final
-# enqueue: an admission after that copy boots held at the owner's Restart (a planned one names it late).
+# enqueue: an admission after that copy would boot held (a planned stop's late step names only what came before it).
 # Those doors always exit; the next generation's ``init_queue_refs`` starts open.
 RETURNS_NAMED: Dict[str, str] = {}
 

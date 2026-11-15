@@ -88,7 +88,7 @@ def test_refused_return_reports_planned_and_saved_promises(tmp_path, monkeypatch
     assert recover_saved_running(workers.RUNNING.values(), tmp_path,
         transaction={promised: ["unsaved"]}, cause="restart") == []
     path = tmp_path / "logs/supervisor.jsonl"
-    rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
     refused = [row for row in rows if row.get("type") == "restart_return_refused"]
     assert bool(refused) is (promised != "none")
     if refused:
@@ -731,7 +731,7 @@ def test_a_managed_update_window_never_times_out_the_saved_work_it_returns(tmp_p
 
     def controls(task_id):
         path = _mailbox_path(tmp_path, task_id)
-        return [json.loads(line).get("kind") for line in mailbox_lines(path.read_text())] if path.exists() else []
+        return [json.loads(line).get("kind") for line in mailbox_lines(path.read_text(encoding="utf-8"))] if path.exists() else []
 
     for task_id in ("saved-a", "saved-b", "stopped"):  # slots 0, 1, 2; 25 min into a long tool call
         _working_run(tmp_path, workers, task_id)
