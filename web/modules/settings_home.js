@@ -518,7 +518,6 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     // Off screen: the reads in flight are dropped and free their connections; none starts until it is shown again.
     function hide() {
         hidden = true;
-        at = '';
         flights.forEach((flight) => flight.controller.abort());
         flights.clear();
     }
@@ -587,7 +586,6 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         at = where;
         if (left) renew(left.reads);
     };
-    const WHERE = ['ouro:settings-page-shown'];
     const onPlaces = () => renew(['places']);
     const onTools = (event) => {
         if (hidden || !root.getClientRects?.().length) return;
@@ -613,7 +611,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     globalThis.window?.addEventListener?.('ouro:settings-updated', onSaved);
     globalThis.window?.addEventListener?.(PLACES_CHANGED_EVENT, onPlaces);
     globalThis.window?.addEventListener?.('ouro:mcp-status-updated', onTools);
-    WHERE.forEach((type) => globalThis.window?.addEventListener?.(type, onWhere));
+    globalThis.window?.addEventListener?.('ouro:settings-page-shown', onWhere);
     const DEVICE_EVENTS = ['click', 'keydown', 'change'];
     DEVICE_EVENTS.forEach((type) => globalThis.window?.addEventListener?.(type, onDevice));
     paint();
@@ -641,7 +639,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
             globalThis.window?.removeEventListener?.('ouro:settings-updated', onSaved);
             globalThis.window?.removeEventListener?.(PLACES_CHANGED_EVENT, onPlaces);
             globalThis.window?.removeEventListener?.('ouro:mcp-status-updated', onTools);
-            WHERE.forEach((type) => globalThis.window?.removeEventListener?.(type, onWhere));
+            globalThis.window?.removeEventListener?.('ouro:settings-page-shown', onWhere);
             DEVICE_EVENTS.forEach((type) => globalThis.window?.removeEventListener?.(type, onDevice));
         },
     };

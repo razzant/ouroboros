@@ -708,4 +708,12 @@ test('the row of a page that is left reads its sources again, a setting\'s row a
     assert.equal((await writeEntry('MCP_SERVERS', 'docs', (before) => ({ ...before, enabled: true }))).state, 'saved');
     await settle();
     assert.equal(answer('tools'), '1 of 1 server on');
+    // A width change covers the list and brings it back beside the same page, without announcing a new path.
+    home.hide();
+    await home.refresh();
+    const afterWidth = count('/api/settings');
+    await go('ouro:settings-page-shown', { path: 'models' });
+    assert.equal(count('/api/settings'), afterWidth + 1, 'the first press after resizing still leaves Rules');
+    await go('ouro:settings-page-shown', { path: 'models/role/main' });
+    assert.equal(count('/api/settings'), afterWidth + 1, 'a level of the same page still reads nothing');
 });
