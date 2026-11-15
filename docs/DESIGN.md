@@ -3444,8 +3444,8 @@ owed jump's origin (‹ Tools, ‹ Main), then the level's parent when spent. To
 Two panes put it over the page column; one column replaces the leading picture. A model role names its destination
 (Consciousness model), distinct from its return. Docked, the sidebar names a section without pages: tabs or Files' location lead its
 band, actions end it, at one height and shape. Controls keep 18px above and the content's leading inset with or without
-native chrome. A narrow row scrolls sideways, keeping controls reachable. Tabs, filters and location use the shared fade; location reveals the current
-folder, none wider than the rail. Section headings follow
+native chrome. Skills drops its tabs only when short actions cannot fit, never above 1087px. Rails use the shared fade;
+location reveals its folder without widening the rail. Section headings follow
 “A section with pages”; a Project shows its name.
 An empty band draws nothing. Its scroller reaches the window's top; its first row starts below the macOS band,
 which stays the window's (owner 22.10). Widgets cards pass under it with crisp edges (owner 20.10); moving content

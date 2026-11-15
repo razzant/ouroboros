@@ -73,7 +73,7 @@ MAX_WIDTH_DEBT = {
     'web/onboarding.css': {'900px': 1, '760px': 1, '720px': 1},  # wizard
     'web/room_work.css': {'900px': 1},  # existing Shade height recipe (L1)
     'web/settings.css': {'980px': 2, '760px': 1, '640px': 1, '600px': 1},  # existing form/MCP layout debt
-    'web/style.css': {'980px': 1, '640px': 2, '620px': 2},  # legacy content only: the shell's queries are gone (L1)
+    'web/style.css': {'980px': 1, '640px': 2, '620px': 2, '1087px': 1},  # F10: Skills' second row is forbidden above the owner's window
     'web/ui.css': {'640px': 1},  # native field font-size/zoom recipe
 }
 

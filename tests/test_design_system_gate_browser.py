@@ -114,7 +114,9 @@ MEASURE = """root => {
             const gap = secondLine ? parseFloat(getComputedStyle(skillsBelow ? e : rail.closest('.section-lead-page')).rowGap) || 0 : 0;
             const margin = secondLine ? parseFloat(getComputedStyle(rail).marginBottom) || 0 : 0;
             const height = r.height - (secondLine ? rb.height + gap + margin : 0);
-            if (height > 56.1)
+            const docked = document.documentElement.dataset.layout === 'docked';
+            const band = docked && !e.closest('#page-chat') ? (coarse ? 80 : 66) : 56;
+            if (height > band + .1)
                 headers.push({node:name(e),height:Math.round(height*10)/10});
             if (secondLine && new Set([...rail.children].filter(shown).map(n=>Math.round(n.getBoundingClientRect().top))).size > 1)
                 headers.push({node:name(rail),wrapped:true});
