@@ -441,3 +441,42 @@ test('the Accounts row counts the accounts beside every page: the home\'s passiv
     await settle();
     assert.deepEqual([answer(), passive()], ['4 accounts, 2 API keys', before]);
 });
+
+test('a door from a one-column Settings level keeps its history entry until the destination return is ready', async (t) => {
+    const { createLayerStack } = await import('../modules/layers.js');
+    const { registerSettingsPage } = await import('../modules/settings_pages.js');
+    for (const door of ['page:skills', 'dashboard:costs']) for (const allowed of [true, false]) {
+        await t.test(`${door}/${allowed}`, async (sub) => {
+            const { env, content, state } = world(sub);
+            const calls = [];
+            const layers = createLayerStack({ win: null, doc: null, history: {
+                pushState: () => calls.push('push'), back: () => calls.push('back'),
+            } });
+            sub.after(() => layers.destroy());
+            const skills = env.document.createElement('div'); skills.id = 'page-skills';
+            skills.innerHTML = '<div class="app-page-header"></div><section></section>';
+            content.append(skills);
+            let leave;
+            registerSettingsPage('test-door-history', { title: 'Door', mount(_body, { ctx }) { leave = ctx.openSettings; } });
+            const showPage = async (name) => {
+                await Promise.resolve(); // app.js awaits its before-page-leave handlers
+                if (name !== 'settings' && !allowed) return false;
+                state.activePage = name;
+                env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: name } }));
+                return true;
+            };
+            const controls = initSettings({ state, ws: env.ws, layers, showPage, openDashboardTab: async () => {
+                if (await showPage('dashboard')) layers.push({ id: 'dashboard-back', page: true, focus: false });
+            } });
+            content.querySelector('[data-settings-home]').getClientRects = () => [];
+            await controls.open('test-door-history');
+            await settle();
+            assert.deepEqual(calls, ['push']);
+            await leave(door);
+            await settle();
+            assert.deepEqual(calls, ['push'], 'the handover never consumes and replaces the existing history entry');
+            assert.equal(layers.size(), 1);
+            assert.equal(layers.top(), allowed ? (door === 'page:skills' ? 'settings-door-back' : 'dashboard-back') : 'settings-level-1');
+        });
+    }
+});
