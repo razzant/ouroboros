@@ -418,9 +418,12 @@ export class WS {
             // instance created while the socket was already open would read its
             // per-instance "seen an open before" flag as false on the next real
             // reconnect and skip the full rebuild; previouslyConnected cannot.
-            this.emit('open', { previouslyConnected });
-            this._refreshStateAfterOpen(previouslyConnected);
-            this._flushPendingMessages();
+            try {
+                this.emit('open', { previouslyConnected });
+            } finally {  // a throwing listener still surfaces; the version read and the queued frames do not wait on it
+                this._refreshStateAfterOpen(previouslyConnected);
+                this._flushPendingMessages();
+            }
         };
 
         socket.onerror = () => {

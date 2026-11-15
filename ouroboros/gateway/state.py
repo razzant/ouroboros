@@ -75,11 +75,15 @@ def _git_checkout_identity(repo_dir: Any) -> tuple:
 
 
 def _runtime_repo_identity(st: Dict[str, Any]) -> tuple:
-    """(branch, sha) for ``/api/state``: supervisor-stamped state values win
-    (they carry managed update/reset provenance); the live checkout fills the
-    source-mode gap; nothing is invented when both are silent."""
+    """(branch, sha) for ``/api/state``. The sha is the source this server generation captured
+    at its start (``server_process.server_source_baseline``): a page compares it to learn that
+    the core it talks to changed, and the supervisor's stamp names the previous generation
+    until this one's bootstrap step. Without a captured source the stamp answers (managed
+    update/reset provenance), then the live checkout (source mode); nothing is invented."""
+    from ouroboros.server_process import server_source_baseline
+
     branch = st.get("current_branch") or None
-    sha = str(st.get("current_sha") or "")
+    sha = server_source_baseline() or str(st.get("current_sha") or "")
     if branch and sha:
         return branch, sha
     from ouroboros.config import REPO_DIR

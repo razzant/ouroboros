@@ -4,8 +4,9 @@ On a source-mode install nothing ever stamps ``current_branch``/``current_sha``
 into state.json, so the endpoint answered ``sha: ""`` / ``branch: null`` while
 the process demonstrably ran from a real git checkout. The fix reads the ACTUAL
 checkout (read-only, stdlib file reads — worktree pointers, loose and packed
-refs, detached HEAD) as the fallback; supervisor-stamped state values keep
-winning, and nothing is invented when both sides are silent.
+refs, detached HEAD) as the fallback; the source the serving generation captured
+at its start answers first, then supervisor-stamped state values, and nothing is
+invented when every side is silent.
 """
 
 from __future__ import annotations
@@ -23,6 +24,14 @@ from ouroboros import usage_store
 
 SHA = "1234567890abcdef1234567890abcdef12345678"
 OTHER = "fedcba0987654321fedcba0987654321fedcba09"
+
+
+@pytest.fixture(autouse=True)
+def _no_captured_source(monkeypatch):
+    """The generation's source is captured once per process (a ``server`` import): each case names its own."""
+    from ouroboros import server_process
+
+    monkeypatch.setattr(server_process, "_source_baseline", None)
 
 
 def _plain_checkout(root, *, branch="ouroboros", sha=SHA, packed=False):
@@ -83,12 +92,19 @@ def test_unreadable_layouts_degrade_to_unknown_not_invented(tmp_path):
     assert _git_checkout_identity(repo) == (None, "")
 
 
-def test_supervisor_stamped_state_values_win_over_the_checkout(tmp_path, monkeypatch):
+def test_the_generations_source_answers_before_a_stamp_and_a_stamp_before_the_checkout(tmp_path, monkeypatch):
     import ouroboros.config as config
+    from ouroboros import server_process
 
     monkeypatch.setattr(config, "REPO_DIR", _plain_checkout(tmp_path / "repo"))
     st = {"current_branch": "managed-branch", "current_sha": OTHER}
     assert _runtime_repo_identity(st) == ("managed-branch", OTHER)
+    # After an update the stamp still names the previous generation until this one's bootstrap step: the page
+    # that reconnects in between must hear the commit this server started from, or it keeps its old self.
+    started = "a" * 40
+    monkeypatch.setattr(server_process, "_source_baseline", started)
+    assert _runtime_repo_identity(st) == ("managed-branch", started)
+    assert _runtime_repo_identity({"current_branch": None, "current_sha": None}) == ("ouroboros", started)
 
 
 def test_source_mode_state_gap_is_filled_from_the_checkout(tmp_path, monkeypatch):
