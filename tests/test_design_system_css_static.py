@@ -179,7 +179,7 @@ def test_no_has_on_an_element_holding_a_rooms_rows():
 # painted without it stood alone at the window's top edge (owner 14.11), and a Settings row whose words came later kept
 # its line hidden. Playwright's WebKit re-matches it, so no browser test sees this; this static check is the guard. Ask
 # for a child (`.x:has(> .slot > *)`) where the tested element only holds elements, or let the text's one writer say it
-# in an attribute the sheet keys on (`data-no-meta`, settings_controls.js setRowMeta). A plain `:empty` on the element
+# in an attribute the sheet keys on (`data-no-meta`, ui_primitives.js setRowMeta). A plain `:empty` on the element
 # itself is re-matched.
 def empty_in_has(selectors):
     """A `:has()` whose argument tests `:empty`, at any depth (inside `:not()`/`:is()`, after a combinator)."""
