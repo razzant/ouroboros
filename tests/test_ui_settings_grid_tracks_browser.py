@@ -109,7 +109,12 @@ def test_action_results_reflow_before_their_text_is_squeezed(role_ui, theme):
     The synthetic translation stresses the existing rendered controls, not a copy
     of their markup. Containment alone passed the old, unreadable two-column row.
     At 360/280px the result gets the row's full width (2px rounding tolerance),
-    rather than the old 95/15px sliver. At 640px both still fit on the same line.
+    rather than the old 95/15px sliver. At 640px, with the product's own label, the
+    two actions (Save and Discard changes) and the result still share a line. The
+    long translation is no fixture for that step: with it the two actions and the
+    result's 12rem took 629 of 640 px with macOS fonts, while the Linux runner's
+    wider fonts drew its Save alone 312 px wide and rightly gave the result its own
+    line (DESIGN "a row too narrow for both gives it its own line").
     """
     from playwright.sync_api import expect
 
@@ -133,9 +138,10 @@ def test_action_results_reflow_before_their_text_is_squeezed(role_ui, theme):
     status = row.locator('.ui-result')
     expect(status).to_contain_text('Roster temporarily unavailable')
     status.evaluate("e => e.textContent = 'Der Modellkatalog ist momentan nicht erreichbar. Die gespeicherte Auswahl bleibt erhalten; bitte versuchen Sie die Aktualisierung erneut.'")
-    button.evaluate("e => e.textContent = 'Modellkatalog erneut aktualisieren'")
     row.evaluate("e => { window.actionReadingRow = e; window.actionReadingButton = e.firstElementChild; }")
-    for width in (640, 360, 280):
+    long_label = 'Modellkatalog erneut aktualisieren'
+    for label, width in (('Save', 640), (long_label, 360), (long_label, 280)):
+        button.evaluate("(e, label) => { e.textContent = label; }", label)
         row.evaluate("(e, w) => { e.style.width = w + 'px'; e.style.maxWidth = '100%'; }", width)
         page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
         row.scroll_into_view_if_needed()
@@ -143,8 +149,10 @@ def test_action_results_reflow_before_their_text_is_squeezed(role_ui, theme):
         seen[str(width)] = row.evaluate("""e => {
             const box = e.getBoundingClientRect(), action = e.firstElementChild.getBoundingClientRect();
             const text = e.querySelector('.ui-result').getBoundingClientRect();
+            const shown = [...e.children].filter(c => !c.hidden && !c.classList.contains('ui-result'));
             return {width: box.width, text: text.width, textTop: text.top,
                 actionBottom: action.bottom, actionRight: action.right - box.right,
+                actions: shown.map(c => Math.round(c.getBoundingClientRect().width)),
                 overflow: e.scrollWidth - e.clientWidth};
         }""")
         setup_browser.capture(page, f"action-results-{theme}-{width}")
