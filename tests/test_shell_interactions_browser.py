@@ -227,7 +227,8 @@ FILES_BACK_FACTS = """() => {
         editor: document.querySelector('.files-editor')?.value ?? null,
         unsaved: [...document.querySelectorAll('.files-entry')].filter(row => shown(row.querySelector('.files-entry-unsaved')))
             .map(row => row.dataset.path || ''),
-        focus: active?.closest?.('.files-entry')?.dataset.path ?? (active?.matches?.('[data-shell-back]') ? 'back' : active?.tagName),
+        focus: active?.closest?.('.files-entry')?.dataset.path ?? (active?.matches?.('[data-shell-back]') ? 'back'
+            : active?.matches?.('.files-preview') ? 'file' : active?.tagName),
         telegramBack: window.Telegram?.WebApp?.BackButton?.isVisible ?? null};
 }"""
 
@@ -278,7 +279,8 @@ def test_back_returns_a_narrow_files_page_from_its_file_to_the_list(shell_ui, tm
     assert facts['list']['layers'] == [] and facts['list']['view'] == 'list', facts
     opened = facts['open']
     assert opened['layers'] == ['files-file'] and opened['armed'] and opened['file'] and not opened['list'], facts
-    assert opened['focus'] == 'back', facts
+    # Telegram owns Back in its native row; the page gives focus to the visible file instead.
+    assert opened['focus'] == ('file' if via == 'telegram' else 'back'), facts
     back = facts['back']
     assert back['layers'] == [] and back['view'] == 'list' and back['list'] and not back['file'], facts
     assert back['focus'] == 'notes.md' and back['unsaved'] == ['notes.md'], facts
