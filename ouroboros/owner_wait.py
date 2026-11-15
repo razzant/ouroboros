@@ -62,9 +62,10 @@ def classify_wake(entries: list[dict], quiz_id: str) -> str:
     """
     from ouroboros.owner_mailbox import (
         KIND_CARD_INPUT, KIND_FINALIZE_NOW, KIND_HURRY, KIND_OWNER_PAUSE, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER,
-        KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, KIND_OWNER_MODEL, place_arrival_wake,
+        KIND_QUIZ_CLOSED, KIND_TASK_MESSAGE, KIND_OWNER_MODEL, place_arrival_wake, tier_only,
     )
 
+    entries = [row for row in entries if not tier_only(row)]  # a tier act is applied by the drain, never a wake
     kinds = [str(row.get("kind") or KIND_OWNER_TEXT) for row in entries]
     if KIND_FINALIZE_NOW in kinds:
         return "control:finalize_now"
@@ -242,6 +243,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
             "route_choice",  # following its role, or the task's own (route_choice)
             "_lead_episode", "_lead_cause", "_lead_return_from", "_lead_role",  # one departure fact, including an unaccepted return
             "_owner_model_applied_id",  # only a completed handover survives a checkpoint
+            "_owner_processing_applied_id",  # a tier act the mind was already told of
         )},
         "delivery_candidate": asdict(candidate) if candidate is not None else None,
         "delivery": {key: getattr(ctx, key, None) for key in (

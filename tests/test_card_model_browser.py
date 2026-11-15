@@ -10,7 +10,8 @@ published shapes (CLIENT_CONTRACT §5 and §9); the work rows are the server's o
 with the published ``lead`` and the ``model`` control added. Both ends run together in
 ``test_chat_model_wire_browser.py``; this test walks the states one server run cannot hold at once, at the owner's
 two pane widths and on a phone, in both themes, and asserts that nothing is wider than the screen and that the
-transcript does not move when the popover opens.
+transcript does not move when the fact's Model sheet opens (owner 12.11 «A»: the composer's sheet, with the work's own
+acts above its field and the work's processing tier at its foot).
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ import re
 
 import pytest
 
+from tests._model_choice_browser import _FOCUS, QUEUED_SCOPE, WORK_SCOPE, _held_focus
 from tests._work_projection_shared import with_work_fields
 from tests.test_design_system_gate_browser import TG_STUB
 from tests.test_effort_range_browser import _launch
@@ -211,22 +213,25 @@ _CARDS = """() => {
         transcript: document.querySelector('#chat-messages').clientWidth };
 }"""
 
+# The fact's Model sheet (model_sheet.js) with the card's head (card_model.js) above its field.
 _POPOVER = """() => {
     const text = (node) => (node ? node.innerText.replace(/\\s+/g, ' ').trim() : null);
-    const popup = document.querySelector('.card-model-pop');
-    if (!popup) return null;
+    const popup = document.querySelector('.ui-popup.model-sheet');
+    if (!popup || !popup.querySelector('.card-model-head')) return null;
     const box = popup.getBoundingClientRect();
     return {
         title: text(popup.querySelector('.card-model-pop-title')),
         acts: [...popup.querySelectorAll('.card-model-act')].map((node) => [node.dataset.act, text(node.querySelector('.card-model-act-label')), text(node.querySelector('.card-model-act-sub'))]),
         rows: [...popup.querySelectorAll('.chat-model-row')].map((node) => [node.dataset.row, node.getAttribute('aria-selected'), text(node)]),
         sections: [...popup.querySelectorAll('.chat-model-section')].map(text),
-        rule: text(popup.querySelector('.chat-model-rule')),
+        scope: text(popup.querySelector('.model-tier-scope')),
+        tiers: [...popup.querySelectorAll('.model-tier-seg')].filter((seg) => !seg.hidden).map((seg) => seg.dataset.tier),
         field: Boolean(popup.querySelector('input.chat-model-query')),
         inside: box.left >= 0 && box.top >= 0 && box.right <= window.innerWidth + 0.5 && box.bottom <= window.innerHeight + 0.5,
         expanded: document.querySelector('.card-model-fact[aria-expanded="true"]')?.closest('.chat-live-card')?.dataset.taskId || null,
     };
 }"""
+_GONE = "() => !document.querySelector('.ui-popup.model-sheet')"
 
 _SHEET = """() => {
     const text = (node) => (node ? node.innerText.replace(/\\s+/g, ' ').trim() : null);
@@ -268,7 +273,7 @@ def _quiet(page) -> None:
 
 
 def _said(page, words: str) -> None:
-    """A toast says the words (the popover's own rule line says them before the act; this is the answer's)."""
+    """A toast says the words: the answer's own (the sheet's tier strip says what its tier applies to before a press)."""
     page.wait_for_function("(words) => [...document.querySelectorAll('.toast')].some((toast) => toast.innerText.includes(words))",
                            arg=words, timeout=10_000)
 
@@ -335,28 +340,45 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
     _show(page, "t-queued")
     shoot("1-cards")
 
-    # 2. The popover of a work on its own model: Main (the one way to follow it), the recent models and Search. Nothing in the
-    #    transcript moves when it opens.
+    # 2. The sheet of a work on its own model: Main (the one way to follow it), the recent models, the field and the
+    #    work's tier. Nothing in the transcript moves when it opens.
     _show(page, "t-own")
     before = page.evaluate(_CARDS)["cards"]
     page.click(_fact("t-own"))
-    page.wait_for_selector(".card-model-pop .chat-model-row", timeout=10_000)
+    page.wait_for_selector(".ui-popup.model-sheet .card-model-head", timeout=10_000)
+    page.wait_for_selector(".ui-popup.model-sheet .chat-model-row", timeout=10_000)
     page.wait_for_timeout(350)
     pop = page.evaluate(_POPOVER)
     assert pop["title"] == "Model for this work · you chose it" and pop["expanded"] == "t-own", pop
     assert pop["acts"] == [], "no separate action: the list's Main row is the way to follow Main"
-    assert pop["rows"][0][0] == f"route|{ASTRA}" and pop["rows"][0][2] == "gpt-6-astra Main this work will follow Main", pop
+    assert pop["rows"][0] == ["main", "false", "Main this work will follow Main"], pop
     assert [row[0] for row in pop["rows"][1:3]] == [f"route|{GLM}", f"route|{KIMI}"] and pop["sections"][0] == "Recent", pop
     assert pop["rows"][2][1] == "true", "the work's own model is the chosen row"
-    assert pop["field"] and pop["rule"] == NEXT_STEP and pop["inside"], pop
+    assert pop["field"] and pop["inside"], pop
+    assert pop["scope"] == f"Default · Standard · {WORK_SCOPE}", ("its tier applies from its next call", pop)
+    # Safari's Tab reaches only fields unless "Press Tab to highlight each item" is on; Option+Tab reaches every control.
+    keys = ("Alt+Tab", "Alt+Shift+Tab") if tag.startswith("webkit") else ("Tab", "Shift+Tab")
+    stack, coarse = page.evaluate("() => [document.documentElement.dataset.layout === 'stack', document.documentElement.dataset.pointer === 'coarse']")
+    if stack:
+        # A running work's sheet in the stack layout is the modal bottom sheet: it holds the focus (under a finger on
+        # itself, so no keyboard rises).
+        trapped = _held_focus(page, *keys, finger=coarse)
+        if tag.startswith("webkit"):
+            page.focus(".ui-popup.model-sheet .chat-model-query")  # Safari's own Tab, from the field: fields only
+            trapped["plain_tab"] = _held_focus(page, "Tab", "Shift+Tab", finger=False, every_stop=False)
+        (shots / f"{tag}-sheet-focus.json").write_text(json.dumps(trapped, indent=1), encoding="utf-8")
+    else:
+        # On the desk it floats beside the transcript, not modal: the field has the focus, and leaving it for the page
+        # closes it (checked on the fallback's sheet below, so this walk keeps its own sheet).
+        assert page.evaluate(_FOCUS)["modal"] is None and page.evaluate(_FOCUS)["typing"], page.evaluate(_FOCUS)
     after = page.evaluate(_CARDS)
     assert {task: card["box"] for task, card in after["cards"].items()} == {task: card["box"] for task, card in before.items()}, \
         "the popover floats: no card moved or changed size"
     held(after)
     shoot("2-popover")
-    page.click(f'.card-model-pop .chat-model-row[data-row="route|{ASTRA}"]')
+    page.click('.ui-popup.model-sheet .chat-model-row[data-row="main"] .chat-model-cell')
     _said(page, NEXT_STEP)
-    page.wait_for_function("() => !document.querySelector('.card-model-pop')")
+    page.wait_for_function(_GONE)
     assert stand.writes[-1] == ("task", "t-own", {"action": "follow"}), stand.writes
     page.wait_for_function(f"""() => document.querySelector('{_fact("t-own")}').closest('.card-model').querySelector('.card-model-pending .card-model-words').innerText.includes('gpt-6-astra')""")
     moved = page.evaluate(_CARDS)["cards"]["t-own"]
@@ -366,13 +388,14 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
     _quiet(page)
     _show(page, "t-queued")
     page.click(_fact("t-queued"))
-    page.wait_for_selector(".card-model-pop .chat-model-row", timeout=10_000)
+    page.wait_for_selector(".ui-popup.model-sheet .chat-model-row", timeout=10_000)
     page.wait_for_timeout(350)
     pop = page.evaluate(_POPOVER)
-    assert pop["acts"] == [] and pop["title"] == "Model for this work · follows Main" and pop["rule"] == AT_START, pop
+    assert pop["acts"] == [] and pop["title"] == "Model for this work · follows Main", pop
+    assert pop["scope"] == f"Default · Standard · {QUEUED_SCOPE}", ("a queued work's tier applies when it starts", pop)
     assert pop["rows"][0][1] == "true" and pop["inside"], pop
     shoot("3-queued")
-    page.click(f'.card-model-pop .chat-model-row[data-row="route|{GLM}"]')
+    page.click(f'.ui-popup.model-sheet .chat-model-row[data-row="route|{GLM}"] .chat-model-cell')
     _said(page, AT_START)
     assert stand.writes[-1] == ("task", "t-queued", {"action": "set", "model": GLM, "use_local": False}), stand.writes
     page.wait_for_function(f"""() => document.querySelector('{_fact("t-queued")}').innerText.includes('glm-5.3')""")
@@ -381,7 +404,7 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
     _quiet(page)
     _show(page, "t-fallback")
     page.click(_fact("t-fallback"))
-    page.wait_for_selector(".card-model-pop .card-model-act", timeout=10_000)
+    page.wait_for_selector(".ui-popup.model-sheet .card-model-act", timeout=10_000)
     page.wait_for_timeout(350)
     pop = page.evaluate(_POPOVER)
     assert pop["title"].startswith("Left Main at 02:14") and pop["title"].endswith("· Waiting for quota"), \
@@ -391,13 +414,25 @@ def _walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None)
     held(page.evaluate(_CARDS))
     shoot("4-fallback")
     page.keyboard.press("Escape")
-    page.wait_for_function("() => !document.querySelector('.card-model-pop')")
+    page.wait_for_function(_GONE)
     assert page.evaluate(_CARDS)["cards"]["t-fallback"]["amber"], "amber stays until the server's fact says otherwise"
+    if not stack:
+        # The floating sheet is not modal: Shift+Tab out of it to the page closes it, and the page keeps that focus.
+        page.click(_fact("t-fallback"))
+        page.wait_for_selector(".ui-popup.model-sheet .card-model-act", timeout=10_000)
+        for _ in range(12):
+            page.keyboard.press(keys[1])
+            if not page.evaluate(_FOCUS)["open"]:
+                break
+        left = page.evaluate(_FOCUS)
+        assert not left["open"] and not page.query_selector(".model-sheet-scrim"), ("focus leaving the floating sheet closes it", left)
+        assert left["at"] != "BODY.", ("the focus stays where the keyboard took it", left)
+        (shots / f"{tag}-sheet-focus.json").write_text(json.dumps({"floating_left": left}, indent=1), encoding="utf-8")
 
     # 5. Main changes: the sheet's count and lists, nothing ticked; two ticks, then one act each after the Main write.
     page.click("#chat-model-mode .chat-model-head")
-    page.wait_for_selector('#chat-model-mode[data-open="true"] .chat-seg', timeout=10_000)
-    page.locator("#chat-model-mode .chat-seg", has_text="glm-5.3").first.click()
+    page.wait_for_selector(f'.ui-popup.model-sheet .chat-model-row[data-row="route|{GLM}"]', timeout=10_000)
+    page.click(f'.ui-popup.model-sheet .chat-model-row[data-row="route|{GLM}"] .chat-model-cell')
     page.wait_for_selector(".confirm-dialog [data-main-followers]", timeout=10_000)
     sheet = page.evaluate(_SHEET)
     assert sheet["title"] == "Change Main" and sheet["count"] == "2 running works follow Main now.", sheet
@@ -457,7 +492,7 @@ def test_a_works_model_on_its_card_the_fallback_and_the_main_sheet(direct_server
 
 
 _CITATION = """() => {
-    const popup = document.querySelector('.card-model-pop');
+    const popup = document.querySelector('.ui-popup.model-sheet');
     const quote = popup?.querySelector('.card-model-cited');
     const line = popup?.querySelector('.card-model-pop-line');
     const toggle = popup?.querySelector('.chat-clamp-toggle');
@@ -474,6 +509,8 @@ _CITATION = """() => {
 
 def _citation_walk(page, url: str, shots: pathlib.Path, tag: str, transcript: int | None, phone: bool, telegram: bool) -> None:
     """Owner, 11.11.2026: the model and the exact cited words are visible on the card, also away from its primary."""
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
     words = 'Use gpt-6-astra for THIS work.\n  Keep my case & <tags> 🙂'
     excerpt = ('Use gpt-6-astra for THIS work; keep these exact words and their spacing 🙂.\n  ' * 30)[:1024]
     stand = Stand()
@@ -499,7 +536,7 @@ def _citation_walk(page, url: str, shots: pathlib.Path, tag: str, transcript: in
     def open_fact(task: str) -> None:
         _show(page, task)
         press(_fact(task))
-        page.wait_for_selector('.card-model-pop')
+        page.wait_for_selector('.ui-popup.model-sheet .card-model-head')
         assert page.evaluate(_POPOVER)['inside'], tag
         if phone:
             assert not page.evaluate(_CITATION)['queryFocused'], (tag, 'opening by tap raises no keyboard')
@@ -533,17 +570,24 @@ def _citation_walk(page, url: str, shots: pathlib.Path, tag: str, transcript: in
     shoot('15', 'card-cited-fallback')
     page.keyboard.press('Escape')
     open_fact('t-queued')
+    # The clamp's toggle follows the head's layout once the sheet holds it (a resize observation, then a frame).
+    try:
+        page.wait_for_function("""() => { const sheet = document.querySelector('.ui-popup.model-sheet');
+            const line = sheet?.querySelector('.card-model-pop-line'), toggle = sheet?.querySelector('.chat-clamp-toggle');
+            return Boolean(line && toggle) && (line.scrollHeight <= line.clientHeight + 1 || !toggle.hidden); }""", timeout=5_000)
+    except PlaywrightTimeoutError:
+        pass  # the assertion below says what stands
     seen = quoted(excerpt, True)
     assert seen['cut'] and not seen['toggleHidden'] and seen['toggle'] == 'Show all', (tag, seen)
     shoot('16', 'card-cited-excerpt')
-    press('.card-model-pop .chat-clamp-toggle')
+    press('.ui-popup.model-sheet .chat-clamp-toggle')
     seen = quoted(excerpt, True)
     assert seen['expanded'] and seen['toggle'] == 'Show less' and not seen['toggleHidden'], (tag, seen)
     assert seen['cut'], (tag, 'the expanded quotation owns a bounded scroller', seen)
     page.locator('.card-model-pop-line').evaluate('(line) => { line.scrollTop = line.scrollHeight; }')
     assert page.locator('.card-model-pop-line').evaluate('(line) => line.scrollTop > 0'), tag
     shoot('17', 'card-cited-expanded')
-    press('.card-model-pop .chat-clamp-toggle')
+    press('.ui-popup.model-sheet .chat-clamp-toggle')
     seen = quoted(excerpt, True)
     assert not seen['expanded'] and seen['toggle'] == 'Show all', (tag, seen)
     assert page.locator('.card-model-pop-line').evaluate('(line) => line.scrollTop == 0'), (tag, 'Show less restores the beginning')
@@ -554,7 +598,7 @@ def _citation_walk(page, url: str, shots: pathlib.Path, tag: str, transcript: in
     assert not moved['amber'] and moved['basis'] == 'own', (tag, moved)
     assert moved['why'] == 'you chose it · left Main (gpt-6-astra)' and moved['pending'] == '', (tag, moved)
     popover = page.evaluate(_POPOVER)
-    assert popover['acts'] == [] and popover['rows'][0][0] == f'route|{ASTRA}', (tag, popover)
+    assert popover['acts'] == [] and popover['rows'][0][0] == 'main', (tag, popover)
     shoot('18', 'card-wait-owner')
     page.keyboard.press('Escape')
     # The cite may already name an accepted primary before the current call has ever used it (CLIENT_CONTRACT §5).

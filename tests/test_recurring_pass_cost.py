@@ -727,8 +727,9 @@ def test_l1_memo_an_unchanged_tree_answers_every_census_consumer_without_a_membe
         _write_seq_reads(patch)
         assert conflicting_writers(queue, target, drive_root=root) == first
         assert model_handoffs(root, target) == []
-    # An addressed action first repairs its own tree (its one body read, per press); its census is the same memo.
-    assert action_writers(queue, target, drive_root=root) == first
+        # An addressed action first repairs its own tree: no member holds a claimed launch row, so it reads no
+        # body either, and its census is the same memo.
+        assert action_writers(queue, target, drive_root=root) == first
 
 
 @pytest.mark.parametrize("change", ["task_row", "custody_run", "open_request"])

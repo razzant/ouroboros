@@ -10,6 +10,7 @@ def test_resolve_openrouter_target_uses_canonical_app_attribution():
     assert OPENROUTER_APP_HEADERS == {
         "HTTP-Referer": "https://ouroboros-agent.ai/",
         "X-OpenRouter-Title": "Ouroboros",
+        "X-OpenRouter-Categories": "personal-agent,programming-app",
     }
     # Attribution stays its own SSOT; the router is also asked for its upstream attempts.
     assert target["default_headers"] == {**OPENROUTER_APP_HEADERS, "X-OpenRouter-Metadata": "enabled"}

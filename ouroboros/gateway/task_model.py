@@ -1,4 +1,4 @@
-"""POST /api/tasks/{task_id}/model: one owner act on a durable root's primary."""
+"""POST /api/tasks/{task_id}/model: one owner act on a durable root's primary, or on its processing tier."""
 from __future__ import annotations
 
 import asyncio
@@ -22,7 +22,7 @@ async def api_task_model(request: Request) -> JSONResponse:
         return json_error(str(exc), 400, reason_code="task_model_invalid")
     body = await request_json_or(request, {})
     errors = validate_ingress(body, TaskModelRequest)
-    if isinstance(body, dict) and set(body) - {"request_id", "action", "model", "use_local"}:
+    if isinstance(body, dict) and set(body) - {"request_id", "action", "model", "use_local", "processing"}:
         errors.append("Unexpected fields in a model act")
     if errors:
         return json_error(errors[0], 400, task_id=task_id, reason_code="task_model_invalid")
@@ -31,10 +31,17 @@ async def api_task_model(request: Request) -> JSONResponse:
                           task_id=task_id, reason_code="request_id_required")
     if body["action"] != "set" and any(key in body for key in ("model", "use_local")):
         return json_error("Only set accepts model and use_local", 400, task_id=task_id, reason_code="task_model_invalid")
+    if (body["action"] == "processing") != ("processing" in body):
+        return json_error("Only processing, and always processing, names a tier", 400,
+                          task_id=task_id, reason_code="task_model_invalid")
     try:
         if body["action"] == "set":
             chosen = normalize_model_choice({**body, "kind": "model"})
             body = {**body, "model": chosen["model"], "use_local": chosen["use_local"]}
+        elif body["action"] == "processing":
+            from ouroboros.model_slots import normalize_call_tier
+
+            body = {**body, "processing": normalize_call_tier(body["processing"])}
     except ValueError as exc:
         return json_error(str(exc), 400, task_id=task_id, reason_code="task_model_invalid")
     try:

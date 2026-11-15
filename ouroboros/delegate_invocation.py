@@ -256,6 +256,7 @@ def _request_facts(drive_root: Any, row: Dict[str, Any]) -> Dict[str, Any]:
         "work_order_coverage": str(row.get("work_order_coverage") or ""),
         "authority_fingerprint": str(row.get("authority_fingerprint") or ""),
         "processing": copy.deepcopy(row.get("processing")) if isinstance(row.get("processing"), dict) else {},
+        **({"row_processing": row["row_processing"]} if "row_processing" in row else {}),
         "prompt_cache_ttl": copy.deepcopy(row.get("prompt_cache_ttl")) if isinstance(row.get("prompt_cache_ttl"), dict) else {},
         # #1196: the cap and HOW it was decided replay with the body a
         # retry re-POSTs, so the replayed STARTED row keeps the same basis.
