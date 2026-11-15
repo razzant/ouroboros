@@ -4,7 +4,7 @@
 // lists stays a route of its own source, never dropped or rewritten. A route's identity is its whole string, source
 // included, so one model through two sources is two rows.
 import {
-    API_PROVIDER_ORDER, apiProviderLabel, composeModelSource, connectionParts, parseModelSource, priceWords,
+    API_PROVIDER_ORDER, apiProviderLabel, cacheWriteWords, composeModelSource, connectionParts, parseModelSource, priceWords,
     unavailableConnectionState,
 } from './route_editor_primitives.js';
 import { harnessPresentation } from './harness_presentation.js';
@@ -92,7 +92,7 @@ export function compareNewerFirst(a, b) {
  * `connections` (`apiConnections()` of a settings read, when one was made) names an API source that cannot send.
  * @param {{catalog?: object, connections?: ?Array}} input
  */
-export function buildModelIndex({ catalog = {}, connections = null, tierPriced = false } = {}) {
+export function buildModelIndex({ catalog = {}, connections = null, tierPriced = false, cacheTier = null } = {}) {
     const sources = new Map();
     const rows = new Map();
     const descriptors = Array.isArray(catalog.model_sources) ? catalog.model_sources : [];
@@ -185,7 +185,7 @@ export function buildModelIndex({ catalog = {}, connections = null, tierPriced =
         firstOfKind.add(kindKey);
     }
     return {
-        problems, connections, priced,
+        problems, connections, priced, cacheTier,
         sources: sorted,
         source: (id) => sources.get(id) || null,
         rows: ordered,
@@ -217,7 +217,9 @@ export function describeRoute(index, raw) {
     const price = priceWords(listed?.price);
     return {
         route, key: routeKey(route), id: modelPart(route), short: shortName(route), source: id, lane,
-        sourceLabel, pay: PAY_WORDS[lane], price, window, listed: Boolean(listed),
+        // Said only while the settings name the cache tier the figure is of (`cacheTier`, model_catalog_store.js).
+        sourceLabel, pay: PAY_WORDS[lane], price, cacheWrite: cacheWriteWords(listed?.price, index?.cacheTier),
+        window, listed: Boolean(listed),
         available: listed?.available ?? null,
         harness: own?.harness || (lane === 'subscription' ? id.slice(SUBSCRIPTION.length) : ''),
         kind: own?.kind || (lane === 'api' ? connectionParts(id).kind : ''),

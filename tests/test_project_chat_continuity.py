@@ -266,6 +266,8 @@ def test_active_chat_activity_contract_mirrors_direct_turn_shape():
         "required_question", "required_question_unavailable", "project_admission_hold", "pause_cause", "owner_wait",
         "status", "outcome_axes", "reason_code", "root_phase_checkpoint", "timeout_retry_from", "original_task_id",
         "finishing_reviews", "late_work", "can_resume", "cancelable", "cancel_origin", "delegated_runs_unreconciled",
+        # An adopted answer's custody and origin, read beside the axes by the status fold.
+        "finalization_recovery", "terminal_origin",
         # K8 census facts for every chat (project_id is already a direct-turn field).
         "last_line", "last_line_at", "tool_calls", "detached", "project_name",
         # A moved text Presence turn takes the owner's Pause (#2566).

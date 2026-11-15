@@ -38,19 +38,29 @@ async function fetchCatalog() {
 export function createModelCatalogStore({ readCatalog = fetchCatalog, readPreferences = () => apiClient.uiPreferences(),
     readSettings = () => apiClient.settings(), now = () => Date.now() } = {}) {
     const state = { catalog: null, readAt: 0, failed: false, reading: null, recents: [], recentsReading: null,
-        connections: null, connectionsReading: null, index: null, tiers: null };
+        connections: null, connectionsReading: null, index: null, tiers: null, cacheTier: null, readTier: undefined };
     const listeners = new Set();
     const notify = () => { state.index = null; listeners.forEach((listener) => listener()); };
 
+    // A row's cache-write figure names the tier it is of (`price.cache_write_ttl`): it is said only while the
+    // settings name that tier (`index`). A held figure of another tier (kept by a partial read, brought by a late or
+    // another reader's answer, or read before the first settings document) makes the catalog stale until this store
+    // has begun a read under the tier the settings name (`readTier`): one more read per tier, never one per opened
+    // capsule, since where that read cannot bring it (a value the server resolves otherwise, a tier changed from
+    // another window, a provider that keeps failing) the figure stays unsaid and the catalog keeps its usual life.
+    const staleForTier = () => state.cacheTier !== null && state.readTier !== state.cacheTier
+        && (state.catalog?.items || []).some((item) => item?.price?.cache_write_ttl && item.price.cache_write_ttl !== state.cacheTier);
+
     function adopt(data) {
         state.catalog = mergeModelCatalog(state.catalog || {}, data);
-        state.readAt = now();
+        state.readAt = staleForTier() ? 0 : now();
         state.failed = false;
     }
 
     function read({ force = false } = {}) {
         if (state.reading) return state.reading;
         if (!force && state.catalog && !state.failed && now() - state.readAt < CATALOG_FRESH_MS) return Promise.resolve();
+        state.readTier = state.cacheTier;
         state.reading = (async () => {
             try {
                 adopt(await readCatalog());
@@ -92,6 +102,12 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
         const fallback = String(settings?.[PROCESSING_PREFERENCE_KEY] || '');
         state.tiers = { main: tierPriced(String(roles?.main || fallback)), lead: tierPriced(fallback) };
         state.connectionsFailed = false;
+        // The tier a call is sent with: another one than before makes the held catalog stale (the next opened capsule
+        // reads that tier's figures), and a held figure of another tier is unsaid at once (`index`).
+        const cacheTier = String(settings?.OUROBOROS_PROMPT_CACHE_TTL || '').trim().toLowerCase();
+        const moved = state.cacheTier !== null && state.cacheTier !== cacheTier;
+        state.cacheTier = cacheTier;
+        if (state.catalog && (staleForTier() || moved)) state.readAt = 0;
     }
 
     /** Whether a catalog price beside a model that `role` (`main`, `lead`) picks could be another tier's: so it is
@@ -120,7 +136,7 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
         /** The index of the catalog as last read (chat_model_routes.js), built once per change. It serves Main's
          *  capsule and its rooms' alike, so it names a catalog price only where Main and a lead both pay it. */
         index() { return state.index ||= buildModelIndex({ catalog: state.catalog || {}, connections: state.connections,
-            tierPriced: tierPricedFor('main') || tierPricedFor('lead') }); },
+            tierPriced: tierPricedFor('main') || tierPricedFor('lead'), cacheTier: state.cacheTier }); },
         tierPriced: tierPricedFor,
         recents: () => state.recents,
         /** `reading`: a read is in flight; `read`: one has answered; `failed`: the last one did not. */

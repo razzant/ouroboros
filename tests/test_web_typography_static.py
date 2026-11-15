@@ -309,6 +309,10 @@ def test_every_focus_visible_selector_gets_the_canonical_ring() -> None:
     assert per_selector, "no :focus-visible rules found; is the parse broken?"
     stale = sorted(set(FOCUS_REACTIONS) - set(per_selector))
     assert not stale, f"FOCUS_REACTIONS names selectors no sheet holds: {stale}"
+    for reaction in FOCUS_REACTIONS:
+        rel, selector = reaction.split(": ", 1)
+        paint = _declarations(_decommented(_read(rel)), selector)
+        assert paint == {"visibility": "hidden"}, f"a focus reaction must only hide the overlapping content: {reaction}: {paint}"
     unfocused = sorted(s for s, ringed in FOCUS_REACTIONS.items() if not any(per_selector.get(ringed, [])))
     assert not unfocused, f"the element these selectors react to has no ring of its own: {unfocused}"
     unringed = sorted(
@@ -366,6 +370,41 @@ def test_the_chosen_sidebar_row_rings_and_marks_in_its_fills_ink() -> None:
             f"{selector!r} does not outrank {card_selector!r}, so the chosen card keeps the voice's ring")
 
 
+# The chosen Project row's Pin and ⋯ stand on its fill as the row's siblings (the Pin before it, the ⋯ after it), so the
+# row's own restatement does not reach them: each selector names the control as its subject beside the chosen row.
+CHOSEN_ROW_CONTROLS = {
+    ".nav-project-pin": r"\.nav-project-pin:has\(\+ \.nav-project-row\.active\)$",
+    ".nav-project-kebab": r"\.nav-project-row\.active ~ \.nav-project-kebab$",
+}
+
+
+def _subject(selector: str) -> str:
+    """A selector's last compound, the arguments of its :has()/:is()/:not() left out."""
+    flat = re.sub(r"\((?:[^()]|\([^()]*\))*\)", "()", selector)
+    return re.split(r"\s*[\s>+~]\s*", flat.strip())[-1]
+
+
+def test_the_chosen_rows_pin_and_menu_ring_in_its_fills_ink() -> None:
+    """The Pin and the ⋯ of the chosen Project row lie on its solid crimson outside `.nav-row.active`, where the room's
+    ring reads 1.14:1 in the light theme and 2.02:1 in the dark one: they restate `--focus-accent-border` as
+    `--tone-crimson-ink`, as the chosen row does for its own ring, and the Pin and the ⋯ of a row that is not chosen
+    keep the room's ring."""
+    source = _decommented(_read("web/style.css"))
+    ringed: dict[str, list[str]] = {control: [] for control in CHOSEN_ROW_CONTROLS}
+    unchosen: list[str] = []
+    for selector_list, body in RULE.findall(source):
+        decls = {name: value.strip() for name, value in re.findall(r"(--[\w-]+)\s*:\s*([^;]+)", body)}
+        if decls.get("--focus-accent-border") != CHOSEN_ROW_INKS["--focus-accent-border"]:
+            continue
+        for selector in (" ".join(s.split()) for s in selector_list.split(",")):
+            for control, chosen in CHOSEN_ROW_CONTROLS.items():
+                if control in _subject(selector):
+                    (ringed[control] if re.search(chosen, selector) else unchosen).append(selector)
+    missing = sorted(control for control, selectors in ringed.items() if not selectors)
+    assert not missing, f"the chosen row's {missing} keep the room's ring on its crimson fill"
+    assert not unchosen, f"a Pin or a ⋯ that is not the chosen row's takes the fill's ink for its ring: {unchosen}"
+
+
 def _declarations(source: str, selector: str) -> dict[str, str]:
     """Every declaration a sheet gives this exact selector, a later rule over an earlier one."""
     found: dict[str, str] = {}
@@ -375,26 +414,23 @@ def _declarations(source: str, selector: str) -> dict[str, str]:
     return found
 
 
-def test_the_cards_quiet_label_shows_whole_or_not_at_all() -> None:
-    """`Main Chat` beside Ouroboros's name on the sidebar's card is never cut inside its words (docs/DESIGN.md
-    "Navigation"; the owner's sweep of 14.11 found "Main C…" at the default width, "M…" with Main's count): its box is
-    one line tall and wraps past a zero-wide first item of that height, so words that do not fit go to a second line
-    the box hides. Both heights are lengths: a line token is a unitless factor (`--line-meta: 1.35`), and as a height
-    it is dropped, which lets the box grow to show the wrapped line, cut at its edge."""
+def test_the_cards_quiet_label_keeps_its_words_in_a_narrow_sidebar() -> None:
+    """Main Chat moves below the name in a narrow card; a wide card keeps the existing single row."""
     source = _decommented(_read("web/style.css"))
-    label = _declarations(source, ".nav-ouro-line1 > .nav-row-label")
-    first = _declarations(source, ".nav-ouro-line1 > .nav-row-label::before")
-    assert label.get("display") == "flex" and label.get("flex-wrap") == "wrap", label
-    assert _declarations(source, ".nav-row-label").get("overflow") == "hidden", "the label's box hides what wraps"
-
-    def own(value: str) -> str:  # a custom property the label declares itself, read through once
-        named = re.fullmatch(r"var\((--[\w-]+)\)", value)
-        return label.get(named.group(1), value) if named else value
-
-    height = own(label.get("height", ""))
-    assert first.get("content") in ("''", '""') and own(first.get("height", "")) == height, (first, height)
-    assert not re.fullmatch(r"var\(--line-[\w-]+\)", height), f"{height} is a unitless line factor, not a height"
-    assert re.search(r"--type-[\w-]+|\d(?:px|r?em)\b", height), f"the label's height {height!r} names no length"
+    narrow = re.search(r"@container ourocard \(max-width: 200px\)\s*\{(.*?)\n\}", source, re.S)
+    assert narrow, "the card needs its own container rule at the narrow sidebar widths"
+    assert _declarations(source, ".nav-ouro-text").get("container") == "ourocard / inline-size"
+    wide = source[:narrow.start()] + source[narrow.end():]
+    label = _declarations(wide, ".nav-ouro-line1 > .nav-row-label")
+    assert label.get("white-space") == "normal" and label.get("overflow") == "visible", label
+    assert "height" not in label and "--label-line" not in label, "no one-line clipping trap"
+    assert not _declarations(source, ".nav-ouro-line1 > .nav-row-label::before"), "no spacer that hides the room name"
+    assert "order" not in label and "flex-basis" not in label, "wide cards keep the label beside the name"
+    small = narrow.group(1)
+    assert _declarations(small, ".nav-ouro-line1").get("flex-wrap") == "wrap"
+    assert _declarations(small, ".nav-ouro-name").get("flex") == "1 1 auto", "the count and mark keep their column"
+    label = _declarations(small, ".nav-ouro-line1 > .nav-row-label")
+    assert label == {"order": "4", "flex-basis": "100%"}, label
 
 
 # ---------------------------------------------------------------------------

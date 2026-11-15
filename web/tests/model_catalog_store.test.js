@@ -71,3 +71,110 @@ test('Settings\' own refresh feeds the store; the settings document\'s connectio
     assert.equal(settingsReads, 1);
     assert.deepEqual(store.index().connections.map((entry) => [entry.id, entry.label, entry.enabled]), [['openai@old', 'OpenAI · Old', false]]);
 });
+
+test('a cache-write figure is said only while the settings name the cache tier it is of', async () => {
+    const { describeRoute } = await import('../modules/chat_model_routes.js');
+    // The server stamps a figure with the tier it was read under (`price.cache_write_ttl`).
+    const priced = (figure, tier) => ({ items: [{ ...item('a/one'), price: { input: 4, output: 20, cache_write: figure, cache_write_ttl: tier } }] });
+    const said = (store) => describeRoute(store.index(), { model: 'a/one' }).cacheWrite;
+    let reads = 0;
+    let answer = () => priced(5, '5m');
+    const store = createModelCatalogStore({ readCatalog: async () => { reads += 1; return answer(); } });
+    await store.read();
+    assert.equal(said(store), '', 'no settings document yet: no catalog price is said, this one included');
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m' });
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m', OUROBOROS_MODEL: 'a/one' });
+    await store.read();
+    assert.deepEqual([reads, said(store)], [1, 'Cache write: $5 per 1M tokens.'], 'the same tier leaves a fresh catalog alone');
+    // Another tier: the held figure is the old tier's, so it is unsaid at once and the catalog is stale.
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
+    assert.equal(said(store), '');
+    // A refresh that fails, or that answers with that provider's error (a 200 whose rows the merge keeps), never
+    // brings the old figure back.
+    answer = () => { throw new Error('offline'); };
+    await store.read();
+    assert.deepEqual([reads, said(store), store.status().failed], [2, '', true]);
+    answer = () => ({ items: [], errors: [{ provider_id: 'openrouter', error: 'timed out' }] });
+    await store.read();
+    assert.deepEqual([reads, said(store), store.catalog().items.length], [3, '', 1], 'the row is kept, its figure unsaid');
+    // That read was begun under the tier the settings name, so the catalog keeps its usual life: no read per capsule.
+    await store.read();
+    assert.equal(reads, 3);
+    answer = () => priced(8, '1h');
+    await store.read({ force: true });  // its next read: five minutes on, or Settings' own Refresh
+    assert.deepEqual([reads, said(store)], [4, 'Cache write: $8 per 1M tokens.']);
+    // A read begun under one tier that answers after the setting moved is the old tier's: unsaid and still stale.
+    let release;
+    answer = () => new Promise((resolve) => { release = () => resolve(priced(8, '1h')); });
+    const late = store.read({ force: true });
+    await Promise.resolve();
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m' });
+    answer = () => priced(5, '5m');
+    release();
+    await late;
+    assert.equal(said(store), '', 'begun under 1h, landed under 5m');
+    await store.read();
+    assert.deepEqual([reads, said(store)], [6, 'Cache write: $5 per 1M tokens.']);
+    // Settings' own refresh hands its catalog over (`adopt`): one begun before a tier was saved carries the old tier.
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
+    store.adopt(priced(5, '5m'));
+    assert.equal(said(store), '', 'a handed-over figure of the old tier');
+    answer = () => priced(8, '1h');
+    await store.read();
+    assert.deepEqual([reads, said(store)], [7, 'Cache write: $8 per 1M tokens.']);
+    // A handed-over figure of the tier the settings name is said: Settings' refresh feeds the store without a read.
+    store.adopt(priced(9, '1h'));
+    assert.equal(said(store), 'Cache write: $9 per 1M tokens.');
+    await store.read();
+    assert.equal(reads, 7, 'and it is fresh');
+});
+
+test('another cache tier makes a held catalog stale even where it states no figure: the new tier may state one', async () => {
+    let reads = 0;
+    const store = createModelCatalogStore({ readCatalog: async () => { reads += 1; return { items: [item('a/one')] }; } });
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m' });
+    await store.read();
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m', OUROBOROS_MODEL: 'a/one' });
+    await store.read();
+    assert.equal(reads, 1, 'the same tier: fresh');
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
+    await store.read();
+    assert.equal(reads, 2);
+});
+
+test('a figure of a tier the settings do not name asks for one more read under that name, then the catalog keeps its life', async () => {
+    const { describeRoute } = await import('../modules/chat_model_routes.js');
+    let reads = 0;
+    const store = createModelCatalogStore({ readCatalog: async () => {
+        reads += 1;
+        return { items: [{ ...item('a/one'), price: { input: 4, output: 20, cache_write: 8, cache_write_ttl: '1h' } }] };
+    } });
+    await store.read();                                        // read before any settings document
+    // A hand-edited value the server resolves to its default: no answer will carry it.
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: 'weekly' });
+    await store.read();
+    assert.equal(reads, 2, 'the first document names another tier than the held figure: one more read');
+    await store.read();
+    await store.read();
+    assert.equal(reads, 2, 'and then none per opened capsule');
+    assert.equal(describeRoute(store.index(), { model: 'a/one' }).cacheWrite, '', 'the figure is never said under another name');
+});
+
+test('a first catalog read that began before any settings document says the figure of the tier that document names', async () => {
+    const { describeRoute } = await import('../modules/chat_model_routes.js');
+    let release;
+    let reads = 0;
+    const answer = { items: [{ ...item('a/one'), price: { input: 4, output: 20, cache_write: 8, cache_write_ttl: '1h' } }] };
+    const store = createModelCatalogStore({ readCatalog: () => {
+        reads += 1;
+        return reads > 1 ? Promise.resolve(answer) : new Promise((resolve) => { release = () => resolve(answer); });
+    } });
+    const first = store.read();
+    await Promise.resolve();
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1H' });   // the settings answer first: a local read; spelled as hand-edited
+    release();
+    await first;
+    assert.equal(describeRoute(store.index(), { model: 'a/one' }).cacheWrite, 'Cache write: $8 per 1M tokens.');
+    await store.read();
+    assert.equal(reads, 1, 'and the catalog is fresh: no second read');
+});

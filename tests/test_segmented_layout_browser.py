@@ -12,7 +12,7 @@ import pathlib
 
 import pytest
 
-from tests.settings_browser_helpers import open_settings, setting_row
+from tests.settings_browser_helpers import go_back, open_settings, setting_row
 from tests.test_design_system_gate_browser import MEASURE as GATE_MEASURE
 from tests.test_evolution_browser import history as evolution_history
 
@@ -46,7 +46,7 @@ _MEASURE = """([name, selector]) => {
   const row = group.parentElement, rowStyle = getComputedStyle(row), rowBox = row.getBoundingClientRect();
   group.dataset.strip = name;
   row.dataset.stripRow = name;
-  const style = getComputedStyle(group);
+  const style = getComputedStyle(group), fill = group.querySelector(':scope > .ui-segment-fill');
   const buttons = [...group.querySelectorAll('.ui-segment')].map((button) => {
     const rect = button.getBoundingClientRect(), look = getComputedStyle(button);
     const range = document.createRange();
@@ -58,15 +58,15 @@ _MEASURE = """([name, selector]) => {
             word: text.width + px(look.paddingLeft) + px(look.paddingRight) + px(look.borderLeftWidth) + px(look.borderRightWidth),
             touch: px(look.getPropertyValue('--touch-target-min')),
             chosen: button.matches('.active, [aria-checked="true"], [aria-pressed="true"]'),
-            fill: look.backgroundColor, overflows: button.scrollWidth > button.clientWidth + 1};
+            fill: button.matches('.active, [aria-checked="true"]') && fill ? getComputedStyle(fill).backgroundColor : look.backgroundColor, overflows: button.scrollWidth > button.clientWidth + 1};
   });
   const doc = document.scrollingElement;
   return {name, ...box(group.getBoundingClientRect()), track: style.backgroundColor, overflowX: style.overflowX,
-          spills: group.scrollWidth > group.clientWidth + 1, buttons,
+          spills: group.scrollWidth > group.clientWidth + 1, buttons, backing: fill ? box(fill.getBoundingClientRect()) : null,
           row: {left: rowBox.left + px(rowStyle.borderLeftWidth) + px(rowStyle.paddingLeft),
                 right: rowBox.right - px(rowStyle.borderRightWidth) - px(rowStyle.paddingRight)},
           titled: [group, ...group.querySelectorAll('*')].filter((node) => node.hasAttribute('title')).length,
-          inline: group.hasAttribute('style'), page: doc.scrollWidth - doc.clientWidth};
+          inline: [...group.style].sort(), page: doc.scrollWidth - doc.clientWidth};
 }"""
 # Transitions are off on the measured page, so a theme's colours are final at once: WebKit never ends a transition it
 # skipped (web/modules/motion.js), and the app treats `transition: none` as a motion that ends on the next frame.
@@ -103,6 +103,8 @@ _TRUST = """async () => {
 
 def _go(page, place: str) -> None:
     toggle = page.locator("[data-mobile-nav-toggle]:visible")
+    while not toggle.count() and page.locator("#page-settings.active .app-page-header [data-settings-back]").is_visible():
+        go_back(page)
     if toggle.count():
         toggle.first.click()
     page.locator(f'[data-nav-page="{place}"]').click()
@@ -123,8 +125,9 @@ def _check(strip: dict, count: int, *, desk: bool) -> list[str]:
     name, buttons, problems = strip["name"], strip["buttons"], []
     if len(buttons) != count:
         problems.append(f"{len(buttons)} options, expected {count}")
-    if strip["titled"] or strip["inline"]:
-        problems.append(f"a hover title ({strip['titled']}) or an inline style ({strip['inline']}) on the strip")
+    allowed = sorted(f"--segment-fill-{edge}" for edge in "xywh") if strip["backing"] else []
+    if strip["titled"] or strip["inline"] != allowed:
+        problems.append(f"a hover title ({strip['titled']}) or styles other than the fill box ({strip['inline']}) on the strip")
     if strip["page"] > 1:
         problems.append(f"the page scrolls sideways by {strip['page']:.1f}px")
     if strip["left"] < strip["row"]["left"] - 0.5 or strip["right"] > strip["row"]["right"] + 0.5:
@@ -148,6 +151,8 @@ def _check(strip: dict, count: int, *, desk: bool) -> list[str]:
         shown = [strip["track"] if _transparent(button["fill"]) else button["fill"] for button in buttons if not button["chosen"]]
         if _transparent(chosen[0]["fill"]) or chosen[0]["fill"] in shown:
             problems.append(f"the chosen option ({chosen[0]['fill']}) looks like another ({shown})")
+        if strip["backing"] and any(abs(strip["backing"][edge] - chosen[0][edge]) > 0.5 for edge in strip["backing"]):
+            problems.append(f"the chosen option's fill is misplaced: {strip['backing']} versus {chosen[0]}")
     if desk and name in DRAWN:
         if len({round(button["top"]) for button in buttons}) != 1:
             problems.append("wraps on the desk")
@@ -209,7 +214,7 @@ def test_every_strip_fits_its_row_and_shows_its_choice(direct_server_with_data, 
                     if not desk and page.locator(STRIPS[target][0]).is_visible():
                         # A translated label longer than the line breaks inside its option, and the strip still fits.
                         page.evaluate("""([selector, label]) => {
-                            const option = document.querySelector(`${selector} .ui-segment:last-child`);
+                            const option = [...document.querySelectorAll(`${selector} .ui-segment`)].at(-1);
                             option.textContent = label;
                         }""", [STRIPS[target][0], label])
                         page.evaluate(_SETTLE, "light")
@@ -233,6 +238,8 @@ def test_every_strip_fits_its_row_and_shows_its_choice(direct_server_with_data, 
                 page.locator('[data-dashboard-tab="consciousness"]').click()
                 page.locator(STRIPS['OUROBOROS_CONSCIOUSNESS_AUTONOMY'][0]).wait_for(state='visible')
                 measure('OUROBOROS_CONSCIOUSNESS_AUTONOMY')
+                if not page.locator('[data-dashboard-tab="evolution"]').is_visible():
+                    page.locator('#page-dashboard [data-dashboard-list-back]').click()
                 page.locator('[data-dashboard-tab="evolution"]').click()
                 page.locator(".evo-measures").wait_for(state="visible", timeout=30_000)
                 measure("evolution-measures")

@@ -272,10 +272,12 @@ def test_part_stamp_keeps_every_failure_and_every_non_terminal_stamp_and_counts_
     page_b = {"tasks": [entry("t4", "task_results", "done"), {"task_id": "t5", "status": "not_recorded"},
                         entry("t6", "terminal_result_projection", "done"),
                         entry("t7", "terminal_root_projection", "cancelled"),
-                        entry("t1", "terminal_root_projection", "done")], "computed_at": ts(2)}
+                        entry("t1", "terminal_root_projection", "done"),
+                        # an adopted delivered answer: the word is done, the stored record failed
+                        entry("t8", "terminal_root_projection", "done", status="failed")], "computed_at": ts(2)}
     summary = part_stamp([page_a, None, page_b])  # a member without a stamp (a legacy record) adds nothing
     kept = [item["task_id"] for item in summary["tasks"]]
-    assert kept == ["t2", "t3", "t4", "t5", "t7"]  # never-done, or not from a terminal projection: in full
+    assert kept == ["t2", "t3", "t4", "t5", "t7", "t8"]  # never-done, failed, or not from a terminal projection: in full
     assert {"t1", "t6"}.isdisjoint(kept)  # terminal and done: counted only
     assert summary["tasks"][3] == {"task_id": "t5", "status": "not_recorded"}
     assert summary["counts"] == [
@@ -284,9 +286,9 @@ def test_part_stamp_keeps_every_failure_and_every_non_terminal_stamp_and_counts_
         {"source": "task_results", "outcome_phase": "done", "tasks": 1},
         {"source": "terminal_result_projection", "outcome_phase": "done", "tasks": 1},
         {"source": "terminal_root_projection", "outcome_phase": "cancelled", "tasks": 1},
-        {"source": "terminal_root_projection", "outcome_phase": "done", "tasks": 1},
+        {"source": "terminal_root_projection", "outcome_phase": "done", "tasks": 2},
         {"source": "terminal_root_projection", "outcome_phase": "error", "tasks": 1}]
-    assert sum(row["tasks"] for row in summary["counts"]) == 7  # each task once, though t1 is on two pages
+    assert sum(row["tasks"] for row in summary["counts"]) == 8  # each task once, though t1 is on two pages
     assert "computed_at" in summary
 
 

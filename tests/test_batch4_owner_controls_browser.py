@@ -486,6 +486,8 @@ def test_pause_restart_retention_and_resume(direct_server_with_data, monkeypatch
                 assert saved.startswith("Saved · applies after restart"), saved
                 # The restart that waits is a line of Ouroboros's card on the Settings home, with its own Restart.
                 open_settings(page, "", timeout=30_000)
+                page.locator('[data-settings-overview-row]').click()
+                page.locator('[data-being-count]').click()
                 restart = page.locator('#page-settings [data-settings-card] [data-needs="restart"] [data-need-action]')
                 expect(restart).to_be_visible(timeout=30_000)
                 dialog, s_title, s_body = _restart_dialog(page, restart)

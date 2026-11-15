@@ -132,7 +132,7 @@ test('the ticked rows are what the sheet answers with, the button says how many,
 test('a sheet with nothing off Main has no lists and no ticks', async () => {
     const s = await sheet({ lists: census({ works: [WORKS[0]], projects: [PROJECTS[1]] }) });
     assert.equal(s.rows.length, 0);
-    assert.equal(s.content.children.length, 4, 'what Main becomes, its facts, the rule and the count');
+    assert.equal(s.content.children.length, 5, 'what Main becomes, its facts, the rule, the cache fact and the count');
 });
 
 /* --- the Main chat's capsule: Main is written first, then one act per tick --- */

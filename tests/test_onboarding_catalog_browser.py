@@ -175,7 +175,7 @@ def test_connection_discovery_survives_general_refresh_without_replacing_other_s
     ):
         ui['backend'].update(catalog_response=response, catalog_status=status)
         page.click('#back-btn')
-        with page.expect_response('**/api/model-catalog'):
+        with page.expect_response('**/api/onboarding/model-catalog'):
             page.click('#onboarding-access-retry')
         expect(page.locator('#onboarding-access-retry')).to_be_enabled()
         page.click('#next-btn')

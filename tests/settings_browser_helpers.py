@@ -47,7 +47,11 @@ def walk_settings(page, measure, *, skill: str = "", settle=None):
     a page that lists entries. Ends at the home, where it started, and returns the paths it walked."""
     settle = settle or (lambda: page.evaluate(SETTLED))
     open_settings(page, "")
-    page.locator(f"{HOME} [data-settings-card]").wait_for(state="visible")
+    overview = page.locator(f"{HOME} [data-settings-overview-row]:visible")
+    if overview.count():
+        overview.click()
+    # With two panes the card moves out of the home into the overview page.
+    page.locator(f"{SETTINGS} [data-settings-card]").wait_for(state="visible")
     settle()
     measure("home")
     paths = page.evaluate(SETTINGS_PATHS, skill)
@@ -76,9 +80,9 @@ def top_path(page) -> str:
 
 
 def go_back(page):
-    """Press the open level's first row, Back, and return the path shown after it."""
+    """Press the section header's Back and return the path shown after it."""
     before = top_path(page)
-    settings_page(page, before).locator("[data-settings-back]").click()
+    page.locator(f"{SETTINGS} > .app-page-header [data-settings-back]").click()
     page.wait_for_function("before => { const levels = [...document.querySelectorAll('#page-settings "
                            "[data-settings-page]')]; return !levels.some((e) => e.dataset.settingsPage === before); }",
                            arg=before)
@@ -94,7 +98,7 @@ def home_answer(page, target: str) -> str:
 
 def needs(page) -> list[str]:
     """What Ouroboros's card lists now, as ``kind:id`` of each row it shows or keeps behind "Show all"."""
-    return page.locator(f"{HOME} [data-settings-card] [data-needs]").evaluate_all(
+    return page.locator(f"{SETTINGS} [data-settings-card] [data-needs]").evaluate_all(
         "rows => rows.map((row) => `${row.dataset.needs}:${row.dataset.needId}`)")
 
 
