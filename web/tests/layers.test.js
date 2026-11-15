@@ -95,6 +95,9 @@ test('push, top, size, pop through the owner, remove is idempotent', () => {
 test('Escape clears search first; shortcut, mouse and host Back dismiss the popup before the page layer, and root is quiet', () => {
     for (const input of ['shortcut', 'mouse', 'host']) {
         const w = world(), closed = [];
+        let routed = 0;
+        for (const button of [0, 1, 2, 3, 4]) w.win.fire('pointerdown', { button, stopPropagation() { routed++; } });
+        assert.equal(routed, 2, 'only browser history buttons bypass click-away handlers');
         const field = w.node('input', w.content);
         field.matches = selector => selector.includes('search');
         field.value = 'words'; field.focus();
@@ -105,7 +108,7 @@ test('Escape clears search first; shortcut, mouse and host Back dismiss the popu
         popup.onkey = event => { if (event.key === 'Escape') { event.preventDefault(); closed.push('popup'); w.doc.dialogs = []; } };
         w.doc.dialogs = [popup];
         const press = () => input === 'host' ? w.layers.back('host-back')
-            : input === 'mouse' ? w.win.fire('auxclick', { button: 3, preventDefault() {} })
+            : input === 'mouse' ? (w.win.fire('auxclick', { button: 3, preventDefault() {} }), w.win.fire('popstate'))
                 : w.win.fire('keydown', { key: '[', metaKey: true, preventDefault() {} });
         press(); assert.deepEqual(closed, ['popup']); assert.equal(w.layers.size(), 1);
         press(); assert.deepEqual(closed, ['popup', 'page']);

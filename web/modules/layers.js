@@ -128,7 +128,9 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
         if (event.key === 'Escape' && doc?.querySelector?.('dialog[open]')) return; // the native dialog takes its own Escape
         if (back(bracket ? 'shortcut' : 'escape')) event.preventDefault();
     };
-    const onMouseBack = (event) => { if (event.button === 3 && back('mouse')) event.preventDefault(); };
+    // A mouse's Back button already consumes browser history. Keep its press out of click-away handlers: closing
+    // a popup on pointerdown would let the following popstate close the page as well. Native history still runs.
+    const onHistoryPointer = (event) => { if (event.button === 3 || event.button === 4) event.stopPropagation(); };
 
     function focusInto(layer) {
         if (layer.focus === false) return;
@@ -304,7 +306,7 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
     win?.addEventListener?.('popstate', onPopState);
     win?.addEventListener?.('keydown', onKeydown);
     win?.addEventListener?.('keydown', onTab, true);
-    win?.addEventListener?.('auxclick', onMouseBack);
+    win?.addEventListener?.('pointerdown', onHistoryPointer, true);
 
     function destroy() {
         disposed = true;
@@ -312,7 +314,7 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
         win?.removeEventListener?.('popstate', onPopState);
         win?.removeEventListener?.('keydown', onKeydown);
         win?.removeEventListener?.('keydown', onTab, true);
-        win?.removeEventListener?.('auxclick', onMouseBack);
+        win?.removeEventListener?.('pointerdown', onHistoryPointer, true);
         pendingInert = null;
         owed = null;
         for (const el of inerted) el.inert = false;
