@@ -50,6 +50,24 @@ test('one header: no icon, no caption line, the tabs are written under the row, 
     }
 });
 
+test('a section keeps one header row with two panes and with a page alone', () => {
+    const ui = readFileSync(new URL('../ui.css', import.meta.url), 'utf8');
+    const settings = readFileSync(new URL('../settings.css', import.meta.url), 'utf8');
+    const header = 'html[data-layout="stack"] .section-place > .app-page-header';
+    const two = ui.slice(ui.indexOf('@container sectionplace (min-width: 40rem) {'));
+    assert.ok(two.includes(`${header} { grid-template-areas: "leading lead lead"; }`), 'Places and both column leads share a row');
+    assert.ok(two.includes(`${header} .app-page-title-row { position: absolute;`), 'the section name stays available to readers without another row');
+    assert.match(two, /grid-template-columns: calc\(var\(--section-rail-w\) - var\(--section-rail-end\) - var\(--space-3\) - 44px - var\(--space-2\)\) minmax\(0, 1fr\)/,
+        'the page lead stays over its column after the places control takes room from the rail lead');
+    const alone = settings.slice(settings.indexOf('@container sectionplace (max-width: calc(40rem - 0.02px)) {'));
+    assert.match(alone, /\[data-section-view="home"\].*grid-template-areas: "leading title toolbar"/,
+        'a list alone keeps Places and its section name');
+    assert.match(alone, /\[data-section-view="page"\].*grid-template-areas: "lead lead lead"/,
+        'a page alone puts Back and its own name in that row');
+    for (const css of [ui, settings]) assert.doesNotMatch(css, /grid-template-areas:\s*"leading title toolbar"\s*"lead lead lead"/,
+        'neither shared nor Settings rules can restore the retired second row');
+});
+
 test('Restart and the budget are the same nodes, placed by layout: the row on a desk, the status Shade on a phone', () => {
     const node = (name, parent) => {
         const el = { name, children: [], parentElement: null,
