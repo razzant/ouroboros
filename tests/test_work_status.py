@@ -262,6 +262,7 @@ def test_refused_source_keeps_resume_for_rechecking_and_unknown_without_a_stop_s
     # A start whose outcome is unknown says that, never that saved state was lost; Resume stays the same door.
     unknown = ws.classify_member(row("t", "budget_paused", pause_cause="unknown"), {"hold": {"reason": "dispatch_outcome_unknown"}})
     assert unknown["reasons"][0]["code"] == "start_unconfirmed" and unknown["release"] == "mind"
+    assert unknown["reasons"][0]["text"] == "Its last start is unconfirmed, or its saved work could not be read"
     raw = ws.classify_member(row("t", "budget_paused", pause_cause="mystery"), {"hold": {}})
     assert raw["reasons"][0]["code"] == "held" and raw["reasons"][0]["text"] == "Held"
 

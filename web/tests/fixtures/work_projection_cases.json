@@ -3703,7 +3703,7 @@
    "": "Held"
   },
   "start_unconfirmed": {
-   "": "It is not known whether its last start went through"
+   "": "Its last start is unconfirmed, or its saved work could not be read"
   },
   "sleeping": {
    "": "Sleeping until it is woken"

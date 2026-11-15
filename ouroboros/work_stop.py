@@ -53,7 +53,7 @@ STOP_TEXT = {
     "spending_limit": "Spending limit reached", "technical_pause": "After a technical problem",
     "awaiting_selection": "Waiting for Ouroboros or you to resume it",
     "restore_failed": "Its saved state could not be restored", "held": "Held",
-    "start_unconfirmed": "It is not known whether its last start went through",
+    "start_unconfirmed": "Its last start is unconfirmed, or its saved work could not be read",
     "sleeping": "Sleeping until it is woken",
     "earlier_work_unconfirmed": "Continue starts when the earlier attempt's work is confirmed finished",
 }
