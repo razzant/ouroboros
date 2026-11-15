@@ -696,7 +696,7 @@ def test_an_unready_child_reaped_on_join_continues_its_bounded_step_in_one_pass(
     monkeypatch.setattr(lifecycle, "kill_worker_tree", lambda pid, **kw: setattr(slot.proc, "killed", True))
     lifecycle.finish_unready_teardown({"worker_id": 1, "worker": slot, "owner_chat_id": 0, "started": 0.0,
                                        "attempt": 1, "drive_root": str(assigning.root), "first_stop": True})
-    assert respawned == [(1, {"ready_attempt": 2})]
+    assert respawned == [(1, {"ready_attempt": 2, "expected_worker": slot})]
 
 
 def test_the_health_module_claims_the_readiness_bound_only_for_live_but_unready_replacements():
