@@ -255,6 +255,34 @@ def test_full_pr_list_enrichment_preserves_raw_head_and_base(gh):
     assert payload["items"][0]["base"]["repo"] == {"id": 2}
 
 
+@pytest.mark.parametrize(("method", "head_repo", "extra", "expected"), [
+    pytest.param("get", {"full_name": "fork-owner/renamed-fork"}, {"maintainer_can_modify": True},
+                 {"head_repo": "fork-owner/renamed-fork", "maintainer_can_modify": True}, id="fork-editable"),
+    pytest.param("get", None, {"maintainer_can_modify": False}, {"head_repo": None, "maintainer_can_modify": False},
+                 id="head-repository-gone-stays-null"),
+    pytest.param("get", {"id": 1}, {"maintainer_can_modify": None}, {"maintainer_can_modify": None}, id="unstated-name-stays-absent"),
+    pytest.param("list", {"full_name": "fork-owner/renamed-fork"}, {}, {"head_repo": "fork-owner/renamed-fork"},
+                 id="list-row-without-edit-flag"),
+])
+def test_concise_pr_states_exact_head_repository_ref_and_maintainer_edit_flag(gh, method, head_repo, extra, expected):
+    """A concise PR row names where a push lands only as GitHub stated it: never from the label or author login,
+    a null kept null, an unstated fact absent."""
+    raw = _pr(7, head={"ref": "feat/7", "label": "dev:feat/7", "sha": SHA, "repo": head_repo}, **extra)
+
+    def answer(p, argv, kw):
+        if p.route == "graphql":
+            return json.dumps({"data": {"nodes": [{"id": "PR_node7", "commits": {"totalCount": 1}, "reviewDecision": None}]}})
+        return json.dumps(raw) if method == "get" else _rest([raw])
+    gh.answer = answer
+    _line, payload = _payload(gh.read(method=method, kind="pr", target=7 if method == "get" else None))
+    item = payload["item"] if method == "get" else payload["items"][0]
+    assert (item["head"], item["head_ref"], item["head_sha"]) == ("dev:feat/7", "feat/7", SHA)
+    assert {k: item[k] for k in ("head_repo", "maintainer_can_modify") if k in item} == expected
+    if method == "get":
+        _line, projected = _payload(gh.read(method="get", kind="pr", target=7, fields=["head_repo", "head_ref", "maintainer_can_modify"]))
+        assert projected["item"] == {"head_ref": "feat/7", **expected}
+
+
 @pytest.mark.parametrize(("null_field", "detail"), [
     (None, "full"),
     ("headRefOid", "full"),
@@ -424,7 +452,8 @@ def test_search_backed_pr_lists_keep_facts_and_withhold_unreadable_counts(gh, fi
     _line, payload = _payload(gh.read(method="list", kind="pr", detail=detail, **filters))
     item = payload["items"][0]
     assert item["commits"] == 101 and item["review_decision"] == "APPROVED" and item["draft"] is True
-    assert (item["head"]["ref"], item["base"]["ref"]) == ("feat", "main") if detail == "full" else (item["head"], item["base"]) == ("dev:feat", "main")
+    assert (item["head"]["ref"], item["base"]["ref"]) == ("feat", "main") if detail == "full" else \
+        (item["head"], item["head_ref"], item["base"], "head_repo" in item) == ("dev:feat", "feat", "main", False)
     assert [view[0] for view in gh.views] == [["gh", "repo", "view", "--json", "nameWithOwner,url"]]
     assert "advanced_search=true" in gh.routes()[0] and len(gh.routes()) == 2
     gh.answer = lambda p, argv, kw: '{"data":{"nodes":[]}}' if p.route == "graphql" else answer(p, argv, kw)

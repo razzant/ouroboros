@@ -271,7 +271,15 @@ def _pr_shape(read: _Read, it: dict, *, full_body: bool) -> dict:
             "base": base.get("ref"), "created_at": it.get("created_at"), "updated_at": it.get("updated_at"),
             "merged_at": it.get("merged_at"), "url": it.get("html_url"),
             "labels": [str(l.get("name")) for l in it.get("labels") or [] if isinstance(l, dict)]}
-    for key in ("mergeable", "mergeable_state", "additions", "deletions", "changed_files", "commits", "review_comments", "comments"):
+    # Where a push to this PR lands, only as GitHub stated it: a null repo stays null (the head repository is gone or
+    # unreadable), an unread one stays absent, and nothing is derived from the label or the author's login.
+    if "ref" in head:
+        item["head_ref"] = head["ref"]
+    repo = head.get("repo")
+    if "repo" in head and (repo is None or isinstance(repo, dict) and "full_name" in repo):
+        item["head_repo"] = repo["full_name"] if repo else None
+    for key in ("maintainer_can_modify", "mergeable", "mergeable_state", "additions", "deletions", "changed_files", "commits",
+                "review_comments", "comments"):
         if key in it:
             item[key] = it[key]
     if full_body:
