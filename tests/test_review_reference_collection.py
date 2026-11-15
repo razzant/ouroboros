@@ -690,6 +690,18 @@ def test_a_busy_review_state_before_settlement_is_a_typed_recoverable_refusal(au
     def busy(*_a, **_k):
         raise ReviewStateLockError(author.data / "locks" / "advisory_review.lock", {"timeout_sec": 4.0})
     monkeypatch.setattr(review_collection, "collect_change", busy)
-    text = change._handle_review_change(author.ctx, review_reference={"record_id": "rl-any"})
+    from ouroboros.tools.tool_result import (
+        _install_tool_result_sidecar, _published_tool_result, _restore_tool_result_sidecar,
+    )
+    sentinel = object()
+    token = _install_tool_result_sidecar(author.ctx, sentinel)
+    try:
+        text = change._handle_review_change(author.ctx, review_reference={"record_id": "rl-any"})
+        published = _published_tool_result(author.ctx, sentinel)
+    finally:
+        _restore_tool_result_sidecar(token)
     assert text.startswith("⚠️ REVIEW_STATE_BUSY") and "TOOL_ARG_ERROR" not in text, text
+    # The typed result the classifier's native row pairs with (LEGACY_UNAVAILABLE:REVIEW_STATE_BUSY).
+    assert published is not sentinel and published.text == text, published
+    assert (published.status, published.code) == ("unavailable", "LEGACY_UNAVAILABLE"), published
     assert "paid attempt" not in text and "may already have been sent" in text and "new key" in text

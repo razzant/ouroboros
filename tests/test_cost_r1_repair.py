@@ -34,9 +34,8 @@ def test_cost_custody_public_type_is_closed_and_nullable():
     assert set(get_type_hints(CostCustody)) == {"status", "open_run_ids", "unrecorded_run_ids", "closed_unrecorded_run_ids",
                                                 "pending_invocation_ids"}
     # Additive: records written before it lack the subset, and absence keeps their earlier reading.
-    marked = {name for name, ann in CostCustody.__annotations__.items()
-              if (getattr(ann, "__forward_arg__", None) or str(ann)).startswith("NotRequired[")}
-    assert marked == {"closed_unrecorded_run_ids"}
+    assert CostCustody.__optional_keys__ == {"closed_unrecorded_run_ids"}
+    assert CostCustody.__required_keys__ == {"status", "open_run_ids", "unrecorded_run_ids", "pending_invocation_ids"}
     for shape in (ChatOutbound, TaskCostBreakdown):
         annotation = get_type_hints(shape, include_extras=True)["cost_custody"]
         # Key optionality is not nullability; Python 3.10 keeps typing_extensions' wrapper in the hints.
