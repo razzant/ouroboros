@@ -188,7 +188,7 @@ def test_worker_crash_retry_survives_settlement_and_successor(q, monkeypatch, cr
     jobs = stdqueue.Queue()
     monkeypatch.setattr(q.queue, "_reap_queue", jobs)
     monkeypatch.setattr(q.queue, "_ensure_reaper_started", lambda: None)
-    monkeypatch.setattr(workers, "respawn_worker", lambda *_a: None)
+    monkeypatch.setattr(workers, "respawn_worker", lambda *_a, **_kw: None)
     _row(q, cron=cron, intent={"kind": "system_repo"})
     q.queue.check_scheduled_tasks()
     [original] = copy.deepcopy(q.pending)

@@ -699,7 +699,7 @@ def test_an_owners_stop_that_joined_the_closure_still_kills_the_dispatched_worke
 
     monkeypatch.setattr(ci, "request_cancel", dispatch_first)
     monkeypatch.setattr(lifecycle, "kill_worker_tree", lambda pid, **kw: killed.append(pid) or alive.__setitem__(0, False))
-    monkeypatch.setattr(env.workers, "respawn_worker", lambda wid: None, raising=False)  # the killed slot starts no process
+    monkeypatch.setattr(env.workers, "respawn_worker", lambda wid, **_kwargs: None, raising=False)  # the killed slot starts no process
     assert close_abandoned_helpers() == [CHILD]
     monkeypatch.setattr(ci, "request_cancel", real_request)
     joined = real_request(env.root, CHILD, reason="the owner pressed Stop", source="http_single", requested_by="owner")
@@ -797,7 +797,7 @@ def _close_after_a_dispatch(env, monkeypatch, task):
 
     monkeypatch.setattr(ci, "request_cancel", dispatch_first)
     monkeypatch.setattr(lifecycle, "kill_worker_tree", lambda pid, **kw: killed.append(pid) or alive.__setitem__(0, False))
-    monkeypatch.setattr(env.workers, "respawn_worker", lambda wid: None, raising=False)
+    monkeypatch.setattr(env.workers, "respawn_worker", lambda wid, **_kwargs: None, raising=False)
     assert close_abandoned_helpers() == [CHILD]
     return killed
 

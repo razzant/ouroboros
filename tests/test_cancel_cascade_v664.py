@@ -138,7 +138,7 @@ def _fake_worker(task_id, *, alive_after_kill=False):
 def _install_worker(monkeypatch, worker):
     from supervisor import workers
     monkeypatch.setattr(workers, "WORKERS", {worker.wid: worker}, raising=False)
-    monkeypatch.setattr(workers, "respawn_worker", lambda wid: None, raising=False)
+    monkeypatch.setattr(workers, "respawn_worker", lambda wid, **_kwargs: None, raising=False)
 
 
 def test_persistence_failure_restores_custody_and_publishes_nothing(monkeypatch, tmp_path):

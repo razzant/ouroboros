@@ -6,21 +6,30 @@ nothing). ``available`` is ``host_memory.physical_memory`` (within this process'
 reserve (``config.HOST_MEMORY_RESERVE_FRACTION`` of the total), ``T`` the typical size of one of our workers (the mean
 of the live workers' own heartbeat reports, both lanes; else this generation's last ``worker_ready`` size; else
 unknown) and ``B`` the processes of both lanes still starting. With no project process acting or starting one start is
-admitted even under pressure (the floor), within the owner's cap and readiness fence;
-with measured memory but unknown ``T``, only that floor admits. Readiness parks since the last successful ``worker_ready`` stop growth only when they
+admitted without room (the floor), within the owner's cap and readiness fence; with measured memory but unknown ``T``,
+only that floor admits. A confirmed critical verdict admits nothing, the floor included (owner choice, 2026-11-14): the
+chosen row waits queued, the dated facts say ``memory_pressure_critical``, Stop ends it as any queued row, and the first
+pass whose reading is not critical admits it; an unread verdict is unknown, published so, and admits as before.
+Readiness parks since the last successful ``worker_ready`` stop growth only when they
 outnumber live ready project processes (finiteness); an unknown reading admits what the owner's cap leaves when set
 (``max(floor, room)``, ``room = cap - acting - idle - booting``), else one starting process at a time (beyond the
 floor, both lanes' booting processes must finish), and says why (``memory_unmeasured: ...``); the owner's
 ``OUROBOROS_MAX_WORKERS``, when set, caps acting tasks and claims.
 
-Reuse of an idle process, a warm return and a crash replacement never ask; the conversation lane's starts stay
-outside (4A: spawn success). The machine is read at most once a pass, outside Q and the lifecycle serializer, only
-when chosen work needs a new process (``dispatch_choice.run_pass``), and never kept.
+Reuse of an idle process and a warm return never ask; the conversation lane's starts stay outside (4A: spawn
+success). A crash replacement (after a confirmed death, a reap, a stranded cancel or a failed readiness) is bound to
+no task and could carry new work, so a confirmed critical verdict holds it like any start
+(``worker_pool_lifecycle._replacement_waits``, its own reading outside Q and lifecycle serialization): the dead slot is forgotten and the next
+ordinary pass admits a process on its reading; the table's last member, or a slot past its first readiness attempt
+(its count), stays dead for the crash detector. The machine is read at most once a pass, outside Q and the lifecycle serializer, only when chosen work
+needs a new process (``dispatch_choice.run_pass``), and never kept.
 Workers report RSS, never probe host memory. Pressure stops or cools nobody;
-it refuses a new process. Dated admission facts are published with the pool's counts (``facts``); the queue census
-hashes only whether starts are admitted and why. Disclosed residuals: growth after a start is not predicted; neighbours
-on the host share memory without a common ledger; Windows Job and commit limits are not read; running out of memory
-is not prevented, only starting a process into a measured shortage.
+it refuses a new process. Dated admission facts are published with the pool's counts (``facts``) and said in words
+by the owner's /status (``status_words``); the queue census hashes only whether starts are admitted and why.
+Disclosed residuals: growth after a start is not predicted; neighbours on the host share memory without a common
+ledger; Windows Job and commit limits are not read; running out of memory is not prevented, only starting a process
+into a measured shortage; a slot held through critical pressure may be replaced beside a process growth
+started meanwhile, a surplus quiescence retires.
 """
 
 from __future__ import annotations
@@ -153,8 +162,8 @@ def admit(reading: Optional[Reading], counts: Dict[str, Any], slots: Iterable[An
     memory = reading.memory
     if memory is None:
         starts, why = max(floor, room if room is not None else int(starting == 0)), reading.unmeasured
-    elif memory.pressure:
-        starts, why = floor, "memory_pressure_critical"
+    elif memory.pressure is True:
+        starts, why = 0, "memory_pressure_critical"
     elif not typical:
         starts, why = floor, "worker_size_unknown"
     else:
@@ -166,7 +175,7 @@ def admit(reading: Optional[Reading], counts: Dict[str, Any], slots: Iterable[An
         "read_at": reading.at, "status": "unknown" if memory is None else "measured",
         "total_bytes": memory and memory.total_bytes, "available_bytes": memory and memory.available_bytes,
         "reserve_bytes": memory and memory.reserve_bytes,
-        "pressure": memory and ("critical" if memory.pressure else "not_critical"),
+        "pressure": memory and {True: "critical", False: "not_critical"}.get(memory.pressure, "unknown"),
         "typical_worker_bytes": typical, "typical_basis": basis, "starting_processes": starting,
         "starts_admitted": starts, "reason": why})
     return starts
@@ -175,6 +184,24 @@ def admit(reading: Optional[Reading], counts: Dict[str, Any], slots: Iterable[An
 def facts() -> Dict[str, Any]:
     """Under Q: dated admission facts, including finiteness without a memory read (``{}`` before the first)."""
     return dict(_FACTS)
+
+
+def status_words() -> str:
+    """The last dated admission in the owner's words for /status (``supervisor.state.status_text``); "" before any.
+    Takes Q for the read; under a confirmed critical verdict it says that queued work waits and how it ends."""
+    from supervisor.queue import _queue_lock
+
+    with _queue_lock:
+        memory = facts()
+    if not memory.get("read_at"):
+        return ""
+    if memory.get("reason") == "memory_pressure_critical":
+        return (f"memory_admission: no new project process starts: the kernel reports critical memory pressure (read "
+                f"{memory['read_at']}); queued work that needs one waits and starts by itself once a reading is not "
+                "critical; Stop ends a queued task")
+    return (f"memory_admission: {memory.get('starts_admitted')} new project process(es) admitted "
+            f"({memory.get('reason')}), kernel pressure {memory.get('pressure') or 'not read'} "
+            f"(read {memory['read_at']})")
 
 
 def _number(value: Any) -> float:
