@@ -9,7 +9,7 @@ const target = names.findIndex((n) => n.startsWith('after a Main reload whose ce
 const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const run = (picked) => {
     const pattern = `^(?:${picked.map((i) => esc(names[i])).join('|')})$`;
-    const out = spawnSync(process.execPath, ['--max-old-space-size=256', '--experimental-test-isolation=none', '--test',
+    const out = spawnSync(process.execPath, ['--max-old-space-size=256', '--experimental-test-isolation=none', '--test', '--test-reporter=tap',
         `--test-name-pattern=${pattern}`, file], { encoding: 'utf8', timeout: 60000, maxBuffer: 64 * 1024 * 1024 });
     const oks = (out.stdout.match(/^ok \d+/gm) || []).length;
     return `status=${out.status} signal=${out.signal} oks=${oks}${/heap out of memory/.test(out.stderr + out.stdout) ? ' OOM' : ''}`;
