@@ -12,44 +12,31 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
-      - name: Trapped copy, up to eight runs, stop at the first runaway
-        shell: bash
-        working-directory: web
-        run: |
-          set +e
-          for i in 1 2 3 4 5 6 7 8; do
-            node --max-old-space-size=2048 --experimental-test-isolation=none --test --test-reporter=tap tests/zz_diag_portal.test.js > ../trap_$i.log 2>&1
-            code=$?
-            echo "run $i exit $code oks=$(grep -c '^ok ' ../trap_$i.log)"
-            if [ $code -ne 0 ]; then grep -n -A40 'LOOP' ../trap_$i.log | head -80; tail -c 4000 ../trap_$i.log; break; fi
-          done
-      - name: Bisect the earlier cases (pairs and prefixes)
-        shell: bash
-        working-directory: web
-        run: node tests/zz_bisect_3501.mjs
-      - name: The suspect case alone, one process, a 512 MB heap
+      - name: The fixed portal file, eight runs as the lane runs it
         shell: bash
         working-directory: web
         run: |
           node --version
           set +e
-          node --max-old-space-size=512 --stack-trace-limit=60 --test --experimental-test-isolation=none --test-timeout=120000 \
-            --test-name-pattern='census arrives before the history draws the card' tests/work_portal.test.js > ../suspect.log 2>&1
-          echo "suspect exit $?"
-          tail -c 20000 ../suspect.log
-      - name: The whole portal file, one process, a 512 MB heap
+          fails=0
+          for i in 1 2 3 4 5 6 7 8; do
+            node --max-old-space-size=1024 --test --test-reporter=tap tests/work_portal.test.js > ../p_$i.log 2>&1
+            code=$?
+            echo "run $i exit $code oks=$(grep -c '^ok ' ../p_$i.log) notok=$(grep -c '^not ok ' ../p_$i.log)"
+            [ $code -ne 0 ] && fails=$((fails+1)) && grep -m5 -A3 '^not ok' ../p_$i.log
+          done
+          echo "portal fails=$fails"
+      - name: Every node test file once, as the lane runs them
         shell: bash
         working-directory: web
         run: |
           set +e
-          node --max-old-space-size=512 --stack-trace-limit=60 --test --experimental-test-isolation=none --test-timeout=120000 \
-            tests/work_portal.test.js > ../whole.log 2>&1
-          echo "whole exit $?"
-          grep -E '^(not ok|ok) ' ../whole.log | tail -15
-          tail -c 12000 ../whole.log
+          node --max-old-space-size=2048 --test --test-concurrency=4 --test-reporter=tap tests/*.test.js > ../all.log 2>&1
+          echo "all exit $? oks=$(grep -c '^ok ' ../all.log) notok=$(grep -c '^not ok ' ../all.log)"
+          grep -m10 '^not ok' ../all.log
