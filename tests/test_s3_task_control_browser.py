@@ -174,7 +174,7 @@ def _scrolls_settled(page, frames: int = 5, limit_ms: int = 10_000) -> None:
                 if (error) reject(error); else resolve();
             };
             const timer = setTimeout(() => finish(new Error(
-                `${quiet} quiet frames of ${frames} ${limit} ms after the change: the page still scrolled or drew none`)), limit);
+                `only ${quiet} of ${frames} quiet frames within ${limit} ms of the change: the page still scrolled or drew no frames`)), limit);
             document.addEventListener('scroll', scrolled, true);
             const frame = () => {
                 if (done) return;
