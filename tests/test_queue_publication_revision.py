@@ -264,15 +264,15 @@ def test_a_tick_measures_the_pool_once_for_its_census_its_document_and_its_certi
     from supervisor import pool_admission, worker_pool_lifecycle, workers
 
     root, now = published
-    calls = []
+    calls, pool = [], {"max_workers": None, "worker_total": 1, "busy_worker_count": 1, "acting_worker_count": 1,
+                       "parked_worker_count": 0, "booting_count": 0, "reaping_count": 0, "retiring_count": 0,
+                       "assignable_idle_workers": 0, "lane_carrier_total": 1}
 
     def measured(*_a, **_k):
         calls.append(1)
         if len(calls) % 2 == 0:
             raise RuntimeError("a slot's process closed between two measurements")
-        return {"max_workers": None, "worker_total": 1, "busy_worker_count": 1, "acting_worker_count": 1,
-                "parked_worker_count": 0, "booting_count": 0, "reaping_count": 0, "retiring_count": 0,
-                "assignable_idle_workers": 0, "lane_carrier_total": 1}
+        return dict(pool)
 
     monkeypatch.setattr(worker_pool_lifecycle, "pool_slot_counts", measured)
     monkeypatch.setattr(workers, "_worker_pool_execution_state", lambda: {"disabled_reason": ""})
@@ -286,6 +286,23 @@ def test_a_tick_measures_the_pool_once_for_its_census_its_document_and_its_certi
         assert queue_publication.publish_queue_changes() is True and calls == [1]
         assert _read(root, "queue_snapshot.json")["pool_observation_status"] == "observed"
         assert _read(root, "queue.alive")["pool"]["worker_total"] == 1
+    # The server's way: the writer thread certifies the counts the quiet tick measured, without measuring again.
+    queue_publication.start_queue_writer()
+    document, pool["worker_total"] = (root / "state/queue_snapshot.json").read_bytes(), 2
+    calls.clear()
+    assert queue_publication.publish_queue_changes() is True and queue_publication.drain_writer() and calls == [1]
+    assert _read(root, "queue.alive")["pool"]["worker_total"] == 2
+    assert (root / "state/queue_snapshot.json").read_bytes() == document
+
+
+def test_an_unknown_document_keeps_its_unknown_counts_under_a_certificate_that_carries_some(tmp_path):
+    """The overlay serves an observed document only: a failed measurement's nulls are never filled in."""
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state/queue_snapshot.json").write_text(json.dumps(
+        {"generation": "g", "running": [], "pending": [], "pool_observation_status": "unknown", "worker_total": None}))
+    (tmp_path / "state/queue.alive").write_text(json.dumps({"generation": "g", "ts": "2026-11-16T00:00:00+00:00",
+                                                           "heartbeats": {}, "pool": {"worker_total": 3}}))
+    assert queue_observation.load_queue_document(tmp_path)["worker_total"] is None
 
 
 def test_publications_follow_changes_not_ticks(published, monkeypatch):
