@@ -61,6 +61,17 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
             # the RUNNING record only fills a gap an older or partial emitter
             # left (emitter-supplied values win).
             _task = _m.get("task") if isinstance(_m.get("task"), dict) else {}
+            # The newest receipt of the work's own calls (the loop's), so its card says what ran beside what was
+            # chosen; a helper's or a review's call reports under its own id and never lands here. A call that
+            # asked no tier has no receipt: an older call's must not speak for it.
+            _receipt = usage.get("processing")
+            if evt.get("source") == "loop" and _tid == str(_task.get("id") or _tid):
+                from ouroboros.lead_fact import RECEIPT_FIELDS
+
+                if isinstance(_receipt, dict):
+                    _m["processing_last"] = {key: copy.deepcopy(_receipt[key]) for key in RECEIPT_FIELDS if key in _receipt}
+                else:
+                    _m.pop("processing_last", None)
             for _field in (
                 "root_task_id", "parent_task_id", "delegation_role",
                 "task_group_id", "requested_model_lane", "effective_model_lane",

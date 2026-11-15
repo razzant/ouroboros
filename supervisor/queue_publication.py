@@ -46,15 +46,16 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import threading
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from ouroboros.contracts.schema_versions import SCHEMA_VERSION_KEY
 from ouroboros.project_admission import carried_basis
 from ouroboros.queue_observation import QUEUE_ALIVE_FRESH_SEC, SHARED_KEY
-from ouroboros.shared_values import token
+from ouroboros.shared_values import TOKEN_PATTERN, token
 from ouroboros.subagents import subagent_intent_fields
 from ouroboros.utils import machine_json, utc_now_iso, write_text_atomic
 from supervisor.queue_snapshot import QUEUE_SNAPSHOT_SCHEMA_VERSION, _PENDING_FIELDS, _keeps_saved_queue
@@ -72,8 +73,10 @@ log = logging.getLogger(__name__)
 
 #: ``queue.alive`` is refreshed inside the readers' freshness bound (``task_status``), without fsync.
 QUEUE_ALIVE_REFRESH_SEC = QUEUE_ALIVE_FRESH_SEC / 4
-#: A task value whose JSON is at least this many characters long may be shared by content address.
+#: A task value at least this long (a string's characters, a container's JSON text) may be shared by its address.
 SHARED_MIN_LENGTH = 1024
+#: ``shared_values.TOKEN_PATTERN`` as text: a reference as ``machine_json`` spells it in a skeleton's text.
+_TOKEN_TEXT = re.compile(TOKEN_PATTERN.pattern.decode("ascii"))
 #: Publications that always open a new generation, whatever the bytes.
 _FORCED_REASONS = frozenset({"startup", "pre_restart_exit", "server_shutdown"})
 #: The process-ending doors: their publication embeds every row whole, without the shared table,
@@ -480,8 +483,8 @@ _POOL_COUNT_KEYS = ("max_workers", "worker_total", "parked_worker_count", "busy_
                     "assignable_idle_workers", "lane_carrier_total", "memory_admission")
 
 
-def _documents(capture: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-    """Outside Q: the two documents of this capture; task values interned unless rollback-readable."""
+def _documents(capture: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
+    """Outside Q: the two documents of this capture and their texts; task values interned unless rollback-readable."""
     from ouroboros.budget_pause import BUDGET_HOLD_KEY
 
     payload = {
@@ -512,53 +515,100 @@ def _documents(capture: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
                     value = task[key]
                     member[key] = {k: value[k] for k in fields if k in value} if isinstance(value, dict) else value
             members[str(task.get("id") or "")] = member
-    if not capture["rollback_readable"]:
-        payload[SHARED_KEY] = _share_replicated(payload)
-    return {_SNAPSHOT_NAME: payload,
-            "queue_dispatch.json": {"budget_root_fences": capture["budget_root_fences"], "members": members}}
+    dispatch = {"budget_root_fences": capture["budget_root_fences"], "members": members}
+    snapshot = machine_json(payload) if capture["rollback_readable"] else _share_replicated(payload)
+    return ({_SNAPSHOT_NAME: payload, "queue_dispatch.json": dispatch},
+            {_SNAPSHOT_NAME: snapshot, "queue_dispatch.json": machine_json(dispatch)})
 
 
-def _share_replicated(payload: Dict[str, Any]) -> Dict[str, Any]:
+def _share_replicated(payload: Dict[str, Any]) -> str:
     """Replace every large task value that appears more than once (top level and one level inside
-    ``metadata``) by its address; the table of those values is returned. A value published once
-    stays where it is: only replication is waste, and a raw reader still sees singletons inline.
-    The rows are this publication's own frozen capture, so they are rewritten in place."""
-    seen: Dict[str, list] = {}  # digest -> [value, count]
-    places = []  # (container, key, digest) of every large value, in document order
+    ``metadata``) by its address, set the table of those values, and return the document's text. A
+    value published once stays where it is: only replication is waste, and a raw reader still sees
+    singletons inline. The rows are this publication's own frozen capture (``_frozen``: no container reached
+    twice), so they are rewritten in place.
+
+    Each place's value is encoded once: that text says whether it is large and whether it repeats (one
+    text is kept per distinct value), its address is the sha256 of that text, and the document's text is
+    the skeleton's (a placeholder for each value published once and for each table entry; a repeated
+    value's places hold its token) with the texts spliced in, so neither a row nor the table is encoded
+    again (``machine_json`` is compositional, as ``shared_values`` relies on). A splice that does not
+    place every placeholder exactly once falls back to encoding the document whole.
+    """
+    kept: Dict[str, str] = {}  # one text per distinct value: a repeat's own copy is dropped at once
+    counts: Dict[str, int] = {}  # text -> its places
+    places = []  # (container, key, value, text) of every large value, in document order
+
+    def count(container: Dict[str, Any], key: str, value: Any) -> None:
+        if (text := _large_text(value)) is not None:
+            text = kept.setdefault(text, text)
+            counts[text] = counts.get(text, 0) + 1
+            places.append((container, key, value, text))
+
     for lane in ("pending", "running"):
         for row in payload[lane]:
             task = row["task"]
             for key, value in task.items():
                 if key == "metadata" and isinstance(value, dict):
                     for name, item in value.items():
-                        if digest := _digest(item):
-                            seen.setdefault(digest, [item, 0])[1] += 1
-                            places.append((value, name, digest))
-                elif digest := _digest(value):
-                    seen.setdefault(digest, [value, 0])[1] += 1
-                    places.append((task, key, digest))
-    shared: Dict[str, Any] = {}
-    for container, key, digest in places:
-        value, count = seen[digest]
-        if count > 1:
-            shared.setdefault(digest, value)
-            container[key] = token(digest)
-    return shared
+                        count(value, name, item)
+                else:
+                    count(task, key, value)
+    prefix, holes = uuid.uuid4().hex, {}  # placeholder address (this publication's own) -> the text it stands for
+
+    def hole(text: str) -> Dict[str, str]:
+        address = f"{prefix}{len(holes):032x}"
+        holes[address] = text
+        return token(address)
+
+    addresses: Dict[str, str] = {}  # text -> its address
+    shared: Dict[str, Any] = {}  # address -> the first value with that text
+    table: Dict[str, Any] = {}  # address -> the placeholder of that text
+    for container, key, value, text in places:
+        if counts[text] == 1:
+            container[key] = hole(text)
+            continue
+        if text not in addresses:
+            digest = addresses[text] = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            shared[digest], table[digest] = value, hole(text)
+        container[key] = token(addresses[text])
+    payload[SHARED_KEY] = table
+    skeleton = machine_json(payload)
+    payload[SHARED_KEY] = shared
+    for container, key, value, text in places:
+        if counts[text] == 1:
+            container[key] = value
+    pieces, position, placed = [], 0, set()
+    for match in _TOKEN_TEXT.finditer(skeleton):
+        text = holes.get(match.group(1))
+        if text is not None:
+            if match.group(1) in placed:  # a placeholder seen twice: stray data or a shared container
+                return machine_json(payload)
+            pieces += (skeleton[position:match.start()], text)
+            position = match.end()
+            placed.add(match.group(1))
+    pieces.append(skeleton[position:])
+    return "".join(pieces) if len(placed) == len(holes) else machine_json(payload)
 
 
-def _digest(value: Any) -> str:
-    """The content address of a large value, or "" for one too small to be worth sharing."""
+def _large_text(value: Any) -> Optional[str]:
+    """The text of a value large enough to share (a string of at least ``SHARED_MIN_LENGTH`` characters, a
+    non-empty dict or list whose text is at least that long), else None."""
     if isinstance(value, str):
-        if len(value) < SHARED_MIN_LENGTH:
-            return ""
-        canonical = json.dumps(value, ensure_ascii=False)
-    elif isinstance(value, (dict, list)) and value:
-        canonical = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-        if len(canonical) < SHARED_MIN_LENGTH:
-            return ""
-    else:
-        return ""
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return machine_json(value) if len(value) >= SHARED_MIN_LENGTH else None
+    if isinstance(value, (dict, list)) and value:
+        text = machine_json(value)
+        return text if len(text) >= SHARED_MIN_LENGTH else None
+    return None
+
+
+def _stamped(document: Dict[str, Any], text: str, generation: str, reason: str) -> str:
+    """The written text: ``document`` (whose text is ``text``) with its generation, time and reason after its
+    own keys, appended to that text instead of encoding the document again."""
+    stamp = {"generation": generation, "ts": utc_now_iso(), "reason": reason}
+    if not document or stamp.keys() & document.keys():
+        return machine_json({**document, **stamp})
+    return f"{text[:-1]},{machine_json(stamp)[1:]}"
 
 
 def _publish(capture: Dict[str, Any], *, writer: Optional[_TickWriter] = None) -> bool:
@@ -567,8 +617,7 @@ def _publish(capture: Dict[str, Any], *, writer: Optional[_TickWriter] = None) -
     ``writer``: the tick's thread names itself, so a capture of a generation that ended while it was encoding
     (``reset`` replaced the writer) is never written over the next generation's documents.
     """
-    documents = _documents(capture)
-    encoded = {name: machine_json(document) for name, document in documents.items()}
+    documents, encoded = _documents(capture)
     with _PUBLISH_LOCK:
         if writer is not None and writer is not _WRITER:
             return False  # an ended generation's capture: the next generation owns the documents now
@@ -593,9 +642,8 @@ def _publish(capture: Dict[str, Any], *, writer: Optional[_TickWriter] = None) -
             if changed:
                 _revoke_alive(state)  # A partial publish must not certify the old no-fence document.
                 for name in stale:
-                    published = {**documents[name], "generation": generations[name], "ts": utc_now_iso(),
-                                 "reason": capture["reason"]}
-                    if _queue().atomic_write_text(state / name, machine_json(published)) is False:
+                    published = _stamped(documents[name], encoded[name], generations[name], capture["reason"])
+                    if _queue().atomic_write_text(state / name, published) is False:
                         raise OSError(f"queue publication failed: {name}")
             if changed or _alive_due(capture["heartbeats"]):
                 _certify(state, generations, capture["heartbeats"])

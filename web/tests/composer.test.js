@@ -94,9 +94,14 @@ test('Send waits for the room\'s model to be saved, Panic never does; a refused 
         instance.hydrateStateSnapshot(state(own));
         const capsule = node(instance, 'pchat-p7-model-mode');
         const value = () => capsule.querySelector('.chat-capsule-value').textContent;
-        const strip = capsule.querySelector('.chat-model-strip');
-        const seg = (words) => strip.children.find((made) => made.classList.contains('chat-seg') && made.children[0]?.textContent === words);
-        const choose = (words) => { for (const fn of strip.listeners.get('click')) fn({ target: { closest: () => seg(words) } }); };
+        // A press on the capsule opens the Model sheet over the page; a press on its Main row follows Main again.
+        document.defaultView = window;  // the sheet's place reads the page's window, as a browser's document has one
+        const followMain = () => {
+            for (const fn of capsule.querySelector('.chat-model-head').listeners.get('click')) fn({ detail: 1 });
+            const list = document.body.children.find((made) => made.classList.contains('model-sheet')).querySelector('.model-sheet-list');
+            const row = list.querySelectorAll('.chat-model-row').find((made) => made.dataset.row === 'main');
+            for (const fn of list.listeners.get('click')) fn({ target: { closest: (selector) => (selector === '.chat-model-row' ? row : null) } });
+        };
         const input = node(instance, 'pchat-p7-input');
         const send = node(instance, 'pchat-p7-send');
         const press = (text) => {
@@ -106,7 +111,7 @@ test('Send waits for the room\'s model to be saved, Panic never does; a refused 
         };
         const reply = (index, body, ok = true, status = 200) => saves[index].resolve({ ok, status, json: async () => body });
         assert.equal(value(), 'gpt-6-astra', 'the room\'s own model, from the room\'s own row');
-        choose('Main');
+        followMain();
         assert.deepEqual(saves.map((save) => save.body), [{ kind: 'main', project_id: 'p7' }]);
         instance.hydrateStateSnapshot(state(own));
         press('/panic');
@@ -122,7 +127,7 @@ test('Send waits for the room\'s model to be saved, Panic never does; a refused 
 
         document.body = new ElementStub('body', document);  // the toast stack's host
         instance.hydrateStateSnapshot(state(own));  // the room holds its own model again
-        choose('Main');
+        followMain();
         press('still here');
         await tick();
         reply(1, { error: 'The project is not available', saved: false, code: 'project_unavailable' }, false, 404);

@@ -693,6 +693,8 @@ def stored_list_order_is_final(result: Dict[str, Any]) -> bool:
     Retry and replica reads, workspace finalization and every nonterminal/unknown
     status still need the ordinary effective reader. A later body write rederives
     the fact; a pre-projection writer leaves NULL. No external state is consulted.
+    The task list and ``body_candidate._recorded_terminal`` answer from the column, so a
+    change to this predicate must leave stored rows to be derived again.
     """
     status = result.get("status")
     ts = result.get("ts")
@@ -1090,7 +1092,7 @@ def effective_task_result(
         child_overlay = project_replica_task_result_fields(result, child_result)
         for key, value in child_overlay.items():
             if key in {"task_id", "parent_task_id", "root_task_id", "session_id", "actor_id", "delegation_role"}:
-                continue
+                continue  # never from a replica: ``task_store.stated_roots`` relies on the stated root
             if key in parent_authoritative_fields:
                 continue
             if key == "artifacts":

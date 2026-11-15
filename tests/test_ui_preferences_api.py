@@ -36,6 +36,7 @@ def test_ui_preferences_round_trip_and_normalization(tmp_path):
             "read_ahead_revisions": {},
             "welcome": {"mode": "default", "text": ""},
             "model_recents": [],
+            "model_pins": [],
         }
 
         create_project(tmp_path, "racer", name="Racer")

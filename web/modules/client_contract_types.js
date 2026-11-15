@@ -769,6 +769,24 @@
  */
 
 /**
+ * A room's processing tier for its new owner work, or Main's own without `project_id`; '' is Default.
+ * @typedef {Object} OwnerChatProcessingRequest
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"} processing
+ * @property {string=} project_id
+ */
+/**
+ * A Project's answer carries its tier; Main's own carries Main's tier, what it was, and what Default resolves to.
+ * @typedef {Object} OwnerChatProcessingResponse
+ * @property {boolean} ok
+ * @property {string} project_id  // '' for Main
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} processing_choice  // Project response
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} previous_processing_choice
+ * @property {""|"standard"|"fast"|"economy"=} main_processing  // Main response: Main's own tier (a Settings value)
+ * @property {""|"standard"|"fast"|"economy"=} previous_main_processing
+ * @property {""|"standard"|"fast"|"economy"=} processing_default  // what Default resolves to
+ */
+
+/**
  * @typedef {Object} OwnerSafetyModeRequest
  * @property {'your_work'|'consciousness'=} kind
  * @property {'full'|'light'|'off'} mode

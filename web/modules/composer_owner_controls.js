@@ -618,10 +618,12 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
         const rowStyle = win?.getComputedStyle?.(row);
         const room = widthOf(row) - px(rowStyle?.paddingLeft) - px(rowStyle?.paddingRight);
         if (!(room > 0) || !wraps()) return;  // not laid out (the unit-test DOM), or the line holds
-        const over = () => {
-            const kids = shownKids();
-            return kids.reduce((sum, kid) => sum + widthOf(kid), 0) + px(rowStyle?.columnGap) * (kids.length - 1) - room + 1;  // 1 px of slack
-        };
+        // A capsule wider than the line is held to it (max-width): its own content's width is what must give way.
+        const natural = (kid) => Math.max(widthOf(kid), Number(kid.scrollWidth) || 0);
+        // A gap stands between every child the row lays out, an empty slot (the chips') included.
+        const laidOut = () => Array.from(row.children || []).filter((kid) => (kid.getClientRects?.().length ?? 1) > 0).length;
+        const over = () => shownKids().reduce((sum, kid) => sum + natural(kid), 0)
+            + px(rowStyle?.columnGap) * Math.max(0, laidOut() - 1) - room + 1;  // 1 px of slack
         const valueWidth = (capsule) => widthOf(capsule.el.querySelector('.chat-capsule-value'));
         let cap = waterLevel(capsules.map(valueWidth), over());
         // The model keeps its value (owner 10.11, «10. A»): where the cap would cut it, Subagents, Context and Effort
@@ -634,6 +636,16 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
         }
         row.style.setProperty('--capsule-value-cap', `${cap}px`);
         row.dataset.ownerCompact = 'values';
+        // Widths read before the cut can under-say what must go (a capsule held to the line, a word beside the value):
+        // measure the cut line again and cut further until it holds, a few passes at most.
+        // Each further cut goes through none, which never interpolates: a value's width transition (style.css) between
+        // two cuts would move the line under the observer and refit it forever.
+        for (let pass = 0; pass < 3 && cap > 0 && wraps(); pass += 1) {
+            cap = Math.max(0, Math.floor(cap - Math.max(1, over())));
+            row.style.setProperty('--capsule-value-cap', '');
+            void row.offsetWidth;
+            row.style.setProperty('--capsule-value-cap', `${cap}px`);
+        }
     }
     // A capsule settled closed refits the names and asks the fold again (a short keyboard room folds the row then).
     let fold = null;

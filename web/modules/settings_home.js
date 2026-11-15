@@ -21,7 +21,7 @@ import { consciousnessMark } from './consciousness_words.js';
 import { getContributions } from './contributions.js';
 import { refreshActionKind, verificationBadge } from './harness_accounts.js';
 import { harnessPresentation } from './harness_presentation.js';
-import { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
+import { createHostStart, startingStatus } from './host_starting_status.js';
 import { fmt, translateString } from './i18n.js';
 import { readNotifyPrefs } from './notifications.js';
 import { PAGE_ICONS, SHELL_ICONS, controlIcon, fluentIcon } from './page_icons.js';
@@ -101,11 +101,13 @@ export function needRows(facts = {}) {
     return rows;
 }
 
-/** Ouroboros's state for its card: `{ text, tone }`, from the socket and the last state snapshot. */
-export function beingState({ connected = true, state = null } = {}) {
+/** Ouroboros's state for its card: `{ text, tone }`, from the socket and what the page's state bodies stated, as the
+ * header's own reducer keeps it (`createHostStart`, host_starting_status.js): `ready`, and the boot phases. */
+export function beingState({ connected = true, ready = false, boot = null } = {}) {
     if (!connected) return { text: fmt('Reconnecting…'), tone: 'muted' };
-    if (supervisorReady(state) === false) {
-        const starting = startingStatus(bootPhase(state));
+    // Only a body that said ready ends Starting…: none read yet, or one forgotten at a disconnect, is no Online.
+    if (ready !== true) {
+        const starting = startingStatus(boot);
         return { text: starting.text, tone: starting.kind === 'failed' ? 'danger' : 'muted' };
     }
     return { text: fmt('Online'), tone: 'ok' };
@@ -398,16 +400,28 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     let hidden = true;          // off screen until the shell shows it (`refresh`); off screen it starts no read
     const flights = new Map();  // a source -> its read in flight: `{ controller, again }`
 
-    function paintCard() {
-        const being = beingState({ connected: ctx.ws?.isConnected?.() !== false, state: facts.state });
-        stateEl.textContent = being.text;
-        stateEl.dataset.tone = being.tone;
+    // The card's readiness, by the header's own reducer: a body that states nothing (or a failed read) keeps what the
+    // last one said, and the socket's close forgets it as the header's does (chat.js showOutage), so a reconnect never
+    // paints an Online read before it; a body read after the close proves it again. Bodies are the page's sequencer's
+    // newest, which a reconnect retires; the home's own copy (`facts.state`) answers rows, never readiness, where there
+    // is a sequencer. Every applied body repaints (`watch`), so a text is written only when it changes.
+    const hostStart = createHostStart();
+    const put = (el, text) => { if (el.textContent !== text) el.textContent = text; };
+    // `read: false` paints without taking a body: the close, which forgets, takes none, so whichever close handler runs
+    // first (app.js's retires the sequencer), a body from before the disconnect is never read back.
+    function paintCard({ read = true } = {}) {
+        const body = !read ? null : ctx.stateSnapshots ? ctx.stateSnapshots.latest?.() : facts.state;
+        if (body) hostStart.read(body);
+        const being = beingState({ connected: ctx.ws?.isConnected?.() !== false, ready: hostStart.ready(),
+            boot: hostStart.status().bootPhase });
+        put(stateEl, being.text);
+        if (stateEl.dataset.tone !== being.tone) stateEl.dataset.tone = being.tone;
         needs = needRows(facts);
         const waiting = needs.filter((row) => row.owner).length;
-        countEl.textContent = waiting ? count(waiting, 'One thing needs you', '{n} things need you') : '';
+        put(countEl, waiting ? count(waiting, 'One thing needs you', '{n} things need you') : '');
         // The list's own Ouroboros row (two panes from the first showing, settings.js): its state, and how many
         // things need the owner when any do.
-        if (overviewAnswer) overviewAnswer.textContent = waiting ? `${being.text} · ${countEl.textContent}` : being.text;
+        if (overviewAnswer) put(overviewAnswer, waiting ? `${being.text} · ${countEl.textContent}` : being.text);
         countEl.hidden = !waiting;
         sepEl.hidden = !waiting;
         const html = needs.map(needRowHtml).join('') + (needs.length > 2
@@ -603,10 +617,13 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     };
     const offStore = store.subscribe((view) => { readAccounts(view); paintCard(); paintRows(); }, { visible: () => false });
     // A skill's lifecycle and an update's status, as the shell hears them. The socket's state is the card's first word:
-    // its open and close repaint the card and read nothing (a reconnect's read is settings.js's).
+    // its open and close repaint the card, reading nothing (a reconnect's read is settings.js's), and the close forgets
+    // the readiness the bodies stated; each change of the page's newest state body, whoever read it, repaints it again.
     const offs = [getContributions().onLifecycle(() => renew(['skills'])),
         ...['update_status_ready', 'update_progress_changed'].map((type) => ctx.ws?.on?.(type, () => renew(['update']))),
-        ...['open', 'close'].map((type) => ctx.ws?.on?.(type, () => paintCard()))];
+        ctx.ws?.on?.('open', () => paintCard()),
+        ctx.ws?.on?.('close', () => { hostStart.forget(); paintCard({ read: false }); }),
+        ctx.stateSnapshots?.watch?.(() => paintCard())];
     root.addEventListener('click', onClick);
     cardEl?.addEventListener('click', onClick);
     searchEl.addEventListener('input', onType);

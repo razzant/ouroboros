@@ -921,18 +921,24 @@ def launch_admission(source: Any, *, root_resume: Optional[Dict[str, Any]] = Non
             _REVIEW_ADMISSION.reset(token)
 
 
-def tree_member_results(root_drive: Any, root_task_id: str, *, linked: Iterable[str] = ()) -> Any:
+def tree_member_results(root_drive: Any, root_task_id: str, *, linked: Iterable[str] = (),
+                        known: Optional[Dict[str, tuple]] = None) -> Any:
     """Select complete retained membership, then strictly read its authority.
 
     ``task_store.tree_facts`` selects the tree (``linked``: ids the caller's own queue,
     custody or model-request sources tie to it) and names the rows it could not read. A
     member whose strict read refuses or no longer finds its own record joins them as linked:
     it holds this tree while the others still answer. An unavailable store refuses the census.
-    Selection never supplies live status or custody. Returns a ``TreeCensus``.
+    Selection never supplies live status or custody. ``known``: ``{task_id: (signature, row)}``, rows
+    the caller's earlier census admitted for this tree, each read at or after that store signature
+    (``tree_census``). An offered member is confirmed by its signature read after every strict read
+    of this census: still that one, its row is returned as given (unchecked, in the caller's own
+    projection) as if read last, not decoded again; moved, it is read, and the rest are confirmed
+    again. Returns a ``TreeCensus``.
     """
     from ouroboros.store_hot_facts import lineage_root
     from ouroboros.task_results import load_task_result
-    from ouroboros.task_store import TreeCensus, tree_facts
+    from ouroboros.task_store import TreeCensus, signatures, tree_facts
 
     try:
         census = tree_facts(root_drive, root_task_id, linked=linked)
@@ -941,19 +947,34 @@ def tree_member_results(root_drive: Any, root_task_id: str, *, linked: Iterable[
     except StoreError as exc:
         raise ValueError("tree_membership_unreadable") from exc
     members, unresolved = {}, dict(census.unresolved)
-    for task_id in census.members:
+
+    def strict(task_id: str) -> None:
         try:
             row = load_task_result(root_drive, task_id, strict=True)
         except StoreError:
             raise
         except (ValueError, TypeError, AttributeError, KeyError, RecursionError):
             unresolved[task_id] = {"reason": "record_unreadable", "linked": True}
-            continue
+            return
         if row is None:  # its row without the body that answers for it (or gone since): it alone is unknown
             unresolved[task_id] = {"reason": "body_missing", "linked": True}
-            continue
+            return
         if lineage_root(row) == root_task_id:
             members[task_id] = row
+
+    pending = [task_id for task_id in census.members if known and task_id in known]
+    for task_id in [task_id for task_id in census.members if task_id not in set(pending)]:
+        strict(task_id)
+    while pending:  # each pass confirms the offered rows after every strict read so far, or reads what moved
+        standing = signatures(root_drive, pending)
+        moved = [task_id for task_id in pending if standing.get(task_id) != known[task_id][0]]
+        if not moved:
+            members.update((task_id, known[task_id][1]) for task_id in pending)
+            break
+        for task_id in moved:
+            strict(task_id)
+        pending = [task_id for task_id in pending if task_id not in set(moved)]
+    members = {task_id: members[task_id] for task_id in census.members if task_id in members}
     return TreeCensus(members, dict(sorted(unresolved.items())))
 
 

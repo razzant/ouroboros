@@ -861,6 +861,7 @@
         },
         "_is_direct_chat": true,
         "initiator": "consciousness",
+        "terminal_origin": "model_final",
         "rounds": 9,
         "continuation_offer": {
           "eligible": false,
@@ -1004,6 +1005,7 @@
         "_is_direct_chat": true,
         "initiator": "consciousness",
         "wake_summary": "Проверил состояние системы и сохранил наблюдения; нового решения от тебя не требуется.",
+        "terminal_origin": "model_final",
         "rounds": 9,
         "continuation_offer": {
           "eligible": false,
@@ -1145,6 +1147,7 @@
         },
         "_is_direct_chat": true,
         "initiator": "consciousness",
+        "terminal_origin": "model_final",
         "rounds": 9,
         "continuation_offer": {
           "eligible": false,
@@ -1534,6 +1537,7 @@
           },
           "_is_direct_chat": true,
           "initiator": "consciousness",
+          "terminal_origin": "model_final",
           "rounds": 9,
           "continuation_offer": {
             "eligible": false,
@@ -1746,6 +1750,7 @@
           },
           "_is_direct_chat": true,
           "initiator": "consciousness",
+          "terminal_origin": "model_final",
           "rounds": 9,
           "continuation_offer": {
             "eligible": false,
