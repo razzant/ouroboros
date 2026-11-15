@@ -2112,7 +2112,7 @@ def test_on_windows_a_window_larger_than_its_screen_is_fitted_and_one_that_fits_
                          WinForm((1470, 1170), (1260, 960), (0, 0)))
     for form, least in ((main, Size(1200, 728)), (setup, Size(1260, 728))):
         assert (form.MinimumSize, form.Size, form.Location) == (least, Size(1366, 728), Point(0, 0))
-        assert form.written == ["MinimumSize", "Size", "Location"]  # the minimum first, and no other property
+        assert form.written == ["MinimumSize", "Size"]  # the minimum first, and no other property
     assert main.Visible is False
     # WinForms may scale by the display after Load instead: the first Shown fits again, then lets go of the form.
     vars(setup).update(MinimumSize=Size(1260, 960), Size=Size(1470, 1170), written=[])
@@ -2120,14 +2120,21 @@ def test_on_windows_a_window_larger_than_its_screen_is_fitted_and_one_that_fits_
         form.Shown.fire(form, None)
         assert form.Shown.handlers == [], "a restore from the tray or the owner's own size is never fitted again"
     assert (setup.MinimumSize, setup.Size) == (Size(1260, 728), Size(1366, 728))
-    assert len(main.written) == 3, "already inside its screen: the second pass writes nothing"
+    assert len(main.written) == 2, "already inside its screen: the second pass writes nothing"
 
     # The same laptop at 100 %, the windows on a second screen whose taskbar is on top: 22 and 52 pixels too tall.
     winforms.area = work_area(1920, 40, 1366, 728)
     main, setup = loaded(WinForm((1100, 750), (800, 500), (2053, 29)), WinForm((980, 780), (840, 640), (2113, 40)))
     assert (main.Size, main.Location, setup.Size, setup.Location) == (
         Size(1100, 728), Point(2053, 40), Size(980, 728), Point(2113, 40))
-    assert main.written == setup.written == ["Size", "Location"]  # a minimum that fits stays the owner's floor
+    assert (main.written, setup.written) == (["Size", "Location"], ["Size"])  # a minimum that fits stays the owner's floor
+    # A form of a fitting size that hangs over the taskbar (a display that scaled it after it was centred) is moved,
+    # not resized.
+    winforms.area = work_area(0, 0, 1920, 1040)
+    main, setup = loaded(WinForm((1375, 938), (1000, 625), (410, 145)), WinForm((1225, 975), (1050, 800), (470, 130)))
+    assert (main.Size, main.Location, setup.Size, setup.Location) == (
+        Size(1375, 938), Point(410, 102), Size(1225, 975), Point(470, 65))
+    assert main.written == setup.written == ["Location"]
 
     # A 1920×1080 screen at 100 %: both fit, so neither Load nor Shown writes a property.
     winforms.area = work_area(0, 0, 1920, 1040)

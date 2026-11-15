@@ -14,24 +14,35 @@
 # the `build` profile, which carries the `desktop` extra, and runs that one case; a
 # skip is a failure here, since a skipped case proves nothing.
 #
-# WHEN. On a push or a pull request that touches the window code, its home test or
-# this file, and on request. A branch that is also a pull request starts it twice for
-# one commit; the second run replaces the first. It reads the repository and writes nothing.
+# WHEN. On a branch push or a pull request that touches the window code, its home
+# test, what the job installs (the lock, the project file, the environment action) or
+# this file, and on request; never on a tag. A branch that is also a pull request
+# starts it twice for one commit; the second run replaces the first. It reads the
+# repository and writes nothing.
 name: Desktop window (Windows)
 
 on:
   push:
+    branches: ['**']  # a tag ignores a path filter
     paths:
       - ouroboros/launcher_window_chrome.py
       - ouroboros/launcher_onboarding.py
       - tests/test_launcher_window_chrome.py
       - .github/workflows/desktop-window.yml
+      - tests/group_run.py
+      - uv.lock
+      - pyproject.toml
+      - .github/actions/setup-python-env/action.yml
   pull_request:
     paths:
       - ouroboros/launcher_window_chrome.py
       - ouroboros/launcher_onboarding.py
       - tests/test_launcher_window_chrome.py
       - .github/workflows/desktop-window.yml
+      - tests/group_run.py
+      - uv.lock
+      - pyproject.toml
+      - .github/actions/setup-python-env/action.yml
   workflow_dispatch:
 
 permissions:

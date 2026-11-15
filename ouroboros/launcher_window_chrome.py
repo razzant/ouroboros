@@ -77,9 +77,9 @@ working area (the screen less the taskbar) opens top-aligned, its bottom edge un
 Continue with it: 980×780 already on a 1366×768 laptop at 100 %, either desktop window at a larger scale.
 ``fit_to_work_area`` hooks the form's ``Load`` and, once, its ``Shown``, because which of ``Load`` and the DPI scaling
 comes first is unproven: each lowers the minimum where it exceeds the area (WinForms otherwise restores it), then sizes
-the form to the area at most and moves it inside, in the form's own pixels. A form that fits is not touched, nothing is
-maximized or shown, and a failure is logged and never keeps the window from opening. The macOS and Linux window managers
-constrain a window to the visible frame themselves. The home test's native case measures a real window; it needs
+the form to the area at most and moves it inside, in the form's own pixels. A form that lies inside is not touched,
+nothing is maximized or shown, and a failure is logged and never keeps the window from opening. macOS and Linux are left
+to their window managers (not measured here). The home test's native case measures a real window; it needs
 Windows with pywebview and pythonnet, which ``.github/workflows/desktop-window.yml`` provides (100 % scale only).
 """
 
@@ -376,13 +376,14 @@ def _fit(form: Any) -> None:
 
         area, size, least = Screen.FromControl(form).WorkingArea, form.Size, form.MinimumSize
         width, height = min(size.Width, area.Width), min(size.Height, area.Height)
-        if (width, height) == (size.Width, size.Height):
-            return  # it fits: its size, place and minimum stay as pywebview made them
-        if least.Width > width or least.Height > height:
-            form.MinimumSize = Size(min(least.Width, width), min(least.Height, height))
-        form.Size = Size(width, height)
-        form.Location = Point(max(area.Left, min(form.Left, area.Right - width)),
-                              max(area.Top, min(form.Top, area.Bottom - height)))
+        left = max(area.Left, min(form.Left, area.Right - width))
+        top = max(area.Top, min(form.Top, area.Bottom - height))
+        if (width, height) != (size.Width, size.Height):
+            if least.Width > width or least.Height > height:
+                form.MinimumSize = Size(min(least.Width, width), min(least.Height, height))
+            form.Size = Size(width, height)
+        if (left, top) != (form.Left, form.Top):  # also a form of a fitting size that hangs over an edge
+            form.Location = Point(left, top)
     except Exception:
         log.warning("The window was not fitted to its screen's working area.", exc_info=True)
 
