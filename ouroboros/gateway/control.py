@@ -669,10 +669,6 @@ def _stop_repo_writers(reason: str) -> list[str]:
     )
     if survivors:
         return survivors
-    if reason != "manual_rollback":  # a helper started after the returns were named returns with them (#3192)
-        from supervisor.restart_retention import name_late_returns
-
-        name_late_returns(DRIVE_ROOT, restart_transaction_id)
     try:
         from ouroboros.tools.services import kill_all_services
 
@@ -696,6 +692,10 @@ def _stop_repo_writers(reason: str) -> list[str]:
         custody_blockers = [f"custody_ledger:{type(exc).__name__}: {exc}"]
     blockers = [f"service:{label}" for label in failed] + custody_blockers
     update_returns["quiesced"] = not blockers
+    if not blockers and reason != "manual_rollback":  # a helper started after the returns were named (#3192);
+        from supervisor.restart_retention import name_late_returns  # an aborting update adds no names
+
+        name_late_returns(DRIVE_ROOT, restart_transaction_id)
     return blockers
 
 
