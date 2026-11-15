@@ -10,7 +10,8 @@ def startup_tree_exclusions(root):
     results outside this closure are never enumerated to construct exclusions.
     An identity the import set aside (``task_results.set_aside``: no row, its file
     refused or quarantined) has no canonical record to read: it is held by its own
-    id, and its own child stores are followed like any member's.
+    id, and its own child stores, its only links, are followed: one that is there
+    and cannot be opened is an unreadable link, never an empty one.
     """
     from ouroboros.obligations import members
     from ouroboros.task_custody import own_child_drives
@@ -32,7 +33,7 @@ def startup_tree_exclusions(root):
             protected.add(task_id)
             canonical = None if task_id in aside else load_task_result(root, task_id, strict=True)
             rows = [canonical] if canonical else []
-            for child in own_child_drives(root, task_id):
+            for child in own_child_drives(root, task_id, strict=task_id in aside):
                 rows.extend(list_task_results(child, strict=True))
             if not rows and task_id not in aside:
                 return None, f"{task_id}: no record"

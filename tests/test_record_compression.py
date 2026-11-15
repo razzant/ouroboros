@@ -56,7 +56,7 @@ def fake_darwin(monkeypatch):
     monkeypatch.setattr(artifact_storage, "sys", SimpleNamespace(platform="darwin"))
     monkeypatch.setattr(artifact_storage, "subprocess", SimpleNamespace(
         run=ditto, DEVNULL=subprocess.DEVNULL, SubprocessError=subprocess.SubprocessError))
-    monkeypatch.setattr(artifact_storage, "_may_share", lambda path: False)
+    monkeypatch.setattr(artifact_storage, "_clone_lives", lambda path: False)
     return calls
 
 
@@ -104,19 +104,21 @@ def test_a_once_cloned_file_is_shared_only_while_the_volume_counts_another_full_
     monkeypatch.setattr(artifact_storage, "_extended_attribute",
                         lambda path, attribute, layout: asked.append(attribute) or answers.get(attribute))
     flags, clones = 0x200, 0x1000
-    assert artifact_storage._may_share("file") is None, "no extended flags: the volume does not say"
+    assert artifact_storage._clone_lives("file") is None, "no extended flags: the volume does not say"
     answers[flags] = 0x10
-    assert artifact_storage._may_share("file") is False and clones not in asked, "never cloned: the count is not asked"
+    assert artifact_storage._clone_lives("file") is False and clones not in asked, "never cloned: the count is not asked"
+    assert artifact_storage._may_share("file") is False
     answers[flags] = 0x41
-    assert artifact_storage._may_share("file") is True and clones not in asked, "every block shared: a full clone lives"
+    assert artifact_storage._clone_lives("file") is True and clones not in asked, "every block shared: a full clone lives"
     answers[flags] = 0x1
-    assert artifact_storage._may_share("file") is None, "marked and no count answered: unknown, kept"
+    assert artifact_storage._clone_lives("file") is None, "marked and no count answered: unknown, kept"
     answers[clones] = 0
-    assert artifact_storage._may_share("file") is None, "no such count: unknown, kept"
+    assert artifact_storage._clone_lives("file") is None, "no such count: unknown, kept"
     answers[clones] = 2
-    assert artifact_storage._may_share("file") is True
+    assert artifact_storage._clone_lives("file") is True
     answers[clones] = 1
-    assert artifact_storage._may_share("file") is False, "marked once, no full clone left"
+    assert artifact_storage._clone_lives("file") is False, "marked once, no full clone left"
+    assert artifact_storage._may_share("file") is True, "the mark stays: it proves a clone was made, never that one lives"
 
 
 def test_each_floor_guard_keeps_its_file_before_any_rewrite(tmp_path, fake_darwin, monkeypatch):
@@ -131,11 +133,11 @@ def test_each_floor_guard_keeps_its_file_before_any_rewrite(tmp_path, fake_darwi
     assert artifact_storage.compression_outcome(noise) == "incompressible"
     assert artifact_storage.compression_outcome(folder) == "not_regular"
     plain = _write(tmp_path / "plain.log")
-    monkeypatch.setattr(artifact_storage, "_may_share", lambda path: True)
+    monkeypatch.setattr(artifact_storage, "_clone_lives", lambda path: True)
     assert artifact_storage.compression_outcome(plain) == "shared"
-    monkeypatch.setattr(artifact_storage, "_may_share", lambda path: None)
+    monkeypatch.setattr(artifact_storage, "_clone_lives", lambda path: None)
     assert artifact_storage.compression_outcome(plain) == "share_unknown", "unknown sharing is kept"
-    monkeypatch.setattr(artifact_storage, "_may_share", lambda path: False)
+    monkeypatch.setattr(artifact_storage, "_clone_lives", lambda path: False)
     monkeypatch.setattr(artifact_storage.shutil, "disk_usage", lambda path: SimpleNamespace(free=1024))
     assert artifact_storage.compression_outcome(plain) == "low_space"
     assert fake_darwin == [], "no guard reached ditto"
@@ -167,7 +169,7 @@ def test_the_compression_sibling_carries_its_own_tag_inside_the_atomic_signature
     monkeypatch.setattr(artifact_storage, "sys", SimpleNamespace(platform="darwin"))
     monkeypatch.setattr(artifact_storage, "subprocess", SimpleNamespace(
         run=ditto, DEVNULL=subprocess.DEVNULL, SubprocessError=subprocess.SubprocessError))
-    monkeypatch.setattr(artifact_storage, "_may_share", lambda path: False)
+    monkeypatch.setattr(artifact_storage, "_clone_lives", lambda path: False)
     assert artifact_storage.compression_outcome(_write(tmp_path / "out.log")) == "failed"
     [sibling] = written
     assert sibling.parent == tmp_path and ".out.log.decmpfs.tmp." in sibling.name
@@ -186,7 +188,7 @@ def test_the_jobs_ditto_runs_at_the_utility_disk_tier_and_a_patch_writers_does_n
     monkeypatch.setattr(artifact_storage, "sys", SimpleNamespace(platform="darwin"))
     monkeypatch.setattr(artifact_storage, "subprocess", SimpleNamespace(
         run=ditto, DEVNULL=subprocess.DEVNULL, SubprocessError=subprocess.SubprocessError))
-    monkeypatch.setattr(artifact_storage, "_may_share", lambda path: False)
+    monkeypatch.setattr(artifact_storage, "_clone_lives", lambda path: False)
     path = _write(tmp_path / "out.log")
     assert artifact_storage.compression_outcome(path, background=True) == "failed"
     assert artifact_storage.compression_outcome(path) == "failed"
@@ -948,7 +950,7 @@ def test_real_compression_keeps_what_every_reader_of_a_retained_source_reads(dat
 # ---- in_scope: the places a pass looks, asked by a copier before it clones (#2945) ------------------------------
 
 def test_in_scope_names_by_place_exactly_what_a_pass_offers_whatever_its_task_state(data, recorded):
-    """``delegate_readonly_inputs`` streams what this names: an APFS clone would leave the source ``shared`` for good."""
+    """``delegate_readonly_inputs`` streams what this names: an APFS clone keeps the source ``shared`` while it lives."""
     done = _evidence(data, "done")
     sources = _sources(data, "done-sources")
     _home, seat = _seat(data, "done", "op-1")

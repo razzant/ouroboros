@@ -249,7 +249,7 @@ def test_clone_or_copy2_keeps_copy2s_bytes_mode_and_times_and_shares_blocks_wher
     assert _copy2_facts(tmp_path / "cloned") == _copy2_facts(tmp_path / "streamed") == _copy2_facts(source)
     assert os.stat(source).st_ino != os.stat(tmp_path / "cloned").st_ino
     if sys.platform == "darwin":
-        assert artifact_storage._may_share(tmp_path / "cloned") is not False
+        assert artifact_storage._may_share(tmp_path / "cloned") is True
         assert artifact_storage._may_share(tmp_path / "streamed") is False
 
 
@@ -259,7 +259,7 @@ def test_a_write_to_either_side_of_a_real_clone_leaves_the_other_whole(tmp_path,
     source = _aged_source(tmp_path / "source")
     clone = tmp_path / "clone"
     artifact_storage.clone_or_copy2(source, clone)
-    assert artifact_storage._may_share(clone) is not False, "this proves a clone, not a copy"
+    assert artifact_storage._may_share(clone) is True, "this proves a clone, not a copy"
     written, other = (source, clone) if side == "source" else (clone, source)
     with written.open("r+b") as handle:  # in place, through the shared blocks' own inode
         handle.seek(4096)
@@ -363,7 +363,7 @@ def test_a_denying_source_acl_reaches_no_copy_and_a_seat_still_edits_its_own(tmp
     copies = {"cloned": artifact_storage.clone_or_copy2, "streamed": shutil.copy2}
     for name, copier in copies.items():
         copier(source, tmp_path / "seat" / name)
-    assert artifact_storage._may_share(tmp_path / "seat" / "cloned") is not False, "this proves a clone, not a copy"
+    assert artifact_storage._may_share(tmp_path / "seat" / "cloned") is True, "this proves a clone, not a copy"
     for name in copies:
         copy = tmp_path / "seat" / name
         assert _acl(copy) == [] and os.lstat(copy).st_mtime_ns == _AGED[1] and stat.S_IMODE(os.lstat(copy).st_mode) == 0o640
@@ -393,7 +393,7 @@ def test_a_destination_acl_is_inherited_by_the_clone_as_by_copy2(tmp_path, deny)
     deny(folder, "writeextattr", "file_inherit")
     artifact_storage.clone_or_copy2(source, folder / "cloned")
     shutil.copy2(source, folder / "streamed")
-    assert artifact_storage._may_share(folder / "cloned") is not False
+    assert artifact_storage._may_share(folder / "cloned") is True
     assert _acl(folder / "cloned") == _acl(folder / "streamed") != []
 
 
@@ -425,7 +425,7 @@ def test_a_byte_only_copy_takes_the_given_mode_and_its_own_times_and_a_read_only
     elif sys.platform == "darwin":
         assert outcomes == [True]
     if sys.platform == "darwin":
-        assert all((artifact_storage._may_share(path) is not False) is clone for path in (copied, source))
+        assert artifact_storage._may_share(copied) is clone and artifact_storage._may_share(source) is clone
     assert sorted(path.name for path in copied.parent.iterdir()) == ["pack-1.pack"]
     default = artifacts.copy_artifact_file(source, tmp_path / "default" / "pack-1.pack")  # every other caller
     assert default == measured and os.lstat(tmp_path / "default" / "pack-1.pack").st_mtime_ns == aged

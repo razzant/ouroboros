@@ -334,6 +334,12 @@ def test_tree_exclusions_follow_only_addressed_links_and_own_child_results(tmp_p
     seen.clear()
     expected |= {"quarantined", "aside-root"}
     assert startup_tree_exclusions(tmp_path)[0] == expected and "quarantined" not in seen, "its own child store is followed"
+    from ouroboros import confined_files
+    opened = confined_files.confined_directory
+    with monkeypatch.context() as patch:  # that store is its only link: there and unopenable is unknown, never empty
+        patch.setattr(confined_files, "confined_directory", lambda root, parts=(): (
+            (_ for _ in ()).throw(PermissionError("busy")) if tuple(parts)[-1:] == ("quarantined",) else opened(root, parts)))
+        assert startup_tree_exclusions(tmp_path) == (None, "quarantined: PermissionError")
     _set_aside(tmp_path, "unrelated")  # a refused file beside an older row: the row is still served
     seen.clear()
     assert results.set_aside(tmp_path) == {"quarantined": "quarantined_before_import"}

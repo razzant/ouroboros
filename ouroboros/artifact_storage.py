@@ -4,8 +4,8 @@ other platform, filesystem or volume boundary answers ``False`` and the caller s
 Never a hard link: an in-place write to the source would change the stored result, while a clone
 diverges at the first write to either side. ``clone_or_copy2`` is ``shutil.copy2`` over it, for a folder
 that is read rather than kept: APFS leaves a clone's may-share mark on the source too, even after its peer
-is gone, so the floor asks a marked file how many full clones it has (``_may_share``) and the mark alone
-decides only where the system cannot say. Where compression is supported, read-only lineage staging streams
+is gone, so the floor asks a marked file whether a full clone still lives (``_clone_lives``) and the mark
+alone decides only where the system cannot say. Where compression is supported, read-only lineage staging streams
 in-scope records until compressed;
 other copy callers keep their own policy. Transparent compression keeps the one floor its callers share
 (``compression_outcome``: the patch writers and the ``record_compression`` maintenance job). The platform
@@ -148,7 +148,7 @@ def compression_outcome(path: pathlib.Path, *, owned: Optional[Callable[[], bool
     floor every caller shares. ``unsupported`` off macOS and Windows; one ``lstat`` decides
     ``not_regular``, ``dataless`` (macOS: evicted, a read would download it), ``small`` (under 64 KiB),
     ``linked`` (another name shares the inode) and ``compressed_already``; macOS keeps a file a living
-    full clone shares its blocks with (``shared``, ``_may_share``;
+    full clone shares its blocks with (``shared``, ``_clone_lives``;
     ``share_unknown`` when the volume does not say: compressing a shared file would unshare it), Windows
     a read-only one (``read_only``: its file control needs a writable handle); a first 64 KiB block zlib
     cannot shrink by one allocation block is ``incompressible``; free space below the file's size is
@@ -193,7 +193,7 @@ def _floor(path: pathlib.Path, info: os.stat_result) -> str:
     if is_compressed(info):
         return "compressed_already"
     if sys.platform == "darwin":
-        shared = _may_share(path)
+        shared = _clone_lives(path)
         if shared is not False:
             return "share_unknown" if shared is None else "shared"
     elif attributes & stat.FILE_ATTRIBUTE_READONLY:
@@ -208,15 +208,21 @@ def _floor(path: pathlib.Path, info: os.stat_result) -> str:
 
 
 def _may_share(path: pathlib.Path) -> Optional[bool]:
-    """macOS: whether a clone holds all of PATH's blocks now (``nlink`` cannot see one); None when the
-    volume does not say. ``EF_MAY_SHARE_BLOCKS`` only says the file was cloned once: it stays on the
-    survivor after its peer is gone. So a marked file is shared while ``EF_SHARES_ALL_BLOCKS`` is set or
-    the volume counts another full clone (``ATTR_CMNEXT_CLONE_REFCNT``, itself included), and unknown
-    where the count is not answered (before macOS 14) or is no such number: the mark then keeps the
-    file as before. A count of one is not shared here: no peer is left, or the two have diverged (one of
-    them written since, a log copied mid-write) and share only what stayed equal, which can be nearly
-    all of it. Compressing such a file loses no byte; the disk then keeps both forms of the common part
-    until the peer goes."""
+    """macOS: whether PATH carries the mark of a clone (``EF_MAY_SHARE_BLOCKS``, which ``nlink`` cannot see);
+    None when the volume does not say. The mark says the file was cloned once: it stays on the survivor
+    after its peer is gone, so it proves a clone was made, never that one lives (``_clone_lives``)."""
+    flags = _extended_attribute(path, 0x200, "Q")  # ATTR_CMNEXT_EXT_FLAGS
+    return None if flags is None else bool(flags & 0x1)
+
+
+def _clone_lives(path: pathlib.Path) -> Optional[bool]:
+    """macOS: whether a clone holds all of PATH's blocks now; None when the volume does not say. A marked
+    file (``_may_share``) is shared while ``EF_SHARES_ALL_BLOCKS`` is set or the volume counts another full
+    clone (``ATTR_CMNEXT_CLONE_REFCNT``, itself included), and unknown where the count is not answered
+    (before macOS 14) or is no such number: the mark then keeps the file as before. A count of one is not
+    shared here: no peer is left, or the two have diverged (one of them written since, a log copied
+    mid-write) and share only what stayed equal, which can be nearly all of it. Compressing such a file
+    loses no byte; the disk then keeps both forms of the common part until the peer goes."""
     flags = _extended_attribute(path, 0x200, "Q")  # ATTR_CMNEXT_EXT_FLAGS
     if flags is None:
         return None

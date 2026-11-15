@@ -234,13 +234,15 @@ def recorded_execution_drive(row: Dict[str, Any], drive: pathlib.Path, spellings
     return any(physical_path(spellings, recorded) == target for recorded in child_drive_candidates(row))
 
 
-def own_child_drives(canonical_root: Any, task_id: str, *,
-                     store_row: Optional[Dict[str, Any]] = None) -> List[pathlib.Path]:
+def own_child_drives(canonical_root: Any, task_id: str, *, store_row: Optional[Dict[str, Any]] = None,
+                     strict: bool = False) -> List[pathlib.Path]:
     """TASK's physical child layouts, never created; no row widens the layouts.
 
     ``store_row`` (the HTTP artifact view) keeps only layouts its canonical row
     records, before any directory IO: there, scratch existence does not authorize
-    a SQLite read. Other callers keep discovering the layouts that exist.
+    a SQLite read. Other callers keep discovering the layouts that exist. ``strict``
+    is for a reader whose only source these layouts are: a layout that is a directory
+    and could not be opened raises, unknown and never absent.
     """
     from ouroboros.confined_files import confined_directory, root_spellings
 
@@ -256,6 +258,8 @@ def own_child_drives(canonical_root: Any, task_id: str, *,
             with confined_directory(canonical, drive.relative_to(canonical).parts):
                 found.append(drive)
         except OSError:
+            if strict and drive.is_dir() and not drive.is_symlink():
+                raise
             continue
     return found
 

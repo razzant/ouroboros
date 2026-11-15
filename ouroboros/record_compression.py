@@ -190,7 +190,7 @@ def in_scope(root: Any, path: Any) -> bool:
     evidence or a seat home's evidence folders under ROOT (the data root), never through ``.git``. By place alone,
     whatever its size, name, task state or today's floor, so a small live record that grows is one. Read-only lineage
     staging streams one not yet compressed: an APFS clone leaves it ``shared`` while the clone lives, and for good
-    where the system cannot count clones (``artifact_storage._may_share``).
+    where the system cannot count clones (``artifact_storage._clone_lives``).
     A log segment is no such place: that staging copies only what ``tool_access.lineage_read_roots`` names. A path
     that cannot be resolved answers True: not knowing is no licence to share blocks, and a stream costs only time."""
     try:
