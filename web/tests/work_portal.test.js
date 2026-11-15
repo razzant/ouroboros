@@ -474,6 +474,38 @@ test('a record read the reload started and Main left before its answer changes n
     } finally { f.close(); }
 });
 
+test('a census read before a disconnect never decides a later replay: the card stays unconfirmed until the next census', async () => {
+    // A reconnect reads the history again, and its answer can land before the post-open state read (which can also
+    // fail): the replay meets only a census read after the outage, so the card the outage parked stays unconfirmed.
+    const history = [
+        { role: 'user', text: 'audit the projects in their own room', ts: '2026-10-10T11:59:00Z', chat_id: 1, source: 'web',
+            history_id: 'h-1', row_address: 'row:1@h#1' },
+        { role: 'system', system_type: 'project_started', chat_id: 1, task_id: 'w-1', project_id: 'p-1', project_name: 'Audit',
+            task_name: 'Audit the projects', text: 'Audit › Audit the projects · Started', ts: '2026-10-10T12:00:00Z',
+            history_id: 'h-2' },
+    ];
+    const f = fixture({ history });
+    const census = { task_bindings: { 'w-1': { project_id: 'p-1', chat_id: 7 } }, projects: [{ id: 'p-1', name: 'Audit' }],
+        active_chat_activities: [room()] };
+    const phase = () => f.part('w-1', 'live-phase').dataset.phase;
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        await settle();
+        f.state(census);
+        await settle();
+        assert.equal(phase(), 'working', 'the census before the outage shows the work running');
+        f.emit('close');
+        await settle();
+        assert.equal(phase(), 'unknown', 'the outage parks the card as unconfirmed');
+        await f.instance.refreshHistory({ revision: 2 });
+        await settle();
+        assert.equal(phase(), 'unknown', 'the replay after the outage does not bring the old census back');
+        f.state(census);
+        await settle();
+        assert.equal(phase(), 'working', 'the census read after the outage decides');
+    } finally { f.close(); }
+});
+
 test('a bound claim stays pending: Retry Continue on the work\'s own card, nothing folds until the host admits it', async () => {
     const details = {};
     const f = fixture({ details });

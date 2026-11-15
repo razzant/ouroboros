@@ -378,6 +378,12 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         if (isMain) reconcile();
     }
 
+    /** A disconnect: the census read before it proves nothing after it, so no replay meets it until the next one. */
+    function retire() {
+        censusRead = false;
+        censusComplete = false;
+    }
+
     /**
      * A `project_started` / `project_handoff` row says which work moved where: it binds that work's card at
      * the row's place (the request's position) instead of drawing a second entry.
@@ -485,5 +491,5 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         return added;
     }
 
-    return { activity, bind, bindRow, follow, present, refresh, relabel, row, settle, sync, syncConvert, turnIntoProject };
+    return { activity, bind, bindRow, follow, present, refresh, relabel, retire, row, settle, sync, syncConvert, turnIntoProject };
 }

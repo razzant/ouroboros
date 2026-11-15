@@ -3464,6 +3464,7 @@ export function createChatInstance({
             return changed;
         });
         hostStart.forget();
+        portals.retire();
         hideTypingIndicatorOnly();
         syncChatStatus();
         syncHeaderControlState({ accounting: { available: false } });
