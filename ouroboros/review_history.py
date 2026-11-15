@@ -16,11 +16,12 @@ def _gap(reason: str, **source: Any) -> dict:
     return {"code": "REVIEW_HISTORY_SOURCE_UNAVAILABLE", "reason": reason, "source": source}
 
 
-def _attempts(drive_root: Any, repo_root: Any, task_id: str, attempts_root: Any = None) -> list:
+def _attempts(drive_root: Any, repo_root: Any, task_id: str, attempts_root: Any = None, unread: list | None = None) -> list:
     """This task's attempt rows on this checkout. A task with its own data folder keeps its commit gate's rows
     there (``attempts_root``) and its ``review_change`` rows in the canonical folder: both are its history, joined
     as ``review_status_projection.with_canonical_change_attempts`` joins them (the canonical row wins an identity
-    both folders hold, in the loader's own order)."""
+    both folders hold, in the loader's own order). With ``unread``, a folder whose state cannot be read is named
+    there and the other folder's rows stay; without it the failure is the caller's."""
     from ouroboros.review_state import _load_state_unlocked, make_repo_key
     from ouroboros.review_state_records import _attempt_identity_tuple, _attempt_order_key
 
@@ -34,7 +35,14 @@ def _attempts(drive_root: Any, repo_root: Any, task_id: str, attempts_root: Any 
     # and never root_task_id (a sibling task's paid budget is not its dispute).
     rows: dict = {}
     for folder in folders:
-        for row in _load_state_unlocked(folder, strict_attempt_authority=True).attempts:
+        try:
+            held = _load_state_unlocked(folder, strict_attempt_authority=True).attempts
+        except (OSError, TypeError, ValueError) as exc:
+            if unread is None:
+                raise
+            unread.append((folder if len(folders) > 1 else None, exc))
+            continue
+        for row in held:
             if row.task_id == task_id and row.repo_key == key:
                 rows.setdefault(_attempt_identity_tuple(row), row)
     return sorted(rows.values(), key=_attempt_order_key)
@@ -134,11 +142,13 @@ def review_dispute_history(history: Any = (), *, drive_root: Any, repo_root: Any
     if isinstance(history, dict) and history.get("kind") == "review_dispute_history":
         return copy.deepcopy(history)
     rounds, gaps, seen_text, records, done, visiting, referenced = [], [], {}, {}, set(), set(), set()
+    unread: list = []
     try:
-        attempts = _attempts(drive_root, repo_root, task_id, attempts_root)
+        attempts = _attempts(drive_root, repo_root, task_id, attempts_root, unread)
     except (OSError, TypeError, ValueError) as exc:
-        attempts = []
-        gaps.append(_gap(f"attempt bindings could not be read ({type(exc).__name__})", task_id=task_id))
+        attempts, unread = [], [(None, exc)]
+    gaps.extend(_gap(f"attempt bindings could not be read ({type(exc).__name__})", task_id=task_id,
+                     **({"folder": str(folder)} if folder else {})) for folder, exc in unread)
     ids = list(previous_records) if previous_records is not None else list(dict.fromkeys(
         row.review_record_id for row in attempts if row.review_record_id and row.review_record_id != exclude_record_id))
     stack = [(rid, False) for rid in reversed(ids)]

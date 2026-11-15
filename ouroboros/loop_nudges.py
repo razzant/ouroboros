@@ -14,11 +14,13 @@ import queue
 from typing import Any, Callable, Dict, List, Optional
 from ouroboros import task_pacing
 from ouroboros.nanny_pacing import nanny_burn_fact, nanny_metered_since_delegate_activity
-from ouroboros.outcomes import _ROOT_WRITE_TOOLS, extract_final_answer, latest_unreconciled_failed_verification, result_unexamined, reviewable_effect_projection, turn_has_reviewable_effects
+from ouroboros._outcome_receipts import red_check_fact
+from ouroboros.outcomes import _ROOT_WRITE_TOOLS, extract_final_answer, result_unexamined, reviewable_effect_projection, turn_has_reviewable_effects
 # D18b: the trace-touched skill-name scan lives with the readiness predicate that
 # consumes it (upstream 0463c6bb); the historical private name stays bound here so
 # loop.py's re-export and every existing caller keep addressing one object.
 from ouroboros.skill_readiness import skill_names_touched_by_trace as _skill_names_touched_by_trace  # noqa: F401 -- historical name
+from ouroboros.tool_error_words import check_cause, red_check_phrase
 from ouroboros.tools.registry import ToolRegistry
 
 
@@ -306,7 +308,23 @@ def _changed_fact(llm_trace: Dict[str, Any]) -> str:
     return "; ".join(f"{label} x{n}" for label, n in counts.items())
 
 
-def _recorded_fact(drive_root: Any, task_id: str, receipt_rows: List[Dict[str, Any]]) -> str:
+def _named_red_check(red: Dict[str, Any]) -> str:
+    """The red check for the mind alone: the command and its cause in the words of the owner's sentence, or the
+    host's own words where it looked for the named files and ran no command."""
+    if red["kind"] == "artifact_observation":
+        return f"path observation — {red['check'] or check_cause(red)}"
+    return f"`{red['check']}` — {check_cause(red)}" if red.get("check") else check_cause(red)
+
+
+def _red_check_words(red: Dict[str, Any]) -> str:
+    """The red check as the notice says it, and whether any check passed after it (``_outcome_receipts.red_check_fact``)."""
+    if not red["passed_after"]:
+        return f"the last recorded check did not pass ({_named_red_check(red)}), and none has passed since"
+    return (f"a check did not pass ({_named_red_check(red)}); {red['passed_after']} passed after it, "
+            "none recorded as a rerun of it")
+
+
+def _recorded_fact(receipt_rows: List[Dict[str, Any]], red: Optional[Dict[str, Any]]) -> str:
     """What this task recorded about its result, by receipt status; a red check with its own words."""
     if not receipt_rows:
         return "no verification receipt"
@@ -321,13 +339,8 @@ def _recorded_fact(drive_root: Any, task_id: str, receipt_rows: List[Dict[str, A
         parts.append('"no machine check exists" declared')
     if kinds - {"no_visible_machine_contract"}:
         parts.append("a zero-run decision recorded")
-    red = latest_unreconciled_failed_verification(drive_root, task_id, receipts=receipt_rows)
-    if red is not None:
-        check, code = str(red.get("check") or "").strip(), red.get("returncode")
-        matcher = "; exit 0 but the expected text was not found" if code == 0 and red.get("matched") is False else ""
-        check = check[:200] + ("…" if len(check) > 200 else "")
-        parts.append(f"latest check RED{f' on `{check}`' if check else ''}"
-                     f"{f' (exit {code}{matcher})' if code is not None else ''} with no later pass of the same check")
+    if red:
+        parts.append(_red_check_words(red))
     return "; ".join(parts) or "no verification receipt"
 
 
@@ -383,27 +396,36 @@ def _callable_tools(tools: Any) -> Optional[frozenset]:
         return None
 
 
-def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm_trace: Dict[str, Any],
-                         receipt_rows: List[Dict[str, Any]]) -> str:
-    """The one finish-door notice (audit 11.11, item 18; owner 12.11: keep the pushback at the exit and make
-    acceptance and quality more precise): the facts the host holds before the first ordinary
-    delivery, never a gate. It names what applies: a result nothing examined since it last changed
-    (``outcomes.result_unexamined``; not where Required's floor reviews it at delivery), direct children still
-    running, this task's own delegated runs with no recorded end. Typed facts only, never parsed prose (P5); a red
-    check, a masking pipe and an agent-defined criterion were said when the check ran and stay on the record."""
+RED_CHECK_NOTICE = "red_check_notice"  # the hold cause of the red check stated alone; beside the other facts the hold is theirs
+
+
+def _pre_delivery_facts(tools: ToolRegistry, drive_root: Any, task_id: str, llm_trace: Dict[str, Any],
+                        receipt_rows: List[Dict[str, Any]], told: bool = False, red_told: bool = False) -> tuple:
+    """The finish-door notice and the two parts it states, ``(text, facts, red)``: never a gate, typed facts only,
+    never parsed prose (P5). ``facts`` (owner 12.11: keep the pushback at the exit and make acceptance and quality
+    more precise): a result nothing examined since it last changed (``outcomes.result_unexamined``; not where
+    Required's floor reviews it at delivery), direct children still running, this task's own delegated runs with no
+    recorded end. ``red`` (owner 15.11: on a failure, a chance to correct it): the last recorded check did not pass
+    and no check has passed since (``_outcome_receipts.red_check_fact``), for every actor and review mode; a masking
+    pipe and an agent-defined criterion were said when the check ran and stay on the record. A part already told
+    (``told``, ``red_told``) is left out."""
     from ouroboros.config import get_task_review_mode
     from ouroboros.tools.review_result import required_root_wave
 
     lines: List[str] = []
+    red = red_check_fact(receipt_rows)
+    red_due = bool(red) and not red["passed_after"] and not red_told
+    callable_tools = _callable_tools(tools)  # a path this actor cannot take is never offered
+    can_check = callable_tools is None or "verify_and_record" in callable_tools
     # A declaration that nothing is machine-checkable does not skip it: an early formal record must not buy the
     # door back (owner 12.11: such a record no longer counts as a check). The notice states the declaration.
-    if (result_unexamined(llm_trace) and not required_root_wave(tools._ctx)
-            and not _zero_run_closed(tools._ctx, receipt_rows)):
+    unexamined = (not told and result_unexamined(llm_trace) and not required_root_wave(tools._ctx)
+                  and not _zero_run_closed(tools._ctx, receipt_rows))
+    if unexamined:
         mode = get_task_review_mode()  # Off refuses a result review; Required reviews only a root at delivery
-        callable_tools = _callable_tools(tools)  # a path this actor cannot take is never offered
         can_review = mode != "off" and (callable_tools is None or "review_change" in callable_tools)
         paths = (["check the result against what was asked (verify_and_record runs the check and records what it "
-                  "showed)"] if callable_tools is None or "verify_and_record" in callable_tools else [])
+                  "showed)"] if can_check else [])
         paths += (["ask for a result review (review_change with subject=\"result\" and the seats you choose; its "
                    "verdict comes back before delivery)"] if can_review else [])
         deliver = "deliver it as it is and say in the answer what was not checked, which the record then shows"
@@ -411,7 +433,7 @@ def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm
             "Before delivery: no recorded check (verify_and_record) or result review has examined this result since it "
             "last changed.",
             f"Changed: {_changed_fact(llm_trace)}.",
-            f"Recorded about it: {_recorded_fact(drive_root, task_id, receipt_rows)}.",
+            f"Recorded about it: {_recorded_fact(receipt_rows, red)}.",
             f"This answer is read by: {_reader_fact(tools._ctx)}.",
             "Result review: off on this install (task review mode Off)." if mode == "off" else
             "Result review: none for this answer; this actor has no review_change." if not can_review else
@@ -419,44 +441,68 @@ def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm
             f"{'of a child ' if mode == 'required' else ''}runs only when you ask for one.",
             "Ways forward: " + "; ".join([*paths, f"or {deliver}" if paths else deliver]) + ".",
         ]
-    try:
-        running = _running_children(tools, drive_root, task_id)
-    except Exception:
-        log.debug("pre-delivery notice: direct children unreadable", exc_info=True)
-        running = []
-    if running:
-        listed = ", ".join(running[:10]) + (f" (+{len(running) - 10} more)" if len(running) > 10 else "")
-        lines.append(f"Still running: direct children {listed}; after this task ends they keep running and spending, "
-                     "and it reads nothing more from them (wait for them, cancel them, or leave them).")
-    try:
-        open_runs = _open_delegated_runs(tools._ctx, task_id)
-    except Exception:
-        log.debug("pre-delivery notice: delegated custody unreadable", exc_info=True)
-        open_runs = 0
-    if open_runs:
-        lines.append(f"Open delegated execution: {open_runs} of this task's runs have no recorded end; "
-                     "ending this task now cancels those still running on the next custody pass "
-                     "(delegate_wait shows each run's state).")
+    elif red_due:  # beside an unexamined result the red check is said once, in "Recorded about it"
+        lines += [
+            "Before delivery: the last recorded check did not pass, and no recorded check has passed since.",
+            f"Check: {_named_red_check(red)}.",
+            f"This answer is read by: {_reader_fact(tools._ctx)}; if you finish now, a clean ending's details will say: "
+            f"\"{red_check_phrase({'verification_red': red})}\"",
+            "Ways forward: " + ("change the result or the check, or run the check again as it is (verify_and_record); or "
+                                if can_check else "change the result; or ")
+            + "deliver the answer as it is and say in it what did not pass.",
+        ]
+    count = len(lines)
+    if not told:
+        try:
+            running = _running_children(tools, drive_root, task_id)
+        except Exception:
+            log.debug("pre-delivery notice: direct children unreadable", exc_info=True)
+            running = []
+        if running:
+            listed = ", ".join(running[:10]) + (f" (+{len(running) - 10} more)" if len(running) > 10 else "")
+            lines.append(f"Still running: direct children {listed}; after this task ends they keep running and "
+                         "spending, and it reads nothing more from them (wait for them, cancel them, or leave them).")
+        try:
+            open_runs = _open_delegated_runs(tools._ctx, task_id)
+        except Exception:
+            log.debug("pre-delivery notice: delegated custody unreadable", exc_info=True)
+            open_runs = 0
+        if open_runs:
+            lines.append(f"Open delegated execution: {open_runs} of this task's runs have no recorded end; "
+                         "ending this task now cancels those still running on the next custody pass "
+                         "(delegate_wait shows each run's state).")
     if not lines:
-        return ""
+        return "", False, False
     if not lines[0].startswith("Before delivery"):
         lines.insert(0, "Before delivery:")
-    return "\n".join([*lines, "Your next answer is delivered as you choose."])
+    text = "\n".join([*lines, "Your next answer is not returned for these facts."])
+    return text, unexamined or len(lines) > count, red_due
+
+
+def _pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm_trace: Dict[str, Any],
+                         receipt_rows: List[Dict[str, Any]]) -> str:
+    """The whole finish-door notice of this moment, nothing told yet (``_pre_delivery_facts``)."""
+    return _pre_delivery_facts(tools, drive_root, task_id, llm_trace, receipt_rows)[0]
 
 
 def _claim_pre_delivery_notice(tools: ToolRegistry, drive_root: Any, task_id: str, llm_trace: Dict[str, Any],
                                receipt_rows: Optional[List[Dict[str, Any]]] = None) -> str:
-    """The notice once per execution: the first door that shows it (this chain, or the handoff riding the same
-    door) latches it, so one door is never two returns."""
-    if drive_root is None or getattr(tools._ctx, "_pre_delivery_noticed", False):
+    """The notice at this door: each of its two parts returns an answer once per execution, and the door that shows a
+    part (this chain, or the handoff riding the same door) latches it, so one door is never two returns and the
+    notice returns an answer at most twice, once for each part. It names the hold's cause for the delivery owner
+    (``_completion_hold_cause``)."""
+    ctx = tools._ctx
+    told, red_told = bool(getattr(ctx, "_pre_delivery_noticed", False)), bool(getattr(ctx, "_red_check_noticed", False))
+    if drive_root is None or (told and red_told):
         return ""
     if receipt_rows is None:
         from ouroboros.outcomes import read_context_verification_receipts
 
-        receipt_rows = read_context_verification_receipts(tools._ctx, task_id, fallback_root=drive_root)
-    notice = _pre_delivery_notice(tools, drive_root, task_id, llm_trace, receipt_rows)
+        receipt_rows = read_context_verification_receipts(ctx, task_id, fallback_root=drive_root)
+    notice, facts, red = _pre_delivery_facts(tools, drive_root, task_id, llm_trace, receipt_rows, told, red_told)
     if notice:
-        tools._ctx._pre_delivery_noticed = True
+        ctx._pre_delivery_noticed, ctx._red_check_noticed = told or facts, red_told or red
+        ctx._completion_hold_cause = "pre_delivery_notice" if facts else RED_CHECK_NOTICE
     return notice
 
 
@@ -466,8 +512,8 @@ def _maybe_inject_finalization_nudges(
     emit_progress: Callable[[str], None],
 ) -> bool:
     """One-shot pre-finalization injections that each re-loop (return True): the authoring
-    handover fact, the skill finalization reminder, the one pre-delivery notice
-    (``_pre_delivery_notice``) and the adapter's answer-protocol marker. Extracted from
+    handover fact, the skill finalization reminder, the pre-delivery notice (``_claim_pre_delivery_notice``: each
+    of its two parts once) and the adapter's answer-protocol marker. Extracted from
     run_llm_loop to keep it under the method size gate."""
     if drive_root is None:
         return False
@@ -555,7 +601,9 @@ def _maybe_inject_finalization_nudges(
     notice = _claim_pre_delivery_notice(tools, drive_root, task_id, llm_trace, receipt_rows)
     if notice:
         # A nanny's notice stays out of the owner chat's progress (owner 2026-08-15: nanny chat spam removed).
-        return _inject(notice, "Pre-delivery facts shown before final response.", "pre_delivery_notice",
+        cause = getattr(tools._ctx, "_completion_hold_cause", "") or "pre_delivery_notice"
+        return _inject(notice, "A check that did not pass was shown before final response." if cause == RED_CHECK_NOTICE
+                       else "Pre-delivery facts shown before final response.", cause,
                        progress=not getattr(tools._ctx, "_nanny_route_dispatched", False))
     # No "expected output but nothing attempted" re-loop (A3, removed for #1748): plain
     # prose can itself be the requested deliverable, and the transcript already shows
