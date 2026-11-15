@@ -244,18 +244,6 @@ def _fence_snapshot_running_rows(rows: Any, *, restored_ids: "set[str]") -> "lis
     return fenced
 
 
-def _saved_step_unlaunched(task: dict) -> bool:
-    """A continuation's saved step whose next attempt never launched (``_working_resume_granted``: the proof a
-    returning door names it by and a Project hold is released by); an unreadable fact proves nothing."""
-    from supervisor.task_admission import _working_resume_granted
-
-    try:
-        return isinstance(task.get("_working_recovery"), dict) and _working_resume_granted(task, _queue().DRIVE_ROOT)
-    except Exception:
-        log.warning("Saved continuation of %s could not be proven at restore", task.get("id"), exc_info=True)
-        return False
-
-
 def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stale: bool, certified: bool = True,
                              direct_caught: "list[str]" = (), handoffs: Optional[dict] = None) -> tuple:
     """Which snapshot rows survive the restore, and the RUNNING rows parked beside them.
@@ -304,7 +292,7 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                                           budget_hold_fact, hold_budget_row, hold_restored_budget_pause)
     from supervisor.restart_retention import (fresh_return_transaction, hold_after_stop, hold_for_owner_restart,
                                               hold_stopped_queue, never_started, park_saved_pause, pause_ids,
-                                              recover_saved_running, returned_before_body,
+                                              continues_saved_step, recover_saved_running, returned_before_body,
                                               retained_pending, HOLD_SAVED_SLEEP_RECOVERY, unseen_pause)
     from supervisor.schedule_occurrence import first_attempt, first_dispatch_unsent, restore_verdict
     from supervisor.task_admission import SEED_RETURN
@@ -497,9 +485,6 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                     "The return receipt was unreadable at restore; recovery is checked when it is readable.")}
             saved_or_accepted = (never_started(task) or isinstance(task.get("_working_recovery"), dict)
                                  or isinstance(task.get(SEED_RETURN), dict) or returned and not project_hold)
-            # A named row continuing its own saved step returns whatever started it (#3192): a schedule receipt's
-            # ``possible`` says the work ran, not that this continuation was sent; the door named it by this proof.
-            continues = str(task.get("id") or "") in returning_queue and (bool(returned) or _saved_step_unlaunched(task))
             kept = retained_pending(task, sleep_hold_reason=sleep_hold_reason)
             if panicked and not current_stop(task) or not certified and writer_wait(task):
                 # This also covers a planned delegate return under Project custody:
@@ -508,9 +493,9 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                                          persist_result=returned is not None)
             elif kept:
                 row = task
-            elif str(task.get("id") or "") in returning_queue and (saved_or_accepted and (schedule_replay or continues)
-                                                                  or recheck):
-                row = task  # the fresh Restart returns it: ordinary admission, at any age
+            elif str(task.get("id") or "") in returning_queue and (saved_or_accepted and (schedule_replay or (
+                    verdict == "possible" and continues_saved_step(task, _queue().DRIVE_ROOT))) or recheck):
+                row = task  # the fresh Restart returns it, or its own saved step past a schedule's ``possible`` (#3192)
             elif owner_restart and (returned or returned is None):
                 row = hold_stopped_queue(dict(task), _queue().DRIVE_ROOT, stop_door, proof=returned,
                                          persist_result=returned is not None)

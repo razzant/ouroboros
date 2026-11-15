@@ -945,6 +945,7 @@ def _perform_supervisor_restart(server,
     server._planned_delegate_restart_transaction_id = ""
     planned_handoffs: set[str] = set()
     restart_transaction_id = server.uuid.uuid4().hex
+    named = ""  # the transaction this door named its returns into; a failed naming adds no late names either
     try:
         from ouroboros.delegate_recovery import prepare_planned_restart_handoffs
         from ouroboros.owner_wait import prepare_owner_wait_handoffs
@@ -963,7 +964,7 @@ def _perform_supervisor_restart(server,
         prepare_restart_returns(ctx.DRIVE_ROOT, ctx.RUNNING, name_queue_returns(ctx.PENDING, "planned_restart"),
                                 transaction_id=restart_transaction_id,
                                 direct=direct_chat_turns(), owner_wait_ids=owner_waits)
-        server._planned_delegate_restart_transaction_id = restart_transaction_id
+        server._planned_delegate_restart_transaction_id = named = restart_transaction_id
     except Exception:
         server.log.debug("Planned self-restart delegate handoff preparation failed", exc_info=True)
     try:
@@ -982,7 +983,7 @@ def _perform_supervisor_restart(server,
         )
         from supervisor.restart_retention import name_late_returns  # a helper started after the returns were named
 
-        name_late_returns(ctx.DRIVE_ROOT, server._planned_delegate_restart_transaction_id)  # returns with them (#3192)
+        name_late_returns(ctx.DRIVE_ROOT, named)  # returns with them (#3192)
         try:  # a field update: a stale snapshot never erases a control written meanwhile (#1307)
             ctx.update_state(lambda live: live.__setitem__("session_id", server.uuid.uuid4().hex))
         except Exception:

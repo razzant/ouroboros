@@ -746,21 +746,35 @@ def retain_saved_running(running: Dict[str, Any], preserve: Iterable[str], drive
         kept = [task_id for task_id in kept if task_id not in orphaned]
 
 
+def continues_saved_step(task: Dict[str, Any], drive_root: Any) -> bool:
+    """A continuation of its own saved step whose next attempt never launched (``_working_resume_granted``): what a
+    returning door names a queued continuation by, and what returns a named one past a schedule's ``possible``
+    receipt at boot (#3192). An unreadable fact proves nothing."""
+    from supervisor.task_admission import _working_resume_granted
+
+    try:
+        return isinstance(task.get("_working_recovery"), dict) and _working_resume_granted(task, drive_root)
+    except Exception:
+        log.warning("Saved continuation of %s could not be proven", task.get("id"), exc_info=True)
+        return False
+
+
 def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: List[Dict[str, Any]], *,
                             transaction_id: str, direct: Iterable[Dict[str, Any]] = (),
                             owner_wait_ids: Iterable[str] = ()) -> set:
-    """A returning door names what it returns before it stops anything.
+    """A returning door names what it returns: before it stops anything, and once its workers are down for what
+    arrived meanwhile (``name_late_returns``).
 
     Running rows (and direct turns) with a working checkpoint and no saved
     pause, the owner-wait handoffs already prepared, and the formerly runnable
     never-started queue, including unstarted successors with a validated saved
-    source and dispatch authority. Added to the door's restart transaction, never replacing a name (planned
-    handoffs and ``name_late_returns`` share it); the launcher's exit acknowledgement makes it fresh.
+    source and dispatch authority (``continues_saved_step``). Added to the door's restart transaction, never replacing
+    a name (planned handoffs and ``name_late_returns`` share it); the launcher's exit acknowledgement makes it fresh.
     """
     import os as _os
 
     from supervisor.events_budget import budget_hold_fact
-    from supervisor.task_admission import _working_resume_granted, seed_returnable
+    from supervisor.task_admission import seed_returnable
 
     dr = _txn()
     returns, kept = set(), {RETAIN_SAVED, RETAIN_UNUSED_GRANT, RETAIN_SLEEP, RETAIN_OWNER_PAUSE}
@@ -785,8 +799,7 @@ def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: L
         if not task_id or _cancel_intent_active(root, task_id):
             continue
         try:
-            if (never_started(task) or returned_before_body(task)
-                    or "_working_recovery" in task and _working_resume_granted(task, root)):
+            if never_started(task) or returned_before_body(task) or continues_saved_step(task, root):
                 queue_ids.append(task_id)
         except Exception:
             log.warning("Saved queued work of %s could not authorize a Restart return", task_id, exc_info=True)
@@ -809,8 +822,9 @@ def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: L
 def name_late_returns(drive_root: Any, transaction_id: str) -> set:
     """Once a returning stop's workers are down, name into its own still active transaction, by the same rules, work
     that arrived after the door named its returns (a helper started meanwhile, #3192). The managed update and the
-    planned restart call it; the owner's Restart stops what it did not name. Never an id already decided; a failure
-    leaves that work held, as before."""
+    planned restart call it; the owner's Restart does not (running work it did not name is cancelled, queued work is
+    held for the owner). Never an id already decided. A failure can come after the transaction row was written: what
+    it holds then is what the next boot reads."""
     from supervisor import workers
 
     try:
@@ -823,7 +837,8 @@ def name_late_returns(drive_root: Any, transaction_id: str) -> set:
             queued = [task for task in workers.PENDING if str((task or {}).get("id") or "") not in decided]
         return prepare_restart_returns(drive_root, late, queued, transaction_id=transaction_id)
     except Exception:
-        log.warning("Work that arrived after the restart was prepared stays unnamed and held", exc_info=True)
+        log.warning("Naming late work into restart %s did not finish; some names may be saved", transaction_id,
+                    exc_info=True)
         return set()
 
 

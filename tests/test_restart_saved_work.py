@@ -43,10 +43,10 @@ def _stop_and_boot(queue, workers, *, age_sec=0):
     """The application stops (its teardown kill), then the next generation boots."""
     workers.kill_workers(force=True, terminal_status="cancelled", result_reason="Server shutdown.",
                          stop_source="server_shutdown", retain_saved_work=True)
-    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text())
+    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
     if age_sec:
         snap["ts"] = "2000-01-01T00:00:00+00:00"
-    queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(snap))
+    queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(snap), encoding="utf-8")
     workers.PENDING[:] = []
     workers.RUNNING.clear()
     return queue.restore_pending_from_snapshot()
@@ -809,7 +809,7 @@ def test_a_stop_keeps_each_saved_queue_time_through_restore_and_its_readers(tmp_
     ]
     workers.kill_workers(force=True, terminal_status="cancelled", result_reason="Server shutdown.",
                          stop_source="server_shutdown", retain_saved_work=True)
-    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text())
+    snap = json.loads(queue.QUEUE_SNAPSHOT_PATH.read_text(encoding="utf-8"))
     saved = {row["id"]: row for row in snap["pending"]}
     assert saved["ordinary"]["queued_at"] == _SAVED_QUEUE_TIMES["ordinary"], "serialized on the outer row"
     # An older writer kept the time only inside its task; another row kept it nowhere.
@@ -817,7 +817,7 @@ def test_a_stop_keeps_each_saved_queue_time_through_restore_and_its_readers(tmp_
     saved["nested"]["task"]["queued_at"] = _SAVED_QUEUE_TIMES["nested"]
     saved["legacy"].pop("queued_at")
     saved["legacy"]["task"].pop("queued_at", None)
-    queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(snap))
+    queue.QUEUE_SNAPSHOT_PATH.write_text(json.dumps(snap), encoding="utf-8")
     workers.PENDING[:] = []
     workers.RUNNING.clear()
     queue.restore_pending_from_snapshot()
@@ -889,11 +889,12 @@ def _schedule_born(root, workers, task_id):
         "token": "occ-1", "schedule_id": "daily-review", "dispatch": "possible", "task": {"id": task_id}})
 
 
-@pytest.mark.parametrize("launched", [False, True], ids=["unlaunched", "already-launched"])
-def test_a_named_schedule_born_continuation_returns_by_itself(tmp_path, monkeypatch, launched):
+@pytest.mark.parametrize("case", ["unlaunched", "already-launched", "foreign-receipt"])
+def test_a_named_schedule_born_continuation_returns_by_itself(tmp_path, monkeypatch, case):
     """#3192: once a scheduled work ran, its receipt says ``possible``; that is no evidence against returning the saved
     step an acknowledged restart named, so it returns and is sent once, from its saved step. The other direction: a
-    named continuation whose next attempt is already recorded as launched is held, never sent again."""
+    named continuation whose next attempt is already recorded as launched, or whose receipt is not its own, is held,
+    never sent again."""
     import queue as stdqueue
 
     from supervisor.restart_retention import prepare_restart_returns
@@ -906,8 +907,11 @@ def test_a_named_schedule_born_continuation_returns_by_itself(tmp_path, monkeypa
     _schedule_born(tmp_path, workers, "digest")
     assert prepare_restart_returns(tmp_path, workers.RUNNING, workers.PENDING, transaction_id="tx-update") == {"digest"}
     _ack(tmp_path, "tx-update")
-    if launched:  # a launcher stamped the successor's attempt before the stop's restore read it
+    if case == "already-launched":  # a launcher stamped the successor's attempt before the stop's restore read it
         write_task_result(tmp_path, "digest", STATUS_RUNNING, chat_id=0, admitted_dispatch_attempt=2)
+    if case == "foreign-receipt":  # the receipt names another occurrence: the run's provenance is unknown
+        write_task_result(tmp_path, "digest", STATUS_RUNNING, chat_id=0, schedule_admission={
+            "token": "occ-other", "schedule_id": "daily-review", "dispatch": "possible", "task": {"id": "digest"}})
 
     _stop_and_boot(queue, workers)
     [row] = workers.PENDING
@@ -916,14 +920,33 @@ def test_a_named_schedule_born_continuation_returns_by_itself(tmp_path, monkeypa
     workers.WORKERS[0] = affirm_ready(workers.Worker(0, InertProcess(), commands))
     monkeypatch.setattr(workers, "repo_writer_task_allowed", lambda _task: True)
     workers.assign_tasks()
-    if launched:
+    if case != "unlaunched":
         assert commands.empty() and not workers.RUNNING
-        assert continuation_refusal(row)["reason"] == "dispatch_outcome_unknown"
+        held = continuation_refusal(row) or budget_hold_fact(row)
+        assert held["reason"] == "dispatch_outcome_unknown", held
         return
     assert budget_hold_fact(row) is None
     sent = commands.get_nowait()
     assert (sent["id"], sent["_attempt"], sent["_working_recovery"]["cause"]) == ("digest", 2, "restart")
     assert commands.empty() and set(workers.RUNNING) == {"digest"} and not workers.PENDING
+
+
+@pytest.mark.parametrize("proof", ["unlaunched", "launched", "unreadable"])
+def test_the_continuation_proof_is_the_saved_steps_unlaunched_attempt(monkeypatch, caplog, proof):
+    """The proof a door names a queued continuation by and a named one returns past a schedule's ``possible`` by
+    (#3192): its saved step's next attempt never launched. A launched attempt or a read that fails proves nothing."""
+    from supervisor import task_admission
+    from supervisor.restart_retention import continues_saved_step
+
+    def granted(_task, _root):
+        if proof == "unreadable":
+            raise OSError("result unreadable")
+        return proof == "unlaunched"
+
+    monkeypatch.setattr(task_admission, "_working_resume_granted", granted)
+    assert continues_saved_step({"id": "digest", "_working_recovery": {}}, "/drive") is (proof == "unlaunched")
+    assert ("could not be proven" in caplog.text) is (proof == "unreadable")
+    assert continues_saved_step({"id": "digest"}, "/drive") is False  # no saved step: nothing to continue
 
 
 @pytest.mark.parametrize("door_named", [True, False], ids=["named-at-the-stop", "not-named"])
