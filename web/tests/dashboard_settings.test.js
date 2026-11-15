@@ -209,6 +209,7 @@ test('Consciousness: its cards are drawn once beside the summary; a refresh leav
         'what a row says of itself never overwrites a choice of its strip');
     assert.equal(autonomy.querySelector('.active').textContent, 'Acts');
     assert.equal(autonomy.querySelector('[data-row-caption]').textContent, AUTONOMY_LEVELS[1].note, 'the chosen level in its own sentence');
+    assert.equal(autonomy.hasAttribute('data-no-meta'), false, 'drawn with no meta, its caption is its line (settings.css: two lines)');
     const range = rowNode(card, 'OUROBOROS_BG_WAKEUP');
     assert.deepEqual(range.querySelectorAll('[data-setting-control]').map((input) => input.value), ['300', '7200']);
     assert.equal(range.querySelectorAll('.settings-row-unit').map((unit) => unit.textContent).join(' '), 'to s', '[300] to [7200] s');

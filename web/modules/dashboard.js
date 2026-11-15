@@ -6,7 +6,7 @@ import { bindSettingRows, readSettings, settingsRow } from './settings_controls.
 import { homeAnswers, homeFactsSeen } from './settings_home.js';
 import { rowsOf } from './settings_rows.js';
 import { paintStatusMark, statusMarkHtml } from './status_mark.js';
-import { escapeHtmlAttr as escape } from './ui_primitives.js';
+import { escapeHtmlAttr as escape, setRowMeta } from './ui_primitives.js';
 
 // By importance and expected use (docs/DESIGN.md §5): the log first and by default, then what
 // runs now, what Ouroboros does on its own (consciousness and its places) and what it costs, then
@@ -87,7 +87,8 @@ export function mountTabSettings(host, tab, { state, cards = null, custom = null
             const box = node.querySelector(kind === 'caption' ? '.ui-row-meta' : '.ui-row-actions');
             box.insertBefore(span, kind === 'caption' ? null : box.firstChild);  // a caption ends the meta line
         }
-        if (span && span.textContent !== (text || '')) span.textContent = text || '';
+        if (kind === 'caption') setRowMeta(span, text || '');  // the meta line's words: the row says when it has none
+        else if (span && span.textContent !== (text || '')) span.textContent = text || '';
     };
     const rows = bindSettingRows(host, { ...ctx, onPaint: (settings, row, node) => {
         if (row.control?.kind === 'custom') onPaint?.(settings);
