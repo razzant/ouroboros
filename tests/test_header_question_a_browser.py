@@ -322,7 +322,7 @@ BAR = """name => {
     const hit = document.elementFromPoint(hb.x + header.clientWidth / 2, hb.bottom + 8);
     return {lead: !!lead?.children.length, attrs: [...header.attributes].map(a => a.name).filter(a => a.startsWith('data-')),
         height: hb.h, centres: items.map(el => Math.round(box(el).cy * 2) / 2), first: items[0] ? box(items[0]).x - hb.x : null,
-        under: !!page.querySelector('.app-page-tabs > *'), hitsPage: !!hit && !hit.closest('.app-page-header'),
+        under: [...page.querySelectorAll('.app-page-tabs > *')].some(el => el.getClientRects().length && !el.closest('[hidden]')), hitsPage: !!hit && !hit.closest('.app-page-header'),
         display: getComputedStyle(header).display};
 }"""
 
@@ -378,6 +378,7 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         page.evaluate("window.__strip = document.querySelector('#page-dashboard [role=tablist]')")
         assert page.locator('#page-dashboard [role=tablist]').get_attribute('aria-orientation') == 'vertical'
         assert page.locator('#page-dashboard [data-dashboard-tab]').count() == 7
+        page.locator('#page-dashboard [data-dashboard-tab="costs"]').click()
         page.locator('#page-dashboard [data-dashboard-tab="costs"]').focus()
         page.set_viewport_size({'width': 390, 'height': 844})
         page.wait_for_function("document.documentElement.dataset.layout === 'stack'")
