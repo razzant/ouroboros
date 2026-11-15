@@ -147,7 +147,8 @@ def test_a_skill_form_opened_from_skills_leads_back_to_skills(subscription_ui):
     setup_browser.capture(page, "settings-skill-form-320x640")
     page.keyboard.press("Escape")
     page.locator("#page-skills").wait_for(state="visible")
-    assert top_path(page) == ""
+    assert page.locator("#page-settings").is_hidden()
+    assert top_path(page) == "skill/gate_skill_7", "the destination stays mounted while its jump returns to Skills"
     assert page.evaluate("() => document.querySelector('#page-skills .skills-scroll').scrollTop") == kept
     # The named header Back does the same.
     open_form()
