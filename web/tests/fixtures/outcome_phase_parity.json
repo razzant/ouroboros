@@ -995,10 +995,40 @@
       "acceptance_clause": "No recorded check or result review examined this result after its last change; this does not establish whether other checks ran."
     },
     {
-      "name": "a red check no later run passed is a detail: the headline stays Done and the clause says it",
+      "name": "a red check in a record without its fact is a detail: the headline stays Done and the clause says what the record does not know",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "objective": {"status": "not_evaluated", "source": "none", "warning": "verification_red_unreconciled", "warnings": ["verification_red_unreconciled"]}}},
       "phase": "done", "headline": "Done",
-      "acceptance_clause": "A check of this result failed and no later run of the same check passed."
+      "acceptance_clause": "A check did not pass and no later run recorded as the same check passed; this record does not say whether other checks passed after it."
+    },
+    {
+      "name": "the last recorded check did not pass and none passed after it: Done, and the clause names the exit code",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "objective": {"status": "not_evaluated", "source": "none", "warning": "verification_red_unreconciled", "warnings": ["verification_red_unreconciled"], "verification_red": {"kind": "explicit_command", "exit_code": 1, "signal": "", "matched": null, "expected_match": "substring", "passed_after": 0, "more": 0}}}},
+      "phase": "done", "headline": "Done",
+      "acceptance_clause": "The last recorded check did not pass (exit code 1); no check passed after it."
+    },
+    {
+      "name": "a red check with later passes of other checks: Done, and the clause counts them",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "objective": {"status": "not_evaluated", "source": "none", "warning": "verification_red_unreconciled", "warnings": ["verification_red_unreconciled"], "verification_red": {"kind": "explicit_command", "exit_code": 0, "signal": "", "matched": false, "expected_match": "substring", "passed_after": 2, "more": 0}}}},
+      "phase": "done", "headline": "Done",
+      "acceptance_clause": "A recorded check did not pass (exit code 0; expected text not found); 2 checks passed after it, none recorded as a rerun of it."
+    },
+    {
+      "name": "a check that recorded no exit code, one later pass and another red check beside it",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "objective": {"status": "not_evaluated", "source": "none", "warning": "verification_red_unreconciled", "warnings": ["verification_red_unreconciled"], "verification_red": {"kind": "explicit_command", "exit_code": null, "signal": "", "matched": null, "expected_match": "substring", "passed_after": 1, "more": 1}}}},
+      "phase": "done", "headline": "Done",
+      "acceptance_clause": "A recorded check did not pass (no exit code); 1 check passed after it, none recorded as a rerun of it; 1 more failed check has no recorded passing rerun."
+    },
+    {
+      "name": "a check killed by a signal, with two other checks still red",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "objective": {"status": "not_evaluated", "source": "none", "warning": "verification_red_unreconciled", "warnings": ["verification_red_unreconciled"], "verification_red": {"kind": "explicit_command", "exit_code": -9, "signal": "SIGKILL", "matched": null, "expected_match": "substring", "passed_after": 0, "more": 2}}}},
+      "phase": "done", "headline": "Done",
+      "acceptance_clause": "The last recorded check did not pass (killed by SIGKILL); no check passed after it; 2 more failed checks have no recorded passing rerun."
+    },
+    {
+      "name": "a path observation that did not find a named file, none passed after it",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "objective": {"status": "not_evaluated", "source": "none", "warning": "verification_red_unreconciled", "warnings": ["verification_red_unreconciled"], "verification_red": {"kind": "artifact_observation", "exit_code": null, "signal": "", "matched": null, "expected_match": "substring", "paths_named": 1, "passed_after": 0, "more": 0}}}},
+      "phase": "done", "headline": "Done",
+      "acceptance_clause": "The last recorded check did not pass (a named file was not found); no check passed after it."
     },
     {
       "name": "finished children without a recorded decision are a detail: the headline stays Done and the clause says it",

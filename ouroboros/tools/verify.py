@@ -315,9 +315,10 @@ def _observe_artifacts(ctx: ToolContext, artifact_paths: List[str]) -> tuple[str
             return "refused_out_of_scope", refused
         if candidate is None:
             continue
-        seen.append(str(raw or "").strip())
-        if not candidate.exists():
-            missing.append(str(raw or "").strip())
+        name = str(raw or "").strip()
+        seen.append(name)
+        if not candidate.exists():  # a relative name resolves under the active workspace: say where the host looked
+            missing.append(name if pathlib.Path(name).is_absolute() else f"{name} (resolved as {candidate})")
     if not seen:
         return "fail", "no artifact_paths given"
     if missing:
