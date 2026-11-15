@@ -107,10 +107,10 @@ export function bindPageBack({ layers, currentHeader, doc = document, win = wind
         previous = header;
         if (!header) return;
         const slot = header.querySelector('[data-page-return]');
-        const jump = layers.returnPage?.();
-        const level = jump ? layers.ids().map(id => layers.get(id)).reverse().find(layer => layer.page && !layer.returnTo && layer.back) : layers.page();
-        const primary = jump || level;
         const column = slot?.closest('.section-lead-page');
+        const jump = layers.returnPage?.();
+        const level = column && jump ? layers.ids().map(id => layers.get(id)).reverse().find(layer => layer.page && !layer.returnTo && layer.back) : layers.page();
+        const primary = column && jump || level;
         if (primary?.back) header.setAttribute('data-return', column ? 'column' : 'leading');
         else header.removeAttribute('data-return');
         if (!slot) return;

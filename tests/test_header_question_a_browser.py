@@ -335,7 +335,7 @@ def _goto(page, name):
 
 def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_a_phone(engine_ui):
     engine = engine_ui['engine']
-    page = _open(engine_ui, 956, 801)
+    page = _open(engine_ui, 1087, 801)
     try:
         bars = {}
         for name in ('skills', 'files'):
@@ -349,7 +349,7 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
             assert abs(bar['centres'][0] - 25) <= 1 and abs(bar['first'] - (36 if name == 'skills' else 20)) <= 1, (name, bar)
             # The strip lends its shadows room below the bar but never takes a press meant for the page.
             assert bar['hitsPage'], (name, bar)
-            setup_browser.capture(page, f'bar-a-{name}-{engine}-956')
+            setup_browser.capture(page, f'bar-a-{name}-{engine}-1087')
         # Settings keeps Search in the band; its selected list row names the page.
         _goto(page, 'settings')
         settings_bar = page.evaluate(BAR, 'settings')
@@ -717,6 +717,26 @@ def test_skills_tabs_and_existing_toolbar_survive_a_narrow_content_column(engine
         page.wait_for_function("document.querySelector('#page-skills .app-page-header').hasAttribute('data-lead')")
         assert page.locator('#page-skills .app-page-lead .app-tab-strip').evaluate('el => el === window.__skillsTabs')
         assert page.evaluate('document.scrollingElement.scrollWidth <= innerWidth')
+        # A jump keeps its full capsule. The page column decides whether the three tabs share its row.
+        _goto(page, 'settings')
+        page.locator('[data-settings-open="page:skills"]').click()
+        for column in (488, 733):
+            page.set_viewport_size({'width': column + 297, 'height': 801})
+            page.evaluate("document.documentElement.style.setProperty('--sidebar-width', '296px')")
+            page.wait_for_timeout(150)
+            lead = page.locator('#page-skills [data-shell-back]')
+            assert lead.inner_text().strip() == 'Settings'
+            assert lead.locator('.shell-back-name').evaluate('n => n.scrollWidth <= n.clientWidth')
+            positions = []
+            for tab in ('installed', 'browse'):
+                strip.locator(f'[data-tab="{tab}"]').click()
+                positions.append(strip.locator('[data-tab="installed"]').bounding_box()['x'])
+                assert strip.locator('.app-tab').evaluate_all("""nodes => nodes.length === 3 && nodes.every(n => {
+                    const r=n.getBoundingClientRect(), p=document.querySelector('#page-skills').getBoundingClientRect();
+                    return r.left >= p.left && r.right <= p.right; })""")
+            assert abs(positions[0] - positions[1]) < 1, 'trailing actions cannot move the tabs under the pointer'
+            below = strip.locator('[data-tab="installed"]').bounding_box()['y'] >= lead.bounding_box()['y'] + lead.bounding_box()['height']
+            assert below == (column == 488)
     finally:
         page.close()
 

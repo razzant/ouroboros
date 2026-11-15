@@ -422,7 +422,7 @@ export function initSettings(ctx = {}) {
         if (isDoorId(target)) return leave(target, { row, ...options });
         opening = true;
         try {
-            return await showPage('settings', { ...options, key: `settings:${target}`, enter: () => {
+            return await showPage('settings', { ...options, row, key: `settings:${target}`, enter: () => {
                 const at = levels.findIndex((level) => level.path === target);
                 if (!target || at >= 0) closeLevels(target ? at + 1 : 0, { row });
                 else go(target, { row, fresh: true });

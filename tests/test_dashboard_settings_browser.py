@@ -258,8 +258,26 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     back.wait_for()
     assert back.inner_text().strip() == "Consciousness" and back.get_attribute("aria-label") == "Back to Consciousness"
     assert back.get_attribute("title") == "Back to Consciousness"
+    parent = page.locator('#page-settings [data-shell-level]')
+    assert parent.inner_text().strip() == "Models" and parent.is_visible()
+    assert page.locator('#page-settings [data-settings-lead-name]').inner_text() == "Consciousness"
+    parent.click()
+    page.locator('[data-settings-page="models"]:visible').wait_for()
+    assert back.inner_text().strip() == "Consciousness" and parent.count() == 0
     back.click()
     page.wait_for_selector("#dashboard-panel-consciousness.active")
+    # Spending a jump through the map keeps the child named and its own parent reachable.
+    page.click(row("consciousness-model"))
+    page.locator('[data-settings-page="models/role/consciousness"]:visible').wait_for()
+    page.evaluate("document.querySelector('[data-nav-page=widgets]').click()")
+    page.wait_for_selector('#page-widgets.active')
+    page.evaluate("document.querySelector('[data-nav-page=settings]').click()")
+    page.wait_for_selector('#page-settings.active')
+    assert back.inner_text().strip() == "Models" and parent.count() == 0
+    back.click()
+    page.locator('[data-settings-page="models"]:visible').wait_for()
+    page.evaluate("document.querySelector('[data-nav-page=dashboard]').click()")
+    page.wait_for_selector('#page-dashboard.active')
     # The four doors of "Around it" stand in the picture's order, each with its value before its chevron.
     around = page.locator('#page-dashboard [data-cx-settings] > section[aria-label="Around it"] [data-setting-door]')
     assert [" ".join(text.split()) for text in around.evaluate_all(

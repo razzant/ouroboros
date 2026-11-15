@@ -335,3 +335,18 @@ test('a two-pane level keeps its own named parent after the jump capsule, and sp
     assert.equal(first.getAttribute('aria-label'), 'Back to Models');
     assert.equal(header.querySelector('[data-shell-level]'), null, 'one control when the jump is spent');
 });
+
+test('outside a section column a file or room level above a jump keeps its own Back', (t) => {
+    const { mount } = setup(t), page = new NodeStub();
+    page.innerHTML = renderPageHeader({ page: 'files' }); mount.append(page);
+    const header = page.querySelector('.app-page-header'), jump = { id: 'jump', returnTo: {}, back: { label: 'Settings' } };
+    let level = { id: 'file', page: true, back: { label: 'Folder' } }, notify;
+    const layers = { page: () => level || jump, returnPage: () => jump,
+        ids: () => ['jump', ...(level ? ['file'] : [])], get: id => id === 'jump' ? jump : level,
+        onChange: fn => { notify = fn; return () => {}; } };
+    t.after(bindPageBack({ layers, currentHeader: () => header }));
+    assert.equal(header.querySelector('[data-shell-back]').getAttribute('aria-label'), 'Back to Folder');
+    assert.equal(header.querySelector('[data-shell-level]'), null);
+    level = null; notify();
+    assert.equal(header.querySelector('[data-shell-back]').getAttribute('aria-label'), 'Back to Settings');
+});

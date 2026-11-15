@@ -599,14 +599,15 @@ test('the header Back is hidden beside the list, leads to the list in one column
     assert.deepEqual([pages(), back()], [[], null]);
 });
 
-test('a direct child address keeps its named parent under it; a first-level address has no extra level', async (t) => {
-    const { env, content, state, showPage, layers } = world(t);
+test('a direct child address keeps its named parent and row; a first-level address has no extra level', async (t) => {
+    const { env, content, state, showPage, layers, shown } = world(t);
     env.document.createElement = (tag) => new DescendantStub(tag);
     const models = settingsPageFor('models');
     t.after(() => registerSettingsPage('models', models));
     registerSettingsPage('models', { title: path => path.includes('/') ? 'Consciousness' : 'Models', mount() {} });
     const controls = initSettings({ state, layers, ws: { on() {} }, showPage, setBeforePageLeave() {} });
-    await controls.open('models/role/consciousness'); await settle();
+    await controls.open('models/role/consciousness', { row: 'model-source' }); await settle();
+    assert.equal(shown.at(-1)[1].row, 'model-source', 'the navigation owner must not reset a specifically revealed row');
     assert.equal(controls.page.dataset.settingsDepth, '2');
     assert.equal(content.querySelector('[data-settings-lead-name]').textContent, 'Consciousness');
     assert.equal(content.querySelector('[data-shell-back]').getAttribute('aria-label'), 'Back to Models');
@@ -616,6 +617,7 @@ test('a direct child address keeps its named parent under it; a first-level addr
     assert.equal(content.querySelector('[data-shell-back]'), null);
     await controls.open('models'); await settle();
     assert.equal(controls.page.dataset.settingsDepth, '1', 'a root never gains a synthetic parent');
+    assert.equal(shown.at(-1)[1].row, '', 'an unnamed forward landing still starts at the top');
 });
 
 test('a root font that moves the two panes\' 40rem repaints Settings: the pane and the list are watched beside the shell', async (t) => {
