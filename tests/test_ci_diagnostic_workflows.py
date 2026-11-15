@@ -745,10 +745,9 @@ def test_full_lane_runs_as_nine_guarded_shards_under_step_ceilings(tmp_path):
     sandbox, order = steps["chromium_sandbox"], [step.get("id") for step in job["steps"]]
     assert order.index("install_browsers") < order.index("chromium_sandbox") < order.index("ui_tests")
     assert sandbox["if"] == lane["if"] and "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in sandbox["run"]
-    # Nothing opts the lane or the smoke out of the sandbox: they prove Chromium with it on (chromium_runtime.SANDBOX_ENV).
-    workflow = _workflow("ui-browser.yml")
-    for scope in (workflow.get("env") or {}, job.get("env") or {}, lane.get("env") or {}, steps["browser_tools"].get("env") or {}):
-        assert "OUROBOROS_CHROMIUM_SANDBOX" not in scope, scope
+    # Nothing opts the lane or the smoke out of the sandbox, in an env block, a run line or a $GITHUB_ENV write: they
+    # prove Chromium with it on (chromium_runtime.SANDBOX_ENV).
+    assert "OUROBOROS_CHROMIUM_SANDBOX" not in (ROOT / ".github/workflows/ui-browser.yml").read_text(encoding="utf-8")
     # Every producer step has its own ceiling, and their sum stays under the job's: a step
     # ceiling fails the step and leaves the evidence steps running, the job ceiling cancels them.
     ceilings = (install["timeout-minutes"], lane["timeout-minutes"], tools["timeout-minutes"])

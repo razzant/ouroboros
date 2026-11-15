@@ -158,21 +158,29 @@ def _scrolls_settled(page, frames: int = 5, limit_ms: int = 10_000) -> None:
     restyled card re-place the chat feed (its reader stays at the newest message, chat_reading_position.js), and
     that scroll's event arrives a frame or two after the write. A scroll of the feed holding the trigger closes an
     open menu (owner decision 1D, asserted below), so a press before it lands proves that race, not the portal.
-    A page that still scrolls after ``limit_ms`` fails here, at once, rather than at the test's own ceiling."""
+    A page that still scrolls, or draws no frames, after ``limit_ms`` fails here, at once, rather than at the test's
+    own ceiling: the limit is a timer, so it holds even where frames stopped."""
     page.evaluate(
         """
         ([frames, limit]) => new Promise((resolve, reject) => {
             let quiet = 0;
-            const started = performance.now();
+            let done = false;
             const scrolled = () => { quiet = 0; };
+            const finish = (error) => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                document.removeEventListener('scroll', scrolled, true);
+                if (error) reject(error); else resolve();
+            };
+            const timer = setTimeout(() => finish(new Error(
+                `${quiet} quiet frames of ${frames} ${limit} ms after the change: the page still scrolled or drew none`)), limit);
             document.addEventListener('scroll', scrolled, true);
             const frame = () => {
+                if (done) return;
                 quiet += 1;
-                const late = performance.now() - started > limit;
-                if (quiet < frames && !late) { requestAnimationFrame(frame); return; }
-                document.removeEventListener('scroll', scrolled, true);
-                if (quiet < frames) reject(new Error(`the page still scrolled ${Math.round(limit)} ms after the change`));
-                else resolve();
+                if (quiet < frames) requestAnimationFrame(frame);
+                else finish(null);
             };
             requestAnimationFrame(frame);
         })
