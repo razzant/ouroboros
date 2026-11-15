@@ -757,6 +757,28 @@ def test_l1_memo_any_write_of_the_tree_is_a_new_census(tmp_path, monkeypatch, me
     assert any(row["kind"] == kind and row.get("task_id") == child for row in blockers), blockers
 
 
+def test_l1_memo_a_write_decodes_only_the_rows_that_moved(tmp_path, monkeypatch, meter):
+    """One member's write, or a new member, is a new census that decodes only the rows that moved; the others
+    keep the rows the last census read (#3399: each write of a live 57-member tree decoded all 57 bodies, 37 MB)."""
+    from ouroboros import task_results
+    from ouroboros.task_results import write_task_result
+    from supervisor import tree_census
+
+    root, _queue, _workers, target = _census_tree(tmp_path, monkeypatch)
+    child, joined = f"{target}-c0", f"{target}-c9"
+    first = tree_census.writer_facts(root, target).rows
+    write_task_result(root, child, "scheduled", launch_handoffs={"op": {"tool": "opaque", "state": "claimed"}})
+    reads, load = [], task_results.load_task_result
+    monkeypatch.setattr(task_results, "load_task_result", lambda r, tid, **kw: reads.append(tid) or load(r, tid, **kw))
+    rows = tree_census.writer_facts(root, target).rows
+    assert reads == [child], "only the member that moved is decoded again"
+    assert rows[child]["launch_handoffs"]["op"]["state"] == "claimed", "and the census carries its new row"
+    assert {tid: rows[tid] for tid in rows if tid != child} == {tid: first[tid] for tid in first if tid != child}
+    reads.clear()
+    write_task_result(root, joined, "scheduled", root_task_id=target, parent_task_id=target, delegation_role="subagent")
+    assert joined in tree_census.writer_facts(root, target).rows and reads == [joined], "a new member is read"
+
+
 def test_l1_memo_a_fact_no_revision_names_is_derived_fresh_on_a_hit(tmp_path, monkeypatch, meter):
     """Inputs are kept, never verdicts: a claim's owner that died, a queue member, a process."""
     from ouroboros import tool_custody

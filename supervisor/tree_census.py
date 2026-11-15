@@ -126,20 +126,28 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
-def _read_facts(root: pathlib.Path, tree: str, linked: Iterable[str], key: Any) -> _Facts:
-    """Each source answers on its own: a failed body census still leaves custody and queue members observed."""
+def _read_facts(root: pathlib.Path, tree: str, linked: Iterable[str], key: Any,
+                held: Optional[_Facts] = None) -> _Facts:
+    """Each source answers on its own: a failed body census still leaves custody and queue members observed.
+    A member whose row sequence stands where ``held`` (this tree's previous census) read it keeps the row read
+    then, so one member's write decodes that member alone, not the whole tree again."""
     from ouroboros.delegate_custody_current import tree_task_ids
     from ouroboros.owner_pause import tree_member_results
 
     links = frozenset(map(str, linked))
     facts = _Facts(key, links)
+    known: Dict[str, dict] = {}
+    if held is not None and held.key is not None and key is not None:
+        before, now = dict(held.key[0]), dict(key[0])
+        known = {task_id: row for task_id, row in held.rows.items()
+                 if task_id in now and before.get(task_id) == now[task_id]}
     try:
         # A member whose result has been collected can still own a remote start.
         facts.tree_ids = list(tree_task_ids(root, tree))  # the store answers or raises
     except Exception as exc:
         facts.tree_error = str(exc)[:200]
     try:
-        census = tree_member_results(root, tree, linked={*links, *facts.tree_ids})
+        census = tree_member_results(root, tree, linked={*links, *facts.tree_ids}, known=known)
         facts.rows = {task_id: {name: row[name] for name in MEMBER_FIELDS if name in row}
                       for task_id, row in census.members.items()}
         facts.unresolved = dict(census.unresolved)
@@ -167,7 +175,7 @@ def writer_facts(custody_root: Any, tree: str, *, linked: Optional[Iterable[str]
     if (held is not None and revision is not None and held.key == revision.members
             and (asked is None or not held.unresolved or asked == held.links)):
         return WriterFacts(root, held, revision)
-    facts = _read_facts(root, tree, asked or (), revision.members if revision is not None else None)
+    facts = _read_facts(root, tree, asked or (), revision.members if revision is not None else None, held)
     if revision is not None and not facts.tree_error and not facts.census_error:
         with _LOCK:
             _MEMO[key] = facts

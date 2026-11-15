@@ -921,14 +921,17 @@ def launch_admission(source: Any, *, root_resume: Optional[Dict[str, Any]] = Non
             _REVIEW_ADMISSION.reset(token)
 
 
-def tree_member_results(root_drive: Any, root_task_id: str, *, linked: Iterable[str] = ()) -> Any:
+def tree_member_results(root_drive: Any, root_task_id: str, *, linked: Iterable[str] = (),
+                        known: Optional[Dict[str, dict]] = None) -> Any:
     """Select complete retained membership, then strictly read its authority.
 
     ``task_store.tree_facts`` selects the tree (``linked``: ids the caller's own queue,
     custody or model-request sources tie to it) and names the rows it could not read. A
     member whose strict read refuses or no longer finds its own record joins them as linked:
     it holds this tree while the others still answer. An unavailable store refuses the census.
-    Selection never supplies live status or custody. Returns a ``TreeCensus``.
+    Selection never supplies live status or custody. ``known``: rows the caller's earlier census
+    admitted for this tree whose rows have not been written since (``tree_census``); a member
+    selected again is taken from there, not decoded again. Returns a ``TreeCensus``.
     """
     from ouroboros.store_hot_facts import lineage_root
     from ouroboros.task_results import load_task_result
@@ -942,6 +945,9 @@ def tree_member_results(root_drive: Any, root_task_id: str, *, linked: Iterable[
         raise ValueError("tree_membership_unreadable") from exc
     members, unresolved = {}, dict(census.unresolved)
     for task_id in census.members:
+        if known and task_id in known:
+            members[task_id] = known[task_id]
+            continue
         try:
             row = load_task_result(root_drive, task_id, strict=True)
         except StoreError:
