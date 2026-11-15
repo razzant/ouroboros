@@ -67,6 +67,8 @@ CLOSURE_FIELDS = ("closed_reason", "closed_at", "closed_by_task_id", "closed_act
 SECRET_FIELDS = ("secret_request", "secret_outcome", "secret_save")
 # The owner closes in one tap; a closure without the owner's words records this sentence.
 OWNER_CLOSE_REASON = "Closed by the owner without an answer."
+# The host's own act when it delivers a late answer; a Project room's other live roots hear the words as the room's context.
+LATE_ANSWER_ROUTE_FACT = "Host fact: delivered in this room only; the host sent it to no work in another room."
 
 def current_question(block: Any) -> bool:
     """Unanswered remains current after its author finishes, until explicit closure."""
@@ -903,8 +905,9 @@ def late_answer_model_text(drive_root: Any, late_answer: Any, owner_text: str) -
     read the canonical block on ``drive_root``.
     When neither authority can be read, the owner's words are delivered with
     one host line saying so — disclosed, never a silent loss of the card's
-    context. A message with no valid ``late_answer`` provenance is returned
-    unchanged."""
+    context. Either form ends with the host's fact of its own route (this room
+    only), never on a secret request's outcome. A message with no valid
+    ``late_answer`` provenance is returned unchanged."""
     ref = late_answer_ref(late_answer)
     if ref is None:
         return owner_text
@@ -920,12 +923,14 @@ def late_answer_model_text(drive_root: Any, late_answer: Any, owner_text: str) -
             block = {}
     state = "which had finished" if block.get("answered_after_terminal") or block.get("delivery_after_terminal") else "which is not reading"
     head = f"[Late answer to a question asked by task {ref['task_id']}, {state}]\n"
+    # A secret request's outcome is host metadata with no owner words to route.
+    fact = "" if secret_outcome_block(block) is not None else "\n" + LATE_ANSWER_ROUTE_FACT
     if isinstance(block, dict) and str(block.get("state") or "") == STATE_ANSWERED:
-        return head + recorded_answer_frame(block)
+        return head + recorded_answer_frame(block) + fact
     return (
         f"{head}{owner_text}\n"
         f"[Host note] This owner message answers quiz {ref['quiz_id']}; that card "
-        "could not be read, so only the owner's own words are shown."
+        "could not be read, so only the owner's own words are shown." + fact
     )
 
 

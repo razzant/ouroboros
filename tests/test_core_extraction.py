@@ -177,8 +177,12 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # Rolled for the one release of words (#3257): escalate's first sentence asks by authority (BIBLE P0),
     # its wait clause names work that cannot go on without the answer, and "with an explanation" leaves
     # the closing sentence; nothing else changed (76a2871b... before).
+    # Rolled for the owner's decision on questions many works share (15.11): escalate's description adds
+    # the asking side (a shared cause framed at its reach, no new card for an applicable answer already
+    # in view, open cards kept consistent with it) and says the rest in fewer words, so its lead still fits
+    # whole beside its bare structure on the direct-OpenAI custom route; nothing else changed (4da8992f... before).
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "4da8992f58a5e0db0c4cf195a08673488961777dafc9801f36ccc18419b462b1"
+        "d8c849fc7517b07e1a690bc21ab4399e135fe2650c88087e186bdd9d44d8c204"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
