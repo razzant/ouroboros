@@ -1,4 +1,4 @@
-"""Save the composer's effort, live Subagents choice and chat model for its room."""
+"""Save the composer's effort, live Subagents choice, chat model and processing tier for its room."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from starlette.routing import Route
 
 from ouroboros.composer_cognition import (
     main_cognition, normalize_model_choice,
-    request_project_id, update_project_cognition, update_project_model_choice,
+    request_project_id, update_project_cognition, update_project_model_choice, update_project_processing_choice,
 )
 from ouroboros.gateway._helpers import request_drive_root, request_json_or
 from ouroboros.gateway.owner_settings import (
@@ -30,7 +30,7 @@ RANGE_FIELDS = ("min", "recommended", "max")
 
 
 def owner_composer_routes() -> list[Route]:
-    """The four composer capsules' owner writes, for Main or the named room.
+    """The four composer capsules' owner writes (Model's tier its own), for Main or the named room.
 
     Their paths and handlers stay together here; the gateway mounts the family.
     Context's writer retains its settings/capability authority in ``settings``.
@@ -42,6 +42,7 @@ def owner_composer_routes() -> list[Route]:
         Route("/api/owner/effort-range", endpoint=api_owner_effort_range, methods=["POST"]),
         Route("/api/owner/subagents-mode", endpoint=api_owner_subagents_mode, methods=["POST"]),
         Route("/api/owner/chat-model", endpoint=api_owner_chat_model, methods=["POST"]),
+        Route("/api/owner/chat-processing", endpoint=api_owner_chat_processing, methods=["POST"]),
     ]
 
 
@@ -181,6 +182,65 @@ def _api_owner_chat_model_sync(request: Request, body: Any) -> JSONResponse:
     return JSONResponse(result)
 
 
+@owner_write_guard
+async def api_owner_chat_processing(request: Request) -> JSONResponse:
+    """Save a room's processing tier, or Main's own from the Main composer; ``""`` is Default."""
+    from ouroboros.gateway.settings import _run_settings_writer
+
+    return await _run_settings_writer(_api_owner_chat_processing_sync, request, await request_json_or(request, {}))
+
+
+def _api_owner_chat_processing_sync(request: Request, body: Any) -> JSONResponse:
+    from ouroboros.model_slots import (
+        MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_PREFERENCE_KEY, normalize_call_tier, normalize_model_role_options,
+        normalize_processing_preference,
+    )
+
+    from ouroboros.gateway.client_contracts import OwnerChatProcessingRequest
+    from ouroboros.gateway.schema import validate_ingress
+
+    if errors := validate_ingress(body, OwnerChatProcessingRequest):  # the card's tier writer's grammar too
+        return unsaved_error(errors[0], 400, code="chat_processing_invalid")
+    try:
+        project_id = request_project_id(body)
+        # A room keeps any tier on its own row; Main's is a Settings value, which never holds Ultrafast.
+        tier = normalize_call_tier(body["processing"]) if project_id else normalize_processing_preference(body["processing"])
+    except ValueError as exc:
+        return unsaved_error(str(exc), 400, code="chat_processing_invalid")
+    with settings_document_mutation():
+        if project_id:
+            try:
+                previous, tier = update_project_processing_choice(request_drive_root(request), project_id, tier)
+            except ValueError as exc:
+                return unsaved_error(str(exc), 404, code="project_unavailable")
+            result = {"ok": True, "project_id": project_id, "processing_choice": tier,
+                      "previous_processing_choice": previous}
+        else:
+            # Main's own tier is its role option; Default removes it, so Main takes the default tier again.
+            # Nothing else of Main moves: its model, account and window stay as they are.
+            result = {"ok": True, "project_id": ""}
+
+            def transform(current):
+                roles, _ = normalize_model_role_options(MODEL_PROCESSING_PREFERENCES_KEY,
+                                                        current.get(MODEL_PROCESSING_PREFERENCES_KEY))
+                previous = str(roles.get("main") or "")
+                result.update(main_processing=tier, previous_main_processing=previous,
+                              processing_default=normalize_processing_preference(current.get(PROCESSING_PREFERENCE_KEY)))
+                if previous == tier:
+                    return None
+                if tier:
+                    roles["main"] = tier
+                else:
+                    roles.pop("main", None)
+                return {**current, MODEL_PROCESSING_PREFERENCES_KEY: normalize_model_role_options(
+                    MODEL_PROCESSING_PREFERENCES_KEY, roles)[1]}
+
+            record_settings_change(request, _owner_update_settings(
+                transform, settings_document_digest(), authored_keys=(MODEL_PROCESSING_PREFERENCES_KEY,)))
+    _owner_audit(request, "chat_processing", result)
+    return JSONResponse(result)
+
+
 def _write_main_route(request: Request | None, choice: dict, *, origin: dict | None = None) -> dict:
     """Main's role writer owns the save; only same-source subscription pins survive."""
     from ouroboros.gateway.settings import _active_main_route
@@ -217,5 +277,5 @@ def _write_main_route(request: Request | None, choice: dict, *, origin: dict | N
     return result
 
 
-__all__ = ["RANGE_FIELDS", "api_owner_chat_model", "api_owner_effort_range", "api_owner_subagents_mode",
-           "effort_range_refusal"]
+__all__ = ["RANGE_FIELDS", "api_owner_chat_model", "api_owner_chat_processing", "api_owner_effort_range",
+           "api_owner_subagents_mode", "effort_range_refusal"]

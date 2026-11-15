@@ -1485,7 +1485,10 @@ def test_a_room_turn_stopped_before_its_bound_frame_returns_on_the_basis_its_res
     turn = _owner_turn(system, tmp_path, monkeypatch, chat_id=room["chat_id"], bound=False)
     stored = load_task_result(tmp_path, turn.id)
     row = system.workers.RUNNING[turn.id]["task"]
-    assert [frame["type"] for frame in turn.frames] == ["direct_turn_bound"] and "_project_admission" not in row
+    # The basis frame, and the admitted tier's beside it (the decided Default here), neither folded into the row.
+    assert [(frame["type"], sorted(frame["facts"])) for frame in turn.frames] == [
+        ("direct_turn_bound", ["_project_admission", "project_id"]), ("direct_turn_bound", ["processing"])]
+    assert "_project_admission" not in row
     assert (stored["task_attempt"], stored["execution_owner"]["kind"], row["project_id"]) == (0, "direct", "room")
     _save_work(tmp_path, turn)
     _door(system, monkeypatch, tmp_path, door)

@@ -71,13 +71,13 @@ export function createComposerFold({ feed, wrap, row, win = globalThis.window, d
     }
     const atLatest = () => feed.scrollHeight - feed.clientHeight - feed.scrollTop < FOLD.latest;
     const keyboard = () => Boolean(doc?.body?.classList?.contains?.('keyboard-open'));
-    // A capsule is worked: open, focused or with the line alone. ☰ stays in sight folded, so its focus (the drawer gives
+    // A capsule is worked: open (Model's sheet too), focused or with the line alone. ☰ stays in sight folded, so its focus (the drawer gives
     // it back on closing) keeps nothing.
     const working = () => {
         const focused = doc?.activeElement;
         const menu = row.querySelector?.(':scope > .composer-menu');
         return Boolean(focused && row.contains?.(focused) && !menu?.contains?.(focused))
-            || Boolean(row.dataset?.ownerSolo) || Boolean(row.querySelector?.('[data-open="true"]'));
+            || Boolean(row.dataset?.ownerSolo) || Boolean(row.dataset?.ownerSheet) || Boolean(row.querySelector?.('[data-open="true"]'));
     };
     // While the owner writes or works a capsule the row stays: the keyboard is up (app.js's keyboard-open), the field
     // holds the focus (with or without a keyboard), or a capsule is worked.

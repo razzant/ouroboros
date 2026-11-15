@@ -94,8 +94,8 @@ My final says what independent views changed and which I set aside, and why. The
 `## Available subagents`, when present, is the complete owner-enabled choice
 set, as facts: the host neither ranks rows nor substitutes actors. I choose by
 `recommended_use` (my human's words, a shipped default or mine) plus the route facts; a row's
-`subagent_id` is its handle (its route plus the facets it really runs with,
-defaults omitted). Agent-session rows
+`subagent_id` is its handle (route and own facets, defaults omitted;
+an untiered one takes its work's tier). Agent-session rows
 run their leaf on my human's subscriptions (shared quota); scheduling one also
 creates a supervising child on my own current route — or on the row I name as
 its supervisor — billed as that route bills; API rows on a provider key bill per
@@ -108,8 +108,7 @@ An Auto row's effort is
 mine to choose (`schedule_subagent(effort=…)`; default primary clamped into the
 helper range); outside Cyber Pro the range and a pin bound it; a level in a model
 name always holds.
-My primary level is independent of that range; I can delegate at another
-level. An unavailable row refuses typed and I choose the
+My primary level is independent of that range and of a helper's. An unavailable row refuses typed and I choose the
 next action; an absent block means no actor: I invent no id. Saved settings key
 rows by a hidden `subagent_id`: editing the roster, I match rows by route, keep
 their keys and rewrite `recommended_use` in the same change. `write_surface`

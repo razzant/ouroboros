@@ -90,9 +90,11 @@ def offered_subagents(settings: Mapping[str, Any]) -> ConfiguredSubagentsResolut
     """The catalog NEW work chooses from (:func:`resolve_configured_subagents`): a valid,
     switched-on catalog with no rows at all offers the Main model as its one base agent —
     with no agent configured, the default model is the base agent. The row is stored id
-    ``main``, Main's model as a catalog row runs it under ``settings`` (route, account pin,
-    processing: ``subscription_install_presets.role_route_binding``) and is never saved. A
-    Main without access offers nothing, as before; a switched-off catalog stays off."""
+    ``main``, Main's model as a catalog row runs it under ``settings`` (route and account pin:
+    ``subscription_install_presets.role_route_binding``) and is never saved. It has no tier of its
+    own: like every row without one, a helper started from it takes its work's (owner 13.11), which
+    is Main's for work that follows Main. A Main without access offers nothing, as before; a
+    switched-off catalog stays off."""
     resolution = resolve_configured_subagents(settings)
     config = resolution.config
     if (config is None or config.items or not config.enabled
@@ -108,8 +110,7 @@ def offered_subagents(settings: Mapping[str, Any]) -> ConfiguredSubagentsResolut
     try:
         offered = make_configured_subagents([ConfiguredSubagent(
             subagent_id="main", recommended_use=PRIMARY_RECOMMENDATION,
-            route=RouteSpec(ROUTE_KIND_API_MODEL, target, pin),
-            processing_preference=binding.get("processing_preference", ""))])
+            route=RouteSpec(ROUTE_KIND_API_MODEL, target, pin))])
     except ValueError:  # a Main the catalog cannot carry offers nothing: the typed empty-list refusal stands
         return resolution
     return dataclass_replace(resolution, config=offered)
@@ -710,9 +711,16 @@ def select_subagent_snapshot(
     legacy_model_lane_supplied: bool = False,
     legacy_executor_supplied: bool = False,
     access: Optional[str] = None,
+    work_tier: Optional[str] = None,
 ) -> tuple[dict[str, Any], bool]:
     """Resolve one row and return ``(immutable_snapshot, used_legacy_seam)``.
 
+    ``work_tier`` is the starting work's tier (``supervisor_route.work_tier``: its carrier, else Main's or the
+    default by its role): a row without a tier of its own runs on it from this start (owner 13.11), a resolved
+    ``""`` included, a row with one keeps its own, and a started helper never changes afterwards. ``None``
+    (unknown or unreadable) keeps the row's own resolution. It rides beside the row's identity as
+    ``work_processing`` (only where it differs), so the row's history and statistics
+    (``subagent_history.execution_identity``) stay the row's own.
     The snapshot is JSON-only so the queue/result stores can copy it losslessly.
     Availability is deliberately not embedded here: saved intent is immutable;
     dispatch/start records its dated live observation in a separate task field.
@@ -761,6 +769,7 @@ def select_subagent_snapshot(
         row = matches[0]
         used_legacy = True
 
+    own_tier = resolve_processing_preference(override=row.processing_preference or None, settings=dict(settings))
     return validate_subagent_snapshot({
         "schema": 1,
         "selected_subagent_id": row.subagent_id,
@@ -771,11 +780,21 @@ def select_subagent_snapshot(
             row.route, api_kind="api_model", pin_key="credential_profile_id"
         ),
         "effort": row.effort,
-        "processing_preference": resolve_processing_preference(
-            override=row.processing_preference or None, settings=dict(settings)),
+        "processing_preference": own_tier,
+        **({"work_processing": work_tier}
+           if work_tier is not None and not row.processing_preference and work_tier != own_tier else {}),
         **({"access": row.access} if row.route.is_session else {}),
         "selected_at": utc_now_iso(),
     }, access=access), used_legacy
+
+
+def run_processing(snapshot: Any) -> str:
+    """What a helper's run asks for: the work's tier a row without one took (``work_processing``), else the row's
+    own. The row's own stays its identity (history, statistics); this is the run's request only. A present
+    ``work_processing`` answers even empty: a continued run that asked for no tier keeps asking for none."""
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    key = "work_processing" if "work_processing" in snapshot else "processing_preference"
+    return str(snapshot.get(key) or "")
 
 
 def validate_subagent_snapshot(raw: Any, *, access: Optional[str] = None) -> dict[str, Any]:
@@ -809,12 +828,14 @@ def validate_subagent_snapshot(raw: Any, *, access: Optional[str] = None) -> dic
     if kind == "agent_session" and access in SESSION_ACCESS_LOWERING:
         if access == "readonly" or captured_access == "full":
             snapshot["access"] = access
-    from ouroboros.model_slots import normalize_processing_preference
+    from ouroboros.model_slots import normalize_call_tier
 
     try:
-        # An old durable snapshot captures legacy behavior, never today's global setting.
-        snapshot["processing_preference"] = normalize_processing_preference(
-            snapshot.get("processing_preference"))
+        # An old durable snapshot captures legacy behavior, never today's global setting; a captured work tier
+        # (Ultrafast included) stays as captured, beside the row's own.
+        snapshot["processing_preference"] = normalize_call_tier(snapshot.get("processing_preference"))
+        if "work_processing" in snapshot:
+            snapshot["work_processing"] = normalize_call_tier(snapshot.get("work_processing"))
     except ValueError as exc:
         raise SubagentSelectionError("subagent_snapshot_invalid", str(exc)) from exc
     return snapshot
@@ -1115,13 +1136,15 @@ def prepare_delegate_start_actor(
         "route": route,
         "access": snapshot.get("access", "workspace_write"),
         "selected_subagent_id": selected_id,
-        "processing_preference": str(snapshot.get("processing_preference") or ""),
+        "processing_preference": run_processing(snapshot),  # what this run asks for, not the row's identity
         "config_fingerprint": config_fingerprint,
         "work_order_fingerprint": work_order_fingerprint,
         "authority_fingerprint": authority_fingerprint,
         "compiled_work_order": bool(selection.get("compiled_work_order")),
-        # The row's pin ("" = Auto) stays the receipt identity; the decided level is the fact.
+        # The row's pin ("" = Auto) and its own tier stay the receipt identity; the decided level and the run's
+        # tier (a work's, inherited) are the facts.
         "row_effort": str(snapshot.get("effort") or ""),
+        "row_processing": str(snapshot.get("processing_preference") or ""),
         "effort_fact": dict(fact),
     }, None
 
@@ -1231,10 +1254,20 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
         if selected_id:
             from ouroboros.config import runtime_settings
 
+            from ouroboros.supervisor_route import work_tier
+
+            # A fresh helper without a tier of its own takes the work's, Main's included (owner 13.11); a
+            # continuation keeps the tier its session was captured with.
+            live_settings = effective_runtime_subagent_settings(runtime_settings())
             selected_snapshot, _legacy = select_subagent_snapshot(
-                effective_runtime_subagent_settings(runtime_settings()),
-                subagent_id=selected_id,
+                live_settings, subagent_id=selected_id, work_tier=work_tier(ctx, live_settings),
             )
+            if str(options.get("continue_from") or "").strip():
+                from ouroboros.delegate_continuation import inherited_processing
+
+                captured = inherited_processing(ctx, options["continue_from"])
+                if captured is not None:
+                    selected_snapshot = {**selected_snapshot, "work_processing": captured}
         if selected_snapshot is not None:
             from ouroboros.delegate_plan import inherited_mode
 

@@ -184,6 +184,7 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
     from ouroboros.tools.github import github_token_from_env_or_settings
     from ouroboros.config import load_settings
     from ouroboros.composer_cognition import main_cognition
+    from ouroboros.model_slots import processing_tiers
     from ouroboros.route_choice import configured_references
     from ouroboros.subagent_runtime import subagents_availability
 
@@ -339,6 +340,7 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         "subagents_mode": main_cognition(settings)["subagents_mode"],
         "subagents_availability": subagents_availability(settings),
         "main_route": configured_references()["main"],
+        "processing_tiers": processing_tiers(settings),
         "projects": projects,
         "project_messages_revision": messages_revision,
         "project_listable_count": project_listable_count,
@@ -680,7 +682,7 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                     or (meta.get("task") or {}).get("_attempt") or 1),
                     "model_activity": (meta.get("active_llm_call") or {}).get("model_activity"),
                     "context_attempt": meta.get("context_attempt"), "lead": meta.get("lead"),
-                    "_lead_request_id": meta.get("_lead_request_id"),
+                    "_lead_request_id": meta.get("_lead_request_id"), "processing_last": meta.get("processing_last"),
                     "turn_phase": meta.get("turn_phase"), "_census_carrier": "worker" if meta.get(
                         "worker_id") is not None else "",
                     "owner_wait": dict(meta.get("owner_wait") or {}),
@@ -812,7 +814,7 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
             from ouroboros.project_naming import derived_run_name
             from ouroboros.task_activity_facts import card_facts
             from ouroboros.work_stop import parked_stop_view
-            from ouroboros.lead_fact import lead_fields
+            from ouroboros.lead_fact import lead_processing_fields
 
             if phase == "unknown" and availability is not None:
                 availability["complete"] = False
@@ -824,7 +826,7 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                     phase = "budget_paused"
             return {
                 "activity_id": task_id,
-                **(lead_fields(row.get("lead"), row, queued=phase == "queued") if root else {}),
+                **(lead_processing_fields(row.get("lead"), row, queued=phase == "queued") if root else {}),
                 "detached": card_facts(row)["detached"],
                 "chat_id": int(row.get("chat_id") or 0),
                 "project_id": str(row.get("project_id") or ""),

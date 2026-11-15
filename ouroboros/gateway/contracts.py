@@ -28,7 +28,7 @@ from ouroboros.gateway.claudexor_contracts import (  # noqa: F401 -- public re-e
     ClaudexorReadState, ClaudexorStatusReads, ClaudexorPassiveReadError, ClaudexorQuotaResponse,
     ClaudexorStatusResponse,
 )
-from ouroboros.gateway.work_contracts import WorkLeadFields, WorkStateFields
+from ouroboros.gateway.work_contracts import ProcessingTiers, WorkLeadFields, WorkStateFields
 from ouroboros.gateway.history_contracts import ChatHistoryResponse, PresenceContact  # noqa: F401 -- public re-exports
 from ouroboros.gateway.health_contracts import BootDocument, BootJob, BootStep, HealthResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.attachment_contracts import (  # noqa: F401 -- public re-exports
@@ -542,7 +542,7 @@ class ProjectsChangedOutbound(TypedDict):
 
 class UiPreferencesChangedOutbound(TypedDict):
     """Outbound notice that ``POST /api/ui/preferences`` committed a change of the named groups
-    (``contributions``); every window reads the named state again."""
+    (``contributions``, ``model_pins``); every window reads the named state again."""
 
     type: Literal["ui_preferences_changed"]
     keys: List[str]
@@ -614,6 +614,7 @@ class ProjectEntry(TypedDict, total=False):
     pinned: bool  # absent on legacy rows means unpinned; no routing/activity effect
     cognition: ProjectCognition
     model_choice: ChatModelChoice  # the room's own model for new owner work; never copied from Main
+    processing_choice: Literal["", "standard", "fast", "economy", "ultrafast"]  # the room's own tier for new owner work; '' = Default
     provenance: str
     clone_url: str
     trusted_at: str
@@ -813,6 +814,7 @@ class StateResponse(WorkStateFields):
     context_mode_auto_low: bool  # frozen compatibility field, always False (persistent auto-Low is retired)
     effort_range: EffortRange  # the owner's effort range (POST /api/owner/effort-range), the tolerant read
     main_route: ChatModelRoute  # Main itself, written by POST /api/owner/chat-model without project_id
+    processing_tiers: ProcessingTiers  # Main's own tier and the default one; POST /api/owner/chat-processing
     safety_mode: str
     skills_repo_configured: bool
     github_token_configured: bool

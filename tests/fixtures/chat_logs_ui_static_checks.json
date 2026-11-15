@@ -849,7 +849,7 @@
     "id": "test_context_segmented_css_exists",
     "path": "web/style.css",
     "kind": "contains",
-    "value": ":is(.chat-model-mode, .chat-context-mode, .chat-subagents-mode) .chat-seg {"
+    "value": ":is(.chat-context-mode, .chat-subagents-mode) .chat-seg {"
   },
   {
     "id": "test_context_segmented_css_exists",

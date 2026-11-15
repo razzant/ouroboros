@@ -89,7 +89,14 @@ class Node extends Events {
     set tabIndex(value) { this.attrs.set('tabindex', String(value)); }
     get textContent() { return this._text + this.children.map((child) => child.textContent).join(''); }
     set textContent(value) { this.children = []; this._text = String(value ?? ''); }
-    set innerHTML(value) { this.children = []; this._text = ''; this.html = String(value); }
+    set innerHTML(value) {
+        // A document made with `parseHtml` builds the markup into nodes, as a browser would (appendHtml below).
+        if (this.ownerDocument?.parseHtml) for (const child of [...this.children]) this.removeChild(child);
+        this.children = [];
+        this._text = '';
+        this.html = String(value);
+        if (this.ownerDocument?.parseHtml) appendHtml(this, this.html);
+    }
     get innerHTML() { return this.html || ''; }
     setAttribute(key, value) { this.attrs.set(key, String(value)); }
     getAttribute(key) {
@@ -180,9 +187,12 @@ class Node extends Events {
     dispatchEvent(event) { return !this.emit(event.type, { native: event }).defaultPrevented; }
 }
 
-/** A document with a body, focus, selection, capture listeners and a window for popup geometry. */
-export function domDouble() {
+/** A document with a body, focus, selection, capture listeners and a window for popup geometry. With `parseHtml` an
+ *  `innerHTML` assignment builds its markup into nodes (appendHtml), for a module that queries what it wrote (a grid's
+ *  cells, a strip's segments); without it the markup is only kept as the string, as before. */
+export function domDouble({ parseHtml = false } = {}) {
     const doc = new Events();
+    doc.parseHtml = parseHtml;
     doc.captures = new Map();
     const bubble = doc.addEventListener.bind(doc);
     doc.addEventListener = (type, listener, options) => {

@@ -668,8 +668,16 @@ def prepare_conversation_task(agent: Any, task: Dict[str, Any], drive_root: Any,
     apply_consciousness_authority(task)
     from ouroboros.settings_integrity import record_subagents_admission
     record_subagents_admission(task, root)
-    from ouroboros.route_choice import capture_lead  # the admitted primary (route_choice)
+    from ouroboros.route_choice import PROCESSING_KEY, capture_lead  # the admitted primary and tier (route_choice)
+    carried = PROCESSING_KEY in (task.get("metadata") if isinstance(task.get("metadata"), dict) else {})
     capture_lead(task, root)
+    tier = (task.get("metadata") or {}).get(PROCESSING_KEY) if isinstance(task.get("metadata"), dict) else None
+    if broadcast is not None and not carried and isinstance(tier, dict) and (tier.get("tier") or pid):
+        # The tier admitted now reaches the row by frame as a room's basis does: the turn's card says it, and a room
+        # turn rebuilt from its row keeps even its decided Default rather than reading the room's newer tier. A Main
+        # turn has no room tier to drift to; a resumed step admits nothing new.
+        broadcast({"type": "direct_turn_bound", "task_id": str(task["id"]), "task_attempt": int(task.get("_attempt") or 1),
+                   "facts": {PROCESSING_KEY: tier}})
     attach_task_contract(task)
     from ouroboros.tool_access_roots import freeze_tool_profile
     freeze_tool_profile(task)

@@ -451,6 +451,7 @@ def produced_fields(snap: Dict[str, Any]) -> Dict[str, Any]:
         "subagents_mode": snap["subagents_mode"],
         "subagents_availability": snap["subagents_availability"],
         "main_route": snap["main_route"],
+        "processing_tiers": snap.get("processing_tiers") or {"main": "", "default": ""},
         "github_token_configured": snap["github_token_configured"],
         "accounting": _accounting_block(snap["accounting"], available, limit),
         "projects": snap["projects"],
