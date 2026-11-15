@@ -292,8 +292,8 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
 
         listable = list_sidebar_projects(root := request_drive_root(request))  # one read: the feed and its count
         messages_revision = project_revision(root, listable)  # read before the feed: a later move reads the list again
-        # A listed room that is the owner's turn always has its row: the Projects header's amber stands for a row the
-        # owner can reach, however long ago its work ended (after the recent slice, in the same message order).
+        # A listed room that is the owner's turn always has its row: the amber on Ouroboros's picture stands for a row
+        # the owner can reach, however long ago its work ended (after the recent slice, in the same message order).
         waiting = {int(chat) for chat, room in (works.get("rooms") or {}).items()
                    if room.get("amber") and str(chat).isdigit()}
         projects = projects_summary(root, include_pinned=True, sidebar_rows=listable, by_message=True, keep=waiting)
