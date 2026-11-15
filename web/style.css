@@ -12248,7 +12248,9 @@ html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-
     clip-path: none;
     grid-area: auto;
 }
-html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header:is(:has(> .app-page-toolbar), [data-controls]) { --telegram-title-end: calc(var(--telegram-header-end) + 96px); }
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header:is(:has(> .app-page-toolbar), [data-controls]) {
+    --telegram-title-end: calc(var(--telegram-header-end) + 96px);
+}
 html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header :is(.app-page-toolbar > button:last-child, .logs-clear-list) {
     position: absolute; top: var(--telegram-row-top); right: var(--telegram-header-end); grid-area: auto;
 }
