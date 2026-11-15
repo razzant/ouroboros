@@ -258,6 +258,36 @@ def test_a_pool_count_change_rewrites_the_certificate_and_every_reader_sees_it(p
     assert _read(root, "queue_snapshot.json")["worker_total"] == 0
 
 
+def test_a_tick_measures_the_pool_once_for_its_census_its_document_and_its_certificate(published, monkeypatch):
+    """A second measurement could disagree with the census: one that failed would publish the document as unknown
+    under an observed census, and no later count change would publish it again. A tick measures once."""
+    from supervisor import pool_admission, worker_pool_lifecycle, workers
+
+    root, now = published
+    calls = []
+
+    def measured(*_a, **_k):
+        calls.append(1)
+        if len(calls) % 2 == 0:
+            raise RuntimeError("a slot's process closed between two measurements")
+        return {"max_workers": None, "worker_total": 1, "busy_worker_count": 1, "acting_worker_count": 1,
+                "parked_worker_count": 0, "booting_count": 0, "reaping_count": 0, "retiring_count": 0,
+                "assignable_idle_workers": 0, "lane_carrier_total": 1}
+
+    monkeypatch.setattr(worker_pool_lifecycle, "pool_slot_counts", measured)
+    monkeypatch.setattr(workers, "_worker_pool_execution_state", lambda: {"disabled_reason": ""})
+    monkeypatch.setattr(pool_admission, "_FACTS", {})
+    queue.RUNNING["r0"] = {"task": _task("r0"), "attempt": 1, "started_at": now[0] - 10, "last_heartbeat_at": now[0] - 1}
+    assert queue.persist_queue_snapshot("start") is True
+    queue_publication.tick_publisher_started()
+    queue.RUNNING["r0"]["task"]["focus"] = {"text": "moved"}
+    for _tick in ("publishes: a reported fact moved", "quiet"):
+        calls.clear()
+        assert queue_publication.publish_queue_changes() is True and calls == [1]
+        assert _read(root, "queue_snapshot.json")["pool_observation_status"] == "observed"
+        assert _read(root, "queue.alive")["pool"]["worker_total"] == 1
+
+
 def test_publications_follow_changes_not_ticks(published, monkeypatch):
     root, _now = published
     writes, _fsyncs = _writes(monkeypatch)

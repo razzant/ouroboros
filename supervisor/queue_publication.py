@@ -126,16 +126,16 @@ class _TickWriter:
     The tick offers its capture (``offer``) and goes on; a capture the thread has not taken yet is replaced by a
     newer one, so a slow disk never queues a backlog and the write that lands is the newest state (an older
     capture a barrier overtook is skipped by ``_publish`` all the same). A quiet tick asks for a certificate
-    refresh (``refresh``). ``drain`` waits for everything offered before it (tests, a door that wants the
-    tick's last capture down before its own export). ``stop`` ends the thread with the loop that fed it:
-    the doors after the loop publish synchronously where they stand.
+    refresh with the pool it measured (``ask_refresh``). ``drain`` waits for everything offered before it
+    (tests, a door that wants the tick's last capture down before its own export). ``stop`` ends the thread
+    with the loop that fed it: the doors after the loop publish synchronously where they stand.
     """
 
     def __init__(self) -> None:
         self.thread: Optional[threading.Thread] = None
         self.wake = threading.Condition()
         self.capture: Optional[Dict[str, Any]] = None  # the newest capture not taken yet
-        self.refresh = False
+        self.refresh: Optional[Dict[str, Any]] = None  # the pool the newest quiet tick measured, to certify
         self.syncs: list = []
         self.closed = False
 
@@ -155,9 +155,9 @@ class _TickWriter:
             self.capture = capture  # a capture not taken yet is superseded: the newest state is what lands
             self.wake.notify()
 
-    def ask_refresh(self) -> None:
+    def ask_refresh(self, pool: Dict[str, Any]) -> None:
         with self.wake:
-            self.refresh = True
+            self.refresh = pool
             self.wake.notify()
 
     def drain(self, timeout: float) -> bool:
@@ -182,19 +182,19 @@ class _TickWriter:
     def _run(self) -> None:
         while True:
             with self.wake:
-                while not (self.closed or self.capture is not None or self.refresh or self.syncs):
+                while not (self.closed or self.capture is not None or self.refresh is not None or self.syncs):
                     self.wake.wait()
                 capture, refresh, syncs = self.capture, self.refresh, self.syncs
-                self.capture, self.refresh, self.syncs = None, False, []
-                if capture is None and not refresh and self.closed:  # stopped: what it still held was written first
+                self.capture, self.refresh, self.syncs = None, None, []
+                if capture is None and refresh is None and self.closed:  # stopped: what it still held was written first
                     for done in syncs:
                         done.set()
                     return
             try:
                 if capture is not None:
                     _publish(capture, writer=self)  # a publication certifies too: the refresh is subsumed
-                elif refresh:
-                    _refresh_alive()
+                elif refresh is not None:
+                    _refresh_alive(refresh)
             except Exception:
                 log.warning("queue publisher thread: the write failed", exc_info=True)
             for done in syncs:
@@ -329,14 +329,16 @@ def publish_queue_changes() -> Optional[bool]:
         # The census: what the rows publish without a transition (worker reports mutate RUNNING in place
         # with no mark). One small identity per tick, so a changed fact is published and an unchanged
         # live set still captures, serializes and writes nothing. A failed write is itself a reason to
-        # publish: the bundle on disk is unknown until a complete rewrite lands (R2).
-        census = _census()
+        # publish: the bundle on disk is unknown until a complete rewrite lands (R2). The pool is measured
+        # once: the census, the capture and the certificate all read that one measurement.
+        pool = _pool_counts()
+        census = _census(pool)
         moved = (_STATE["revision"] != _STATE["published"] or census != _STATE["census"] or _STATE["write_failed"])
-        capture = _capture(_STATE["reason"] or "main_loop", census=census) if moved else None
+        capture = _capture(_STATE["reason"] or "main_loop", census=census, pool=pool) if moved else None
     if not _WRITER.alive():
         # Written where the tick stands: the outcome answers for this tick's own write, so every failure so
         # far is answered with it.
-        outcome = _refresh_alive() if not moved else (None if capture is None else _publish(capture))
+        outcome = _refresh_alive(pool) if not moved else (None if capture is None else _publish(capture))
         _STATE["failures_answered"] = _STATE["failed_writes"]
         return outcome
     # The writer thread lands it (the newest capture replaces one it has not taken yet); a quiet tick asks it for
@@ -345,7 +347,7 @@ def publish_queue_changes() -> Optional[bool]:
     if capture is not None:
         _WRITER.offer(capture)
     elif not moved and _queue().QUEUE_PUBLICATION is not None:
-        _WRITER.ask_refresh()
+        _WRITER.ask_refresh(pool)
     else:
         return None  # kept, or nothing of this process certified yet
     failed, answered = _STATE["failed_writes"], _STATE["failures_answered"]
@@ -377,9 +379,10 @@ def _row_facts(meta: Dict[str, Any]) -> Dict[str, Any]:
     return facts
 
 
-def _census() -> str:
-    """Under Q: one small identity of what the rows publish without a transition, and the pool facts a reader
-    decides on (``_pool_counts(census=True)``; the counts themselves ride the certificate)."""
+def _census(pool: Optional[Dict[str, Any]] = None) -> str:
+    """Under Q: one small identity of what the rows publish without a transition, and of the pool facts a reader
+    decides on from the document (``_pool_census`` of the tick's measurement, else of one taken here; the counts
+    ride the certificate)."""
     rows = []
     for task_id, meta in _queue().RUNNING.items():
         if isinstance(meta, dict):
@@ -391,7 +394,7 @@ def _census() -> str:
                 reported["model_waits"] = {wid: row for wid, row in waits.items()
                                            if isinstance(row, dict) and row.get("state") == "waiting"}
             rows.append((task_id, _row_facts(meta), reported))
-    return machine_json([rows, _pool_counts(census=True)])
+    return machine_json([rows, _pool_census(_pool_counts() if pool is None else pool)])
 
 
 def _custody_key() -> tuple:
@@ -407,11 +410,14 @@ def _kept_by_memo() -> bool:
     return _STATE["kept"] is not None and _STATE["kept"] == _custody_key()
 
 
-def _capture(reason: str, *, census: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Under Q: the thin rows and queue facts of this revision; None when the saved queue is kept."""
+def _capture(reason: str, *, census: Optional[str] = None,
+             pool: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Under Q: the thin rows and queue facts of this revision; None when the saved queue is kept. ``pool`` and
+    ``census`` are the tick's (one measurement); a barrier's capture measures the pool here, once."""
     if _kept_by_memo():
         return None
-    census = _census() if census is None else census
+    pool = _pool_counts() if pool is None else pool
+    census = _census(pool) if census is None else census
     _STATE["capture_seq"] += 1
     pending_items = list(_queue().PENDING)
     running_items = [(task_id, meta if isinstance(meta, dict) else {}) for task_id, meta in _queue().RUNNING.items()]
@@ -448,24 +454,18 @@ def _capture(reason: str, *, census: Optional[str] = None) -> Optional[Dict[str,
         "forced": reason in _FORCED_REASONS,
         "pending": pending_rows, "running": running_rows,
         "acceptance_fences": acceptance_fences, "budget_root_fences": budget_root_fences,
-        "pool": _pool_counts(),
+        "pool": pool,
         "restart_intent": agent_restart_snapshot(), "restart_reply": dict(_AGENT_RESTART_REPLY),
         "heartbeats": {tid: meta.get("last_heartbeat_at") for tid, meta in running_items},
     }
 
 
-def _pool_counts(*, census: bool = False) -> Dict[str, Any]:
+def _pool_counts() -> Dict[str, Any]:
     """The pool's published facts, measured by ``worker_pool_lifecycle.pool_slot_counts`` (its docstring names
     each count) from the ACTUAL pool, plus the last reading of the machine's memory (``memory_admission``:
     ``pool_admission.facts``, dated by its own ``read_at``). A slot mid-reap is not
     assignable, so no reader is told of a free slot that is not. A failed measurement publishes
-    ``pool_observation_status: "unknown"`` with null counts: never zeros, which would read as an empty pool.
-
-    The census takes what a reader decides on from the document itself: the disablement and its reason, whether
-    any process is started (``model_detach.pool_available``), and whether starts are admitted and why. The counts
-    change with every boot, retirement and reap while no row changes; they reach readers on the certificate
-    (``_certify``, ``queue_observation.load_queue_document``), so such a change rewrites ``queue.alive`` and not
-    the document, which keeps the counts of its own write."""
+    ``pool_observation_status: "unknown"`` with null counts: never zeros, which would read as an empty pool."""
     try:
         from supervisor import pool_admission, workers as _workers_mod
         from supervisor.worker_pool_lifecycle import pool_slot_counts
@@ -475,17 +475,27 @@ def _pool_counts(*, census: bool = False) -> Dict[str, Any]:
         # Absence is counted above, not an explicit disablement.
         counts["worker_pool_disabled_reason"] = "" if disabled == "no_workers" else disabled
         counts["pool_observation_status"] = "observed"
-        memory = pool_admission.facts()
-        if census:
-            return {"worker_pool_disabled_reason": counts["worker_pool_disabled_reason"],
-                    "started": counts["worker_total"] + counts["lane_carrier_total"] > 0,
-                    "memory_admission": (bool(memory.get("starts_admitted")), memory.get("reason", ""))}
-        counts["memory_admission"] = memory
+        counts["memory_admission"] = pool_admission.facts()
         return counts
     except Exception:
         log.debug("Worker pool facts unavailable; published as unknown", exc_info=True)  # every tick: no warning flood
         return {**dict.fromkeys(_POOL_COUNT_KEYS), "worker_pool_disabled_reason": "unknown",
                 "pool_observation_status": "unknown", "pool_observation_error": "introspection_failed"}
+
+
+def _pool_census(counts: Dict[str, Any]) -> Dict[str, Any]:
+    """The pool facts a reader decides on from the document itself: the disablement and its reason, whether any
+    process is started (``model_detach.pool_available``), and whether starts are admitted and why (the verdict, not
+    the reading's bytes); a failed measurement is its own shape. The counts change with every boot, retirement and
+    reap while no row changes; they reach readers on the certificate (``_certify``,
+    ``queue_observation.load_queue_document``), so such a change rewrites ``queue.alive`` and not the document,
+    which keeps the counts of its own write."""
+    if counts.get("pool_observation_status") != "observed":
+        return counts
+    memory = counts.get("memory_admission") or {}
+    return {"worker_pool_disabled_reason": counts["worker_pool_disabled_reason"],
+            "started": counts["worker_total"] + counts["lane_carrier_total"] > 0,
+            "memory_admission": (bool(memory.get("starts_admitted")), memory.get("reason", ""))}
 
 
 def _certified_pool(counts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -680,8 +690,9 @@ def _publish(capture: Dict[str, Any], *, writer: Optional[_TickWriter] = None) -
             return False
 
 
-def _refresh_alive() -> Optional[bool]:
-    """A tick with nothing to publish: keep the certificate fresh for its readers, never a new generation."""
+def _refresh_alive(pool: Dict[str, Any]) -> Optional[bool]:
+    """A tick with nothing to publish: keep the certificate fresh for its readers (the heartbeats, and the counts of
+    the pool that tick measured), never a new generation."""
     published = _queue().QUEUE_PUBLICATION
     if published is None:
         return None  # nothing of this process is certified; a kept saved queue stays uncertified
@@ -690,7 +701,7 @@ def _refresh_alive() -> Optional[bool]:
     with _queue()._queue_lock:
         heartbeats = {tid: (meta.get("last_heartbeat_at") if isinstance(meta, dict) else None)
                       for tid, meta in _queue().RUNNING.items()}
-        pool = _certified_pool(_pool_counts())
+    pool = _certified_pool(pool)
     if not _alive_due(heartbeats, pool):
         return True
     with _PUBLISH_LOCK:
