@@ -6,8 +6,7 @@ The real SPA in headless Chromium and WebKit over the shared fixture's endpoints
 tab a field the owner is in keeps its text and caret through the tab's own periodic refresh and a settings read, and
 leaving it shows the row's result line; the Updates channel keeps its focused choice through a status read; the
 Evolution choice "Every N tasks" posts both keys in one body and says itself in its own sentence; the doors of
-Consciousness and Costs lead where they say. The docked sidebar returns each of the five tabs to Settings; in one
-column its Back, Escape and the system's Back return there, with the list's scroll preserved. At the 320 x 640 floor
+Consciousness and Costs lead where they say. The named shell capsule, Escape and the system's Back return each tab to Settings at every width, with the list's scroll preserved. At the 320 x 640 floor
 each page's own Back reaches the list, and every tab and three-way choice fits.
 
 The settings endpoint is answered here the way the server answers it: `_meta.effects` on a read, the receipt
@@ -248,7 +247,7 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     _serve(page, "models")
     _serve(page, "permissions")
     page.click(row("consciousness-model"))
-    back = page.locator('#page-settings [data-settings-page="models/role/consciousness"] [data-settings-back]')
+    back = page.locator('#page-settings > .app-page-header [data-shell-back]')
     back.wait_for()
     assert back.inner_text().strip() == "Consciousness"
     back.click()
@@ -260,22 +259,22 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
         "Model | Main model", f"Its actions are checked | {_scale_word(page, 'light')}", "Where it lives |", "Improving itself | Off"]
     # The Safety door opens its row's page in Settings, whose Back names this tab and returns to it.
     page.click(row("consciousness-safety"))
-    back = page.locator('#page-settings [data-settings-page="permissions"] [data-settings-back]')
+    back = page.locator('#page-settings > .app-page-header [data-shell-back]')
     back.wait_for()
     assert back.inner_text().strip() == "Consciousness"
     back.click()
     page.wait_for_selector("#dashboard-panel-consciousness.active")
     # The evolution door opens its row on the Evolution tab, and the allowance door its row in Costs: a door inside
-    # the Dashboard leaves no Back.
+    # the Dashboard leaves its named return in the same slot.
     page.click(row("consciousness-evolution"))
     page.wait_for_selector("#dashboard-panel-evolution.active")
     page.wait_for_function("() => document.activeElement?.dataset.evoWhen === 'off'")
-    assert page.locator("#dashboard-panel-evolution > .dashboard-back").count() == 0
+    assert page.locator("#page-dashboard [data-shell-back]").inner_text().strip() == "Consciousness"
     page.click('[data-dashboard-tab="consciousness"]')
     page.click(row("consciousness-allowance"))
     page.wait_for_selector("#dashboard-panel-costs.active")
     page.wait_for_function("(id) => document.activeElement?.id === id", arg=f"setting-{ALLOWANCE}")
-    assert page.locator("#dashboard-panel-costs > .dashboard-back").count() == 0
+    assert page.locator("#page-dashboard [data-shell-back]").inner_text().strip() == "Consciousness"
 
 
 def test_costs_shows_subscriptions_from_the_passive_view_alone_and_its_doors_open_accounts(ui):
@@ -289,7 +288,7 @@ def test_costs_shows_subscriptions_from_the_passive_view_alone_and_its_doors_ope
     assert not [path for path, _ in ui["posts"] if "/api/claudexor/" in path], "nothing is woken or refreshed"
     _serve(page, "accounts")
     door.click()
-    back = page.locator('#page-settings [data-settings-page="accounts/codex"] [data-settings-back]')
+    back = page.locator('#page-settings > .app-page-header [data-shell-back]')
     back.wait_for()
     assert back.inner_text().strip() == "Costs"
     back.click()
@@ -314,29 +313,20 @@ def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, widt
         return top
 
     def check_back(tab, leave):
-        back = page.locator("#page-dashboard > .app-page-header [data-dashboard-back]")
+        back = page.locator("#page-dashboard > .app-page-header [data-shell-back]")
         assert page.locator(f"#dashboard-panel-{tab} > .dashboard-back").count() == 0
         assert _sideways(page) == [], (tab, leave)
-        if page.viewport_size["width"] >= 720:
-            # Review res3: beside the sidebar a door between sections adds no Back and no layer.
-            assert back.count() == 0
-            assert page.evaluate("() => window.__ouroLayers.ids().includes('dashboard-back')") is False
-            if leave == "Escape":
-                page.keyboard.press("Escape")
-                assert page.locator(f"#dashboard-panel-{tab}.active").is_visible()
-            page.locator('[data-nav-page="settings"]').click()
+        back.wait_for(state="visible")
+        assert back.get_attribute("aria-label").startswith("Back to Settings")
+        assert back.inner_text().strip() == "Settings"
+        assert page.locator("#page-dashboard [data-shell-back]").count() == 1
+        assert page.evaluate("() => Boolean(window.__ouroLayers.returnPage())")
+        if leave == "Escape":
+            page.keyboard.press("Escape")
+        elif leave == "Back":
+            back.click()
         else:
-            back.wait_for(state="visible")
-            assert back.get_attribute("aria-label") == "Back to Settings"
-            assert back.inner_text().strip() == ""
-            assert page.locator("#page-dashboard [data-dashboard-list-back]").is_hidden()
-            assert page.locator("#page-dashboard [data-mobile-nav-toggle]").is_hidden()
-            if leave == "Escape":
-                page.keyboard.press("Escape")
-            elif leave == "Back":
-                back.click()
-            else:
-                page.go_back()
+            page.go_back()
         page.wait_for_selector("#page-settings.active")
         assert back.count() == 0, leave
 
@@ -347,32 +337,25 @@ def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, widt
         assert page.evaluate("(s) => document.querySelector(s).scrollTop", HOME) == tops[tab], f"Escape from {tab} returns where Settings was"
     assert tops["storage"] > 0 and tops["updates"] > 0, f"the home was scrolled when its last rows were pressed: {tops}"
     for leave in ("Back", "system Back"):
-        # Physical and system Back remain exercised in the one-column layout that supplies them.
-        if width >= 720:
-            page.set_viewport_size({"width": 320, "height": height})
-            open_settings(page)
         top = leave_home("storage")
         check_back("storage", leave)
         assert top > 0
         assert page.evaluate("(s) => document.querySelector(s).scrollTop", HOME) == top, f"{leave} returns where Settings was"
-        if width >= 720:
-            page.set_viewport_size({"width": width, "height": height})
-            page.wait_for_function("() => document.documentElement.dataset.layout === 'docked'")
-    # A tab reached any other way has no Back.
+    # The primary map clears returns and opens the section list.
     _nav(page, "dashboard", width)
-    assert page.locator("#page-dashboard [data-dashboard-back]").count() == 0
+    assert page.locator("#page-dashboard [data-shell-back]").count() == 0
 
 
 def test_no_tab_scrolls_sideways_at_the_floor_and_a_three_way_choice_keeps_one_line(ui):
     page, _ = _open(ui, tab="consciousness", width=320, height=640)
     for tab in TABS:
         if not page.locator(f'[data-dashboard-tab="{tab}"]').is_visible():
-            page.locator('#page-dashboard [data-dashboard-list-back]').click()
+            page.locator('#page-dashboard [data-shell-back]').click()
         page.click(f'[data-dashboard-tab="{tab}"]')
         page.wait_for_selector(f"#dashboard-panel-{tab}.active")
         page.wait_for_timeout(200)
         assert _sideways(page) == [], tab
-    page.locator('#page-dashboard [data-dashboard-list-back]').click()
+    page.locator('#page-dashboard [data-shell-back]').click()
     page.click('[data-dashboard-tab="consciousness"]')
     tops = page.locator('#page-dashboard [data-setting-row="OUROBOROS_CONSCIOUSNESS_AUTONOMY"] [data-setting-value]').evaluate_all(
         "(buttons) => buttons.map((button) => Math.round(button.getBoundingClientRect().top))")

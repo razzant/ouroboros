@@ -3,7 +3,7 @@ wait for its result line, open an entry's editor and press its Save.
 
 Settings has no URL: a path is opened through the shell's opener (the loopback debug hook ``window.__ouroSettings``,
 the same function app.js's ``openSettings`` calls), so a test reaches a page the way any caller does. The hooks are
-the shell's (settings.js: ``[data-settings-home]``, ``[data-settings-page]``, ``[data-settings-back]``), the home's
+the shell's (settings.js: ``[data-settings-home]``, ``[data-settings-page]``, ``[data-shell-back]``), the home's
 (settings_home.js: ``[data-settings-open]``, ``[data-settings-answer]``, the card ``[data-settings-card]`` with its
 rows ``[data-needs]``, the search field ``#settings-search`` and a result ``[data-settings-result]``) and the row
 helper's (settings_controls.js:
@@ -23,7 +23,7 @@ def settings_page(page, path: str = ""):
 def open_settings(page, path: str = "", row: str = "", *, timeout: float = 10_000):
     """Show Settings at `path`, revealing `row` when given, and wait until that level is visible."""
     page.wait_for_function("() => Boolean(window.__ouroSettings)", timeout=timeout)
-    opened = page.evaluate("([path, row]) => window.__ouroSettings.open(path, { row })", [path, row])
+    opened = page.evaluate("([path, row]) => window.__ouroSettings.open(path, { row, map: true })", [path, row])
     assert opened is not False, f"Settings refused to open {path!r}"
     level = settings_page(page, path)
     level.wait_for(state="visible", timeout=timeout)
@@ -78,7 +78,7 @@ def top_path(page) -> str:
 def go_back(page):
     """Press the section header's Back and return the path shown after it."""
     before = top_path(page)
-    page.locator(f"{SETTINGS} > .app-page-header [data-settings-back]").click()
+    page.locator(f"{SETTINGS} > .app-page-header [data-shell-back]").click()
     page.wait_for_function("before => { const levels = [...document.querySelectorAll('#page-settings "
                            "[data-settings-page]')]; return !levels.some((e) => e.dataset.settingsPage === before); }",
                            arg=before)

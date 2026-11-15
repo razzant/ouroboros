@@ -107,8 +107,16 @@ MEASURE = """root => {
             (r.width < 43.9 || r.height < 43.9) && !hits(e, r))
             small.push({node:name(e),label:(e.getAttribute('aria-label') || e.textContent).trim().slice(0,65),
                 width:Math.round(r.width*10)/10,height:Math.round(r.height*10)/10});
-        if (e.matches('.app-page-header') && r.height > 56.1)
-            headers.push({node:name(e),height:Math.round(r.height*10)/10});
+        if (e.matches('.app-page-header')) {
+            const rail = e.querySelector('.logs-kinds'), rb = rail?.getBoundingClientRect();
+            const secondLine = rb?.height && rb.top >= r.top + 28;
+            const gap = secondLine ? parseFloat(getComputedStyle(rail.closest('.section-lead-page')).rowGap) || 0 : 0;
+            const height = r.height - (secondLine ? rb.height + gap : 0);
+            if (height > 56.1)
+                headers.push({node:name(e),height:Math.round(height*10)/10});
+            if (secondLine && new Set([...rail.children].filter(shown).map(n=>Math.round(n.getBoundingClientRect().top))).size > 1)
+                headers.push({node:name(rail),wrapped:true});
+        }
     }
     return {overflow, small, headers};
 }"""
@@ -224,6 +232,10 @@ def open_nav(page, name):
     # A one-column section page has Back in place of Places. Return through its real header controls.
     if page.locator('html').get_attribute('data-layout') == 'stack':
         while not toggle.count():
+            if page.locator('html').get_attribute('data-telegram-back') == 'back':
+                page.evaluate('Telegram.WebApp.BackButton.callback()')
+                rest(page)
+                continue
             back = page.locator('.page.active .app-page-header .shell-back:visible').first
             if not back.count():
                 break
@@ -291,10 +303,15 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
                     facts[key] = page.evaluate(MEASURE, root)
                     if any(facts[key].values()):
                         failures[key] = facts[key]
-                    # A page alone has Back; beside its list the Places control stays with that list.
+                    # One leading slot: a deeper level owns Back even when its list still fits beside it.
                     if width < 720:
-                        control = '[data-mobile-nav-toggle]' if page.locator(HOME).is_visible() else '[data-settings-back]'
-                        if not page.locator(root + ' .app-page-header ' + control).is_visible():
+                        host_back = page.locator('html').get_attribute('data-telegram-back') == 'back'
+                        page_back = page.evaluate('() => Boolean(window.__ouroLayers.page()?.back)')
+                        control = '[data-shell-back]' if page_back else '[data-mobile-nav-toggle]'
+                        if host_back:
+                            if page.locator(root + ' .app-page-header [data-shell-back]:visible').count():
+                                failures[key + '/navigation'] = 'the page duplicates Telegram Back'
+                        elif not page.locator(root + ' .app-page-header ' + control).is_visible():
                             failures[key + '/navigation'] = f'the expected {control} left the header'
                 # The home, every page a module registered (the list of skill forms and the fixture skill's form
                 # among them), and one editor of a page that lists entries.
@@ -316,7 +333,7 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
                 tab_name = 'page'
                 if tabs:
                     if name == 'dashboard' and not tabs[index].is_visible():
-                        page.locator(root + ' [data-dashboard-list-back]').click()
+                        page.evaluate("() => window.__ouroLayers.back('control')")
                         rest(page)
                     tabs[index].click()
                     tab_name = tabs[index].get_attribute('data-dashboard-tab') if name == 'dashboard' else tabs[index].inner_text().strip()
