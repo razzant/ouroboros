@@ -276,31 +276,41 @@ def test_work_outputs_return_as_checked_bytes_and_a_planted_link_returns_nothing
     assert attached(docker, "tar -c") and not docker.records()
 
 
+_PROBE = ("import sys\nfrom ouroboros import work_domain\ntry:\n    print(work_domain.managed())\n"
+          "except Exception as exc:\n    print(type(exc).__name__)\n"
+          "print('ouroboros.execution_domain' in sys.modules)\n")
+
+
+def _lookup():
+    """A fresh interpreter's first work-domain lookup (its ``sys.modules`` is that lookup's own): what ``managed()``
+    answers, or its error's type, and whether the execution-domain module was imported."""
+    root = pathlib.Path(work_domain.__file__).resolve().parents[1]
+    environ = {**os.environ, "PYTHONPATH": str(root)}
+    done = subprocess.run([sys.executable, "-c", _PROBE], capture_output=True, text=True, cwd=root,
+                          env=environ, timeout=60)
+    assert done.returncode == 0, done.stderr
+    return done.stdout.split()
+
+
 def test_an_unmanaged_lookup_never_imports_the_execution_domain(env, monkeypatch):
     """The first work-domain lookup of a process on an install without an ``execution`` policy answers "no
-    domain" without the execution-domain module graph; a managed one still returns the domain object, and an
-    unusable policy still raises. Each lookup is a fresh interpreter, so ``sys.modules`` is that lookup's own."""
-    from ouroboros import deployment_policy, execution_domain
+    domain" without the execution-domain module graph, and an unusable policy still raises, on every host; a
+    managed lookup is the next test's, where the product allows an execution domain."""
+    from ouroboros import deployment_policy
 
-    probe = ("import sys\nfrom ouroboros import work_domain\ntry:\n    print(work_domain.managed())\n"
-             "except Exception as exc:\n    print(type(exc).__name__)\n"
-             "print('ouroboros.execution_domain' in sys.modules)\n")
-
-    def lookup():
-        root = pathlib.Path(work_domain.__file__).resolve().parents[1]
-        environ = {**os.environ, "PYTHONPATH": str(root)}
-        done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, cwd=root,
-                              env=environ, timeout=60)
-        assert done.returncode == 0, done.stderr
-        return done.stdout.split()
-
-    assert lookup() == ["False", "False"]  # unmanaged
+    assert _lookup() == ["False", "False"]  # unmanaged
     env.manage()
-    assert lookup() == ["False", "False"]  # a policy without ``execution``
-    # A container path is POSIX on every host: name it, never derive it from the host's (a Windows drive path).
-    env.manage(section(env, path_mappings=[{"host_path": str(env.work), "backend_path": "/work"}]))
-    assert lookup() == ["True", "True"]  # managed: the domain, through execution_domain.current()
-    assert work_domain._domain() is execution_domain.current() is not None
+    assert _lookup() == ["False", "False"]  # a policy without ``execution``
     monkeypatch.setenv(deployment_policy.POLICY_ENV, str(env.admin / "missing.json"))
     deployment_policy.reset_for_tests()
-    assert lookup() == ["DeploymentPolicyError", "False"]  # a bad file never reads as unmanaged
+    assert _lookup() == ["DeploymentPolicyError", "False"]  # a bad file never reads as unmanaged
+
+
+@posix_host
+def test_a_managed_lookup_still_returns_the_domain_object(env):
+    from ouroboros import execution_domain
+
+    # A container path is POSIX on every host: name it, never derive it from the host's (a Windows drive path).
+    env.manage(section(env, path_mappings=[{"host_path": str(env.work), "backend_path": "/work"}]))
+    assert _lookup() == ["True", "True"]  # managed: the domain, through execution_domain.current()
+    assert work_domain._domain() is execution_domain.current() is not None
