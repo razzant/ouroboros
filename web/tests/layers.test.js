@@ -165,6 +165,9 @@ test('browser Back retains a pending asynchronous close and a refusal; a stale c
     assert.equal(w.layers.top(), 'return');
     assert.equal(w.layers.historyArmed(), true, 'browser Back is re-armed while the owner decides');
     w.layers.pop('escape');
+    w.win.fire('popstate');
+    await tick();
+    assert.equal(w.layers.historyArmed(), true, 'a repeated browser Back is also re-armed while pending');
     assert.equal(attempts, 1, 'another dismiss does not start the same leave again');
     decide(false);
     await tick();

@@ -254,7 +254,7 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
     function pop(reason = 'close') {
         const layer = top();
         if (!layer) return false;
-        if (closing.has(layer)) return true;
+        if (closing.has(layer)) { reconcileHistory(); return true; }
         let result;
         try { result = layer.onClose?.(reason); } finally {
             if (result?.then) {
