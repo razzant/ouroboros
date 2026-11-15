@@ -47,8 +47,8 @@ html[data-layout="stack"] .settings-page { padding-inline: 12px; }
     .settings-shell[data-section-view="page"] .settings-door-glyph.settings-overview-glyph { width: 20px; height: 20px; margin-inline-end: var(--space-2); }
 }
 
-/* A phone: the band is `☰ Settings`, and the row under it holds the field over the home, or `(‹) <page>` over a page,
-   at the column's own inset. */
+/* A phone's two panes keep the columns' lead under the place's band. One column (below) has one band: the
+   home puts its search in the scrolling list, and a page replaces the place's name with Back and its own name. */
 html[data-layout="stack"] #page-settings > .app-page-header {
     grid-template-areas: "leading title toolbar" "lead lead lead";
 }
@@ -60,6 +60,11 @@ html[data-layout="stack"] #page-settings .settings-lead-col { gap: var(--space-2
    leading control on a screen). Only a page that replaced the list gives the places control up: with the list beside
    its page (40rem up to the shell's switch) the first-level page has no Back, so the control stays. */
 @container sectionplace (max-width: calc(40rem - 0.02px)) {
+    /* Collapse the empty lead after Search moves, never hide a focused field while its resize frame waits. */
+    html[data-layout="stack"] #page-settings[data-section-view="home"] > .app-page-header[data-search-in-home] { grid-template-areas: "leading title toolbar"; }
+    html[data-layout="stack"] #page-settings[data-section-view="home"] > .app-page-header[data-search-in-home] .app-page-lead { display: none; }
+    /* The list starts where the band's second row stood, so Search and every group keep their place. */
+    html[data-layout="stack"] #page-settings[data-section-view="home"] > .app-page-header[data-search-in-home] + .settings-shell > .settings-home { padding-top: 2px; }
     html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header > .app-page-leading,
     html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
     html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header { grid-template-areas: "lead lead lead"; }
@@ -1284,12 +1289,17 @@ html[data-layout="stack"] .settings-search { height: 44px; }
 
 /* settings rows */
 /* A row that saves itself (settings_controls.js settingsRow) stands on the shared .ui-row, at least 52 px tall: its
-   name, one meta line with the row's result after it, its control at the end. The result is words in the meta line,
-   so an empty one takes no line, and Undo is a link in that sentence. A number is typed in a short field with its
+   name, one meta line and its control at the end, and the row's result on a line of its own under them (below): an
+   empty one takes no line, and Undo is a link in that sentence. A number is typed in a short field with its
    unit beside it ("No limit" next to a bound that may be unlimited) and a choice of many is a list, both as tall as
    a button with the value in the semibold weight; a path or an address has a longer field. */
 .settings-row,
 .settings-head { box-sizing: border-box; min-height: 52px; }
+/* Keep the same minimum on the content tracks when a result adds a track. The spanning item distributes the
+   spare room exactly as the resting grid does; subtract the tray's insets (a card's only row has none). */
+.settings-row::before { content: ""; grid-area: 1 / 1 / 3 / -1; min-height: calc(52px - 2 * (var(--space-3) + 1px)); pointer-events: none; }
+.ui-card > .settings-row:only-child::before { min-height: 52px; }
+.dashboard-settings[data-solo] > .settings-row::before { content: none; }  /* this row is a flex column */
 .settings-row > .ui-row-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-2); text-wrap: pretty; }
 /* Main, a fallback or a role whose key cannot send: its line says so in the warning colour (these rows have no tinted
    body, so the light theme's unset warning word would leave it unmarked). */
@@ -1304,9 +1314,10 @@ html[data-layout="stack"] .settings-search { height: 44px; }
 .settings-row-result:empty,
 .settings-row-fact:empty { display: none; }
 /* A row with nothing under its name stands on one line: its meta line takes no room and its name is centred against
-   the control. The words of a meta line stand in its child elements, as settingsRow draws them. */
-.settings-row > .ui-row-meta:has(> *):not(:has(> :not(:empty))) { display: none; }
-.settings-row > .ui-row-title:not(:has(+ .ui-row-meta > :not(:empty))) { grid-row: 1 / span 2; }
+   the control. The row says so itself (`data-no-meta`, written with the line's words: ui_primitives.js setRowMeta),
+   since WebKit does not re-match `:empty` inside `:has()` when the words come after the row was painted. */
+.settings-row[data-no-meta] > .ui-row-meta { display: none; }
+.settings-row[data-no-meta] > .ui-row-title { grid-row: 1 / span 2; }
 .settings-row > .ui-row-actions > .ui-control { width: 14rem; max-width: 100%; }
 .settings-row[data-kind="text"] > .ui-row-actions > .ui-control { width: 18rem; }
 .settings-row > .ui-row-actions > select.ui-control,
@@ -1352,12 +1363,18 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
    door keep their hands off it (:not([data-lead])), so the mark keeps its own column. */
 .settings-row[data-lead] { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "mark words actions" "mark meta actions"; }
 .settings-row[data-lead] .settings-row-value { white-space: nowrap; }
-/* A door's value is a fact said at the row's end: the words keep at least three fifths of the row and a long value
-   ("No voice on this device") wraps at the end instead of squeezing them into a column of a few words. */
-.settings-row[data-kind="door"]:not([data-lead]) { grid-template-columns: minmax(60%, 1fr) auto; }
+/* A door's value is a fact said at the row's end, flush against its sign: the two sides share a narrow row up to what
+   each actually holds, so a short name ("Model") gives a long route the open middle while longer words beside a long
+   value still split the row evenly, and the sign never drops under the value. */
+.settings-row[data-kind="door"]:not([data-lead]) { grid-template-columns: auto auto; justify-content: space-between; }
+.settings-row[data-kind="door"]:not([data-lead]) > .ui-row-actions { flex-wrap: nowrap; }
+.settings-row[data-kind="door"]:not([data-lead]) .settings-row-value { text-align: end; }
 /* A wide control (settings_controls.js marks it `data-wide`) goes under the words below 36rem, while beside it the
-   words would keep only a narrow column (ui.css moves every row's actions only below 28rem). */
+   words would keep only a narrow column (ui.css moves every row's actions only below 28rem). Beside them it leaves the
+   words 16rem whatever its own width: a wider one (Evolution's strip with its N field) wraps its own parts there. */
+.settings-row[data-wide] { grid-template-columns: minmax(min(100% - var(--space-3), 16rem), 1fr) auto; }
 @container (max-width: 36rem) {
+    .settings-row[data-wide]::before { grid-row: 1 / 4; }
     .settings-row[data-wide] > :is(.ui-row-title, .ui-row-meta, .ui-row-actions) { grid-column: 1 / -1; }
     .settings-row[data-wide] > .ui-row-actions { grid-row: 3; justify-content: flex-start; }
 }
@@ -1366,6 +1383,7 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
    do go there). A row that leads with a mark says its value as a third line and keeps its sign at the end. */
 @container (max-width: 28rem) {
     .settings-row:is([data-kind="door"], [data-kind="switch"], [data-kind="secret"], [data-kind="number"]:not([data-no-limit])):not([data-lead]) > :is(.ui-row-title, .ui-row-meta) { grid-column: 1; }
+    .settings-row:not([data-kind="door"], [data-kind="switch"], [data-kind="secret"], [data-kind="number"]:not([data-no-limit]))::before { grid-row: 1 / 4; }
     .settings-row:is([data-kind="door"], [data-kind="switch"], [data-kind="secret"], [data-kind="number"]:not([data-no-limit])):not([data-lead]) > .ui-row-actions { grid-column: 2; grid-row: 1 / span 2; flex-wrap: nowrap; justify-content: flex-end; }
     .settings-row[data-lead] > :is(.ui-row-title, .ui-row-meta) { grid-column: 2; }
     .settings-row[data-lead] > .ui-row-actions { display: contents; }
@@ -1436,6 +1454,7 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
     background: none;
 }
 .settings-row[data-kind="choices"] > .ui-row-actions { display: block; margin-top: var(--space-2); }
+.settings-row[data-kind="choices"]::before { grid-row: 1 / 4; }
 .settings-row[data-kind="choices"] > .settings-row-result { grid-row: 4; }  /* under the options, as every row's */
 .settings-rows > .settings-row[data-kind="choices"]:only-child > .ui-row-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .settings-rows > .settings-row[data-kind="choices"]:only-child > .ui-row-meta { margin-top: calc(-1 * var(--space-3)); font-size: var(--type-body); line-height: var(--line-body); }
@@ -1552,7 +1571,6 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
 .models-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); align-items: start; gap: var(--space-3); }
 .model-role-field { min-width: 0; }
 .model-role-field > :is(select, .ui-model-chooser) { width: 100%; min-width: 0; }
-.model-role-row[data-solo] > .model-role-notes:not(:has(> :not(:empty))) { display: none; }
 .model-role-row[data-solo] .model-role-meta { margin-top: 0; }
 .model-role-row[data-solo] > .model-role-details { margin-top: 0; }
 .models-role .model-role-copy { margin: 0; }
@@ -1630,9 +1648,19 @@ textarea.ui-control.settings-rules-text {
 }
 .agent-family-accounts .harness-account-row[data-tone="warn"] { background: var(--status-warn-bg); }
 .harness-account-mark { grid-area: mark; display: grid; place-items: center; min-width: 22px; color: var(--text-secondary); }
+/* An account's name is one line: an address never breaks inside itself, and one longer than the line is cut with an
+   ellipsis (the markup offers no break at its @ or its dots). */
+.agent-family-accounts .harness-account-main > strong { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .agent-family-accounts .harness-account-actions { flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 .harness-account-actions > [data-resources] { margin: 0; }
 .harness-account-extra { grid-column: 2 / -1; grid-row: 3; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-1); }
+/* A row too narrow to keep its words about 200 px beside the switch and More (a phone leaves them 150) stands them
+   under the words, at their start, and Sign in's line under them; the owner's window keeps them at the row's end. */
+@container (max-width: 22rem) {
+    .agent-family-accounts .harness-account-row > :is(.harness-account-main, .harness-account-meta, .harness-account-actions) { grid-column: 2 / -1; }
+    .agent-family-accounts .harness-account-row > .harness-account-actions { grid-row: 3; justify-content: flex-start; margin-top: var(--space-1); }
+    .agent-family-accounts .harness-account-row > .harness-account-extra { grid-row: 4; }
+}
 /* What is rare shows while More is open: the row holds the :has() in its own compound and lends the line its display;
    closed, the fallback hides it, and a line of nothing else takes no room. */
 .harness-account-row:has([data-resources][aria-expanded="true"]) {

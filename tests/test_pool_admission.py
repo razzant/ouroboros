@@ -860,3 +860,78 @@ def test_failed_replacement_never_clears_a_new_slots_reaping_marker(assigning, m
     else:
         task_lifecycle._recover_stranded_reaping_slot(queue, "settled", {"claim_owner": "dead"})
     assert workers.WORKERS[old.wid] is newer and newer.reaping
+
+
+def _held_after_its_crash(assigning, monkeypatch):
+    """The table's last member dies with its task; its crash retry moved the task back to PENDING (as
+    ``worker_health._readmit_crash_retry`` pops RUNNING and enqueues) and the reaper's respawn reads critical."""
+    from supervisor import task_reaper, workspace_preparation
+
+    monkeypatch.setattr(pool_admission, "_READY", {"seq": 1, "generation": workspace_preparation.current_generation(),
+                                                   "rss_bytes": GIB})  # this generation's worker size is known
+    held = assigning.original
+    machine(monkeypatch, 9, pressure=True)
+    held.proc.alive = False
+    workers.RUNNING.pop("owner")
+    workers.PENDING.append(task("owner", _attempt=2))
+    task_reaper._respawn_after_reap(queue, workers, 0, expected_worker=held)
+    return held
+
+
+@pytest.mark.parametrize("later", ["not_critical", "critical"])
+def test_a_held_slot_drops_its_settled_task_so_the_retry_elsewhere_never_strands_it(assigning, monkeypatch, later):
+    """Opus review: a held dead slot kept its crashed task's ``busy_task_id``. When the retry ran on a process grown on
+    a non-critical reading, the crash detector's next job for the held slot carried the retry's RUNNING row, was never
+    current, and the slot stayed ``reaping`` and dead in the table, never replaced or retired. Held, it starts as its
+    replacement would, with no task: the next job is current; beside the grown process a calm reading replaces it and
+    a critical one retires it, and the retry keeps its own process."""
+    from supervisor import worker_health
+
+    held = _held_after_its_crash(assigning, monkeypatch)
+    assert workers.WORKERS == {0: held} and not held.reaping
+    task_at_hold = held.busy_task_id  # the mechanism, checked after the outcome: a tree without it reaches the strand
+    machine(monkeypatch, 9)  # the dispatch pass reads calm and grows a process for the retry
+    workers.assign_tasks()
+    (fresh,) = [slot for slot in workers.WORKERS.values() if slot is not held]
+    fresh.reaping = False
+    affirm_ready(fresh)
+    workers.assign_tasks()
+    retry = workers.RUNNING["owner"]
+    assert retry["worker_id"] == fresh.wid and fresh.busy_task_id == "owner"
+    machine(monkeypatch, 9, pressure=later == "critical")
+    with queue._queue_lock:
+        workers._ensure_workers_healthy_locked(queue)
+    job = queue._reap_queue.get_nowait()
+    assert job["worker"] is held
+    worker_health.recover_confirmed_dead_worker(job)
+    with queue._queue_lock:
+        workers._ensure_workers_healthy_locked(queue)  # a stranded slot stays reaping: the detector skips it
+    stranded = workers.WORKERS.get(0) is held and held.reaping and not held.proc.alive
+    assert not stranded and workers.WORKERS.get(0) is not held, {  # replaced when calm, retired when critical
+        "stranded": stranded, "reaping": held.reaping, "busy_task_id": held.busy_task_id, "job_task_id": job["task_id"],
+        "detector_requeued": not queue._reap_queue.empty()}
+    assert (0 in workers.WORKERS) is (later == "not_critical")
+    assert task_at_hold is None and job["task_id"] == ""  # held as its replacement starts, so its job was current
+    assert workers.RUNNING["owner"] is retry and fresh.busy_task_id == "owner" and workers.WORKERS[fresh.wid] is fresh
+    assert [row["outcome"] for row in _held_rows(assigning.root)] == (
+        ["kept_last_member"] + (["retired"] if later == "critical" else []))
+    assert queue._reap_queue.empty() or queue._reap_queue.get_nowait()["worker"] is not fresh
+
+
+def test_a_held_slot_keeps_a_task_whose_running_row_still_names_it(assigning, monkeypatch):
+    """Ownership is never dropped while the task's RUNNING row still names the dead slot: held under critical, it
+    keeps the task, and the crash detector's next job is current, so its death is still recovered."""
+    from supervisor import worker_health
+
+    held = assigning.original
+    machine(monkeypatch, 9, pressure=True)
+    held.proc.alive = False
+    assert workers.RUNNING["owner"]["worker_id"] == 0
+    reading = pool_admission.read()
+    with lifecycle._WORKER_LIFECYCLE_LOCK:
+        assert lifecycle._replacement_waits(0, held, reading) is True
+    assert workers.WORKERS == {0: held} and held.busy_task_id == "owner" and not held.reaping
+    with queue._queue_lock:
+        workers._ensure_workers_healthy_locked(queue)
+        job = queue._reap_queue.get_nowait()
+        assert job["task_id"] == "owner" and worker_health._dead_job_is_current(job)

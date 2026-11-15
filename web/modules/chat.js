@@ -2245,7 +2245,12 @@ export function createChatInstance({
         }
     }
     function applyHistoryMessages(messages, { fromReconnect = false, archived = false } = {}) {
-        const knownCards = new Set(liveCardRecords.keys());
+        // A returning room reads arrivals instead of receiving socket frames. Only newly drawn content marks ↓:
+        // the first page, older pages and adopting a stored identity for already seen live words stay quiet.
+        const reportActivity = historyLoaded && !archived;
+        const knownRows = reportActivity ? new Set(messagesDiv.children) : null;
+        const knownCards = new Map([...liveCardRecords].map(([id, record]) => [id, reportActivity
+            ? { projection: captureLiveCardProjection(record), items: record.items.length, source: record.latestSourceTs } : null]));
         _historyReplayActive = true;
         _historyAppending = archived;
         liveCardBound.beginReplay();
@@ -2467,14 +2472,22 @@ export function createChatInstance({
                 const dirty = [...liveCardRecords.values()].filter(record => record._timelineDirty);
                 measure(() => { const kept = keepSelection(document); return dirty.map(record => ({ scroll: timelineScroll(record), kept })); },
                     (before) => dirty.forEach((record, index) => renderLiveCardTimeline(record, before[index])));
-                return true;
-            });
+                return reportActivity && ([...messagesDiv.children].some(node => node.classList.contains('chat-bubble') && !knownRows.has(node))
+                    || [...liveCardRecords].some(([id, record]) => {
+                        const before = knownCards.get(id);
+                        // Reconciliation can change liveness or placement of words already seen; that is no arrival.
+                        return record.root?.isConnected && (record.items.length > (before?.items || 0)
+                            || (!before?.projection || isoMicros(record.latestSourceTs) > isoMicros(before.source))
+                                && liveCardProjectionChanged(before?.projection || null, record));
+                    }));
+            }, { remoteContent: reportActivity });
         } finally {
             _historyRow = null;
             _historyReplayActive = false;
             _historyAppending = false;
             replayKeys = null; replaySelection = null;
         }
+        portals.refresh();
         syncChatStatus();
     }
 
@@ -3409,7 +3422,7 @@ export function createChatInstance({
     let wsHasConnectedOnce = false;
 
     onWs('open', (msg) => {
-        const openedVisit = visit;
+        const openedVisit = visit, readOnOpen = recentRequest;
         mainWaiting?.setConnected(true);
         refreshHeaderControlState();
         syncChatStatus();
@@ -3435,9 +3448,11 @@ export function createChatInstance({
             clearReloadParams();
         };
         loadUiPreferences()
-            // Reconnect refetches lost task_done; first open shares idle-gated hydration.
-            .then(() => (destroyed || openedVisit !== visit ? false : isReconnect ? syncHistory({ fromReconnect: true })
-                : waitForHydrationWindow().then(awaitInitialHydration)))
+            // A return's paint receipt may have read the newest page while preferences loaded (even a refused read
+            // counts). Share that work; a real reconnect still owes a read newer than any request it interrupted.
+            .then(() => (destroyed || openedVisit !== visit ? false
+                : msg?.resumed && recentRequest > readOnOpen ? historySyncPromise || historyPager.whenIdle()
+                : isReconnect ? syncHistory({ fromReconnect: true }) : waitForHydrationWindow().then(awaitInitialHydration)))
             .then(settled, settled);
     });
 
@@ -3463,6 +3478,7 @@ export function createChatInstance({
             return changed;
         });
         hostStart.forget();
+        portals.retire();
         hideTypingIndicatorOnly();
         syncChatStatus();
         syncHeaderControlState({ accounting: { available: false } });

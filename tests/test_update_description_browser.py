@@ -637,7 +637,9 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     ui, engine = letter_ui, letter_ui["engine"]
     output = diagnostic_directory(tmp_path, "update-description-away", publish=True)
     large = FIXTURE["large"]
-    short = "\n\n".join(FIXTURE["small"]["text"].split("\n\n")[:2])  # about five lines at the owner's width
+    # About four lines in the Updates page's column at the owner's width: with Dashboard's list beside the open page
+    # (PR #3369) that column is narrower than the whole content area the first two paragraphs were sized for.
+    short = FIXTURE["small"]["text"].split("\n\n")[0]
     current = {"status": _status(large, {**_letter(large, "ready"), "text": short})}
     sockets = []
 
@@ -729,8 +731,15 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     assert back["more"] is None and back["content"] <= back["height"] + 1, back
 
     # 6. A narrower window (or interface size) folds some of it: Read all comes, and goes at the owner's width again.
-    page.set_viewport_size({"width": 860, "height": OWNER_WINDOW["height"]})
+    # A phone's column folds it. There a Dashboard brought back by the sidebar may give its page up for its list (each
+    # showing resets the open page, dashboard.js onPageShown; only a row pressed in the visit keeps it); the owner then
+    # opens Updates from the list. Either way the letter is read on Updates.
+    page.set_viewport_size({"width": 320, "height": OWNER_WINDOW["height"]})
     page.evaluate(FRAMES)
+    if not page.locator("#dashboard-panel-updates").is_visible():
+        page.click('[data-dashboard-tab="updates"]')
+        page.wait_for_selector("#dashboard-panel-updates", state="visible")
+        page.evaluate(FRAMES)
     shot("04-short-narrow")
     narrow = letter("short-narrow")
     assert narrow["more"] == "Read all" and narrow["content"] > narrow["height"], narrow

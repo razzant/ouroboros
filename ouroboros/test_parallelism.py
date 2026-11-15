@@ -16,8 +16,9 @@ whole machine. Floor one; a run never waits for a free slot. It waits only while
 the macOS kernel confirms critical memory pressure (owner choice, 2026-11-14):
 ``reserve`` then holds neither the lock nor a row, says why with the reading's
 date, re-reads the machine every ``config.TEST_PROCESS_SAMPLE_SEC`` and reserves
-at the first reading that is not critical; the caller's interrupt (Ctrl-C, a
-task's Stop) ends the wait, and an unread verdict admits as before, said as unknown.
+at the first reading that is not critical; the caller's interrupt (Ctrl-C, a pooled
+task's Stop: its worker's kill) or its ``stop`` reader (an in-process turn's controls)
+ends the wait, and an unread verdict admits as before, said as unknown.
 Each ``scripts/run_tests.py`` pass reserves on its own, so a battery may wait at a
 pass boundary, never inside a running pass; the hermetic gate reserves once, before
 its first lane. A child with a parent allocation reads neither and never waits:
@@ -188,16 +189,20 @@ def _ledger_lock(directory: Optional[Path]):
 
 
 def reserve(command: str, cpu_workers: Optional[int] = None, *, env: Optional[Mapping[str, str]] = None,
-            slots=None, say: Optional[Callable[[str], None]] = None) -> tuple[Admission, "SlotLease"]:
+            slots=None, say: Optional[Callable[[str], None]] = None,
+            tell: Optional[Callable[[str], None]] = None,
+            stop: Optional[Callable[[], Optional[bool]]] = None) -> tuple[Admission, "SlotLease"]:
     """Admit this run's workers and publish its row as ONE reservation under the ledger lock: no other run's
     census, admission or write comes between this run's. ``slots`` maps the admission to the count the row
     holds, within the admitted workers (default: all of them; a one-process pass holds one, a Node lane its
     concurrency). A child with a parent allocation reads no ledger and holds no row.
 
     An admission that confirms critical pressure starts nothing: the lock is released with no row written,
-    ``say`` (default: stderr) tells the wait and its end with each reading's date, and the machine alone is
-    re-read outside the lock until a reading is not critical; the reservation then admits as usual and its
-    admission carries ``waited``."""
+    ``say`` (default: stderr) tells the wait and its end with each reading's date, ``tell`` the same two moments
+    in the owner's words (``OWNER_WAIT``), and the machine alone is re-read outside the lock until a reading is
+    not critical; the reservation then admits as usual and its admission carries ``waited``. ``stop``, read only
+    while it waits, ends the wait with ``WaitStopped`` when it answers True (an unknown ``None`` stops nothing):
+    nothing was admitted, leased or started."""
     env = os.environ if env is None else env
     say = say or (lambda text: print(text, file=sys.stderr, flush=True))
     directory = None if NESTED_WORKERS_ENV in env else _owned_ledger()
@@ -213,8 +218,16 @@ def reserve(command: str, cpu_workers: Optional[int] = None, *, env: Optional[Ma
         say(f"waiting to start: the kernel reports critical memory pressure (read {admitted.critical_at}); work "
             "already running continues; this run starts when a reading is no longer critical; Ctrl-C or Stop ends "
             "the wait")
-        ended = _until_not_critical()
+        if tell:
+            tell(OWNER_WAIT["waiting"])
+        try:
+            ended = _until_not_critical(stop)
+        except WaitStopped as stopped:
+            say(str(stopped))
+            raise
         say(WAIT_ENDED[ended[1]].format(at=ended[0], since=since))
+        if tell:
+            tell(OWNER_WAIT[ended[1]])
 
 
 # How a wait ended, said as such: only a read verdict is "no longer critical"; an unknown admits as it always did.
@@ -227,13 +240,30 @@ WAIT_ENDED = {
 }
 
 
-def _until_not_critical() -> tuple:
+# The same moments on an owner's progress line: what happens and what they can do; the readings stay in ``say``.
+OWNER_WAIT = {
+    "waiting": "waiting for memory: the computer is critically short of it. Running work continues; the tests "
+               "start by themselves once memory recovers. Stop ends the wait",
+    "not_critical": "starting: memory recovered",
+    "pressure_unknown": "starting as usual: memory pressure can no longer be read",
+    "memory_unknown": "starting as usual: memory can no longer be read",
+}
+
+
+class WaitStopped(Exception):
+    """A ``stop`` reader ended a wait for critical memory pressure: nothing was admitted, leased or started."""
+
+
+def _until_not_critical(stop: Optional[Callable[[], Optional[bool]]] = None) -> tuple:
     """Sleep a sample interval and re-read the machine until a reading is not critical: ``(its date, how)``, how a
-    ``WAIT_ENDED`` key (a read verdict, or an unknown one). No lock, row or child is held meanwhile."""
+    ``WAIT_ENDED`` key (a read verdict, or an unknown one). No lock, row or child is held meanwhile. ``stop`` is
+    read once a sample; True raises ``WaitStopped``."""
     from ouroboros import config
 
     while True:
         time.sleep(config.TEST_PROCESS_SAMPLE_SEC)
+        if stop is not None and stop() is True:
+            raise WaitStopped(f"a stop of this work ended the wait for memory (read {utc_now_iso()}); nothing started")
         memory = physical_memory()
         if memory is None or memory.pressure is not True:
             return utc_now_iso(), ("memory_unknown" if memory is None else

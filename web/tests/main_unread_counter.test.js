@@ -39,11 +39,12 @@ function liftLine(start) {
 // a room beyond the feed: pinned verbatim below and run here as the list runs it.
 const IS_UNREAD = '(row) => unreadCount(row.visible_revision, state.projectSeenRevision?.[row.id], readAheadFor(row.chat_id)) > 0';
 
-function harness({ revision = null, seen = null, loaded = true, page = 'files', project = null, answer = () => ({}) } = {}) {
+function harness({ revision = null, seen = null, loaded = true, page = 'files', project = null, answer = () => ({}),
+    view = readAhead } = {}) {
     const posts = [], badges = [], acks = [], landings = [];
     const moves = {};  // what Main's feed (#chat-messages) and its ↓ (#chat-scroll-bottom) listen to
     const context = vm.createContext({
-        ...readAhead,  // app.js imports these: a message read in full elsewhere (DESIGN "Unread")
+        ...view,  // app.js imports these: a message read in full elsewhere, the observer mode (DESIGN "Unread")
         state: { mainVisibleRevision: revision, mainSeenRevision: seen, mainSeenLoaded: loaded, activePage: page },
         navState: { activeProjectId: project },  // a Project open over Main (owner 06.11)
         updateUnreadBadge: () => badges.push(context.mainUnreadCount()),
@@ -64,6 +65,26 @@ function harness({ revision = null, seen = null, loaded = true, page = 'files', 
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+// A view opened with `?observer=1` (DESIGN "Unread"): its own instance of read_ahead.js, in the observer mode.
+async function observerView() {
+    const view = await import('../modules/read_ahead.js?observer-main');
+    view.captureObserverMode({ href: 'http://127.0.0.1:8765/?observer=1' }, { state: null, replaceState() {} });
+    return view;
+}
+
+test('an observer view writes no Main cursor, not even a first one; the revision stays offered', async () => {
+    const view = await observerView();
+    const first = harness({ revision: 161, seen: null, view, answer: (body) => ({ main_seen_revision: body.main_seen_revision }) });
+    first.api.observeMainRevision(161);
+    await flush();
+    assert.deepEqual(first.posts, []);
+    assert.equal(first.context.state.mainSeenRevision, null);
+    const held = harness({ revision: 5, seen: 2, view, answer: (body) => ({ main_seen_revision: body.main_seen_revision }) });
+    assert.equal(await held.api.markMainViewed(5), false);  // "still unread here", as a failed write answers
+    assert.deepEqual(held.posts, []);
+    assert.equal(held.context.state.mainSeenRevision, 2);
+});
 
 test("Main's number is its room revision less its read cursor; unknown counts none", () => {
     assert.equal(harness({ revision: 42, seen: 40 }).api.mainUnreadCount(), 2);
@@ -393,8 +414,9 @@ function pageHarness({ unread = 0, page = 'files', project = null } = {}) {
         // chat.js: `showLatest` goes to the present (with `arrive`, onto what came); `resume` is a return, as left.
         mainChat: { showLatest(options) { claims.push(options?.arrive === true ? 'land' : 'latest'); },
             resume(arrive) { claims.push(['resume', arrive]); }, closeTransient() {}, ws: { paused: page !== 'chat' } },
-        rooms: { suspend(room) { room.ws.paused = true; }, restore(room) { room.ws.paused = false; },
+        rooms: { suspend(room) { room.ws.paused = true; }, restore(room) { room.ws.paused = false; }, rememberSelection() {},
             forgetShownSelections(others, options) { context.forgottenSelections += 1; context.forgetOptions = options; } },
+        projectInstances: new Map(),
         forgottenSelections: 0,
         roomCoversMain: () => true,
         document: { hidden: false, querySelectorAll: () => [], getElementById: () => null },
@@ -429,6 +451,18 @@ test('Main shown from another page is a return: chat.js `resume` puts it as left
     await leaving.context.show('settings');
     assert.deepEqual(leaving.claims, [], 'another page shown while Main has news claims nothing for Main');
     assert.equal(leaving.context.mainChat.ws.paused, true, 'Main behind another page is away');
+});
+
+test('a Project over Main keeps its selection before the next page is shown and takes focus', async () => {
+    for (const [page, project, kept] of [['chat', 'p1', [['kept', 'p1'], ['shown', 'settings']]], ['files', null, [['shown', 'settings']]]]) {
+        const { context } = pageHarness({ page, project });
+        const order = [];
+        if (project) context.projectInstances.set(project, { id: project });
+        context.rooms.rememberSelection = (room) => { if (room) order.push(['kept', room.id]); };
+        context.window.dispatchEvent = (event) => order.push(['shown', event.detail?.page]);
+        await context.show('settings');
+        assert.deepEqual(order.slice(0, 2), kept, `from ${page}`);
+    }
 });
 
 test("Main pressed again while shown (its row) lands what came; read, under a Project, or for a task's place it does not", async () => {

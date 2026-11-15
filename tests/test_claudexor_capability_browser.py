@@ -24,8 +24,11 @@ pytestmark = [pytest.mark.ui_browser]
 
 
 def navigate(page, name):
-    if page.viewport_size["width"] <= 640:
-        page.locator(".page.active [data-mobile-nav-toggle]").click()
+    if page.viewport_size["width"] < 720:
+        toggle = page.locator(".page.active [data-mobile-nav-toggle]")
+        while not toggle.is_visible():
+            page.locator(".page.active > .app-page-header .shell-back:visible").click()
+        toggle.click()
     page.locator(f'#primary-sidebar [data-nav-page="{name}"]').click()
     page.locator(f"#page-{name}.active").wait_for()
 

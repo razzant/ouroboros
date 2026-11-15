@@ -920,6 +920,11 @@ def _replacement_waits(wid: int, slot: Any, reading: Any, ready_attempt: int = 1
         kept = last or (critical and ready_attempt > 1)
         if kept:
             slot.booting = slot.reaping = slot.retiring = False
+            # Kept as its replacement would start: without the settled task, whose retry may run
+            # elsewhere. A RUNNING row that still names this slot keeps it for the crash detector.
+            running = _pool().RUNNING.get(slot.busy_task_id) if slot.busy_task_id else None
+            if not (isinstance(running, dict) and running.get("worker_id") == wid):
+                slot.busy_task_id = None
     if not critical:
         return True
     if kept and getattr(slot, "replacement_pressure_held", False):

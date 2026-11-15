@@ -5,6 +5,7 @@ import pytest
 from ouroboros.test_evidence import diagnostic_directory
 
 from tests.settings_browser_helpers import open_settings
+from tests.test_subscription_setup_browser import status_answer
 
 pytest_plugins = ('tests.test_ui_smoke_playwright',)
 
@@ -48,10 +49,12 @@ def test_engine_facts_status_line_at_both_widths(direct_server_with_data, tmp_pa
                             'phase': 'verifying', 'completedPartitions': 2, 'totalPartitions': 3,
                             'processedBytes': 2**20, 'totalBytes': 2**21, 'currentPartition': 'project-fixture'}}
                     payload['reads']['accounts'] = 'failed'
+                    # The host serves its remembered roster with the remembered login policy.
+                    payload['profiles']['login_capable_harnesses'] = ['claude']
                     payload['facets'] = {'accounts': {'stale': True, 'observed_at': '2026-10-11T01:02:03Z',
                                                       'error': 'daemon_recovery_only'}}
                 page = browser.new_page(viewport={'width': width, 'height': 1000})
-                page.route('**/api/claudexor/status**', lambda route: route.fulfill(json=payload))
+                page.route('**/api/claudexor/status**', lambda route: status_answer(route, payload))
                 page.goto(direct_server_with_data['url'] + '/#settings', wait_until='domcontentloaded')
                 # The banner stands on a provider's page of Accounts and keys.
                 open_settings(page, 'accounts/claude')

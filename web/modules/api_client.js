@@ -611,7 +611,7 @@ export const apiClient = {
     exportI18nUrl: (language = '') => `/api/ui/i18n/export${language ? `?language=${encodeURIComponent(language)}` : ''}`,
     regenerateI18n: (payload = {}) => jsonPost('/api/ui/i18n/regenerate', payload),
     /** @returns {Promise<import('./api_types.js').DesktopAutostartResponse>} */
-    desktopAutostart: () => fetchJson('/api/desktop/autostart', { cache: 'no-store' }),
+    desktopAutostart: (init = {}) => fetchJson('/api/desktop/autostart', { cache: 'no-store', ...init }),
     /** @returns {Promise<import('./api_types.js').DesktopAutostartResponse>} */
     setDesktopAutostart: (enabled) => jsonPost('/api/desktop/autostart', { enabled: Boolean(enabled) }),
     /** @returns {Promise<import('./api_types.js').DesktopAutostartResponse>} */
@@ -664,7 +664,7 @@ export const apiClient = {
      * @returns {Promise<import('./api_types.js').ProviderTestResponse>}
      */
     providerTest: (payload) => jsonPost('/api/providers/test', payload),
-    extensions: () => fetchJson('/api/extensions', { cache: 'no-store' }),
+    extensions: (init = {}) => fetchJson('/api/extensions', { cache: 'no-store', ...init }),
     /**
      * Widgets page cards: live extension UI tabs projected from the loader
      * snapshot (no skill discovery), each stamped with the owning skill's
@@ -759,7 +759,7 @@ export const apiClient = {
      */
     cancelStorageFree: () => jsonPost('/api/storage/free/cancel', {}, STORAGE_READ),
     /** @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>} */
-    updateStatus: () => fetchJson('/api/update/status', { cache: 'no-store' }),
+    updateStatus: (init = {}) => fetchJson('/api/update/status', { cache: 'no-store', ...init }),
     /** @returns {Promise<import('./management_contract_types.js').UpdateStatusResponse>} */
     updateCheck: () => jsonPost('/api/update/check', {}),
     /** @returns {Promise<import('./api_types.js').UpdatePreflightResponse>} */

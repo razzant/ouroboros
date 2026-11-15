@@ -128,7 +128,7 @@ def install_exception_hooks() -> None:
     # The interpreter defaults only print the traceback raw; our record replaces
     # that print. Anything else installed earlier keeps running after ours.
     chain_thread = previous_thread_hook is not threading.__excepthook__
-    chain_sys = previous_sys_hook is not sys.__excepthook__
+    chain_sys = previous_sys_hook not in (sys.__excepthook__, _report_uncaught)
 
     def thread_hook(args: Any) -> None:
         name = getattr(args.thread, "name", None) or "unknown"
@@ -149,6 +149,15 @@ def install_exception_hooks() -> None:
     sys_hook._ouroboros_hook = True  # type: ignore[attr-defined]
     threading.excepthook = thread_hook
     sys.excepthook = sys_hook
+
+
+def _report_uncaught(exc_type: Any, exc_value: Any, exc_traceback: Any) -> None:
+    """``sys.excepthook`` of a relayed process until logging's: the interpreter's print, then, on the main thread,
+    the handover. There an uncaught report precedes the process's end, which can be ``os._exit`` with no exit hook
+    (a forkserver child whose preload failed: ``multiprocessing.forkserver.main``)."""
+    sys.__excepthook__(exc_type, exc_value, exc_traceback)
+    if threading.current_thread() is threading.main_thread():
+        finish_output_relay()
 
 
 def _log_uncaught(message: str, exc_info: Any) -> bool:
@@ -337,9 +346,9 @@ def _install_output_relay(max_bytes: int = OUTPUT_RELAY_MAX_BYTES, *, start_thre
     text they still buffer from before is flushed by the relay's thread ahead of anything relayed,
     so installing never writes to the pipe itself.
 
-    ``start_thread=False`` protects a multiprocessing main-module preload without
-    making the forkserver multithreaded: output queues until worker logging starts,
-    or its ordinary crash tail is lost if the preload itself fails.
+    ``start_thread=False`` keeps the forkserver's preload thread-free (``preloading_forkserver``):
+    output queues until a forked child's logging starts its own relay, or until the forkserver's
+    exit starts the writer for the handover (``_OutputRelay.finish``), since nothing forks after it.
     """
     global _relay
     if _relay is not None:
@@ -377,12 +386,27 @@ def _install_output_relay(max_bytes: int = OUTPUT_RELAY_MAX_BYTES, *, start_thre
     # An interpreter exit runs both hooks: the first before non-daemon threads are joined, the second after.
     # A pool child's end runs the first only (multiprocessing's ``_bootstrap`` calls ``threading._shutdown``
     # after printing an uncaught traceback, then fork and forkserver children leave by ``os._exit``).
+    if sys.excepthook is sys.__excepthook__:
+        sys.excepthook = _report_uncaught
     atexit.register(finish_output_relay)
     with contextlib.suppress(AttributeError, RuntimeError):
         threading._register_atexit(finish_output_relay)  # type: ignore[attr-defined]
     with _relay.cond:
         _relay.start()
     return True
+
+
+def preloading_forkserver() -> bool:
+    """Whether the caller runs in the forkserver's own preload (``multiprocessing.forkserver.main``): that
+    process forks every pool child, so a thread there would be copied mid-state. A spawned child imports the
+    same main module as ``__mp_main__`` from ``spawn._main``, and a child the forkserver forked (``_serve_one``)
+    may import it too (Python before 3.13 never passes the forkserver its main path): both may start threads."""
+    forkserver = sys.modules.get("multiprocessing.forkserver")
+    main, child = (getattr(getattr(forkserver, name, None), "__code__", None) for name in ("main", "_serve_one"))
+    frame = sys._getframe(1) if main is not None else None
+    while frame is not None and frame.f_code is not main and frame.f_code is not child:
+        frame = frame.f_back
+    return frame is not None and frame.f_code is main
 
 
 def finish_output_relay(stop_deadline: float | None = None) -> None:
@@ -527,7 +551,8 @@ class _OutputRelay:
     ``[output gap: ...]`` line at that position once the reader takes it. The thread writes at most
     ``select.PIPE_BUF`` bytes at a time (512 on Windows), ending on a line when one fits, so a line that short
     reaches the reader whole beside the pipe's other writers, as a line-buffered stream's did.
-    EPIPE (the launcher gone) closes the output and later output is dropped. The thread never
+    EPIPE (the launcher gone) closes the output and later output is dropped; EAGAIN (another holder made
+    the shared pipe description nonblocking) waits for room as a blocking write would. The thread never
     logs, since a record would come back through its own queue. Should it end any other way,
     it writes one line saying so and this process's later output to these streams is dropped:
     the plain streams write to the same pipe, so falling back to them would bring the wait back.
@@ -552,6 +577,7 @@ class _OutputRelay:
         self.thread: threading.Thread | None = None
         self.allow_thread = True
         self.finish_deadline: float | None = None
+        self.full_pause = 0.0  # the writer's pause after a refused write, grown while the output stays full
 
     def for_child(self) -> "_OutputRelay":
         return _OutputRelay(self.output, self.max_bytes, self.handover_sec, output_open=self.output_open,
@@ -591,10 +617,15 @@ class _OutputRelay:
         """Hand over this tail within one absolute grace, shared by repeated exit hooks.
 
         No-progress intervals cannot distinguish a stopped reader from one awaiting
-        CPU. Only the close's deadline ends a healthy reader's handover early.
+        CPU. Only the close's deadline ends a healthy reader's handover early. A writer
+        withheld until now (a forkserver's preload) starts here: no fork follows an exit.
         """
         with self.cond:
-            if self.thread is None or self.owner != os.getpid():
+            if self.owner != os.getpid():
+                return
+            self.allow_thread = True
+            self.start()
+            if self.thread is None:  # refused (an exhausted process): the queue is the exit's loss
                 return
             self.finish_deadline = min(deadline, self.finish_deadline or deadline)
             in_flight_gap = 1 if self.pending and not self.pending_is_output else 0
@@ -626,6 +657,10 @@ class _OutputRelay:
                         piece = piece[:bytes(piece).rfind(b"\n") + 1] or piece
                 try:
                     written = os.write(self.output, piece)  # may wait for the reader; no lock held
+                    self.full_pause = 0.0
+                except BlockingIOError:  # EAGAIN: a nonblocking description is full, never a gone reader
+                    written = 0
+                    self._await_room()
                 except OSError:
                     written = -1
                 with self.cond:
@@ -651,6 +686,19 @@ class _OutputRelay:
                     os.write(self.output, line[:getattr(select, "PIPE_BUF", 512)])  # only this thread waits; no lock held
                 except OSError:
                     pass
+
+    def _await_room(self) -> None:
+        """Wait, holding no lock, for the room a blocking write would have waited for: ``poll`` for POLLOUT, then a
+        pause grown on each refusal in a row up to one second, since POLLOUT can show less room than a whole piece
+        needs (and Windows polls no pipe). A gone reader wakes it, and its next write meets EPIPE."""
+        try:
+            poller = select.poll()
+            poller.register(self.output, select.POLLOUT)
+            poller.poll()
+        except (AttributeError, OSError, ValueError):
+            pass
+        self.full_pause = min(1.0, max(0.01, self.full_pause * 2))
+        time.sleep(self.full_pause)
 
     def _take(self) -> None:
         item = self.queue.popleft()

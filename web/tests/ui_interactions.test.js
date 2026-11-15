@@ -80,7 +80,7 @@ function environment() {
         getComputedStyle: (node) => ({ visibility: node.visibility || 'visible',
             scrollPaddingInlineStart: node.scrollPadding || '0px', scrollPaddingInlineEnd: node.scrollPadding || '0px',
             scrollPaddingTop: node.scrollPadding || '0px', scrollPaddingBottom: node.scrollPadding || '0px',
-            overflowY: node.overflowY || 'visible' }),
+            overflowY: node.overflowY || 'visible', getPropertyValue: name => name === '--scroll-fade-edge' ? '32px' : '' }),
     });
     doc.body = new Node(doc, 'body');
     doc.activeElement = doc.body;
@@ -263,16 +263,19 @@ test('a vertical list brings the chosen row into view inside its own scroller, n
     const controller = bindTabStrip(strip, { dataAttr: 'data-view' });
     tabs[0].focus();
     // End chooses the last row, below the rail's visible edge (160): the rail scrolls by what it lacks and the edge
-    // fade's clearance (24, so the row is not dimmed under the fade), the page not.
+    // fade's clearance (32, so the row is not dimmed under the fade), the page not.
     strip.emit('keydown', { target: tabs[0], key: 'End' });
     assert.equal(doc.activeElement, tabs[2]);
-    assert.deepEqual([rail.scrollTop, page.scrollTop, strip.scrollLeft ?? 0], [144, 0, 0]);
+    assert.deepEqual([rail.scrollTop, page.scrollTop, strip.scrollLeft ?? 0], [152, 0, 0]);
     // A row already in view moves nothing; one above the top edge comes back to it, the same clearance inside it.
-    tabs.forEach((tab, i) => { tab.rect = { left: 0, right: 200, top: -50 + i * 100, bottom: -10 + i * 100 }; });
+    tabs.forEach((tab, i) => { tab.rect = { left: 0, right: 200, top: -20 + i * 100, bottom: 20 + i * 100 }; });
     strip.emit('keydown', { target: tabs[2], key: 'ArrowUp' });
-    assert.equal(rail.scrollTop, 144, 'the second row stands in view');
+    assert.equal(rail.scrollTop, 152, 'the second row stands clear of both fades');
+    tabs[1].rect = { top: 50, bottom: 90 };
+    controller.select('two');
+    assert.equal(rail.scrollTop, 130, 'a geometrically visible row under the top fade comes clear');
     strip.emit('keydown', { target: tabs[1], key: 'ArrowUp' });
-    assert.deepEqual([rail.scrollTop, page.scrollTop], [30, 0]);
+    assert.deepEqual([rail.scrollTop, page.scrollTop], [38, 0]);
     controller.destroy();
 });
 
@@ -484,6 +487,50 @@ test('listbox positioning follows its input without claiming keyboard, ARIA or f
     binding.reposition();
     assert.equal(popup.css.get('--ui-popup-top'), '84px');
     assert.equal(doc.defaultView.listenerCount(), 0);
+});
+
+test('a chooser clears its whole field above or below and stays in its scroller', () => {
+    const { doc, node } = environment();
+    doc.defaultView.innerHeight = 800;
+    const scroller = node('section');
+    Object.assign(scroller, { overflowY: 'auto', scrollHeight: 1200, clientHeight: 400, scrollTop: 0 });
+    scroller.rect = { top: 100, bottom: 500, left: 0, right: 320 };
+    const field = node('label'), input = node('input'), popup = node('div');
+    field.rect = { top: 430, bottom: 490, left: 28, right: 268, width: 240, height: 60 };
+    input.rect = { ...field.rect, top: 450, height: 40 };
+    popup.rect = { width: 240, height: 100 };
+    field.append(input); scroller.append(field); doc.body.append(scroller, popup);
+    const binding = bindPopoverPosition(popup, { anchor: input, field });
+    assert.equal(popup.css.get('--ui-popup-top'), '326px', 'above the label, with a four-pixel gap');
+    assert.equal(scroller.scrollTop, 0, 'enough room above: the reading place stays');
+    field.rect.top = 120; field.rect.bottom = 180;
+    input.rect.top = 140; input.rect.bottom = 180;
+    binding.reposition();
+    assert.equal(popup.css.get('--ui-popup-top'), '184px');
+    assert.equal(popup.css.get('--ui-popup-max-height'), '308px', 'the page ends at 500, even in an 800px window');
+    scroller.rect.left = 20; scroller.rect.right = 290;
+    binding.reposition();
+    assert.equal(popup.css.get('--ui-popup-max-width'), '254px', 'the scroller bounds the horizontal box too');
+    binding.destroy();
+});
+
+test('a chooser with neither side free scrolls its field into room before placing the popup', () => {
+    const { doc, node } = environment();
+    doc.defaultView.innerHeight = 600;
+    const scroller = node('section');
+    Object.assign(scroller, { overflowY: 'auto', scrollHeight: 1000, clientHeight: 400, scrollTop: 200 });
+    scroller.rect = { top: 100, bottom: 500, left: 0, right: 320 };
+    const field = node('label'), input = node('input'), popup = node('div');
+    field.getBoundingClientRect = () => ({ top: 460 - scroller.scrollTop, bottom: 520 - scroller.scrollTop, height: 60 });
+    input.getBoundingClientRect = () => ({ ...field.getBoundingClientRect(), left: 28, right: 268, width: 240 });
+    popup.rect = { width: 240, height: 220 };
+    field.append(input); scroller.append(field); doc.body.append(scroller, popup); input.focus();
+    const binding = bindPopoverPosition(popup, { anchor: input, field });
+    assert.equal(scroller.scrollTop, 252);
+    assert.equal(popup.css.get('--ui-popup-top'), '272px');
+    assert.equal(popup.css.get('--ui-popup-max-height'), '220px');
+    assert.equal(doc.activeElement, input);
+    binding.destroy();
 });
 
 test('popup uses visual viewport bounds and point coordinates without an input owner', () => {

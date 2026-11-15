@@ -224,7 +224,7 @@ def test_a_pass_sized_by_its_workers_is_built_from_the_one_admission_it_reserved
         100 * 1024 ** 3, 100 * 1024 ** 3, not state["cleared"]))
     monkeypatch.setattr(test_parallelism, "other_runs", lambda: test_parallelism.HostRuns(7 * state["cleared"]))
 
-    def until_not_critical():  # meanwhile pressure clears and another run reserves seven slots
+    def until_not_critical(stop=None):  # meanwhile pressure clears and another run reserves seven slots
         state["cleared"] = True
         return "2026-11-15T00:00:00Z", "not_critical"
 

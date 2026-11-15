@@ -20,7 +20,7 @@ from ouroboros.model_slots import (
 )
 from ouroboros.provider_models import compatible_endpoint_configured, parse_claudexor_model, provider_for_model
 from ouroboros.provider_connections import configured_connections, connection_rows, normalize_connections
-from ouroboros.gateway.secret_rows import mask_connections, rehydrate_connections
+from ouroboros.gateway.secret_rows import mask_connections, rehydrate_connections, typed_connection_secrets
 from ouroboros.settings_integrity import operator_variables, skill_environ
 
 
@@ -574,6 +574,49 @@ def wizard_authors_safety_light() -> bool:
     return not SETTINGS_PATH.exists()
 
 
+def draft_access(data: dict, current_settings: dict) -> Tuple[Any, Dict[str, str], set, str | None]:
+    """A setup draft's access as it would be saved: its connection rows and its provider fields, every kept
+    secret restored from ``current_settings`` (an untouched field posts back its marker; a row keeps its secret by
+    kind and name). ``(connections, keys, typed, error)``: what the validator below prepares and what the draft's
+    own catalog read asks the providers with (``gateway/onboarding.api_onboarding_model_catalog``); ``typed`` is
+    the secrets this draft carries as text its author typed, never a restored one."""
+    secret_keys = secret_provider_setting_keys()
+    keys: Dict[str, str] = {}
+    typed: set = set()
+    connections = current_settings.get("OUROBOROS_CONNECTIONS", [])
+    if "OUROBOROS_CONNECTIONS" in data:
+        connections, error = normalize_connections(data["OUROBOROS_CONNECTIONS"])
+        if error:
+            return [], {}, typed, error
+        typed |= typed_connection_secrets(connections)
+        try:
+            connections = rehydrate_connections(connections, current_settings.get("OUROBOROS_CONNECTIONS"))
+        except ValueError as exc:
+            return [], {}, typed, str(exc)
+    for field in _PROVIDER_FIELDS:
+        setting_key = field["settingKey"]
+        raw_value = data.get(setting_key)
+        if raw_value is not None and not isinstance(raw_value, str):
+            # A JSON object/array/number here is a malformed API post, never a
+            # credential: str()-ing it would persist unusable garbage as a
+            # "successful" setup. Honest rejection over silent stringification.
+            return [], {}, typed, f"{field['label']} must be a text value."
+        value = _string(raw_value)
+        # An untouched credential field posts back the marker it was prefilled
+        # with. It means "keep the stored secret" and NEVER "store this string":
+        # resolving it to the stored value here — before the length check, the
+        # has-remote gate and the prepared merge — is what keeps the marker out
+        # of settings.json on every host, since every save path (the atomic
+        # completion endpoint, the desktop bridge) shares this validator. With
+        # nothing stored the marker resolves to empty, so it cannot become a key.
+        if setting_key in secret_keys and _is_secret_placeholder(value):
+            value = _string(current_settings.get(setting_key))
+        elif setting_key in secret_keys and value:
+            typed.add(value)
+        keys[setting_key] = value
+    return connections, keys, typed, None
+
+
 def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, str | None]:
     """Structural validation shared by the desktop and web wizard.
 
@@ -594,36 +637,9 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
             parse_claudexor_model(_string(data.get("OUROBOROS_MODEL")))
         except ValueError as exc:
             return {}, str(exc)
-    secret_keys = secret_provider_setting_keys()
-    keys: Dict[str, str] = {}
-    connections = current_settings.get("OUROBOROS_CONNECTIONS", [])
-    if "OUROBOROS_CONNECTIONS" in data:
-        connections, error = normalize_connections(data["OUROBOROS_CONNECTIONS"])
-        if error:
-            return {}, error
-        try:
-            connections = rehydrate_connections(connections, current_settings.get("OUROBOROS_CONNECTIONS"))
-        except ValueError as exc:
-            return {}, str(exc)
-    for field in _PROVIDER_FIELDS:
-        setting_key = field["settingKey"]
-        raw_value = data.get(setting_key)
-        if raw_value is not None and not isinstance(raw_value, str):
-            # A JSON object/array/number here is a malformed API post, never a
-            # credential: str()-ing it would persist unusable garbage as a
-            # "successful" setup. Honest rejection over silent stringification.
-            return {}, f"{field['label']} must be a text value."
-        value = _string(raw_value)
-        # An untouched credential field posts back the marker it was prefilled
-        # with. It means "keep the stored secret" and NEVER "store this string":
-        # resolving it to the stored value here — before the length check, the
-        # has-remote gate and the prepared merge — is what keeps the marker out
-        # of settings.json on every host, since every save path (the atomic
-        # completion endpoint, the desktop bridge) shares this validator. With
-        # nothing stored the marker resolves to empty, so it cannot become a key.
-        if setting_key in secret_keys and _is_secret_placeholder(value):
-            value = _string(current_settings.get(setting_key))
-        keys[setting_key] = value
+    connections, keys, _typed, error = draft_access(data, current_settings)
+    if error:
+        return {}, error
     local_source = _string(data.get("LOCAL_MODEL_SOURCE"))
     local_filename = _string(data.get("LOCAL_MODEL_FILENAME"))
     local_chat_format = _string(data.get("LOCAL_MODEL_CHAT_FORMAT"))

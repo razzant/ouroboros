@@ -8,7 +8,7 @@ The commit gate stays reproducible and candidate-independent; ARCHITECTURE §8 o
 
 ### Pytest marker lanes
 
-Default local pytest excludes seven costly or environment-dependent lanes — `integration`, `browser`, `ui_browser`, `ui_browser_docker`, `portable_detail`, `skill_smoke` and `size_ratchet` (`pyproject.toml` `addopts`, mirrored by `LANE_EXCLUSION_EXPR`) — and CI opts into each explicitly (job topology and provider matrix: ARCHITECTURE §8 "CI topology"):
+Default local pytest excludes the seven costly or environment-dependent lanes named below (`pyproject.toml` `addopts`, mirrored by `LANE_EXCLUSION_EXPR`), and CI opts into each explicitly (job topology and provider matrix: ARCHITECTURE §8 "CI topology"):
 
 - `integration` runs real provider checks. Split manual/tag jobs by `credential_required`, never waive a mixed pytest exit: optional failures stay red outside release dependencies; required missing credentials fail; quota/429/5xx/timeout stay inconclusive, contract/auth/model/reasoning/tool 4xx red. `provider_release_floor.py` blocks official tags unless every required canary passed. No provider secrets in PRs. Keyless `tests/system_e2e/` lanes and markers: ARCHITECTURE §8.
 - `browser` / `ui_browser` / `ui_browser_docker` launch real Playwright engines (agent browser tools / the host UI / the `ouroboros-web:test` container; the docker lane skips without Docker). The marker owns what a lane collects; UI page errors: `PageErrors` (`tests/ui_console_errors.py`), strict until declared. `portable_detail`: build and portable artifact invariants. Manual/tag `ui-smoke` runs the complete `ui_browser` lane (required invocation: "Safe local verification" below). None needs a paid provider.
@@ -65,7 +65,7 @@ OUROBOROS_RUN_UI_SMOKE=1 OUROBOROS_EXPECT_BROWSER_ENGINES=chromium,webkit \
 
 `tests/candidate_checkout.py`: byte-faithful dirty capture, refusals, boot verification. `origin_proof=True` binds served static/Python by sentinel/VERSION suffix; installed distributions refuse. `ui_candidate_checkout` owns one copy/session; `direct_server_with_data` isolates case data/processes/ports/sockets (`owned_process_temp`); `case_checkout` verifies source/copy and restores overlays after proven teardown.
 
-`scripts/claudexor_lifecycle_smoke.py` witnesses real-engine custody under `python -I -S scripts/safe_test.py -- <python> scripts/claudexor_lifecycle_smoke.py`. No credentials or vendor task needed; it stops its daemon children and keeps temporary roots. Only its fake-harness catalog is substituted (production excludes fakes); admission and custody are production.
+`scripts/claudexor_lifecycle_smoke.py` (custody) and `scripts/claudexor_quit_witness.py --evidence-dir D [--handle-exe H]` (only Quit frees home and project; base: `--expect hold`) run a real engine under `python -I -S scripts/safe_test.py -- <python> <script>`, credential-free; daemons stop, and a clean witness PASS alone removes its temp root (`cleanup.temp_root`). Substituted only: fake harnesses, the witness's stub and Restart seams.
 
 ### Reading CI failure evidence
 

@@ -11,7 +11,7 @@ import { bindModelChooser, matchingModelOptions, modelChooserHtml, modelOptions,
 import { createModelList } from '../modules/model_list.js';
 import { createModelRolesEditor } from '../modules/model_roles.js';
 import { applyPayload, CODE_PREFIX, setMissTransport } from '../modules/i18n.js';
-import { catalogModelOptions, priceWords, routeModelInputHtml } from '../modules/route_editor_primitives.js';
+import { cacheWriteWords, catalogModelOptions, priceWords, routeModelInputHtml } from '../modules/route_editor_primitives.js';
 import { ElementStub } from './chat_dom_fixture.js';
 import { appendHtml, domDouble } from './dom_double.js';
 
@@ -117,12 +117,12 @@ test('under a role: an OpenRouter model says its price per 1M tokens; every othe
     const sources = [{ id: 'codex', label: 'Codex', credentialHarness: 'codex' }];
     const codex = { provider_id: 'claudexor', source_id: 'codex', id: 'gpt-6-astra', name: 'gpt-6-astra', value: 'claudexor::codex=gpt-6-astra' };
     const editor = createModelRolesEditor({ hostId: 'roles', doc, showContext: false, store: { snapshot: {}, accountsKnown: false },
-        catalogFetch: async () => ({ items: [codex], model_sources: sources }) });
+        catalogFetch: async () => ({ items: [{ ...codex, max_context_window: 400000 }], model_sources: sources }) });
     editor.load({ OPENROUTER_API_KEY: 'k', OPENAI_API_KEY: 'k', OUROBOROS_MODEL: OPUS.value,
         OUROBOROS_MODEL_LIGHT: codex.value, OUROBOROS_MODEL_CONSCIOUSNESS: 'x-ai/grok-4.7',
         OUROBOROS_MODEL_FALLBACKS: `openai::gpt-6, openrouter@gone::${OPUS.value}` }, contract);
     editor.adoptCatalog({ model_sources: sources, items: [OPUS, codex,
-        { provider_id: 'openrouter', id: 'x-ai/grok-4.7', value: 'x-ai/grok-4.7', name: 'xAI: Grok 4.7' },
+        { provider_id: 'openrouter', id: 'x-ai/grok-4.7', value: 'x-ai/grok-4.7', name: 'xAI: Grok 4.7', context_window: 2000000 },
         // OpenRouter lists the very id the direct key below names, with a price; the key's own row states none.
         { provider_id: 'openrouter', id: 'gpt-6', value: 'gpt-6', name: 'gpt-6', price: { input: 1.25, output: 10 } },
         { provider_id: 'openai', id: 'gpt-6', value: 'openai::gpt-6', name: 'gpt-6' },
@@ -131,10 +131,16 @@ test('under a role: an OpenRouter model says its price per 1M tokens; every othe
     const said = (group) => host.querySelectorAll(`[data-model-role-group="${group}"] [data-model-role-status]`)
         .map((node) => node.textContent);
     assert.deepEqual(said('main'), ['$4 in / $20 out per 1M tokens']);
-    assert.deepEqual(said('light'), ['Uses your subscription. No API key required.']);
+    assert.deepEqual(said('light'), ['Uses your subscription. No API key required. 400K window.'], 'the window its account\'s catalog states');
     assert.deepEqual(said('vision'), ['Uses Main.']);
     assert.deepEqual(said('safety'), ['Uses Light.']);
-    assert.deepEqual(said('consciousness'), ['Price unknown'], 'an OpenRouter model whose catalog states no price');
+    assert.deepEqual(said('consciousness'), ['Price unknown · 2M window'],
+        'an OpenRouter model whose catalog states no price; the window its catalog publishes stands beside it');
+    // A window is said beside how the model is paid, never invented: the catalog's, in the model list's words.
+    editor.adoptCatalog({ model_sources: sources, items: [{ ...OPUS, context_window: 1000000 }, codex] });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(said('main'), ['$4 in / $20 out per 1M tokens · 1M window']);
+    assert.deepEqual(said('safety'), ['Uses Light.'], 'an empty slot names what it follows, no window of its own');
     const [direct, gone] = said('fallback');
     assert.equal(direct, 'Price unknown', 'a direct key names no price of its own, though OpenRouter prices the same id');
     assert.match(gone, /Accounts/, 'a key that cannot send says so first');
@@ -300,6 +306,20 @@ test('the capsule strip and the Change Main sheet say the price where "paid by k
     assert.equal(routeFacts(said), 'OpenRouter · $4 in / $20 out');
     assert.equal(said.facts, 'OpenRouter · $4 in / $20 out');
     assert.equal(routeFacts(describeRoute(index, { model: 'z-ai/glm-5.3' })), 'OpenRouter · paid by key');
+    // The sheet's cache-write price (composer_model.test.js) is the catalog's own figure for the install's cache tier
+    // (`price.cache_write`, chosen and stamped with its tier by the server): said as stated, never derived from the
+    // input price, and not said where the catalog states none, where the figure would print as zero, where the settings
+    // name another tier than the figure's (or none), or where another processing tier prices the call.
+    assert.equal(said.cacheWrite, '');
+    const cached = { ...OPUS, price: { ...OPUS.price, cache_write: 6.4, cache_write_ttl: '1h' } };
+    const sheet = (options) => describeRoute(buildModelIndex({ catalog: { items: [cached] }, ...options }), { model: OPUS.value }).cacheWrite;
+    assert.equal(sheet({ cacheTier: '1h' }), 'Cache write: $6.40 per 1M tokens.');
+    assert.deepEqual([sheet({ cacheTier: '5m' }), sheet({ cacheTier: 'default' }), sheet({}), sheet({ cacheTier: '1h', tierPriced: true })],
+        ['', '', '', '']);
+    for (const none of [undefined, {}, { cache_write: 0, cache_write_ttl: '1h' }, { cache_write: 0.00001, cache_write_ttl: '1h' },
+        { cache_write: -1, cache_write_ttl: '1h' }, { cache_write: '6.4', cache_write_ttl: '1h' }, { cache_write: 6.4 }]) {
+        assert.equal(cacheWriteWords(none, '1h'), '', JSON.stringify(none));
+    }
 });
 
 test('a stale account pin left from a subscription never hides an OpenRouter role price', async () => {
@@ -331,17 +351,24 @@ test('a language change says the price under a role again, in the new language',
     }
 });
 
-test('the Agents editor paints again for another language: its prices are composed words', async () => {
+test('the Agents editor paints again for another language, and for its dictionary arriving: its prices are composed words', async () => {
     const { availableSubagentsRenderSignature } = await import('../modules/subagents_settings.js');
     const state = { loaded: true, setting: { items: [] } };
-    const english = availableSubagentsRenderSignature(state, 0);
-    applyPayload({ language: 'ru', english: false, revision: 61, entries: {} });
+    const paint = () => availableSubagentsRenderSignature(state, 0);
+    applyPayload({ language: '', english: true, revision: 60, entries: {} });
+    const english = paint();
     try {
-        assert.notEqual(availableSubagentsRenderSignature(state, 0), english);
+        applyPayload({ language: 'ru', english: false, revision: 60, entries: {} });
+        const bare = paint();
+        assert.notEqual(bare, english, 'another language');
+        // The same language, its dictionary read again (a later revision): the composed words may read differently.
+        applyPayload({ language: 'ru', english: false, revision: 61, entries: {
+            '{input} in / {output} out per 1M tokens': { text: '{input} вход / {output} выход за 1 млн токенов' } } });
+        assert.notEqual(paint(), bare, 'the dictionary arrived');
     } finally {
-        applyPayload({ language: '', english: true, revision: 62, entries: {} });
+        applyPayload({ language: '', english: true, revision: 60, entries: {} });
     }
-    assert.equal(availableSubagentsRenderSignature(state, 0), english);
+    assert.equal(paint(), english, 'the same language and dictionary: nothing to paint again');
 });
 
 test('while Main or the default tier is on Fast or Economy the composer list names no catalog price; on Standard it does', async () => {
@@ -360,6 +387,48 @@ test('while Main or the default tier is on Fast or Economy the composer list nam
     assert.equal(await shown({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"economy"}' }), '');
     // The list serves Main and its rooms alike: a room's new work, a lead, would pay the default tier's price.
     assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'fast', OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'standard' } }), '');
+});
+
+test('a local role says the local model\'s window, never the window of a cloud id its slot still holds', async () => {
+    const wide = { ...OPUS, context_window: 1000000 };
+    const local = { provider_id: 'local', id: 'qwen.gguf', value: 'qwen.gguf (local)', name: 'qwen.gguf', use_local: true, context_window: 64000 };
+    const said = async (settings, items) => {
+        const { editor, host } = await mainRole(settings);
+        editor.adoptCatalog({ model_sources: [], items });
+        await new Promise((resolve) => setImmediate(resolve));
+        const text = host.querySelector('[data-model-role-group="main"] [data-model-role-status]').textContent;
+        editor.destroy();
+        return text;
+    };
+    assert.equal(await said({ USE_LOCAL_MAIN: true }, [wide, local]), 'Uses the local runtime. 64K window.');
+    assert.equal(await said({ USE_LOCAL_MAIN: true }, [wide]), 'Uses the local runtime.', 'no local row: no window is claimed');
+    assert.equal(await said({}, [wide, local]), '$4 in / $20 out per 1M tokens · 1M window', 'the same slot on its cloud route');
+});
+
+test('the window a route is sized with is said before the one its catalog publishes', async () => {
+    const { apiClient } = await import('../modules/api_client.js');
+    const { contract } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url), 'utf8'));
+    const { doc } = domDouble();
+    const host = doc.createElement('div');
+    host.id = 'roles';
+    doc.body.append(host);
+    Object.defineProperty(host, 'innerHTML', { set(html) { host.replaceChildren(); appendHtml(host, html); }, get: () => '' });
+    const preview = apiClient.responseLimitPreview;
+    apiClient.responseLimitPreview = async () => ({ route: { model: OPUS.value }, window_ack: false,
+        response_limit: { route_fp: 'fp', max_output_tokens: 0, source: 'auto' }, window: { tokens: 400000, source: 'provider_metadata' } });
+    try {
+        const editor = createModelRolesEditor({ hostId: 'roles', doc, showContext: true,
+            store: { snapshot: {}, accountsKnown: false, subscribe: () => () => {}, refresh: async () => {}, read: async () => {} },
+            catalogFetch: async () => ({ items: [], model_sources: [] }) });
+        editor.load({ OPENROUTER_API_KEY: 'k', OUROBOROS_MODEL: OPUS.value }, contract);
+        editor.adoptCatalog({ model_sources: [], items: [{ ...OPUS, context_window: 1000000 }] });
+        for (let turn = 0; turn < 6; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(host.querySelector('[data-model-role-group="main"] [data-model-role-status]').textContent,
+            '$4 in / $20 out per 1M tokens · 400K window');
+        editor.destroy();
+    } finally {
+        apiClient.responseLimitPreview = preview;
+    }
 });
 
 test('a role on a model stored with its local label says it runs locally, never Price unknown', async () => {

@@ -183,6 +183,7 @@
  * @property {boolean} ok
  * @property {Object} model_settings  // the model setting keys the draft would save
  * @property {AvailableSubagentsSetting} available_subagents
+ * @property {string[]} known_spend_gaps  // what the draft's limits cannot count, as GET /api/settings names it after a save
  * @property {string} source
  * @property {Object[]} diagnostics
  */
@@ -421,6 +422,8 @@
  * @property {Object=} task_contract
  * @property {string=} reason_code
  * @property {Object=} cancel_origin The typed stop an owner-stopped turn's final carries (source, stop_policy).
+ * @property {Object=} finalization_recovery An adopted answer's custody (cause, answer, delivery_id), read by the status fold.
+ * @property {string=} terminal_origin Who authored the terminal text: model_final or a host origin.
  * @property {string[]=} delegated_runs_unreconciled The row's current custody debt beside its cause (#1583).
  * @property {Object=} review_status
  * @property {Object=} review_projection
@@ -1238,13 +1241,14 @@
  * read as "no account connected" while real accounts sat in the agent home.
  * "ok" — read, the matching collection is AUTHORITATIVE (empty means empty);
  * "not_read" — never asked: no daemon, or discovery/handshake died before the
- * fan-out (which leaves every facet untouched); "failed" — asked, and no
+ * fan-out (which leaves every facet untouched); or an answer the host discarded as
+ * older than a confirmed account write or a newer held read; "failed" — asked, and no
  * usable answer came back (refused, or a body in the wrong shape).
  * Facets are independent: one fanned-out read can fail while its siblings land.
  * @typedef {"ok"|"not_read"|"failed"} ClaudexorReadState
  */
 /**
- * Independent facets: ok=authoritative, not_read=never asked, failed=no usable answer. Empty without ok proves nothing.
+ * Independent facets: ok=authoritative, not_read=never asked or discarded, failed=no usable answer. Empty without ok proves nothing.
  * @typedef {Object} ClaudexorStatusReads
  * @property {ClaudexorReadState} catalog
  * @property {ClaudexorReadState} accounts
@@ -1281,7 +1285,7 @@
  * @property {Object=} daemon
  * @property {string=} config_dir
  * @property {Array<Object>=} harnesses
- * @property {Object=} profiles
+ * @property {Object=} profiles Full Accounts adds login_capable_harnesses (string[]|null); manifest eligibility, null retains unread-manifest fail-open.
  * @property {Array<Object>=} quota
  * @property {Array<Object>=} quota_absences
  * @property {Array<Object>=} resources Engine resource facets retain decimal strings, units and independent observation times.

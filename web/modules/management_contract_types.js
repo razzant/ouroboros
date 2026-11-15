@@ -588,13 +588,24 @@
  */
 
 /**
- * Engine ControlAccountResourcesResponse (or ControlQuotaResponse), passed through.
+ * Host transport attempt dates, not provider observation dates. An identical attempt
+ * joined in flight keeps its original dates and sets reused.
+ * @typedef {Object} ClaudexorRefreshAttempt
+ * @property {string} started_at
+ * @property {string} completed_at
+ * @property {boolean} reused
+ */
+
+/**
+ * Engine ControlAccountResourcesResponse (or ControlQuotaResponse), passed through
+ * with optional host refresh provenance. Provider observation dates are unchanged.
  * @typedef {Object} ClaudexorAccountResources
  * @property {Object[]} snapshots
  * @property {Object[]=} absences
  * @property {string=} refreshed_at
  * @property {*=} refresh_skipped
  * @property {Object[]=} resources
+ * @property {ClaudexorRefreshAttempt=} refresh_attempt
  */
 
 /**
@@ -663,11 +674,15 @@
  */
 
 /**
- * A catalog's published token price, USD per 1M tokens; `tiers` only when input length changes it.
+ * A catalog's published token price, USD per 1M tokens; `tiers` only when input length changes it; `cache_write`
+ * only where the record states the prompt-cache write figure of the tier this install sends, with `cache_write_ttl`
+ * naming that tier (the resolved `OUROBOROS_PROMPT_CACHE_TTL` the catalog was read under).
  * @typedef {Object} ModelPrice
  * @property {number} input
  * @property {number} output
  * @property {ModelPriceTier[]=} tiers
+ * @property {number=} cache_write
+ * @property {string=} cache_write_ttl
  */
 
 /**

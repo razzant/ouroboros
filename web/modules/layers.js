@@ -15,7 +15,7 @@
  * History: while at least one layer is open there is exactly one same-URL history entry (`pushState`), so Back
  * closes a layer before it leaves the app; `popstate` pops one layer; closing the last layer programmatically
  * consumes that entry (`history.back()`) and the popstate it causes is swallowed. The entry is reconciled once per
- * task, so "close the drawer, open the Project" never leaves a stray entry (the b2 mockup's finding). No URL is ever
+ * microtask, so "close the drawer, open the Project" never leaves a stray entry (the b2 mockup's finding). No URL is ever
  * written: the desktop shell and the Telegram mini app have no address bar.
  *
  * Inert: a modal layer makes the rest of the shell inert (siblings along its ancestor path inside the shell's
@@ -37,6 +37,7 @@ const LAYER_STATE = { ouroLayers: 1 };
 
 export function createLayerStack({ win = globalThis.window, doc = globalThis.document, history = win?.history } = {}) {
     const stack = [];
+    const closing = new WeakSet();
     const listeners = new Set();
     const inerted = new Set();
     const hist = { armed: false, skip: 0, queued: false };
@@ -248,12 +249,21 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
         });
     }
 
-    /** THE dismiss: exactly one layer, the top one, through its owner's onClose. */
+    /** THE dismiss: exactly one layer, the top one, through its owner's onClose. An asynchronous owner keeps its
+     * layer until it has arrived (or returns false to stay), so a page return can replace it without losing Back. */
     function pop(reason = 'close') {
         const layer = top();
         if (!layer) return false;
-        try { layer.onClose?.(reason); } finally {
-            if (has(layer.id)) remove(layer.id);  // an owner that did not call remove
+        if (closing.has(layer)) { reconcileHistory(); return true; }
+        let result;
+        try { result = layer.onClose?.(reason); } finally {
+            if (result?.then) {
+                closing.add(layer);
+                reconcileHistory(); // a browser Back consumed the entry; keep it while navigation is pending
+                Promise.resolve(result).then((closed) => {
+                    if (closed !== false && get(layer.id) === layer) remove(layer.id);
+                }, (error) => console.error('layers: close failed', error)).finally(() => closing.delete(layer));
+            } else if (has(layer.id)) remove(layer.id);  // a synchronous owner that did not call remove
         }
         return true;
     }

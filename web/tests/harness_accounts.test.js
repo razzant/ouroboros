@@ -1844,7 +1844,7 @@ test('a lower pin under a newer engine is never promised to activate', () => {
     const line = daemonStatusLine(read, {});
     assert.equal(line.tone, 'warn');
     assert.match(line.text, /^Engine 4\.3\.1 keeps serving; this Ouroboros version pins older Claudexor 4\.3\.0\./);
-    assert.match(line.text, /After Restart Claudexor, Panic or an engine exit, 4\.3\.0 may refuse data a newer engine served\./);
+    assert.match(line.text, /After Quit, Restart Claudexor, Panic or an engine exit, 4\.3\.0 may refuse data a newer engine served\./);
     assert.ok(!/activate|staged|ready/.test(line.text), line.text);
     // A facet gap: the serving claim yields to the facets; the pin fact stays.
     const gap = daemonStatusLine({ ...read, reads: { catalog: 'ok', accounts: 'failed', quota: 'ok' } }, {});
@@ -2177,10 +2177,20 @@ test('an unknown auth row refreshes status on the real click, never starts login
         },
         quota: [],
     };
+    // Login uses apiClient/global fetch, not the status store's injected
+    // transport. Observe both so a mistaken OAuth launch cannot escape this
+    // assertion by taking the other HTTP path.
+    globalThis.fetch = async (url, init = {}) => {
+        requests.push(`${init.method || 'GET'} ${url}`);
+        return fakeResponse(200, { job_id: 'unexpected-login', job: { state: 'failed' } });
+    };
     const store = createClaudexorStatusStore({
         fetchImpl: async (url, init = {}) => {
             requests.push(`${init.method || 'GET'} ${url}`);
-            return fakeResponse(200, snapshot);
+            return fakeResponse(200, url.includes('?view=quota') ? {
+                view: 'quota', profiles: snapshot.profiles, quota: [], quota_absences: [],
+                reads: { accounts: 'ok', quota: 'ok' },
+            } : snapshot);
         },
         doc,
     });
@@ -2194,7 +2204,12 @@ test('an unknown auth row refreshes status on the real click, never starts login
     };
     try {
         assert.equal(await initHarnessAccounts({ store }), true);
-        await refreshPromise;
+        // Mount starts snapshot-first discovery through the store's internal
+        // lazy path, not its public refresh wrapper. Wait for its real reads
+        // before finding the row listener rather than awaiting an unset spy.
+        await store.refresh();
+        await store.observe();
+        assert.equal(store.facet('accounts'), 'ok', 'unknown auth is not a failed roster read');
         refreshCalls = 0;
         requests.length = 0;
         const click = loginButton.listeners

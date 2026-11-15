@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from tests.settings_browser_helpers import open_settings
+from tests.test_subscription_setup_browser import status_answer
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
@@ -62,7 +63,7 @@ def test_accounts_partial_quota_cards(direct_server_with_data):
 
             def status(route):
                 requests.append(route.request.method)
-                route.fulfill(json=snapshot)
+                status_answer(route, snapshot)
 
             page.route("**/api/claudexor/status**", status)
             page.goto(direct_server_with_data["url"], wait_until="domcontentloaded")

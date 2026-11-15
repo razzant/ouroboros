@@ -217,32 +217,26 @@ def test_the_closed_drawer_rests_its_moving_dots_and_opening_it_starts_them(nav_
 
 
 def test_a_closed_project_whose_row_the_collapse_hides_gives_the_focus_to_the_toggle(nav_ui, tmp_path):
-    """Opened by keyboard, then the list collapsed: closing the Project cannot return the focus to its hidden row, so
-    the Projects toggle takes it, never the page body; with the list open the row takes it back as before."""
+    """The Projects list never collapses: closing a Project returns focus to its row, and no retired toggle exists."""
     ui = nav_ui
     facts = {'engine': ui['engine']}
     page, sync = open_app(ui, 1280, 844, snapshot())
     row = f'.nav-project-row[data-project-id="{PROJECTS[2]["id"]}"]'
     focused = "() => { const a = document.activeElement; return a?.id || a?.className || a?.tagName || ''; }"
     try:
-        for collapse in (False, True):
-            page.locator(row).focus()
-            page.keyboard.press('Enter')
-            page.locator('#project-panel:not([hidden])').wait_for()
-            if collapse:
-                page.locator('#nav-projects-toggle').focus()
-                page.keyboard.press('Enter')
-                page.wait_for_function("() => document.getElementById('nav-projects')?.hasAttribute('data-collapsed')")
-            page.locator('#project-panel .chat-messages').first.focus()
-            page.keyboard.press('Escape')
-            page.wait_for_function("() => !document.body.classList.contains('project-panel-open')")
-            settle(page)
-            facts[f'collapsed={collapse}'] = page.evaluate(focused)
+        page.locator(row).focus()
+        page.keyboard.press('Enter')
+        page.locator('#project-panel:not([hidden])').wait_for()
+        page.locator('#project-panel .chat-messages').first.focus()
+        page.keyboard.press('Escape')
+        page.wait_for_function("() => !document.body.classList.contains('project-panel-open')")
+        settle(page)
+        facts['closed'] = page.evaluate(focused)
+        facts['toggle_count'] = page.locator('#nav-projects-toggle').count()
     finally:
         save_evidence(tmp_path, f'nav-close-focus-{ui["engine"]}', facts)
         page.close()
-    assert 'nav-project-row' in facts['collapsed=False'], facts
-    assert facts['collapsed=True'] == 'nav-projects-toggle', facts
+    assert 'nav-project-row' in facts['closed'] and facts['toggle_count'] == 0, facts
 
 
 def test_mains_unread_count_sits_beside_its_mark_never_on_it(nav_ui, tmp_path):
@@ -284,15 +278,20 @@ def test_mains_unread_count_sits_beside_its_mark_never_on_it(nav_ui, tmp_path):
     for case in ('mouse', 'narrow', 'touch'):
         seen, rest = facts[case], facts[case]['rest']
         assert seen['text'] == '99+' and seen['mark'], facts
-        assert seen['label']['right'] <= seen['badge']['left'] + 0.5, (case, facts)  # the label gives way
+        if case in ('mouse', 'narrow'):
+            # The narrow card keeps Main Chat on its second line (783b1cf34, c374668b7).
+            assert seen['label']['top'] >= seen['badge']['bottom'], (case, facts)
+            assert seen['label']['right'] == pytest.approx(seen['mark']['right'], abs=0.5), (case, facts)
+        else:
+            assert seen['label']['right'] <= seen['badge']['left'] + 0.5, (case, facts)
         assert seen['badge']['right'] <= seen['mark']['left'] - 2, (case, facts)
         assert rest['mark'] is None, facts
         assert all(abs(rest['badge'][side] - seen['badge'][side]) <= 0.5 for side in seen['badge']), (case, facts)
 
 
 COLUMNS = """work => {
-    const box = (selector) => { const el = document.querySelector(selector); const r = el.getBoundingClientRect();
-        return {left: r.left, right: r.right, text: el.textContent.trim()}; };
+    const box = (selector) => { const el = document.querySelector(selector); if (!el) return null;
+        const r = el.getBoundingClientRect(); return {left: r.left, right: r.right, text: el.textContent.trim()}; };
     return {main_count: box('[data-nav-page="chat"] .unread-badge'), main_mark: box('[data-nav-page="chat"] .nav-mark'),
             count: box('#nav-projects-count'), header_mark: box('.nav-projects-facts .status-mark'),
             row_mark: box(`[data-project-id="${work}"] .status-mark`), kebab: box(`[data-project-id="${work}"] ~ .nav-project-kebab`),
@@ -301,9 +300,7 @@ COLUMNS = """work => {
 
 
 def test_main_and_the_projects_header_share_the_rows_columns(nav_ui, tmp_path):
-    """Both numbers count unread messages (owner 19.10, Q1 = B): Main's its room's, the Projects' the rows' sum. Each
-    stands just before one mark column shared with the rows; + takes the ⋯ column with a mouse and follows the chevron
-    on touch, where rows have no ⋯ column."""
+    """Main has its own count; each Project row carries its own mark, and the removed Projects header has no total."""
     ui = nav_ui
     facts = {'engine': ui['engine']}
     work, asking, unread = PROJECTS[2]['id'], PROJECTS[6]['id'], [PROJECTS[1]['id'], PROJECTS[4]['id']]
@@ -329,21 +326,20 @@ def test_main_and_the_projects_header_share_the_rows_columns(nav_ui, tmp_path):
         finally:
             save_evidence(tmp_path, f'nav-columns-{ui["engine"]}', facts)
             page.close()
-    for case, main_count in (('mouse', '2'), ('narrow', '99+'), ('touch', '2')):
+    expected_main = {'mouse': '2', 'narrow': '99+', 'touch': '2'}
+    for case in ('mouse', 'narrow', 'touch'):
         seen = facts[case]
-        assert (seen['main_count']['text'], seen['count']['text']) == (main_count, '6'), facts  # 3 + 3 in Projects
-        assert seen['count']['right'] == pytest.approx(seen['main_count']['right'], abs=0.5), (case, facts)
-        # One mark column: a one-dot shape (the header's amber) sits mid-column, as a row's does, under three dots.
+        assert seen['main_count'] and seen['main_count']['text'] == expected_main[case], (case, facts)
+        assert seen['count'] is None and seen['header_mark'] is None, (case, facts)
+        assert seen['main_mark'] and seen['row_mark'], (case, facts)
         middle = (seen['main_mark']['left'] + seen['main_mark']['right']) / 2
-        for mark in ('header_mark', 'row_mark'):
-            assert (seen[mark]['left'] + seen[mark]['right']) / 2 == pytest.approx(middle, abs=0.5), (case, mark, facts)
-    touch = facts['touch']
+        assert (seen['row_mark']['left'] + seen['row_mark']['right']) / 2 == pytest.approx(middle, abs=0.5), (case, facts)
     for case in ('mouse', 'narrow'):  # + keeps the ⋯ column whole, the narrowest sidebar included
         seen = facts[case]
-        assert (seen['add']['left'], seen['add']['right']) == pytest.approx(
-            (seen['kebab']['left'], seen['kebab']['right']), abs=0.5), (case, facts)
-    assert touch['chevron']['right'] <= touch['add']['left'] <= touch['chevron']['right'] + 12, facts
-    assert touch['add']['right'] < touch['count']['left'], facts
+        assert seen['add'] and seen['kebab'], (case, facts)
+        assert (seen['add']['left'] + seen['add']['right']) / 2 == pytest.approx(
+            (seen['kebab']['left'] + seen['kebab']['right']) / 2, abs=0.5), (case, facts)
+    assert facts['touch']['add'] and facts['touch']['chevron'] is None, facts
 
 
 QUESTION = '**The line is up.**\n\nOne step is `yours`: switch the local test on in Circles, then I run the trial and finish the merge.'
@@ -450,7 +446,7 @@ def test_mains_row_carries_its_rooms_mark_in_the_project_rows_column(nav_ui, tmp
             facts[width] = {'main': mark_of(page, '.nav-row-main .nav-mark'), 'project': mark_of(page, project),
                             'mainInk': main.evaluate('el => getComputedStyle(el).color'),
                             'words': page.locator('.nav-row-main .nav-row-words').text_content()}
-            expect()(main).to_have_accessible_name(re.compile(r'^Ouroboros Main Chat\s*·\s*Thinking'))
+            expect()(main).to_have_accessible_name(re.compile(r'^Ouroboros\s+Main Chat\s*·\s*Thinking'))
             # Main's own mark rests while only a Project asks (the picture's dot says that wait: the test above).
             sync(snapshot(asking=[PROJECTS[2]['id']]))
             facts[width]['rest'] = mark_of(page, '.nav-row-main .nav-mark')
@@ -471,17 +467,14 @@ def test_mains_row_carries_its_rooms_mark_in_the_project_rows_column(nav_ui, tmp
 
 def test_the_collapse_is_remembered_on_this_device_and_only_there(nav_ui, tmp_path):
     ui = nav_ui
-    pins = [PROJECTS[5]['id']]
-    body = snapshot(pins=pins)
+    body = snapshot(pins=[PROJECTS[5]['id']])
     facts = {'engine': ui['engine']}
     rows = "() => [...document.querySelectorAll('#nav-projects-list > .nav-project-item')].filter(e => !e.hidden).length"
-    expanded = "() => document.getElementById('nav-projects-toggle').getAttribute('aria-expanded')"
+    expanded = "() => document.getElementById('nav-projects-toggle')?.getAttribute('aria-expanded') || null"
     page, _sync = open_app(ui, 1280, 800, body)
     try:
         facts['first'] = [page.evaluate(expanded), page.evaluate(rows)]
-        page.locator('#nav-projects-toggle').click()
-        settle(page)
-        facts['collapsed'] = [page.evaluate(expanded), page.evaluate(rows)]
+        facts['toggle'] = page.locator('#nav-projects-toggle').count()
         ui['errors'].watch(page)  # the reload may cut off this page's own reads; the other pages stay strict
         page.reload()
         page.wait_for_selector('#nav-projects-list [data-project-id]', state='attached')
@@ -495,23 +488,21 @@ def test_the_collapse_is_remembered_on_this_device_and_only_there(nav_ui, tmp_pa
         facts['other'] = [other.evaluate(expanded), other.evaluate(rows)]
     finally:
         other.close()
-    # Storage that refuses (a private window, a locked-down WebView): expanded, and the toggle still works in the page.
+    # Storage that refuses (a private window, a locked-down WebView) has the same permanent feed.
     refusing = ("for (const name of ['getItem', 'setItem', 'removeItem']) Storage.prototype[name] = function () {"
                 " throw new DOMException('storage denied', 'SecurityError'); };")
     locked, _ = open_app(ui, 1280, 800, body, init=[refusing])
     try:
-        facts['locked'] = [locked.evaluate(expanded), locked.evaluate(rows)]
-        locked.locator('#nav-projects-toggle').click()
-        settle(locked)
-        facts['locked_collapsed'] = [locked.evaluate(expanded), locked.evaluate(rows)]
+        facts['locked'] = [locked.evaluate(expanded), locked.evaluate(rows), locked.locator('#nav-projects-toggle').count()]
     finally:
         save_evidence(tmp_path, f'nav-collapse-memory-{ui["engine"]}', facts)
         locked.close()
     everything = len(PROJECTS)
-    assert facts['first'] == ['true', everything], facts
-    assert facts['collapsed'] == facts['reloaded'] == ['false', len(pins)], facts
-    assert facts['other'] == ['true', everything], facts
-    assert facts['locked'] == ['true', everything] and facts['locked_collapsed'] == ['false', len(pins)], facts
+    assert facts['first'] == [None, everything], facts
+    assert facts['toggle'] == 0, facts
+    assert facts['reloaded'] == [None, everything], facts
+    assert facts['other'] == [None, everything], facts
+    assert facts['locked'] == [None, everything, 0], facts
     assert not ui['errors'].unexpected(), ui['errors'].report()
 
 
@@ -659,7 +650,8 @@ def test_a_long_press_opens_a_rows_menu_on_touch_where_the_dots_take_no_column(c
     assert facts['pressed_by_lift'] == [], 'the lifting finger pressed nothing under it'
     assert facts['pressed'] == {'pinned': True}, 'a deliberate tap afterwards presses the item'
     assert facts['focused_kebab']['size'] == [44, 44], facts
-    assert facts['focused_kebab']['left'] >= facts['focused_kebab']['rowRight'] - 0.5, facts
+    assert facts['focused_kebab']['rowRight'] - (
+        facts['focused_kebab']['left'] + facts['focused_kebab']['size'][0]) == pytest.approx(2, abs=0.5), facts
     under = facts['kebab_under_menu']
     assert under['size'] == [44, 44] and under['expanded'] == 'true' and under['focus'] == 'pin', facts
 

@@ -229,8 +229,8 @@ const FORMS = new Map();  // skill id → { skill, name, sections }: what the la
 
 /** One read of the installed skills (`GET /api/extensions`, a passive read). It answers the list and remembers which
  *  skills registered a settings form, for the skill page, its title and search. */
-export async function readSkills() {
-    const data = await apiClient.extensions();
+export async function readSkills({ signal } = {}) {
+    const data = await apiClient.extensions({ signal });
     const names = new Map((Array.isArray(data?.skills) ? data.skills : []).map((skill) => [String(skill?.name || ''), skill]));
     FORMS.clear();
     for (const section of Array.isArray(data?.live?.settings_sections) ? data.live.settings_sections : []) {
@@ -353,5 +353,9 @@ function mountSkillSources(container, { path, ctx }) {
     return { unmount() { window.removeEventListener('ouro:settings-page-shown', onShown); rows.dispose(); } };
 }
 
-registerSettingsPage('skill', { title: skillFormTitle, mount: mountSkillForm });
+registerSettingsPage('skill', { title: skillFormTitle, mount: mountSkillForm, exists: async (path) => {
+    if (path === 'skill') return true;
+    await readSkills();
+    return FORMS.has(skillOf(path));
+} });
 registerSettingsPage('skill-sources', { title: 'Skill sources', mount: mountSkillSources });

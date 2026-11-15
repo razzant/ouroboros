@@ -91,14 +91,17 @@ def parked(level, gate):
 
 
 def fill_pipe():
-    """A native writer fills the unread pipe (the stopped launcher); returns once it holds no more."""
+    """A native writer fills the unread pipe (the stopped launcher); returns once it holds no more: unwritable at
+    ten checks in a row, since macOS grows a pipe's buffer under a blocked writer (one unwritable check, then a
+    writable one, read as "not full" under load)."""
     import select
     threading.Thread(target=raw_flood, args=(64,), daemon=True).start()  # 256 KiB: more than any pipe holds
-    poller, deadline = select.poll(), time.monotonic() + 60
+    poller, deadline, unwritable = select.poll(), time.monotonic() + 60, 0
     poller.register(2, select.POLLOUT)
-    while poller.poll(0) and time.monotonic() < deadline:
+    while unwritable < 10 and time.monotonic() < deadline:
+        unwritable = 0 if poller.poll(0) else unwritable + 1
         time.sleep(0.01)
-    mark(phase="pipe_full", full=not poller.poll(0))
+    mark(phase="pipe_full", full=unwritable >= 10)
 
 
 if __name__ == "__main__":
@@ -118,6 +121,42 @@ if __name__ == "__main__":
             return original_import(name, *args, **kwargs)
         builtins.__import__ = broken_import
         runpy.run_path(str(pathlib.Path(sys.argv[1]) / "server.py"), run_name=config.get("main_name", "__main__"))
+    if scenario in ("mp_preload", "manager"):  # server.py as the pool's main module, as `python server.py` runs it
+        import multiprocessing
+        broken = progress.parent / "preload"
+        (broken / "starlette").mkdir(parents=True, exist_ok=True)
+        (broken / "starlette" / "__init__.py").write_text(config["hook"])
+        (progress.parent / "speaker").mkdir(exist_ok=True)
+        (progress.parent / "speaker" / "relay_speaker.py").write_text(config["speaker"])
+        os.environ["PRELOAD_FACTS"] = str(progress)
+        sys.path[:0] = [str(broken), str(progress.parent / "speaker")]  # a child's preload reads these first
+        sys.modules["__main__"].__file__ = str(pathlib.Path(repo) / "server.py")
+        process_logging.configure_process_logging(drive_logs=None)  # the server's own relay, as server.main() has
+        if config.get("pipe_full"):
+            fill_pipe()
+        context = multiprocessing.get_context(config["method"])
+        if scenario == "manager":  # the event bus's manager: a spawned server that never configures logging
+            import relay_speaker
+            from multiprocessing.managers import SyncManager
+            SyncManager.register("speak", callable=relay_speaker.speak)
+            manager = SyncManager(ctx=context)
+            manager.start()
+            manager.speak(config["lines"])
+            manager.shutdown()
+            mark(phase="manager_done", exitcode=manager._process.exitcode)
+        else:
+            child = context.Process(target=os.getpid)
+            started = time.monotonic()
+            try:
+                child.start()
+                child.join(60)
+                mark(phase="joined", exitcode=child.exitcode, sec=round(time.monotonic() - started, 3))
+            except Exception as exc:  # a forkserver whose preload failed forks no child
+                mark(phase="start_failed", error=type(exc).__name__, sec=round(time.monotonic() - started, 3))
+        wait_for("release")
+        drain_own()
+        mark(phase="done", held=held())
+        sys.exit(0)
     if config.get("early_error"):  # before configure_process_logging: the plain streams, as before
         raise RuntimeError("an error before the relay")
     real_start = threading.Thread.start
@@ -186,6 +225,65 @@ if __name__ == "__main__":
             mark(phase="driver_ready", engine=pw.webkit.name)
         mark(phase="driver_stopped")
         wait_for("release")
+        sys.exit(0)
+    if scenario in ("async_driver", "sync_prepare"):  # browser.py's own driver starts, a noisy real Node driver
+        import types
+        from playwright._impl import _transport
+        from ouroboros import browser_output
+        from ouroboros.tools import browser, browser_session
+        node, entry = _transport.compute_driver_executable()
+        names = ("noisy-driver.py", "driver-started", "driver-gate")
+        wrapper, started, gate = (progress.parent / name for name in names)
+        wrapper.write_text("import os, pathlib, sys, time\npathlib.Path(" + repr(str(started)) + ").write_text('1')\n"
+                           "while not pathlib.Path(" + repr(str(gate)) + ").exists():\n    time.sleep(0.02)\n"
+                           "os.write(2, b'D' * 262144)\nos.execv(" + repr(str(node)) + ", [" + repr(str(node)) + ", "
+                           + repr(str(entry)) + ", *sys.argv[1:]])\n")
+        _transport.compute_driver_executable = lambda: (sys.executable, str(wrapper))
+        if not config.get("adapt", True):  # the composition that dropped the scope: the driver inherits the pipe
+            browser_output.driver_diagnostics = lambda **_kw: contextlib.nullcontext()
+        fill_pipe()
+        outcome, bs = {}, types.SimpleNamespace(pw_instance=None, _pw_driver=None, page=None, browser=None)
+        owner = browser_session.owner_of(bs)
+        def start():
+            try:
+                if scenario == "async_driver":
+                    owner.run(browser._start_driver(bs), clean=True)
+                else:  # the caller thread's preparation; this engine is absent and may not install
+                    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(progress.parent / "no-browsers")
+                    browser._ensure_playwright_installed(engine="webkit", allow_install=False)
+                outcome["ok"] = True
+            except BaseException as exc:  # noqa: BLE001 - the settled outcome is the subject
+                outcome["error"] = repr(exc)
+        starter = threading.Thread(target=start, daemon=True)
+        starter.start()
+        deadline = time.monotonic() + 60
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if scenario == "async_driver":
+            async def beside():  # another coroutine of the generation's loop while the start's scope is open
+                return _transport._get_stderr_fileno()
+            mark(phase="during", beside=owner.run(beside()), plain=sys.stderr.fileno())
+        gate.write_text("go")
+        starter.join(config.get("join", 60))
+        mark(phase="started" if not starter.is_alive() else "pending", outcome=dict(outcome))
+        wait_for("resume")
+        starter.join(60)
+        if scenario == "async_driver":
+            async def facts():
+                return bs.pw_instance.webkit.name, bs._pw_driver._transport._proc.pid
+            engine, pid = owner.run(facts())
+            confirmed = owner.close(lambda: browser._close_generation(bs))
+            try:
+                os.kill(pid, 0)
+                gone = False
+            except ProcessLookupError:
+                gone = True
+            mark(phase="closed", engine=engine, confirmed=confirmed, driver_gone=gone, outcome=dict(outcome))
+        else:
+            mark(phase="closed", outcome=dict(outcome))
+        wait_for("release")
+        drain_own()
+        mark(phase="done", held=held())
         sys.exit(0)
     if scenario == "dependency_install":
         from supervisor import git_ops, git_ops_reset
@@ -424,6 +522,60 @@ if __name__ == "__main__":
         execute_panic_stop(None, lambda: None, data_dir=pathlib.Path(config["data"]), panic_exit_code=99,
                            log=logging.getLogger("panic"))
 '''
+
+
+# A pool child's preload of server.py reaches ``from starlette.applications import Starlette`` after its relay is
+# installed: this stand-in records the child's threads there and the ``multiprocessing`` frames it runs under, read
+# from its own stack (the role never comes from the code under test, so the same hook observes a tree without the
+# repair), then fails (the preload's import failure) or hands the import to the real package, so the whole server
+# module loads as it does in production. ``verdict`` is the production answer where one exists, to compare.
+PRELOAD_HOOK = r"""
+import json, os, sys, threading
+from ouroboros import process_logging
+relay, stack, frame = process_logging._relay, [], sys._getframe()
+while frame is not None:
+    module = frame.f_globals.get("__name__") or ""
+    if module.startswith("multiprocessing."):
+        stack.append(module + "." + frame.f_code.co_name)
+    frame = frame.f_back
+verdict = getattr(process_logging, "preloading_forkserver", None)
+with open(os.environ["PRELOAD_FACTS"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps({{"pid": os.getpid(), "phase": "preload", "threads": threading.active_count(),
+                             "relay_thread": relay is not None and relay.thread is not None, "stack": stack,
+                             "verdict": verdict() if verdict else None}}) + "\n")
+if {fail}:
+    raise ImportError("controlled missing server dependency (pool preload)")
+sys.path.remove(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+del sys.modules["starlette"]
+import starlette
+"""
+
+SPEAKER = r"""
+import os, sys
+def speak(lines):
+    for index in range(lines):
+        print(f"manager line {index:05d} " + "m" * 90, file=sys.stderr)
+    return os.getpid()
+"""
+
+
+def _preloaded(fail=False, **config):
+    return {**config, "hook": PRELOAD_HOOK.format(fail=fail), "speaker": SPEAKER}
+
+
+def _preload_rows(probe) -> list:
+    """Each preload's facts with its role read from its recorded stack: the forkserver's own preload runs inside
+    ``multiprocessing.forkserver.main``; a child the forkserver forked runs under ``_serve_one`` there too, and a
+    spawned child under ``multiprocessing.spawn``. A production verdict, where the tree has one, must agree."""
+    rows = []
+    for row in probe.rows():
+        if row.get("phase") == "preload":
+            stack = row["stack"]
+            forkserver = ("multiprocessing.forkserver.main" in stack
+                          and "multiprocessing.forkserver._serve_one" not in stack)
+            assert row["verdict"] in (None, forkserver), row
+            rows.append({**row, "forkserver": forkserver})
+    return rows
 
 
 class _Probe:
@@ -908,6 +1060,42 @@ def test_a_gap_queued_beside_an_idle_writer_reaches_a_reading_launcher_without_w
         relay.put(b"gone\n")  # EPIPE ends the writer and closes its descriptor
 
 
+def test_a_full_nonblocking_pipe_waits_for_room_and_never_closes_the_output():
+    """Opus, panel on PR3479: another holder of the shared pipe description can make it O_NONBLOCK, so a full pipe
+    answers EAGAIN where a blocking write waits; the writer took that for a gone reader and closed this process's
+    output for good. Only the test's own pipe is made nonblocking. While the reader is away the writer waits for
+    room without spinning, a producer never waits, and once the reader returns everything queued arrives; EPIPE
+    still closes the output."""
+    import fcntl
+
+    from ouroboros import process_logging
+
+    read_end, write_end = os.pipe()
+    shared = os.dup(write_end)
+    fcntl.fcntl(shared, fcntl.F_SETFL, fcntl.fcntl(shared, fcntl.F_GETFL) | os.O_NONBLOCK)  # the relay's fd too
+    relay = process_logging._OutputRelay(write_end, 1024 * 1024, 5.0)
+    try:
+        began = time.monotonic()
+        for _ in range(64):  # 256 KiB: four times what the pipe holds
+            relay.put(b"x" * 4095 + b"\n")
+        assert time.monotonic() - began < 1.0, "a producer never waits for the reader"
+        time.sleep(0.5)
+        cpu = time.process_time()
+        time.sleep(0.5)
+        assert relay.output_open and relay.thread.is_alive() and time.process_time() - cpu < 0.2
+        relay.put(b"after the reader returned\n")
+        got, deadline = bytearray(), time.monotonic() + 10
+        while not got.endswith(b"after the reader returned\n") and time.monotonic() < deadline:
+            got += os.read(read_end, 65536)
+        assert bytes(got) == (b"x" * 4095 + b"\n") * 64 + b"after the reader returned\n", "nothing lost, in order"
+    finally:
+        os.close(read_end)
+        os.close(shared)
+    with relay.cond:
+        relay.put(b"gone\n")  # EPIPE still ends the writer and closes its descriptor
+        assert relay.cond.wait_for(lambda: not relay.output_open, 5)
+
+
 def test_a_stdout_pipe_beside_another_stderr_is_never_relayed_even_without_pipe_identity(monkeypatch):
     """Carbon r1: on Windows ``fstat`` gives every pipe, console and NUL dev and inode 0, so a stdout pipe beside a
     console stderr passed the one-pipe check and stdout was merged into stderr's descriptor. Both must be FIFOs."""
@@ -940,7 +1128,7 @@ def test_server_import_failure_exits_with_a_full_unread_launcher_pipe(tmp_path, 
     with _probe(tmp_path, scenario="early_server", main_name=main_name) as probe:
         assert probe.wait_phase("pipe_full", 60)["full"]
         assert probe.wait_phase("early_failure", 60)["relayed"]
-        assert probe.phase("early_failure")["relay_thread"] is (main_name == "__main__")
+        assert probe.phase("early_failure")["relay_thread"] is True  # no forkserver: a preload's thread starts too
         assert probe.finish(limit=15) == 1
         probe.read()
 
@@ -962,6 +1150,24 @@ def test_system_query_preserves_result_with_full_unread_diagnostic_pipe(tmp_path
         probe.read()
         probe.flag("release")
         assert probe.finish() == 0
+
+
+@pytest.mark.parametrize("system, value", [("Darwin", "16.0 GB"), ("Linux", "15.6 GB"), ("Windows", "8.0 GB"),
+                                           ("Plan9", "Unknown")])
+def test_each_system_s_memory_query_keeps_its_own_reading(monkeypatch, system, value):
+    """The memory query per system after its diagnostics moved to the relay: macOS and Linux read through
+    ``check_output_with_relayed_stderr``, Windows through its own captured wmic query, any other system reads
+    nothing. In process; the real child beside a full pipe is the test above."""
+    from ouroboros import platform_layer, process_logging
+
+    commands = []
+    answers = {"sysctl": b"17179869184\n", "awk": b"15.6 GB\n"}
+    monkeypatch.setattr(platform_layer.platform, "system", lambda: system)
+    monkeypatch.setattr(process_logging, "check_output_with_relayed_stderr",
+                        lambda command: commands.append(command[0]) or answers[command[0]])
+    monkeypatch.setattr(platform_layer, "_wmic_value_line", lambda *query: f"TotalPhysicalMemory={8 * 1024 ** 3}")
+    assert platform_layer.get_system_memory() == value
+    assert commands == {"Darwin": ["sysctl"], "Linux": ["awk"]}.get(system, [])
 
 
 @pytest.mark.parametrize("adapt", [True, False])
@@ -995,3 +1201,170 @@ def test_actual_abort_and_optional_fatal_handler(tmp_path, handler, full):
         assert probe.finish(limit=15) == -signal.SIGABRT
         if full and not handler:
             probe.read()
+
+
+# Python 3.13 hands the forkserver the main module's path, so it preloads server.py; before, each forked child
+# imports it after the fork (``_serve_one``), as a spawned child does.
+FORKSERVER_PRELOADS = sys.version_info >= (3, 13)
+
+
+@pytest.mark.parametrize("method", ["spawn", "forkserver"])
+def test_a_pool_preload_failure_reaches_a_reading_launcher_and_the_forkserver_stays_thread_free(tmp_path, method):
+    """Opus review: the relay's thread was withheld in every ``__mp_main__`` preload of server.py, so a spawned child
+    whose preload failed exited with its whole traceback queued (0 bytes beside a reading launcher; 986 before the
+    relay). A child relays from its preload; only the forkserver's own preload stays thread-free (it forks every
+    child), and its exit starts the writer for the handover. The traceback reaches the reader either way."""
+    with _probe(tmp_path, **_preloaded(scenario="mp_preload", method=method, fail=True, server_log=False)) as probe:
+        probe.read()
+        ended = probe.wait_phase("joined", 60) or probe.phase("start_failed")
+        assert ended is not None, probe.rows()
+        probe.flag("release")
+        assert probe.finish() == 0
+    preloads = _preload_rows(probe)
+    assert preloads, probe.rows()  # the import failed where the hook says, in a role read from its own stack
+    text = bytes(probe.output).decode(errors="replace")
+    assert "ImportError: controlled missing server dependency (pool preload)" in text and "Traceback" in text, (
+        len(probe.output), preloads)
+    in_forkserver = [row for row in preloads if row["forkserver"]]
+    assert [row["forkserver"] for row in preloads] == [method == "forkserver" and FORKSERVER_PRELOADS], preloads
+    assert all(row["relay_thread"] is not row["forkserver"] for row in preloads), preloads
+    assert all(row["threads"] == 1 for row in in_forkserver), preloads
+    if not in_forkserver:
+        assert probe.phase("joined")["exitcode"] == 1, probe.rows()
+
+
+def test_a_forkserver_preloading_the_whole_server_stays_thread_free_and_forks_its_child(tmp_path):
+    """All of server.py loads in the forkserver (3.13) with the relay installed and no thread, or in the forked
+    child before; the child runs and exits 0 beside a reading launcher."""
+    with _probe(tmp_path, **_preloaded(scenario="mp_preload", method="forkserver", server_log=False)) as probe:
+        probe.read()
+        assert probe.wait_phase("joined", 120) is not None, probe.rows()
+        probe.flag("release")
+        assert probe.finish() == 0
+    (preload,) = _preload_rows(probe)
+    assert preload["forkserver"] is FORKSERVER_PRELOADS and preload["relay_thread"] is not FORKSERVER_PRELOADS
+    assert preload["threads"] == 1 or not FORKSERVER_PRELOADS
+    assert probe.phase("joined")["exitcode"] == 0
+
+
+def test_a_spawn_preload_failure_beside_a_stopped_reader_exits_within_its_handover(tmp_path):
+    """The same spawned child's failed preload beside a full, unread pipe: its exit waits only its handover's bound,
+    never for the reader."""
+    from ouroboros.runtime_limits import SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SEC
+
+    with _probe(tmp_path, **_preloaded(scenario="mp_preload", method="spawn", fail=True, pipe_full=True,
+                                              server_log=False)) as probe:
+        joined = probe.wait_phase("joined", 120)
+        assert joined is not None and joined["exitcode"] == 1, probe.rows()
+        assert probe.phase("pipe_full")["full"] is True
+        assert joined["sec"] < SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SEC + 30  # its own interpreter start included
+        probe.read()
+        probe.flag("release")
+        assert probe.finish() == 0
+
+
+def test_the_event_bus_manager_relays_its_output_to_a_reading_launcher(tmp_path):
+    """The spawn-context manager (``supervisor/workers.py``'s event bus) preloads server.py and never configures
+    logging: what it writes reaches a reading launcher, live and at its ordinary shutdown."""
+    with _probe(tmp_path, **_preloaded(scenario="manager", method="spawn", lines=3000, server_log=False)) as probe:
+        probe.read()
+        assert probe.wait_phase("manager_done", 120) is not None, probe.rows()
+        probe.flag("release")
+        assert probe.finish() == 0
+    assert probe.phase("manager_done")["exitcode"] == 0
+    (preload,) = _preload_rows(probe)
+    data = bytes(probe.output)
+    assert data.count(b"manager line ") == 3000 and b"[output gap:" not in data, (data.count(b"manager line "), preload)
+    assert preload["relay_thread"] is True and preload["forkserver"] is False
+
+
+@pytest.mark.parametrize("adapt", [True, False])
+def test_the_async_session_s_real_driver_start_keeps_its_diagnostics_off_an_unread_pipe(tmp_path, adapt):
+    """Composition repair: merging the asynchronous browser session (#3475) dropped the driver's diagnostic scope, so
+    ``_start_driver``'s Node inherited the launcher's pipe again. ``browser._start_driver`` on the generation's real
+    loop: a 256 KiB stderr write beside a full, unread pipe, then the exact stdout protocol (the handshake answers);
+    another coroutine of that loop meanwhile gets the original getter; the close stops that driver. Without the scope
+    (the negative control) the start waits until the reader resumes."""
+    with _probe(tmp_path, scenario="async_driver", adapt=adapt, join=60 if adapt else 3) as probe:
+        assert probe.wait_phase("pipe_full", 60)["full"]
+        during = probe.wait_phase("during", 60)
+        assert during is not None and during["beside"] == during["plain"], probe.rows()
+        started = probe.wait_phase("started" if adapt else "pending", 90)
+        assert started is not None, probe.rows()
+        if adapt:
+            assert started["outcome"] == {"ok": True}, started
+        probe.read()
+        probe.flag("resume")
+        closed = probe.wait_phase("closed", 90)
+        probe.flag("release")
+        assert probe.finish() == 0
+    assert closed["outcome"] == {"ok": True} and closed["engine"] == "webkit", closed
+    assert closed["confirmed"] is True and closed["driver_gone"] is True, closed
+
+
+@pytest.mark.parametrize("adapt", [True, False])
+def test_the_callers_sync_preparation_keeps_its_driver_s_diagnostics_off_an_unread_pipe(tmp_path, adapt):
+    """``_ensure_playwright_installed`` reads the engine's path through a synchronous driver on the calling thread:
+    beside a full, unread pipe it completes (here refusing the absent engine it may not install); without the scope
+    it waits for the reader."""
+    with _probe(tmp_path, scenario="sync_prepare", adapt=adapt, join=60 if adapt else 3) as probe:
+        assert probe.wait_phase("pipe_full", 60)["full"]
+        started = probe.wait_phase("started" if adapt else "pending", 90)
+        assert started is not None, probe.rows()
+        probe.read()
+        probe.flag("resume")
+        closed = probe.wait_phase("closed", 90)
+        probe.flag("release")
+        assert probe.finish() == 0
+    assert "not already installed" in closed["outcome"].get("error", ""), closed
+
+
+def test_a_start_scope_reaches_only_its_own_task_and_the_tasks_it_creates(monkeypatch):
+    """The seam itself: a ``task`` scope rides the starting task's context (the connection's runner is created from
+    it), never another coroutine of the same loop; a task that copied the context keeps the value but, once the scope
+    has closed, gets the original getter, never a closed descriptor. A thread scope stays its thread's."""
+    import asyncio
+    from types import SimpleNamespace
+
+    pytest.importorskip("playwright")
+    from playwright._impl import _transport
+    from ouroboros import browser_output, process_logging
+
+    monkeypatch.setattr(_transport, "_get_stderr_fileno", lambda: "original")
+    monkeypatch.setattr(process_logging, "_relay", SimpleNamespace(owner=os.getpid(), put=lambda _data: None))
+
+    async def scenario():
+        opened, release = asyncio.Event(), asyncio.Event()
+        seen = {}
+
+        async def beside():
+            await opened.wait()
+            seen["beside"] = _transport._get_stderr_fileno()
+
+        async def created():
+            seen["created"] = _transport._get_stderr_fileno()
+            await release.wait()
+            seen["created_after"] = _transport._get_stderr_fileno()
+
+        other = asyncio.create_task(beside())
+        with browser_output.driver_diagnostics(task=True):
+            inner = asyncio.create_task(created())
+            seen["own"] = _transport._get_stderr_fileno()
+            opened.set()
+            await other
+            await asyncio.sleep(0)
+        seen["own_after"] = _transport._get_stderr_fileno()
+        release.set()
+        await inner
+        return seen
+
+    seen = asyncio.run(scenario())
+    assert isinstance(seen["own"], int) and seen["created"] == seen["own"], seen
+    assert seen["beside"] == seen["own_after"] == seen["created_after"] == "original", seen
+    with browser_output.driver_diagnostics():
+        scoped = _transport._get_stderr_fileno()
+        elsewhere = []
+        thread = threading.Thread(target=lambda: elsewhere.append(_transport._get_stderr_fileno()))
+        thread.start()
+        thread.join(10)
+    assert isinstance(scoped, int) and elsewhere == ["original"] and _transport._get_stderr_fileno() == "original"

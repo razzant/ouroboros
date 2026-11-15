@@ -408,14 +408,16 @@ def _outcome(row: Mapping[str, Any]) -> str:
 
 
 def shown_outcome(row: Mapping[str, Any]) -> str:
-    """The settled word a work says beside ``Finalizing…``: its stored lifecycle, except a turn its author or owner
-    stopped, which reads ``cancelled`` wherever its card's status fold says Stopped (``outcome_phase``)."""
+    """The settled word a work says beside ``Finalizing…``: its stored lifecycle, except where its card's status
+    fold reads otherwise (``outcome_phase``): a turn its author or owner stopped reads ``cancelled``, and a failed
+    record whose model answer was delivered before its finalization was cut reads ``completed``."""
     status = _outcome(row)
     if status in {"completed", "failed"}:
         from ouroboros.project_dialogue import outcome_phase
 
-        if outcome_phase({**row, "root_phase_checkpoint": {}}, {}) == "cancelled":
-            return "cancelled"
+        phase = outcome_phase({**row, "root_phase_checkpoint": {}}, {})
+        if phase == "cancelled" or (status == "failed" and phase in {"done", "warn"}):
+            return "cancelled" if phase == "cancelled" else "completed"
     return status
 
 

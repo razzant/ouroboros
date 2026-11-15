@@ -13,6 +13,7 @@ import zipfile
 import pytest
 
 import tests.test_skill_smoke_official as smoke
+from ouroboros.skill_loader import find_skill
 from tests.skill_smoke_author import run_author_review
 from tests.system_e2e.harness import (
     LANE_MOCK, MOCK_SLUG, ScriptedStubModel, classify_call, require_lane, skill_review_clean_text,
@@ -204,7 +205,13 @@ def test_s41_author_override_cannot_replace_independent_blocking_verdict(tmp_pat
                        [verdict(True)], error="criticism remains unresolved")
     assert len(model.review_calls) == 1
     evidence = json.loads((tmp_path / "author/author-evidence.json").read_text())
-    assert not evidence["review"].get("author_disposition")
+    # Since #3296 no install runs Blocking: the product records the author's stance beside the verdict (P3, "never
+    # forbids"), and the skill smoke lane reads the verdict itself (``assert_review_evidence``), which refused above.
+    # The stance sits beside the independent blocking verdict; it replaces neither the verdict nor the CI decision.
+    author = evidence["review"].get("author_disposition") or {}
+    assert (author.get("disposition"), author.get("reviewer_signal")) == ("accepted", "blockers"), author
+    loaded = find_skill(tmp_path / "author/data", NAME)
+    assert loaded is not None and loaded.review.status == "blockers", "the author's word replaced the verdict"
 
 
 @pytest.mark.parametrize("kind", ["missing", "pending"])

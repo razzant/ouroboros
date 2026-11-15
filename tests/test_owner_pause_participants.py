@@ -435,9 +435,21 @@ def test_a_resume_notice_names_who_granted_it_and_no_one_it_does_not_know(tmp_pa
     text = messages[-1]["content"]
     assert "This task continued from its Pause " + words in text and "owner Resume" not in text
     slept: list = []
-    budget_pause._resume_disclosure(ctx, {"reason": "sleep", "rail": "model_sleep", "paused_at": 1.0}, {},
-                                    {"consumed_at": 6.0, "by": by}, {"reason": "hard_rail"}, slept)
+    # A sleep's return names the independent review it did not wait for, and no other run it holds.
+    passed = {"runs": [{"run_id": "", "invocation_id": "inv-review", "state": "stop_unknown", "independent_review": True},
+                       {"run_id": "run-critic", "state": "stop_requested", "independent_review": True,
+                        "stop_policy": "request_stop", "stop_outcome": "requested"},
+                       {"run_id": "run-unsent", "state": "stop_unknown", "independent_review": True,
+                        "stop_policy": "request_stop", "stop_outcome": "not_issued_gateway_unavailable"},
+                       {"run_id": "run-own", "state": "stop_unknown", "independent_review": False}]}
+    budget_pause._resume_disclosure(ctx, {"reason": "sleep", "rail": "model_sleep", "paused_at": 1.0, "external_runs": passed},
+                                    {}, {"consumed_at": 6.0, "by": by}, {"reason": "hard_rail"}, slept)
     assert any(woken in str(message.get("content")) for message in slept), slept
+    (notice,) = [str(message["content"]) for message in slept if "without waiting for" in str(message.get("content"))]
+    # A stop the return tried is said by its recorded outcome, never as sent when it was not.
+    assert ("for start inv-review, run run-critic (stop outcome: requested), "
+            "run run-unsent (stop outcome: not_issued_gateway_unavailable):") in notice and "run-own" not in notice
+    assert notice.endswith("were unresolved at that grant."), "the grant's observation, not a present-tense claim"
 
 
 def test_a_budget_pause_resume_keeps_its_own_census_disclosure(tmp_path, monkeypatch):
@@ -456,6 +468,15 @@ def test_a_budget_pause_resume_keeps_its_own_census_disclosure(tmp_path, monkeyp
     text = messages[-1]["content"]
     assert "Delegated runs this task holds (re-observed at this Resume):\n- run run-1: stop_confirmed" in text
     assert "its participants" not in text
+    # A Resume that passed an unbound review start names it by its start and says it is no writer of this work.
+    row["external_runs"] = {"runs": [
+        {"run_id": "", "invocation_id": "inv-review", "state": "stop_unknown", "stop_outcome": "pending_invocation_unbound",
+         "independent_review": True},
+        {"run_id": "", "invocation_id": "inv-own", "state": "stop_unknown", "stop_outcome": "pending_invocation_unbound"}]}
+    budget_pause._resume_disclosure(ctx, row, {}, {"consumed_at": 2.0}, {"reason": "hard_rail"}, messages)
+    text = messages[-1]["content"]
+    assert ("\n- start inv-review: stop_unknown (stop outcome: pending_invocation_unbound); independent review that "
+            "cannot change this work\n- start inv-own: stop_unknown (stop outcome: pending_invocation_unbound)\n") in text
 
 
 # --- R1 repairs: a racing same-wait write and a record without a full list -------------------
