@@ -317,7 +317,7 @@ BAR = """name => {
     const page = document.querySelector('#page-' + name), header = page.querySelector('.app-page-header');
     const lead = header.querySelector('.app-page-lead');
     const items = [...header.querySelectorAll('.app-page-lead [role=tab], .app-page-lead .files-crumb, .app-page-lead-title, .app-page-toolbar button')]
-        .filter(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
+        .filter(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).clipPath !== 'inset(50%)');
     const hb = box(header);
     const hit = document.elementFromPoint(hb.x + header.clientWidth / 2, hb.bottom + 8);
     return {lead: !!lead?.children.length, attrs: [...header.attributes].map(a => a.name).filter(a => a.startsWith('data-')),
@@ -349,7 +349,7 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
             # The strip lends its shadows room below the bar but never takes a press meant for the page.
             assert bar['hitsPage'], (name, bar)
             setup_browser.capture(page, f'bar-a-{name}-{engine}-956')
-        # Settings keeps its search and the open page's title in the band's lead.
+        # Settings keeps Search in the band; its selected list row names the page.
         _goto(page, 'settings')
         settings_bar = page.evaluate(BAR, 'settings')
         assert settings_bar['lead'] and 'data-lead' in settings_bar['attrs'] and 'data-empty' not in settings_bar['attrs']
@@ -361,7 +361,7 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         _goto(page, 'dashboard')
         page.locator('#page-dashboard [data-dashboard-tab="costs"]').click()
         dashboard_band = page.evaluate(BAR, 'dashboard')
-        assert dashboard_band['height'] == 52 and abs(dashboard_band['centres'][0] - 26) <= 1, dashboard_band
+        assert dashboard_band['height'] == 52 and dashboard_band['centres'] == [], dashboard_band
         _goto(page, 'widgets')
         page.locator('.widgets-card').first.wait_for()
         widgets = page.evaluate("""() => ({bar: document.querySelector('#page-widgets .app-page-header').getBoundingClientRect().height,
@@ -620,7 +620,7 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
         page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 175")
         page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
         setup_browser.capture(page, f'files-sidebar-drag-{engine}-{theme}')
-        assert page.locator('#files-breadcrumb').evaluate("el => el.closest('.files-browser-header') !== null")
+        assert page.locator('#files-breadcrumb').evaluate("el => el.closest('.app-page-lead') !== null")
         assert page.evaluate("document.activeElement === window.__filesNodes[1]")
         page.mouse.move(start_x + 560 - start_width, handle['y'] + handle['height'] / 2)
         page.mouse.up()
@@ -640,7 +640,7 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
             measured.append({'name': control.inner_text(), 'box': control.bounding_box()})
         print(json.dumps({'files_narrow_controls': measured, 'engine': engine, 'theme': theme, 'content_width': 160}))
         assert page.evaluate('document.scrollingElement.scrollWidth <= innerWidth')
-        assert page.locator('#page-files .app-page-header').get_by_role('heading', name='Files', exact=True).count() == 1
+        assert page.locator('#page-files .app-page-header').get_by_role('heading', name='Files', exact=True).count() == 0
         page.locator('#files-new-file').scroll_into_view_if_needed()
         setup_browser.capture(page, f'files-sidebar-narrow-{engine}-{theme}')
         page.locator('#files-new-file').click()
@@ -694,10 +694,10 @@ def test_skills_tabs_and_existing_toolbar_survive_a_narrow_content_column(engine
         page.mouse.down()
         page.mouse.move(558, handle['y'] + handle['height'] / 2, steps=12)
         page.mouse.up()
-        page.wait_for_function("document.querySelector('#page-skills .app-page-header').hasAttribute('data-narrow')")
-        assert page.locator('#page-skills .app-page-header').get_by_role('heading', name='Skills', exact=True).count() == 1
-        strip = page.locator('#page-skills .app-page-tabs .app-tab-strip')
-        assert strip.evaluate('el => el === window.__skillsTabs && el.clientWidth > 80')
+        page.wait_for_function("document.getElementById('content').clientWidth < 200")
+        assert page.locator('#page-skills .app-page-header').get_by_role('heading', name='Skills', exact=True).count() == 0
+        strip = page.locator('#page-skills .app-page-lead .app-tab-strip')
+        assert strip.evaluate('el => el === window.__skillsTabs && el.clientWidth > 0')
         assert page.evaluate("document.activeElement.dataset.tab === 'installed'")
         for selector in ('#skills-update-all', '#skills-refresh'):
             button = page.locator(selector)

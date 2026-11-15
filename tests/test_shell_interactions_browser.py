@@ -589,13 +589,16 @@ def test_the_desktop_title_band_over_a_page_moves_the_window(shell_ui, tmp_path,
         page.locator(f'#page-{page_name}').wait_for(state='visible')
         settle(page)
         allowed = ('.app-page-lead .app-tab, .app-page-lead .files-crumb, .settings-search, '
+                   '.app-page-header #log-filters button, .app-page-header #btn-clear-logs, '
                    '.app-page-toolbar :is(#skills-refresh, #skills-update-all, #files-refresh, '
                    '#files-new-file, #files-new-dir, #files-paste)')
         facts['band'] = page.evaluate(TITLE_BAND, {'band': 52, 'allowed': allowed})
         band = facts['band']
         assert band['height'] == 52 and band['drags'] > 0 and not band['unexpected'], facts
-        if page_name in ('widgets', 'dashboard'):  # Dashboard's pages are a list; the band names its columns.
+        if page_name == 'widgets':
             assert band['controls'] == [] and band['firstTabTop'] is None, facts
+        elif page_name == 'dashboard':  # Logs' filters and Clear occupy the one band.
+            assert 'btn-clear-logs' in band['controls'] and band['firstTabTop'] is None, facts
         elif page_name == 'settings':
             assert band['controls'] == ['settings-search'] and band['firstTabTop'] is None, facts
         else:
