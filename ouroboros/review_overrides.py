@@ -65,9 +65,12 @@ def _keep_on_attempt(ctx: Any, reason: str, row: Any = None) -> None:
         key = {name: getattr(row, name, None) for name in ("repo_key", "task_id", "tool_name", "attempt")}
     if type(key["attempt"]) is not int or key["attempt"] < 1:
         return  # no reviewed attempt yet: only a commit of this call goes over it
+    record = str(getattr(row, "review_record_id", "") or "")  # a rebuilt source's number may name another wave now
 
     def stamp(state: Any) -> None:
-        if (found := state.latest_attempt_for(**key)) is not None and not (reason == _OPEN and found.review_override_reason):
+        found = state.latest_attempt_for(**key)
+        if found is not None and not (reason == _OPEN and found.review_override_reason) and (
+                not record or found.review_record_id == record):
             found.review_override_reason = reason
 
     update_state(pathlib.Path(ctx.drive_root), stamp)
@@ -167,8 +170,8 @@ def _went_on_over(ctx: Any, source: Any) -> str:
     was known (a wave handed back still open, or a failed free check ahead of the panel): then its review record says
     what it holds now. A panel FAIL on the record, or a counted seat's FAIL on a record still open, is gone over as
     that FAIL; otherwise a failed check stands, and an open wave stands at its record's outcome (nothing once passed).
-    An attempt the gate kept no reason on stands at no verdict only when its record dispatched no review (a free replay
-    at a spent paid ceiling or over a pending wave): the refusal's own kind, since no call counts that outcome."""
+    An attempt the gate kept no reason on stands at no verdict only when its record is a refusal to dispatch (a free
+    replay at a spent paid ceiling or over a pending wave): the refusal's own kind, since no call counts that outcome."""
     kept, record_id = (str(getattr(source, name, "") or "") for name in ("review_override_reason", "review_record_id"))
     if not record_id or (kept and kept != _OPEN and kept not in _CHECK_REASONS):
         return kept
@@ -185,8 +188,7 @@ def _went_on_over(ctx: Any, source: Any) -> str:
     reason = str(verdict.get("reason") or "")
     if not kept:  # every other outcome was counted, or left uncounted, by the call that met it
         refusal = record.get("dispatch_refusal") if isinstance(record.get("dispatch_refusal"), dict) else {}
-        named = str(refusal.get("kind") or "") or reason or "not_dispatched"
-        return named if verdict["aggregate"] == "NOT_DISPATCHED" else ""
+        return str(refusal.get("kind") or "") if verdict["aggregate"] == "NOT_DISPATCHED" else ""
     counted = {str(row.get("seat_id") or "") for row in record.get("rows") or []
                if isinstance(row, Mapping) and not row.get("additional")}
     if reason == _OPEN and any(seat in counted and value == "FAIL"

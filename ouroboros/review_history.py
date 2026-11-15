@@ -16,25 +16,28 @@ def _gap(reason: str, **source: Any) -> dict:
     return {"code": "REVIEW_HISTORY_SOURCE_UNAVAILABLE", "reason": reason, "source": source}
 
 
-def _attempts(drive_root: Any, repo_root: Any, task_id: str, also: Any = None) -> list:
+def _attempts(drive_root: Any, repo_root: Any, task_id: str, attempts_root: Any = None) -> list:
     """This task's attempt rows on this checkout. A task with its own data folder keeps its commit gate's rows
-    there (``also``) and its ``review_change`` rows in the canonical folder: both are its history, each folder's
-    rows in their written order, the two interleaved by start time."""
-    import heapq
-
+    there (``attempts_root``) and its ``review_change`` rows in the canonical folder: both are its history, joined
+    as ``review_status_projection.with_canonical_change_attempts`` joins them (the canonical row wins an identity
+    both folders hold, in the loader's own order)."""
     from ouroboros.review_state import _load_state_unlocked, make_repo_key
+    from ouroboros.review_state_records import _attempt_identity_tuple, _attempt_order_key
 
     if drive_root is None or repo_root is None or not task_id:
         return []
     key = make_repo_key(pathlib.Path(repo_root))
     folders = [pathlib.Path(drive_root)]
-    if also is not None and pathlib.Path(also).resolve() != folders[0].resolve():
-        folders.append(pathlib.Path(also))
+    if attempts_root is not None and pathlib.Path(attempts_root).resolve() != folders[0].resolve():
+        folders.append(pathlib.Path(attempts_root))
     # Exact task/repository identity, never the lifecycle reader's legacy fallback
     # and never root_task_id (a sibling task's paid budget is not its dispute).
-    held = [[row for row in _load_state_unlocked(folder, strict_attempt_authority=True).attempts
-             if row.task_id == task_id and row.repo_key == key] for folder in folders]
-    return list(heapq.merge(*held, key=lambda row: str(row.started_ts or row.ts or "")))
+    rows: dict = {}
+    for folder in folders:
+        for row in _load_state_unlocked(folder, strict_attempt_authority=True).attempts:
+            if row.task_id == task_id and row.repo_key == key:
+                rows.setdefault(_attempt_identity_tuple(row), row)
+    return sorted(rows.values(), key=_attempt_order_key)
 
 
 def _source_text(drive_root: Any, task_id: str, source: dict, seen: dict, gaps: list) -> dict:
