@@ -662,39 +662,102 @@ def test_each_finalization_nudge_names_its_own_hold_cause(tmp_path, monkeypatch,
     assert _hold_cause(tools._ctx) == case and _hold_cause(tools._ctx) == "", "read once"
 
 
-@pytest.mark.parametrize("after_write", ["nothing", "declared", "red_check", "result_review"])
-def test_an_unexamined_result_is_noticed_once_and_an_examined_one_is_not(turn, monkeypatch, after_write):
-    """Audit 11.11, item 18: a written result nothing examined since its last change is noticed once at the first
-    finish (cause ``pre_delivery_notice``) and the second finish is accepted. An executed check, a red one too, or a
-    result review asked for after the last change examined it: the door is silent. A declaration that nothing is
-    machine-checkable examines nothing: the notice still comes, and the record keeps ``receipt_absent``."""
+def _check(code, tag="a"):
+    """A recorded command check exiting ``code``; another ``tag`` is another check."""
     import sys
 
+    return act("verify_and_record", contract_kind="explicit_command",
+               check=[sys.executable, "-c", f"raise SystemExit({code})  # {tag}"])
+
+
+def _declared():
+    return act("verify_and_record", contract_kind="no_visible_machine_contract", check="read it through")
+
+
+def _missing():
+    return act("verify_and_record", contract_kind="artifact_observation", artifact_paths=["nowhere.md"])
+
+
+# After the write: the rounds up to the delivered answer (built per run); the door's holds in order; whether the
+# record keeps ``receipt_absent``; how many checks passed after the red one the record keeps (None: it keeps none).
+_DOOR_CASES = {
+    "nothing": (lambda: [finish("Answer"), finish("Answer")], ["pre_delivery_notice"], True, None),
+    "declared": (lambda: [_declared(), finish("Answer"), finish("Answer")], ["pre_delivery_notice"], True, None),
+    "result_review": (lambda: [act("review_change", subject="result"), finish("Answer")], [], False, None),
+    "green_check": (lambda: [_check(0), finish("Answer")], [], False, None),
+    "red_check": (lambda: [_check(1), finish("Answer"), finish("Answer")], ["red_check_notice"], False, 0),
+    "red_then_declared": (lambda: [_check(1), _declared(), finish("Answer"), finish("Answer")],
+                          ["red_check_notice"], False, 0),
+    "red_then_other_green": (lambda: [_check(1), _check(0, "b"), finish("Answer")], [], False, 1),
+    "red_then_stop": (lambda: [_check(1), finish("Answer", action="stop", rationale="Unfinished")], [], False, 0),
+    # One door, one return: the red check is said once, in the unexamined result's "Recorded about it".
+    "red_then_write": (lambda: [_check(1), act("write_file", path="report.md", content="Report 2"), finish("Answer"),
+                                finish("Answer")], ["pre_delivery_notice"], True, 0),
+    "missing_after_write": (lambda: [_missing(), finish("Answer"), finish("Answer")], ["pre_delivery_notice"], True, 0),
+    # Each part returns once, in either order: the edit after the red notice leaves the result unexamined.
+    "red_notice_then_write": (lambda: [_check(1), finish("Answer"), act("write_file", path="report.md", content="Report 2"),
+                                       finish("Answer"), finish("Answer")], ["red_check_notice", "pre_delivery_notice"], True, 0),
+    # A check that fails after the first notice is news: the second return, and the last (owner 15.11).
+    "notice_then_red": (lambda: [finish("Answer"), _missing(), finish("Answer"), _missing(), finish("Answer")],
+                        ["pre_delivery_notice", "red_check_notice"], True, 0),
+}
+
+
+@pytest.mark.parametrize("case", list(_DOOR_CASES))
+def test_the_finish_door_returns_an_unexamined_result_and_a_red_last_check_once_each(turn, monkeypatch, case):
+    """The finish door states two facts, each once per execution, and the next finish is accepted. A written result
+    nothing examined since its last change (audit 11.11, item 18): an executed check, a red one too, or a result
+    review asked for after the last change examined it, while a declaration that nothing is machine-checkable examines
+    nothing. A last recorded check that did not pass with none passed since (owner 15.11: on a failure, a chance to
+    correct it): a command or a path observation; a later pass of any check, an author stop and no check at all
+    leave the door silent, and a declaration after the failure does not. The record keeps the red check either way,
+    with how many checks passed after it."""
     from ouroboros.outcomes import apply_receipt_absent_flag, derive_loop_outcome
 
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_a, **_k: (True, ""))  # the check runs, unjudged
-    examine = {
-        "nothing": [],
-        "declared": [act("verify_and_record", contract_kind="no_visible_machine_contract", check="read it through")],
-        "red_check": [act("verify_and_record", contract_kind="explicit_command",
-                          check=[sys.executable, "-c", "raise SystemExit(1)"])],
-        "result_review": [act("review_change", subject="result")],
-    }[after_write]
-    if after_write == "result_review":  # the request is what the record reads; its panel does not run here
+    rounds, held, unexamined, passed_after = _DOOR_CASES[case]
+    rounds = rounds()
+    if case == "result_review":  # the request is what the record reads; its panel does not run here
         turn.registry.override_handler("review_change", lambda _ctx, **_kw: json.dumps({"status": "requested"}))
-    noticed = after_write in {"nothing", "declared"}
-    script = [write_round(), *examine, finish("Answer"), finish("Answer")]
+    script = [write_round(), *rounds]
 
     text, usage, trace = turn.run(script)
 
-    assert text == "Answer" and len(turn.calls) == len(script) - (0 if noticed else 1)
-    assert [facts(row) for row in holds(turn.root)] == (
-        [(len(script) - 1, "selection", "finalization_nudge", "pre_delivery_notice", sha("Answer"))] if noticed else [])
+    assert text == "Answer" and len(turn.calls) == len(script), "every scripted round ran, and the last one delivered"
+    assert [(row["reason"], row["subreason"]) for row in holds(turn.root)] == [("finalization_nudge", cause) for cause in held]
+    reminders = [row["content"] for row in turn.calls[-1] if str(row.get("content") or "").startswith("[SYSTEM REMINDER]")]
+    said = sum(text.count("the last recorded check did not pass") for text in reminders)  # the door's own statement
+    in_record_line = case in {"red_then_write", "missing_after_write", "red_notice_then_write"}
+    assert said == ("red_check_notice" in held) + in_record_line, reminders
+    if case == "red_check":  # the cause, and the sentence the owner's details will carry
+        assert "exit code 1), and none" not in reminders[0] and "The last recorded check did not pass (exit code 1)" in reminders[0]
+    if case == "missing_after_write":  # the host's own words for a check that ran no command, never dressed as one
+        assert "did not pass (path observation — missing: nowhere.md (resolved as " in reminders[0]
+        assert str(turn.root / "nowhere.md") + ")), and none has passed since" in reminders[0], "where the host looked"
     outcome = derive_loop_outcome(text, usage, trace)
     apply_receipt_absent_flag(outcome, trace, turn.root, "author-task")
-    warnings = outcome["outcome_axes"]["objective"].get("warnings") or []
-    assert ("receipt_absent" in warnings) is noticed, warnings
-    assert ("verification_red_unreconciled" in warnings) is (after_write == "red_check"), warnings
+    objective = outcome["outcome_axes"]["objective"]
+    warnings = objective.get("warnings") or []
+    assert ("receipt_absent" in warnings) is unexamined, warnings
+    assert ("verification_red_unreconciled" in warnings) is (passed_after is not None), warnings
+    assert (objective.get("verification_red") or {}).get("passed_after") == passed_after and "check" not in (
+        objective.get("verification_red") or {}), "the task row keeps the fact, the receipt keeps the command"
+
+
+def test_a_root_under_required_is_told_its_red_last_check_before_the_review(tmp_path, monkeypatch):
+    """Required reviews a root's result at delivery, so the door leaves the unexamined result to that review; the
+    red last check is told there too, before the paid wave: the review cannot pass a check for its author."""
+    from ouroboros.loop_nudges import _pre_delivery_notice
+
+    tools, trace, _content = _nudge_case("pre_delivery_notice", tmp_path, monkeypatch)
+    monkeypatch.setattr("ouroboros.config.get_task_review_mode", lambda: "required")
+    monkeypatch.setattr("ouroboros.tools.review_result.required_root_wave", lambda _ctx: True)
+    red = [{"status": "fail", "contract_kind": "explicit_command", "check": "pytest -q", "returncode": 1}]
+
+    assert _pre_delivery_notice(tools, tmp_path, "t", trace, []) == "", "the unexamined result is the review's"
+    notice = _pre_delivery_notice(tools, tmp_path, "t", trace, red)
+    assert "the last recorded check did not pass" in notice and "`pytest -q` — exit code 1" in notice
+    assert "has examined this result" not in notice and "review_change" not in notice
 
 
 def test_only_a_current_bound_result_review_examines_the_result():
@@ -724,8 +787,9 @@ def test_only_a_current_bound_result_review_examines_the_result():
 
 def test_the_notice_shown_before_a_continuation_is_not_shown_again_after_it(tmp_path, monkeypatch):
     """The notice comes once for the task, not once per process: a continuation (an owner wait, a restart, a budget
-    pause) saves the shown notice and the handed-off child results with the other delivery facts, so the resumed
-    execution shows neither again. A new turn on a reused context starts its own notice."""
+    pause) saves both shown parts of the notice (the facts and the red last check) and the handed-off child results
+    with the other delivery facts, so the resumed execution shows none again. A new turn on a reused context starts
+    its own notice, and a first notice saved before any check failed leaves the red check its one return."""
     from ouroboros import owner_wait
     from ouroboros.loop import _reset_turn_state
     from ouroboros.loop_nudges import _claim_pre_delivery_notice
@@ -733,18 +797,28 @@ def test_the_notice_shown_before_a_continuation_is_not_shown_again_after_it(tmp_
 
     monkeypatch.setattr("ouroboros.config.get_task_review_mode", lambda: "auto")
     trace = {"reasoning_notes": [], "tool_calls": [{"tool": "write_file", "status": "ok", "args": {"path": "r.md"}}]}
+    red = [{"status": "fail", "contract_kind": "explicit_command", "check": "pytest -q", "returncode": 1}]
     ctx, limit = _loop_ctx(tmp_path, "t")
-    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=ctx), tmp_path, "t", trace, []), "the first door shows it"
+    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=ctx), tmp_path, "t", trace, red), "the first door shows it"
     ctx._subagent_handoff_shown = ["child-1:abc"]
     saved = json.loads(json.dumps(owner_wait.continuation_state(ctx, limit.messages, {}, {}, 3, [], set()), default=str))
     unsaved, _ = _loop_ctx(tmp_path, "t")
-    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=unsaved), tmp_path, "t", trace, []), "nothing carried it"
+    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=unsaved), tmp_path, "t", trace, red), "nothing carried it"
     resumed, _ = _loop_ctx(tmp_path, "t")
     owner_wait.restore_continuation_state(SimpleNamespace(_ctx=resumed), saved, [], {}, {}, set())
-    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=resumed), tmp_path, "t", trace, []) == ""
+    assert resumed._pre_delivery_noticed and resumed._red_check_noticed, "both parts were told before the pause"
+    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=resumed), tmp_path, "t", trace, red) == ""
     assert resumed._subagent_handoff_shown == ["child-1:abc"], "the handed-off results stay handed off"
     _reset_turn_state(resumed)
-    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=resumed), tmp_path, "t", trace, []), "a new turn's answer"
+    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=resumed), tmp_path, "t", trace, red), "a new turn's answer"
+    early, limit = _loop_ctx(tmp_path, "t")  # the first notice came before any check failed
+    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=early), tmp_path, "t", trace, []) and not early._red_check_noticed
+    saved = json.loads(json.dumps(owner_wait.continuation_state(early, limit.messages, {}, {}, 3, [], set()), default=str))
+    later, _ = _loop_ctx(tmp_path, "t")
+    owner_wait.restore_continuation_state(SimpleNamespace(_ctx=later), saved, [], {}, {}, set())
+    assert "the last recorded check did not pass" in _claim_pre_delivery_notice(SimpleNamespace(_ctx=later), tmp_path, "t", trace, red)
+    assert later._completion_hold_cause == "red_check_notice" and later._red_check_noticed
+    assert _claim_pre_delivery_notice(SimpleNamespace(_ctx=later), tmp_path, "t", trace, red) == "", "and once"
 
 
 @pytest.mark.parametrize("mode", ["auto", "off", "auto_without_review_tool"])

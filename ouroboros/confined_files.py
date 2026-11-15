@@ -225,6 +225,17 @@ class ConfinedDirectory:
                     if include_links or entry.is_dir(follow_symlinks=False) or entry.is_file(follow_symlinks=False)]
 
 
+def real_directory(path: Any) -> bool:
+    """Whether PATH names a directory itself, no link followed at its end: the question after a confined
+    open refused it. Only a missing path answers no. A lookup that fails for any other reason raises, so
+    the refusal stays unknown and is never read as absence (``Path.is_dir`` answers "no" to every lookup
+    error from Python 3.14)."""
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
 @contextlib.contextmanager
 def confined_directory(root: Any, parts: Any = ()):
     """Hold the root and every directory component until the caller finishes."""

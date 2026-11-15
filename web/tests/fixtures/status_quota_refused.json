@@ -41,6 +41,7 @@
         }
       }
     ],
+    "login_capable_harnesses": null,
     "harnessAccounts": [],
     "accountPools": [
       {

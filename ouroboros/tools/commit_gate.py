@@ -1218,7 +1218,7 @@ def _review_ledger_facts(ctx: ToolContext, commit_message: str, *, goal: str, sc
         **_review_body_facts(ctx),
         "panel": panel, "composition": str(panel.get("composition") or "full_pool"),
         "composition_reason": str(panel.get("reason") or ""), "chosen_by": str(panel.get("chosen_by") or "owner"),
-        "task_id": task_id, "root_task_id": resolve_root_task_id(ctx),
+        "task_id": task_id, "root_task_id": resolve_root_task_id(ctx), "attempts_root": str(ctx.drive_root),
         "review_wave_id": resolve_review_wave(ReviewRequest(
             surface="commit_gate", goal=goal or commit_message, task_id=task_id,
             retry_key=str(getattr(ctx, "_current_review_retry_key", "") or "")), {}, ""),

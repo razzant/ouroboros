@@ -1043,6 +1043,14 @@ test('a circle\'s alias is named by what it resolves to for a place that inherit
         "Uses Team's model: gpt-6");
     assert.equal(inheritedModelWords(placed('team', '', { value: GLM, layer: 'circle' }), null).placeholder, 'Empty uses the consciousness model',
         'circles not read yet: nothing is claimed for them');
+    // A route on the local runtime is said as that, whatever model name its slot holds: an alias resolved by its
+    // slot's rule, or the consciousness model a place inherits.
+    assert.equal(inheritedModelWords(placed('team', '', { value: ASTRA, layer: 'circle', local: true }), aliased).placeholder,
+        "Uses Team's model: Local model");
+    assert.equal(inheritedModelWords(placed('home', '', { value: ASTRA, layer: 'consciousness', local: true }), [TEAM, HOME]).placeholder,
+        'Uses the consciousness model: Local model');
+    assert.equal(inheritedModelWords(placed('home', '', { value: ASTRA, layer: 'consciousness', local: false }), [TEAM, HOME]).placeholder,
+        'Uses the consciousness model: gpt-6-astra');
 });
 
 test('clearing the field returns the place to inheriting: one write of the empty model, then what it uses now', async (t) => {

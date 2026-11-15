@@ -103,13 +103,9 @@ def place_view(root, place, *, declarations: list[dict] | None = None, allowance
                        for i, n in enumerate(result["notes"])]
     circle = records.circle_context(place.place_id)
     model, layer = place_model_route(place, circle)
-    if not model:
-        model = following_route("consciousness")[0]
-    elif model in ("main", "light"):
-        from ouroboros.config import get_light_model
-        from ouroboros.model_slots import _main_model
-        model = get_light_model() if model == "light" else _main_model()
-    result["model_route"] = {"value": model, "layer": layer}
+    # No model of its own follows consciousness; the aliases are roles. Each resolves by its slot's one rule.
+    model, local = following_route(model or "consciousness") if model in ("", "main", "light") else (model, False)
+    result["model_route"] = {"value": model, "layer": layer, "local": local}
     result["circle"] = circle if brief or circle is None else {
         key: circle[key] for key in ("circle_id", "placed_by", "placed_at")}
     result["description"] = records.description(place.place_id)

@@ -84,6 +84,7 @@ def test_startup_quit_only_cleans_owned_or_identity_proven_server(native_guard, 
     monkeypatch.setitem(sys.modules, "webview", webview)
     monkeypatch.setattr(launcher_onboarding, 'NativeAppearance', lambda: SimpleNamespace(attach=lambda window: None))
     monkeypatch.setattr(launcher_onboarding, 'paint_room', lambda window: None)  # the macOS leaf; no events here
+    monkeypatch.setattr(launcher_onboarding, 'fit_to_work_area', lambda window: None)  # the same leaf, on Windows
     monkeypatch.setattr(launcher_onboarding, 'setup_recovery_menu', lambda *a: [])
     real_thread = threading.Thread  # only the lifecycle thread is held back; the quit's closer really runs
     monkeypatch.setattr(launcher.threading, "Thread", lambda **kw: real_thread(**kw) if kw.get("name") == "ouroboros-quit"

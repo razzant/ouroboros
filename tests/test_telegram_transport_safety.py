@@ -207,6 +207,44 @@ def test_send_message_does_not_retry_ambiguous_transport_failure(monkeypatch):
     assert attempts == 1
 
 
+@pytest.mark.parametrize(("failure", "unsent"), [
+    (httpx.ConnectError, True),  # nothing reached Telegram: the outbox may send it again
+    (httpx.ConnectTimeout, True),
+    (httpx.PoolTimeout, True),
+    (httpx.ProxyError, True),  # the proxy refused the tunnel before the request
+    (httpx.ReadTimeout, False),  # Telegram may have created the message before the answer was lost
+    (httpx.WriteTimeout, False),
+    (httpx.ReadError, False),
+    (httpx.RemoteProtocolError, False),  # accepted, then closed without an answer
+])
+def test_only_a_failure_before_the_request_left_is_unsent(monkeypatch, failure, unsent):
+    _plugin, telegram_api = _load_skill()
+
+    def handler(request):
+        raise failure("lost", request=request)
+
+    _install_mock_transport(monkeypatch, telegram_api, handler)
+    with pytest.raises(telegram_api.TelegramTransportError) as captured:
+        asyncio.run(telegram_api.TelegramClient("token").send_message(42, "hello"))
+    assert captured.value.unsent is unsent
+
+
+@pytest.mark.parametrize(("status", "body", "unsent", "retry_after"), [
+    (429, {"ok": False, "error_code": 429, "parameters": {"retry_after": 7}}, True, 7),
+    (200, {"ok": False, "error_code": 429, "parameters": {"retry_after": "3"}}, True, 3),
+    (429, {"ok": False, "error_code": 429}, True, 0),
+    (403, {"ok": False, "error_code": 403}, True, 0),
+    (502, {"ok": False, "error_code": 502}, False, 0),  # a 5xx may follow a created message
+])
+def test_a_refusal_says_whether_it_created_nothing_and_how_long_flood_control_asks(
+        monkeypatch, status, body, unsent, retry_after):
+    _plugin, telegram_api = _load_skill()
+    _install_mock_transport(monkeypatch, telegram_api, lambda _request: httpx.Response(status, json=body))
+    with pytest.raises(telegram_api.TelegramRequestRejected) as captured:
+        asyncio.run(telegram_api.TelegramClient("token").call("sendMessage", data={"chat_id": "42", "text": "x"}))
+    assert (captured.value.unsent, captured.value.retry_after) == (unsent, retry_after)
+
+
 @pytest.mark.parametrize("response_kind", ["invalid_json", "non_object"])
 def test_invalid_telegram_protocol_response_is_retryable(monkeypatch, response_kind):
     _plugin, telegram_api = _load_skill()

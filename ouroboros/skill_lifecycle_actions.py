@@ -364,6 +364,8 @@ def run_skill_action(
                 "actor": actor, "task_id": task_id, "skill": skill_name,
                 "client_host": str(getattr(ctx, "_skill_owner_client_host", "") or ""),
                 "content_hash": result.get("content_hash") or expected_content_hash,
+                "review_status": result.get("review_status"), "review_stale": result.get("review_stale"),
+                "review_gate_reason": (result.get("review_gate") or {}).get("blocking_reason"),
                 "requested_items": list(items or []), "ok": bool(result.get("ok")),
                 "enable_after_grant": _enable_after_grant,
                 "granted_key_count": len(result.get("granted_keys") or []),
@@ -417,4 +419,16 @@ def run_skill_action(
                                     result_message=(lambda value: "Access granted; " + value["setup_error"] if value.get("setup_error") else "") if action == "grant" else None,
                                     progress_target=_progress),
     )
+    if not _owner_actor and result.get("ok"):  # the mind's own action left the skill on: the work's card says over what
+        from ouroboros.review_overrides import note_skill_over_review
+
+        if action == "enable" and result.get("enabled"):
+            note_skill_over_review(ctx, skill_name, result.get("review_gate"), "turned_on")
+        elif action == "grant" and result.get("turn_on_when_ready") == "enabled":  # the grant let a waiting turn-on through
+            try:
+                granted = find_skill(drive, skill_name, repo_path=repo_path)
+                if granted is not None and granted.enabled:
+                    note_skill_over_review(ctx, skill_name, granted.review.gate_for(granted.content_hash), "turned_on")
+            except Exception:  # the grant stands and its audit row follows; only the card's note is lost
+                log.warning("A skill turned on by a grant was not named on its work's card", exc_info=True)
     return audit(result)
