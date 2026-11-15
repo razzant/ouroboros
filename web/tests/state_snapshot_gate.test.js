@@ -203,6 +203,29 @@ test('only an actual failed read fans out, and a throwing fan-out still releases
     assert.equal(unavailable.length, 2);
 });
 
+test('a watcher is told after each change of latest(): an applied body, a failed read, a retire; never a stale answer', async () => {
+    let painting = true;
+    const sequencer = createStateSnapshotSequencer(() => { if (painting) throw new Error('a consumer failed to paint'); });
+    const seen = [];
+    const off = sequencer.watch(() => seen.push(sequencer.latest()));
+    sequencer.watch(() => { throw new Error('one watcher fails'); });  // its fault stays its own
+    const first = await sequencer.gate(false);
+    assert.throws(() => sequencer.apply(first, { supervisor_ready: true }), /failed to paint/);
+    assert.deepEqual(seen, [{ supervisor_ready: true }], 'told even when the apply callback threw, and past the failing watcher');
+    painting = false;
+    const stale = sequencer.begin();
+    sequencer.apply(await sequencer.gate(false), { supervisor_ready: false });
+    assert.equal(sequencer.apply(stale, { old: true }), false);
+    sequencer.fail(stale);
+    assert.deepEqual(seen.slice(1), [{ supervisor_ready: false }], 'a stale apply or fail changes nothing and tells nobody');
+    sequencer.fail(await sequencer.gate(false));
+    sequencer.retire();
+    assert.deepEqual(seen.slice(2), [null, null], 'a failed read and a retire clear latest(), and say so');
+    off();
+    sequencer.apply(await sequencer.gate(false), { supervisor_ready: true });
+    assert.equal(seen.length, 4, 'a removed watcher hears nothing more');
+});
+
 // The bindings map is held with its revision; `?bindings_since` lets the server answer "unchanged".
 const bound = { t1: { project_id: 'alpha', chat_id: 5, project_name: 'Alpha' } };
 
