@@ -305,7 +305,7 @@ def test_lost_start_replays_original_processing_facts_after_setting_changes(tmp_
     assert engine.posts[0] == engine.posts[1]
     assert engine.posts[1][0]["processingPreference"] == "economy"
     held = custody.replay(ctx.drive_root)["directory-run"]
-    assert held.processing_preference == "economy"
+    assert held.processing_preference == held.row_processing == "economy"
     assert held.effort == engine.posts[1][0].get("effort", "")
     from ouroboros.subagent_history import record_session_execution, subagent_last_delegation
     monkeypatch.setattr(custody, "invocation_record", lambda *_a, **_kw: pytest.fail("history scanned an invocation"))
