@@ -172,7 +172,7 @@ def test_a_stale_revision_no_row_holds_gets_the_whole_text_or_its_read(tmp_path,
     ({}, "mode=overwrite requires content"),
     ({"mode": "append", "content": "x"}, "mode='append' is not an operation. Pass mode as exactly one of overwrite"),
     ({"content": ["x"]}, "content must be Markdown text, not list"),
-    ({"content": "x", "version": "abc"}, "version is used only with mode=revert; memory_read(source='identity'"),
+    ({"content": "x", "version": "abc"}, "with mode=revert (memory_read(source='identity', version=...) reads one); expected_revision"),
 ])
 def test_the_argument_rules_are_knowledge_writes(tmp_path, identity, arguments, said):
     reply = _update_identity(_ctx(tmp_path), expected_revision=_sha(identity.read_bytes()), **arguments)
