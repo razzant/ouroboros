@@ -153,6 +153,30 @@ def _assert_menu_geometry(metrics: dict, *, placement: str | None = None) -> Non
         assert rect["bottom"] <= metrics["trigger"]["top"] - 3, metrics
 
 
+def _scrolls_settled(page, frames: int = 5) -> None:
+    """Return once ``frames`` animation frames pass with no scroll anywhere on the page. A viewport change and a
+    restyled card re-place the chat feed (its reader stays at the newest message, chat_reading_position.js), and
+    that scroll's event arrives a frame or two after the write. A scroll of the feed holding the trigger closes an
+    open menu (owner decision 1D, asserted below), so a press before it lands proves that race, not the portal."""
+    page.evaluate(
+        """
+        (frames) => new Promise((resolve) => {
+            let quiet = 0;
+            const scrolled = () => { quiet = 0; };
+            document.addEventListener('scroll', scrolled, true);
+            const frame = () => {
+                quiet += 1;
+                if (quiet < frames) { requestAnimationFrame(frame); return; }
+                document.removeEventListener('scroll', scrolled, true);
+                resolve();
+            };
+            requestAnimationFrame(frame);
+        })
+        """,
+        frames,
+    )
+
+
 def _hold_live_root(data_dir, task_id: str, *, hold_seconds: float = 90.0) -> None:
     """Make ``task_id`` a GENUINELY running managed root for the test's duration: a queued
     row restored from the queue snapshot at boot, dispatched by the pool, and held inside
@@ -417,6 +441,9 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                     }
                     """,
                 )
+                # The feed takes its new place first (one scroll, 10-20 ms after the resize): opened before it,
+                # the menu closes by 1D rather than by anything this step measures.
+                _scrolls_settled(page)
                 trigger.click()
                 menu.wait_for(state="visible", timeout=10_000)
                 short_metrics = menu.evaluate(
