@@ -313,14 +313,35 @@ def test_a_tool_servers_page_saves_its_entry_keeps_typed_text_and_remove_asks_fi
     page.close()
 
 
+# Who asked for each catalogue read, recorded as it starts: its stack names the module that read (the home's own reads
+# start in settings_home.js), since another page may read the catalogue for itself.
+_RECORD_CATALOGUE_READERS = """() => {
+    const fetch = window.fetch;
+    window.__catalogueReaders = [];
+    window.fetch = (url, init) => {
+        if (String(url).split('?')[0].endsWith('/api/model-catalog')) window.__catalogueReaders.push(String(new Error().stack));
+        return fetch(url, init);
+    };
+}"""
+
+
+def _show_page(page, name):
+    """Show the page `name` as its sidebar row does (pressed in place, so a phone's closed drawer needs no opening)."""
+    page.locator(f'#primary-sidebar [data-nav-page="{name}"]').first.evaluate("row => row.click()")
+    page.wait_for_function("name => document.getElementById(`page-${name}`)?.classList.contains('active')", arg=name)
+
+
 @pytest.mark.parametrize("width,height", SIZES)
 def test_models_from_search_a_role_saves_through_its_writer_and_the_context_door_posts_nothing(subscription_ui, width, height):
     page, server = _page(subscription_ui, width, height)
-    # The list with Ouroboros's card (beside a page, the card is the pane its row opens), shown again: the home reads
-    # its answers again (settings.js announce, settings_home.js refresh), and none of those reads is the catalogue.
+    # The list with Ouroboros's card (beside a page, the card is the pane its row opens). The list reads its answers when
+    # it comes on screen (settings.js look): Settings shown again after another page reads every one of them, and none
+    # of the home's reads is the catalogue.
     show_card(page)
+    page.evaluate(_RECORD_CATALOGUE_READERS)
+    _show_page(page, "skills")
     subscription_ui["reads"].clear()
-    page.evaluate("() => window.__ouroSettings.open('')")
+    _show_page(page, "settings")
     for _ in range(200):  # its storage read, one of the answers it reads each time, has reached the server
         if any(urlparse(url).path == "/api/storage" for url in subscription_ui["reads"]):
             break
@@ -328,7 +349,9 @@ def test_models_from_search_a_role_saves_through_its_writer_and_the_context_door
     else:
         raise AssertionError(("the home did not read its answers again", subscription_ui["reads"]))
     page.wait_for_function("() => document.querySelector('#page-settings [data-settings-open=rules] [data-settings-answer]')?.textContent")
-    assert not [url for url in subscription_ui["reads"] if "/api/model-catalog" in url], "the home reads no catalogue"
+    readers = page.evaluate("() => window.__catalogueReaders")
+    assert not [stack for stack in readers if "settings_home.js" in stack], ("the home reads no catalogue", readers)
+    subscription_ui["reads"].clear()  # from here a catalogue read is the one Models makes when it is shown
     assert "OUROBOROS_PROMPT_CACHE_TTL" in search_settings(page, "prompt cache")
     page.locator(f'{HOME} [data-settings-result="OUROBOROS_PROMPT_CACHE_TTL"]').click()
     level = _settled(page, "models")
