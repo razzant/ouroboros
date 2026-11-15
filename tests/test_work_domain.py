@@ -291,7 +291,8 @@ def test_an_unmanaged_lookup_never_imports_the_execution_domain(env, monkeypatch
     assert lookup() == ["False", "False"]  # unmanaged
     env.manage()
     assert lookup() == ["False", "False"]  # a policy without ``execution``
-    env.manage(section(env))
+    # A container path is POSIX on every host: name it, never derive it from the host's (a Windows drive path).
+    env.manage(section(env, path_mappings=[{"host_path": str(env.work), "backend_path": "/work"}]))
     assert lookup() == ["True", "True"]  # managed: the domain, through execution_domain.current()
     assert work_domain._domain() is execution_domain.current() is not None
     monkeypatch.setenv(deployment_policy.POLICY_ENV, str(env.admin / "missing.json"))
