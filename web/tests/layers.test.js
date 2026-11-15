@@ -1,6 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createLayerStack } from '../modules/layers.js';
+import { clearReloadParams, createLayerStack } from '../modules/layers.js';
+
+test('boot hints are consumed by the history owner without erasing a layer or a page address', () => {
+    const state = { ouroborosLayer: true }, calls = [];
+    const win = { location: { href: 'https://local/?room=2&_ouro_reason=refresh&_ouro_refresh=1#settings' },
+        history: { state, replaceState: (...args) => calls.push(args) } };
+    clearReloadParams(win);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0][0], state);
+    assert.equal(String(calls[0][2]), 'https://local/?room=2#settings');
+    win.location.href = 'https://local/?room=2#settings';
+    clearReloadParams(win);
+    assert.equal(calls.length, 1, 'ordinary addresses take no write');
+});
 
 // The layer stack (P2): one dismiss for every layer, one history entry while any is open, inert outside a modal
 // layer, focus into the layer and back to the opener. A fake DOM small enough to read: nodes with parents,

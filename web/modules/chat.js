@@ -1,6 +1,7 @@
 import { escapeHtmlAttr, isoMicros } from './utils.js';
 import { bindMarkdownTables, destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { renderPageHeader } from './page_header.js';
+import { clearReloadParams } from './layers.js';
 import { fluentIcon, renderSkillIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { createRoomHeader, mainHeaderActionsHtml } from './chat_header.js';
@@ -480,16 +481,6 @@ export function createChatInstance({
     try {
         pendingRestartNotice = restartNoticeText(new URL(window.location.href).searchParams.get('_ouro_reason') || '');
     } catch {}
-    function clearReloadParams() {
-        try {
-            const url = new URL(window.location.href);
-            if (!url.searchParams.has('_ouro_reason') && !url.searchParams.has('_ouro_refresh')) return;
-            url.searchParams.delete('_ouro_reason');
-            url.searchParams.delete('_ouro_refresh');
-            window.history.replaceState({}, '', url);
-        } catch {}
-    }
-
     function rememberMessageKey(key) {
         if (!key || seenMessageKeys.has(key)) return;
         seenMessageKeys.add(key);

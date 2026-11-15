@@ -34,6 +34,17 @@
 
 const LAYER_STATE = { ouroLayers: 1 };
 
+/** Consume boot-only reload hints without changing the current layer's history state or any page address. */
+export function clearReloadParams(win = globalThis.window) {
+    try {
+        const url = new URL(win.location.href);
+        if (!url.searchParams.has('_ouro_reason') && !url.searchParams.has('_ouro_refresh')) return;
+        url.searchParams.delete('_ouro_reason');
+        url.searchParams.delete('_ouro_refresh');
+        win.history.replaceState(win.history.state, '', url);
+    } catch {}
+}
+
 export function createLayerStack({ win = globalThis.window, doc = globalThis.document, history = win?.history } = {}) {
     const stack = [];
     const listeners = new Set();
