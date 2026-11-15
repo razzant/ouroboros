@@ -283,12 +283,14 @@ def test_exact_nested_line_and_post_quote_conversion(direct_server_with_data, br
             _evidence(page, tmp_path, f"line-after-gesture-{browser_engine}", fixture, facts)
             page.locator('#project-panel-close').click()
             _idle(page, '#chat-messages')
-            # A sidebar reopen reads the present and clears the source jump’s return.
+            # A sidebar reopen keeps the residual reading place and draft, and clears the source jump’s return.
             page.locator('.nav-project-row[data-project-id="quote-triage"]').click()
             _idle(page, '#pchat-quote-triage-messages')
             assert page.evaluate("window.__ouroLayers.returnPage() === null")
-            assert page.locator('#pchat-quote-triage-messages').evaluate(
-                'n => n.scrollHeight - n.scrollTop - n.clientHeight') < 48
+            facts["reopened"] = _settled_row(page, target, feed)
+            assert abs(target.evaluate(timeline_top) - after) <= 2, facts["reopened"]
+            assert abs(facts["reopened"]["feedTop"] - facts["after_resize"]["feedTop"]) <= 2, facts["reopened"]
+            assert page.locator('#pchat-quote-triage-input').input_value() == 'Project draft\n' * 5
         finally:
             _evidence(page, tmp_path, f"line-conversion-{browser_engine}", fixture, facts)
             browser.close()
