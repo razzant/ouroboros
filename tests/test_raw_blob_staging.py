@@ -207,9 +207,6 @@ class Recording(real):
         super().__init__(args, *rest, **kwargs)
 
 subprocess.Popen = Recording
-# work_domain.run's first domain lookup imports the execution-domain module graph (~10 MB, once per process,
-# already resident in a live one); measured inside the window it would hide what staging itself holds.
-import ouroboros.execution_domain
 tracemalloc.start()
 try:
     divergent = stage_raw_payload_inventory(root, rels, env)
