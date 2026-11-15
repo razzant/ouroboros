@@ -1,5 +1,6 @@
 """Saved work reaches the real assignment door without bypassing its scope proof;
-a later continuation of that work is admitted by its own carrier."""
+a later continuation of that work is admitted by its own carrier. A started schedule-born
+occurrence returns from its saved round, never as a replay of its first dispatch."""
 from __future__ import annotations
 
 import copy
@@ -11,9 +12,10 @@ import pytest
 
 from ouroboros import working_checkpoint as wc
 from ouroboros.task_results import load_task_result, write_task_result
-from supervisor import queue, workers
+from supervisor import queue, schedule_occurrence, workers
 from supervisor.events_budget import budget_hold_fact
 from tests._budget_pause_exact_helpers import _fast_hold, _loop_ctx, _mock_pause_observation
+from tests._store_journal_shared import exclusive_hold
 from tests.test_main_project_consistency import admit_main
 from tests.test_project_hold_recovery import accepted, worker
 from tests.test_restart_saved_work import _ack, _stop_and_boot
@@ -21,14 +23,31 @@ from tests.test_swarm_host_admission import host  # noqa: F401
 
 
 
+def _scheduled(host, tmp_path, *, project):  # noqa: F811
+    """One admitted schedule occurrence (its room, or none): its receipt says ``none`` until a launcher marks it."""
+    from tests.test_schedule_occurrence import _project, _row
+
+    q = SimpleNamespace(queue=queue, pending=host.pending, root=host.root)
+    if project:
+        (tmp_path / "room").mkdir()
+        _project(q, folder=tmp_path / "room")
+    _row(q, project_id="proj" if project else "", intent={"kind": "system_repo"})
+    queue.check_scheduled_tasks()
+    [task] = host.pending
+    return task
+
+
 def _running(host, tmp_path, monkeypatch, scope):  # noqa: F811
-    task = accepted(host, tmp_path) if scope == "project" else admit_main(host, tid="held")
-    original = copy.deepcopy(task)
+    if scope.startswith("schedule"):
+        task = _scheduled(host, tmp_path, project=scope == "schedule")
+    else:
+        task = accepted(host, tmp_path) if scope == "project" else admit_main(host, tid="held")
+    original, tid = copy.deepcopy(task), task["id"]
     sent = worker(host, monkeypatch)
     workers.assign_tasks()
-    assert [row["id"] for row in sent] == ["held"]
-    write_task_result(host.root, "held", "running", task_attempt=1, started_at="2026-10-08T00:00:00Z")
-    _, limit = _loop_ctx(host.root, "held", attempt=1)
+    assert [row["id"] for row in sent] == [tid]
+    write_task_result(host.root, tid, "running", task_attempt=1, started_at="2026-10-08T00:00:00Z")
+    _, limit = _loop_ctx(host.root, tid, attempt=1)
     wc.save_round(limit, "post_batch")
     # Physical worker termination is doubled; queue handoff and its durable
     # metadata above, stop, boot, Resume and later assignment stay real.
@@ -36,30 +55,123 @@ def _running(host, tmp_path, monkeypatch, scope):  # noqa: F811
     return original
 
 
-@pytest.mark.parametrize(("stop", "scope"), [("quit", "project"), ("restart", "main")])
-def test_saved_accepted_work_returns_through_real_assignment(host, tmp_path, monkeypatch, scope, stop):  # noqa: F811
+def _returning_stop(host, monkeypatch, tid, *, owner):  # noqa: F811
+    """The door names the saved run in ``return_ids`` and the exiting launcher acknowledges it."""
+    from ouroboros import delegate_recovery
     from supervisor.restart_retention import prepare_restart_returns
 
+    tx = delegate_recovery.prepare_owner_restart(host.root)["transaction_id"] if owner else "working-return"
+    assert prepare_restart_returns(host.root, workers.RUNNING, workers.PENDING, transaction_id=tx) == {tid}
+    _ack(host.root, tx)
+    if owner:
+        monkeypatch.setattr(delegate_recovery, "_PROCESS_GENERATION", "next-boot")
+        assert delegate_recovery.boot_door(host.root) == "owner_restart"
+
+
+def _receipt_busy_at_boot(host, monkeypatch):  # noqa: F811
+    """Boot's strict receipt read meets a real exclusive store hold (``StoreBusy`` contention), then it ends."""
+    from ouroboros import store
+
+    real, verdicts = schedule_occurrence.restore_verdict, []
+
+    def contended(task):
+        holder = exclusive_hold(store.store_path(host.root))
+        try:
+            with store.acquisition_budget(0.2):
+                verdicts.append(real(task))
+        finally:
+            holder.execute("ROLLBACK")
+            holder.close()
+        return verdicts[-1]
+
+    monkeypatch.setattr(schedule_occurrence, "restore_verdict", contended)
+    return verdicts, lambda: monkeypatch.setattr(schedule_occurrence, "restore_verdict", real)
+
+
+@pytest.mark.parametrize(("stop", "scope"), [
+    ("quit", "project"), ("restart", "main"), ("quit", "schedule"), ("restart", "schedule"),
+    ("restart", "schedule_main"), ("owner_restart", "schedule"), ("busy", "schedule"), ("busy", "schedule_main")])
+def test_saved_accepted_work_returns_through_real_assignment(host, tmp_path, monkeypatch, scope, stop):  # noqa: F811
+    """Quit holds for Resume; a named return assigns once. A schedule-born run returns its saved round, not its
+    occurrence's first input; a receipt busy at boot keeps it in Project custody until the readable recheck."""
     original = _running(host, tmp_path, monkeypatch, scope)
-    if stop == "restart":
-        assert prepare_restart_returns(host.root, workers.RUNNING, workers.PENDING,
-                                       transaction_id="working-return") == {"held"}
-        _ack(host.root, "working-return")
+    tid = original["id"]
+    receipt = load_task_result(host.root, tid).get("schedule_admission")
+    if stop != "quit":
+        _returning_stop(host, monkeypatch, tid, owner=stop == "owner_restart")
+    verdicts, readable = _receipt_busy_at_boot(host, monkeypatch) if stop == "busy" else ([], None)
     assert _stop_and_boot(queue, workers) == 1
     [restored] = host.pending
     assert restored["_attempt"] == 2
+    if readable:
+        readable()
+        assert verdicts == ["busy"] and restored["_project_admission_restore_hold"] and not budget_hold_fact(restored)
     sent = worker(host, monkeypatch)
     if stop == "quit":
         workers.assign_tasks()
         assert not sent and budget_hold_fact(restored)
-        assert queue.resume_budget_paused_task("held")["ok"]
+        assert queue.resume_budget_paused_task(tid)["ok"]
     workers.assign_tasks()
     workers.assign_tasks()
-    assert [row["id"] for row in sent] == ["held"], restored
-    assert sent[0]["_attempt"] == 2
+    assert [row["id"] for row in sent] == [tid], restored
+    assert sent[0]["_attempt"] == 2 and sent[0]["_working_recovery"] == restored["_working_recovery"]
     for key in ("project_id", "workspace_root", "drive_root", "_project_admission", "_project_scope_none"):
         assert sent[0].get(key) == original.get(key)
-    assert load_task_result(host.root, "held")["admitted_dispatch_attempt"] == 2
+    assert load_task_result(host.root, tid)["admitted_dispatch_attempt"] == 2
+    if receipt:  # the occurrence's first dispatch is never replayed: same receipt, no new occurrence task
+        assert load_task_result(host.root, tid)["schedule_admission"]["token"] == receipt["token"]
+        queue.check_scheduled_tasks()
+        workers.assign_tasks()
+        assert not host.pending and len(sent) == 1
+    assert not host.attempts
+
+
+@pytest.mark.parametrize("busy", [False, True], ids=["readable", "busy_at_boot"])
+@pytest.mark.parametrize(("damage", "scope"), [
+    ("foreign_receipt", "schedule"), ("foreign_receipt", "schedule_main"), ("torn_source", "schedule"),
+    ("torn_source", "schedule_main"), ("no_project_basis", "schedule")])
+def test_a_returned_scheduled_run_without_its_exact_authority_never_launches(
+    host, tmp_path, monkeypatch, damage, scope, busy,  # noqa: F811
+):
+    """The return names the saved run; restore's reading and then Project revalidation and the launch's receipt
+    projection each still refuse a foreign receipt, a torn saved source or a missing Project basis."""
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.task_results import _TRULY_TERMINAL_STATUSES
+    from ouroboros.work_stop import continuation_refusal
+
+    original = _running(host, tmp_path, monkeypatch, scope)
+    tid = original["id"]
+    if damage == "foreign_receipt":
+        admission = load_task_result(host.root, tid)["schedule_admission"]
+        write_task_result(host.root, tid, "running", schedule_admission={**admission, "token": "foreign"})
+    if damage == "no_project_basis":
+        workers.RUNNING[tid]["task"]["_project_admission"] = None
+    _returning_stop(host, monkeypatch, tid, owner=False)
+    verdicts, readable = _receipt_busy_at_boot(host, monkeypatch) if busy else ([], None)
+    assert _stop_and_boot(queue, workers) == 1
+    [restored] = host.pending
+    if readable:
+        readable()
+        assert verdicts == ["busy"]
+    if damage == "torn_source":  # restore does not read it: the locator is not authority
+        source = task_artifact_dir_path(host.root, tid) / restored["_working_recovery"]["source_ref"]["path"]
+        source.write_bytes(b"{torn")
+    sent = worker(host, monkeypatch)
+    workers.assign_tasks()
+    workers.assign_tasks()
+    assert not sent and host.pending == [restored]
+    custody = restored.get("_project_admission_restore_hold") or {}
+    if damage == "foreign_receipt" and not busy:  # restore's own reading: an unknown receipt returns nothing
+        stop = budget_hold_fact(restored) or continuation_refusal(restored)
+        assert stop["reason"] == ("saved_work_hold" if scope == "schedule" else "dispatch_outcome_unknown")
+    else:  # visibly held in custody, never released into a refused launch
+        assert custody["reason"] == ("project_dispatch_unconfirmed" if damage == "torn_source"
+                                     else "project_routing_fence_lookup_failed"), custody
+    if damage == "foreign_receipt" and busy:
+        assert custody["detail"] == "The schedule's original no-dispatch receipt is unconfirmed."
+    if damage == "no_project_basis":
+        assert "Project identity is missing" in custody["detail"]
+    assert load_task_result(host.root, tid)["status"] not in _TRULY_TERMINAL_STATUSES
     assert not host.attempts
 
 

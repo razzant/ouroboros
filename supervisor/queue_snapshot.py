@@ -423,17 +423,18 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
             continue
         # Import opaque owner/cap carriers even for an exact saved Pause. Its
         # single-use Resume is a separate authority from ordinary queue replay.
-        verdict = restore_verdict(task)
-        schedule_replay = verdict == "replay"
+        verdict = restore_verdict(task)  # a first dispatch; a started run's saved continuation is no replay (#3192)
+        schedule_replay = verdict == "replay" or verdict == "possible" and isinstance(task.get("_working_recovery"), dict)
         if schedule_replay and task.get("admitted_dispatch") == "possible" and first_dispatch_unsent(task):
             # Its receipt proves no first handoff: never started, under this stop's own rule.
             task["admitted_dispatch"] = "none"
             if continuation_refusal(task).get("dispatch_unknown"):
                 clear_refusal(task)
-        # Busy at boot proves neither way: this stop's rule for an unsent row, under Project
-        # custody that re-reads the receipt each tick (``revalidate_project_holds``).
-        recheck = (verdict == "busy" and task.get("admitted_dispatch") == "possible" and first_attempt(task)
-                   and budget_hold_fact(task) is None)
+        # Busy at boot proves neither way: this stop's rule for an unsent row or a named saved run,
+        # under Project custody that re-reads the receipt each tick (``revalidate_project_holds``).
+        recheck = (verdict == "busy" and task.get("admitted_dispatch") == "possible" and budget_hold_fact(task) is None
+                   and (first_attempt(task) or isinstance(task.get("_working_recovery"), dict)
+                        and str(task.get("id") or "") in returning_queue))
         if _exact_pause_row(task):
             refusal = budget_pause_restore_refusal(_queue().DRIVE_ROOT, task)
             retained.append(task if not refusal else hold_restored_budget_pause(

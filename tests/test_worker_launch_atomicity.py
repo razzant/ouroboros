@@ -412,8 +412,10 @@ def test_rows_without_an_occurrence_never_borrow_the_receipt_proof(world, monkey
     assert pending[0].get("_project_admission_restore_hold"), "possibly dispatched work is never released"
 
 
-@pytest.mark.parametrize("case", ["retry_attempt", "receipt_possible"])
+@pytest.mark.parametrize("case", ["retry_attempt", "receipt_possible", "receipt_possible_returning"])
 def test_legacy_discriminator_keeps_every_other_possible_unknown(world, monkeypatch, case):
+    """Also when a return transaction names it: a possibly sent first dispatch without a saved run stays unknown."""
+    from supervisor import restart_retention
     from supervisor import schedule_occurrence as occurrences
 
     _, root, pending = world
@@ -425,6 +427,9 @@ def test_legacy_discriminator_keeps_every_other_possible_unknown(world, monkeypa
         assert held["admitted_dispatch"] == "possible" and held["_project_admission_restore_hold"]
     else:
         assert occurrences.record_dispatch_possible(task)
+        if case == "receipt_possible_returning":
+            monkeypatch.setattr(restart_retention, "fresh_return_transaction",
+                                lambda _root: {"queue_ids": [task["id"]], "return_ids": [task["id"]]})
         [held] = restore([legacy])
         assert held["admitted_dispatch"] == "possible" and hold_reason(held) == "dispatch_outcome_unknown"
 

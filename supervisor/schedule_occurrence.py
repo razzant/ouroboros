@@ -34,7 +34,7 @@ survive restart; no process-local witness is needed. Unreadable or foreign
 results and admitted rows with missing receipts remain unknown. Dispatch
 possibility lives monotonically on the row and receipt, so a first attempt whose
 receipt still says none never reached a worker (``first_dispatch_unsent``); restore
-holds a positive one visibly (``restore_verdict``). Retention removal reads the
+holds a positive first dispatch visibly (``restore_verdict``). Retention removal reads the
 receipt from the table's exact root and preserves accepted or unknown obligations.
 
 A refusal at admission is a hold, not a stored witness. An older admission
@@ -1132,7 +1132,7 @@ def mark_occurrence_row(task: Dict[str, Any], *, redispatch: bool) -> bool:
 
 
 def restore_allowed(task: Dict[str, Any]) -> bool:
-    """Snapshot restore revives a schedule-born pending row only on ``replay``."""
+    """Whether the receipt proves no first dispatch (``replay``); a saved run continues on ``possible``."""
     return restore_verdict(task) == "replay"
 
 
@@ -1144,9 +1144,9 @@ def restore_verdict(task: Dict[str, Any]) -> str:
 def _restore_reading(task: Dict[str, Any]) -> tuple[str, Dict[str, Any]]:
     """``replay``: the receipt is readable, ours, still ``scheduled`` and never marked
     dispatchable. ``possible``: the receipt or row positively says a handoff may have
-    happened and the task has not settled — restore holds it visibly, never replays
-    it. ``busy``: confirmed contention — read again by the occurrence reconcile, or for
-    a first attempt the snapshot calls possible, by the Project custody restore gates it with.
+    happened and the task has not settled — restore holds that first dispatch visibly and returns
+    only a named saved run. ``busy``: confirmed contention — read again by the occurrence reconcile,
+    or for a possible first attempt or a named saved run, by the Project custody restore gates it with.
     ``settled`` (it ran) and ``unknown`` (missing, unreadable, foreign) are not
     replayed: custody owns a started run, and the scheduler's reconcile holds an
     unprovable one. A row without an occurrence replays unless it names a schedule."""

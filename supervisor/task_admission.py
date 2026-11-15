@@ -734,7 +734,7 @@ def revalidate_project_holds() -> None:
     )
     from supervisor import queue, workers
     from supervisor.queue_snapshot import _descends_from, _interrupted_ancestors, _fence_snapshot_running_rows, _exact_pause_row
-    from supervisor.schedule_occurrence import first_dispatch_unsent, restore_allowed
+    from supervisor.schedule_occurrence import _occurrence_of, first_dispatch_unsent, restore_allowed, restore_verdict
     from supervisor.update_merge import assisted_resume_authorizes
     from ouroboros.projects_registry import _load_bindings, project_binding_for_task
     from ouroboros.project_placement import pending_placement, refresh_pending_placement
@@ -841,8 +841,10 @@ def revalidate_project_holds() -> None:
                 raise ProjectAdmissionError("project_dispatch_unconfirmed",
                     "The original task's no-dispatch evidence is unconfirmed; automatic recovery is not authorized.")
             owner_hold = task.get("_owner_hold")
-            # The schedule receipt proves no first dispatch; a grant continues one.
-            schedule_allowed = granted or restore_allowed(task)
+            # The schedule receipt proves no first dispatch; a saved run's grant continues it while that receipt
+            # still reads ``possible`` (restore's rule, deferred here when the receipt was busy at boot).
+            schedule_allowed = granted and (governing != "working" or _occurrence_of(task) is None
+                                            or restore_verdict(task) == "possible") or restore_allowed(task)
             if owner_hold:
                 task["_owner_hold"] = owner_hold
             if not schedule_allowed:
