@@ -380,8 +380,10 @@ function navigationHarness({ pendingWork, exitAtOnce = true, stack = false, cove
         projectInstances: new Map(), projectPaintRequests: new Map(), projectReveals: new Map(),
         lastProjectRows: [project], state: { projectSeenRevision: {} }, mainChat: null,
         projectPanelTitle: {}, projectPanelBody: {}, ctx: {},
+        pageNavigation: { capture: () => ({}) },
+        layers: { back: () => context.api.close() },
         // The panel's exit has run by the next sync here (as under reduced motion): a retired room is put away.
-        showPage: async () => true, isStackLayout: () => stack, roomCoversMain: () => covers, createChatInstance: instance,
+        showPage: async (_name, options) => { options.enter(); return true; }, isStackLayout: () => stack, roomCoversMain: () => covers, createChatInstance: instance,
         document: { hidden: false },
         syncNavigationState() {
             if (context.mainChat) context.syncMainLifetime();

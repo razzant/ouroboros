@@ -1,9 +1,5 @@
-// The Skills page: three views of one page — Installed (what Ouroboros can do
-// now), Browse (what else it could do, from every connected source) and Sources
-// (where skills come from and how much each place is trusted). Installed is the
-// default and never waits for a source or GitHub: it reads the local listing and
-// the serialized lifecycle queue, and every owner action keeps its own words,
-// confirmation and refusal. Browse and Sources live in their own modules.
+// Skills' Installed view reads the local listing and lifecycle queue without waiting for a source.
+// Browse and Sources own their views; every action keeps its words, confirmation and refusal.
 import { bindPageHeader, bindTabStrip, renderPageHeader, renderTabStrip } from './page_header.js';
 import { bindMenu } from './ui_interactions.js';
 import { openConfirmDialog } from './confirm_dialog.js';
@@ -818,7 +814,7 @@ export function initSkills(ctx = {}) {
             return false;
         }
         if (action === 'open_detail') { openInstalledSheet(name, options.node); return false; }
-        if (action === 'open_widgets') { document.querySelector('[data-nav-page="widgets"]')?.click(); return false; }
+        if (action === 'open_widgets') { void ctx.showPage?.('widgets'); return false; }
         if (action === 'open_secrets') {
             // Accounts and keys reveals the row of the first key the button names (a stored key's row is its name).
             void ctx.openSettings?.('accounts', { row: String(options.keys || '').split(',')[0].trim() });
@@ -1105,7 +1101,10 @@ export function initSkills(ctx = {}) {
     window.addEventListener('ouro:open-skills', onOpenSkills);
     paintFilters(null);
 
-    return { destroy() {
+    return { capture() {
+        const tab = activeTab;
+        return () => { if (activeTab !== tab) selectTab(tab); };
+    }, destroy() {
         destroyed = true;
         renderGeneration += 1;
         clearTimeout(pollTimer);

@@ -623,6 +623,7 @@ test('Settings search belongs to the phone list and returns to the desktop heade
         observers.forEach(fn => fn([{ target: content.querySelector('.settings-shell') }]));
         await settle();
         assert.equal(search.parentElement, parent, `${layoutName}/${two}: search follows the list`);
+        assert.equal(controls.page.dataset.searchPlace, parent === home ? 'list' : 'band', 'the writer supplies late placement to WebKit');
         assert.equal(content.querySelector('#settings-search'), field);
         assert.equal(field.value, 'context', 'moving the field preserves the query and its listener');
     }

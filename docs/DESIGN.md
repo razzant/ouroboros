@@ -3394,17 +3394,14 @@ Telegram, and nothing depends on a haptic (`web/modules/haptics.js`).
 A jump leaves a named return in the one stack (`web/modules/layers.js`), under overlays. Every move except a sidebar
 or drawer choice, a section's own list row or a tab is a jump; another stacks. Sidebar and drawer choices clear the
 returns; section rows and tabs keep them. Returning restores the page, its levels, reading place and pressed row.
-The drawer, Project panel, section levels and a file shown alone in Files use that same stack. Dialogs, menus and the work list keep their own
-Escape and outside-press dismissal. Escape, browser and system Back, mouse Back and ⌘[ (Ctrl+[ elsewhere) use the same Back: a popup first, then the
-top layer. Escape clears a filled search first. × and the scrim close their layer; a Project that covers Main (the phone's card, a finger's
-docked column) is modal with the docked sidebar live, its covered room inert once it
-has arrived; the system or browser Back and Telegram's Back close
-what is on top: a dialog over a layer first, then the layer. While a layer is
-open the page holds exactly one same-address history entry, so Back closes it
-instead of leaving the app; navigation itself is still never written into the
-address. A modal layer makes the rest of the shell inert (never what opens over
-it); closing refocuses the opener unless focus moved somewhere live. The shell
-draws one close glyph and one More glyph (`web/modules/page_icons.js`).
+The drawer, Project panel, section levels and a file shown alone in Files use that same stack. Escape, browser,
+system, mouse and Telegram Back, and ⌘[ (Ctrl+[ elsewhere) use one Back: a popup first, then the top layer. Dialogs,
+menus and the work list keep their dismissal; Escape clears a filled search first. × and the scrim close their layer.
+A Project that covers Main (the phone's card, a finger's docked column) is modal with the docked sidebar live,
+its covered room inert once it arrives. A modal layer makes the rest of the shell inert, never what opens over it;
+closing refocuses the opener unless focus moved somewhere live. While any layer is open the page holds one
+same-address history entry, so Back closes it before leaving the app; no navigation is written into the address.
+The shell draws one close glyph and one More glyph (`web/modules/page_icons.js`).
 
 ### Page header
 
@@ -3420,8 +3417,8 @@ window's (owner 22.10), the page's first row starts below it, and the Widgets bo
 crisp edges (owner 20.10), as a room's feed does (owner 21.10), while a plain press in the empty band still moves
 the window. A Project shows its name. In the stack layout the row is at most 56 px and is the only header row:
 the leading control (Ouroboros's picture at a room or a section's list, Back on a page), the destination's name,
-its status, then a room's consciousness chip and Panic; a page's tabs stand at the top of the page, never as a
-second caption row. Logs keeps its filters in one rail below the row, Clear at its end. Files' location and actions stay in the band. The name wins over the
+its status, then a room's consciousness chip and Panic; tabs or filters occupy at most one line below the row.
+Logs keeps Clear at the row's end. Files' location and actions stay in the band. The name wins over the
 status word, which a short row drops whole after its start step, keeping its mark, and Main's title ellipsizes
 before its chip or Panic yields.
 A Project's name keeps one line inside its capsule, at the controls' size and weight (`--type-body`, 600), and ends
@@ -3436,7 +3433,7 @@ Skills keeps its tabs and actions in the band, its search and chips first in the
 On a phone the tabs are one line under the header row. Files keeps its location and actions in the band, its filter
 first in the folder's list; Circles ends the band with New circle, Widgets has no controls.
 Files shows the folder's list and the chosen file side by side while its own width holds both (the `files`
-container, 700 px); narrower, the list comes first and a chosen file replaces it under `Back to folder`, which
+container, 700 px); narrower, the list comes first and a chosen file replaces it with its folder's named Back, which
 keeps an unsaved draft: the file's row says `unsaved` (a new file's draft has its own row at the top) and reopens
 it; another page keeps it too (a return says whether the file changed meanwhile); another file or folder asks. The folder's status stands over the list (audit №7, owner
 2026-10-28T22:09Z).

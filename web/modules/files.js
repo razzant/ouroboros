@@ -37,14 +37,11 @@ export function filesPageTemplate() {
         <div class="files-layout" data-files-view="list">
             <section class="files-sidebar">
                 <div class="files-toolbar">
-                    <input id="files-search" class="ui-control" name="files-filter" type="text" aria-label="Filter current folder" placeholder="Filter current folder...">
+                    <input id="files-search" class="ui-control" name="files-filter" type="search" aria-label="Filter current folder" placeholder="Filter current folder...">
                 </div>
                 <div id="files-list" class="files-list" tabindex="0" aria-label="Files in current folder"></div>
             </section>
-            <section class="files-preview">
-                <div class="files-preview-back">
-                    <button type="button" class="btn btn-default files-back" data-files-back>Back to folder</button>
-                </div>
+            <section class="files-preview" tabindex="-1">
                 <div class="files-preview-header" hidden>
                     <div>
                         <div id="files-preview-path" class="files-preview-path"></div>
@@ -103,8 +100,6 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     const refreshBtn = page.querySelector('#files-refresh');
     const sidebarEl = page.querySelector('.files-sidebar');
     const previewEl = page.querySelector('.files-preview');
-    const backBtn = page.querySelector('[data-files-back]');
-    backBtn.insertAdjacentHTML('afterbegin', `<span aria-hidden="true">${SHELL_ICONS.back}</span>`);
     // The location and actions share the page's band; the filter scrolls with the folder list. Moving the same
     // controls keeps their listeners and focus. A long location reveals its current folder inside the strip alone.
     bindPageHeader(page.querySelector('.app-page-header'), {
@@ -180,7 +175,8 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         const lost = layoutEl.contains(active) && !active.getClientRects().length;
         if (!(single && focusTarget) && !lost) return;
         const row = [...listEl.querySelectorAll('.files-entry.selected')].find((node) => node.getClientRects().length);
-        const target = (single && focusTarget) || (single && view === 'file' ? backBtn : row || listEl);
+        const back = page.querySelector('[data-shell-back]');
+        const target = single && view === 'file' && back?.getClientRects().length ? back : focusTarget || row || listEl;
         target.focus({ preventScroll: true });
     }
 
@@ -393,7 +389,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         button.type = 'button';
         button.className = 'files-entry is-draft selected';
         button.innerHTML = `${entryIcon('file')}${label}<span class="files-entry-meta"><span class="files-entry-unsaved">unsaved</span></span>`;
-        button.addEventListener('click', () => showPane('file', backBtn));
+        button.addEventListener('click', () => showPane('file', previewEl));
         return button;
     }
 
@@ -471,8 +467,8 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     }
 
     // The list's place survives the file shown in front of it: a list out of sight forgets its scroll.
-    listEl.addEventListener('scroll', () => {
-        if (listEl.getClientRects().length) listScroll = sidebarEl.scrollTop;
+    sidebarEl.addEventListener('scroll', () => {
+        if (sidebarEl.getClientRects().length) listScroll = sidebarEl.scrollTop;
     }, { passive: true });
     // Back to folder, and the layer's own close (Escape, the system Back, Telegram's Back): the list again, the draft
     // kept for its row, focus on that row.
@@ -480,12 +476,12 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         renderList();
         showPane('list', listEl.querySelector('.files-entry.selected') || listEl);
     }
-    backBtn.addEventListener('click', closeFile);
 
     // Focus stays this module's (showPane), so the layer neither takes it nor hands it back.
     function syncLayer(open) {
         if (!layers) return;
-        if (open) layers.push({ id: FILE_LAYER, el: previewEl, page: true, modal: false, focus: false, opener: null, onClose: closeFile });
+        if (open) layers.push({ id: FILE_LAYER, el: previewEl, page: true, modal: false, focus: false, opener: null,
+            back: { label: state.path === '.' ? 'Files' : state.path.split('/').filter(Boolean).at(-1), title: `Files › ${state.path}` }, onClose: closeFile });
         else layers.remove(FILE_LAYER);
     }
 
@@ -577,7 +573,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     async function loadFile(path) {
         // The file already in the editor, its draft as it was (on the list alone, its row reopens it).
         if (state.selectedPath === path && state.editorPath === path) {
-            showPane('file', backBtn);
+            showPane('file', previewEl);
             return;
         }
         const request = ++viewRequest;
@@ -637,7 +633,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
                 node: editable ? renderEditor(data.content || '', { isNew: false }) : document.createTextNode(data.content || ''),
             });
         }
-        showPane('file', backBtn);
+        showPane('file', previewEl);
     }
 
     function filenameFromPath(path) {

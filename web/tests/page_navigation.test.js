@@ -42,7 +42,10 @@ test('jumps stack after the veto, section choices retain them, the map clears th
     assert.deepEqual(place, { key: 'settings:tools', label: 'Settings', title: 'Settings › Tools', scroll: 240, focus: 'Skills row' });
     assert.ok(changes.every(ids => ids.length), 'one-column jumps and returns never expose an empty stack');
     assert.deepEqual(history, [['push', { ouroLayers: 1 }, '']], 'no consumed sentinel, URL or second history');
-    await nav.go('skills', move('skills'));
+    const pending = nav.capture();
+    place.scroll = 500;
+    await nav.go('skills', move('skills'), { origin: pending });
+    assert.equal(layers.returnPage().returnTo.scroll, 240, 'an asynchronous destination keeps the place at the press');
     await nav.go('widgets', move('widgets'), { map: true });
     await settle();
     assert.deepEqual(layers.ids(), []);

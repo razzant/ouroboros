@@ -156,6 +156,10 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
             && (box.scrollHeight > box.clientHeight || box.scrollWidth > box.clientWidth));
         const saved = boxes.map((box) => [box, box.scrollTop, box.scrollLeft]);
         const anchors = [];
+        const popup = opener?.closest?.('[role="dialog"], [role="menu"], .ui-popup');
+        if (popup?.id) anchors.push(...Array.from(doc.querySelectorAll('[aria-controls]'))
+            .filter((node) => node.getAttribute('aria-controls').split(' ').includes(popup.id)));
+        if (opener) anchors.unshift(opener);
         for (let at = root?.contains(opener) ? opener : null; at && at !== root; at = at.parentElement) {
             anchors.push(at, at.nextElementSibling, at.previousElementSibling);
         }

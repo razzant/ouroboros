@@ -28,7 +28,7 @@ function world() {
         node.scrollLeft = left;
         listeners.doc.get('scroll')({ target: node });
     };
-    return { listeners, page, box, scrolled, restore };
+    return { doc, listeners, page, box, scrolled, restore };
 }
 
 test('a box scrolled on a page goes back when the page or its tab is shown again; another page is untouched', () => {
@@ -102,6 +102,22 @@ test('Logs owns its actual scroller; generic page restoration still restores oth
     logs.scrollTop = 0; other.scrollTop = 0;
     w.listeners.win.get('ouro:dashboard-subtab-shown')({ detail: { tab: 'logs' } });
     assert.deepEqual([logs.scrollTop, other.scrollTop], [0, 40], 'only logs.js restores #page-logs');
+});
+
+test('a jump from a closed popup returns focus to its surviving trigger, not a hidden row', () => {
+    const w = world(), root = w.page('page-chat');
+    Object.assign(root, { matches: () => false, querySelectorAll: () => [] });
+    const popup = { id: 'room-shade' };
+    let open = true, focused;
+    const row = { isConnected: true, closest: (selector) => selector.includes('role=') ? popup : open ? null : popup,
+        getClientRects: () => open ? [1] : [], focus: () => { focused = 'row'; }, matches: () => true };
+    const trigger = { isConnected: true, getAttribute: () => 'room-shade', getClientRects: () => [1],
+        closest: () => null, matches: () => true, focus: () => { focused = 'trigger'; } };
+    w.doc.querySelectorAll = () => [trigger];
+    const restore = w.restore.capture(root, row);
+    restore(); assert.equal(focused, 'row');
+    open = false;
+    restore(); assert.equal(focused, 'trigger');
 });
 
 // A repaint keeps the reading place: WebKit holds a box in a size container to what remains while a part with an <svg>

@@ -6,9 +6,8 @@
  * drawer is open (a slow read finishing), it takes its place beneath the drawer, which Escape and Back close first. It
  * is not modal and its focus is the owner's (`focus: false`, no opener): the stack neither moves focus in nor back.
  * Dialogs, menus and the work list keep their own focus traps and Escape. Every way of leaving ends in the same place:
- * Escape, the scrim, × call `pop()`, which closes exactly one layer, the top one, through the layer's own `onClose`;
- * the browser's or Android's Back and Telegram's Back call `back()`, which first gives an open dialog over the layer
- * its Escape (the dialog is what is on top) and otherwise pops. The owner of a layer's
+ * Escape, a close control, browser, system, mouse, keyboard and Telegram Back call `back()`, which first gives a
+ * popup its Escape and otherwise pops one layer through its `onClose`. The owner of a layer's
  * state keeps owning it: it calls `push` when it opens and `remove` when it closes (both idempotent), and `onClose` is
  * where the stack asks the owner to close.
  *

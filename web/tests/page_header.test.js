@@ -28,7 +28,7 @@ test('one header: no icon, no caption line, the tabs are written under the row, 
     // On a desk the tabs take the hidden title's place (bindPageHeader): the bar is not empty (owner 19.10, A).
     assert.match(tabbed, /data-sidebar-names>/);
     assert.doesNotMatch(tabbed, /data-empty/);
-    // The Back slot (placePageBack) stands before the lead, both after the hidden title.
+    // The shell return slot stands before the lead, both after the hidden title.
     assert.match(tabbed, /<\/h2>\s*<\/div><span class="app-page-return" data-page-return><\/span><div class="app-page-lead"><\/div>/, 'the Back slot, then the lead slot, follow the hidden title');
     const acting = renderPageHeader({ title: 'Files', actionsHtml: '<button>Refresh</button>' });
     assert.match(acting, /data-sidebar-names>/);

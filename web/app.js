@@ -92,6 +92,7 @@ const beforePageLeaveHandlers = [];
 let settingsControls = null;
 let dashboardControls = null;
 let logsControls = null;
+let skillsControls = null;
 const navState = {
     activeProjectId: null,
     mobileDrawerOpen: false,
@@ -244,6 +245,7 @@ function capturePlace(opener) {
     const page = state.activePage, projectId = navState.activeProjectId;
     const settings = page === 'settings' ? settingsControls?.capture() : null;
     const dashboard = page === 'dashboard' ? dashboardControls?.capture() : null;
+    const skills = page === 'skills' ? skillsControls?.capture() : null;
     const project = projectId ? { id: projectId, name: projectPanelTitle.textContent } : null;
     const root = project ? projectInstances.get(projectId)?.page : document.getElementById(`page-${page}`);
     const reading = restorePlaces.capture(root, opener);
@@ -256,6 +258,7 @@ function capturePlace(opener) {
             commitPage(page, { reveal: true, enter: () => {
                 settings?.restore();
                 dashboard?.restore();
+                skills?.();
                 if (project && projectInstances.has(projectId)) {
                     navState.activeProjectId = projectId;
                     projectPanelTitle.textContent = projectPanelTitle.title = project.name;
@@ -798,10 +801,11 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
     if (navState.activeProjectId === project.id) {
         if (map) layers.batch(() => pageNavigation.clear());
         if (closeDrawer && navState.mobileDrawerOpen) setMobileDrawerOpen(false);
-        if (!openOnly) closeProjectPanel();
+        if (!openOnly) layers.back('project-toggle');
         else if (taskId && quizId) await revealProjectQuestion(freshProjectRow(project), projectInstances.get(project.id), taskId, quizId);
         return;
     }
+    const origin = pageNavigation.capture();
     // The room is the registry's. A row that names its room is its caller's own answer (or the row pressed in the list)
     // and opens as it stands; a reference names only {id, name} and is read by its id first, whatever an older feed row
     // says. Until then the room on screen stays as it is.
@@ -814,7 +818,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
     try {
         // One paint for the whole step (the sync below): a handover leaves the room that was on screen.
         let inst;
-        const movedToChat = await showPage('chat', { map, key: `project:${project.id}`, closeProject: false, closeDrawer: false, sync: false, enter: () => {
+        const movedToChat = await showPage('chat', { map, origin, key: `project:${project.id}`, closeProject: false, closeDrawer: false, sync: false, enter: () => {
         // A document Main had open (a modal over the whole app) closes rather than sit over the room. Covered (a phone,
         // a finger's docked column), Main leaves with it; docked beside the room it stays on screen and live.
         rooms.rememberSelection(mainChat);
@@ -904,6 +908,7 @@ async function resolveProjectRoom(project, navigation) {
 // Resolve and read the exact destination before switching; failed lookups retain room/composer state.
 async function revealQuotedSource(address, chatId, isCurrent) {
     const navigation = projectNavigationGeneration;
+    const origin = pageNavigation.capture();
     const current = () => navigation === projectNavigationGeneration && isCurrent();
     let project = null, page = null;
     if (chatId !== 1) {
@@ -925,7 +930,7 @@ async function revealQuotedSource(address, chatId, isCurrent) {
         if (!matches) return { state: 'unknown' };
         if (project) return openProjectPanel(project, { openOnly: true, sourceReveal: { address, page, current: isCurrent } });
     }
-    closeProjectPanel({ reveal: true });
+    if (await showPage('chat', { reveal: true, origin }) === false) return null;
     const showing = projectNavigationGeneration;
     return mainChat.revealSource(address, () => showing === projectNavigationGeneration, page);
 }
@@ -1012,8 +1017,8 @@ async function acknowledgeProjectAfterPaint(project, instance = null, { forcePai
     return promise;
 }
 
-document.getElementById('project-panel-close')?.addEventListener('click', () => closeProjectPanel());
-projectPanelBackdrop?.addEventListener('click', () => closeProjectPanel());
+document.getElementById('project-panel-close')?.addEventListener('click', () => layers.back('control'));
+projectPanelBackdrop?.addEventListener('click', () => layers.back('scrim'));
 function renderProjectsNav(projects, projectChatIds, activityIndex = projectActivityIndex, readOrder = 0) {
     const all = projects || [];
     // Isolation fan-out SSOT: recognize EVERY registered project chat_id (incl.
@@ -1400,7 +1405,7 @@ initActivity({ ...ctx, mount: document.getElementById('dashboard-panel-activity'
 initConsciousnessDashboard({ ...ctx, mount: document.getElementById('dashboard-panel-consciousness') });
 initCosts({ ...ctx, mount: document.getElementById('dashboard-panel-costs') });
 const disposeStorage = initStorage({ ...ctx, mount: document.getElementById('dashboard-panel-storage') });
-initSkills(ctx);
+skillsControls = initSkills(ctx);
 initWidgets(ctx);
 initCircles(ctx);
 const updateStatus = initUpdateStatus(ctx);

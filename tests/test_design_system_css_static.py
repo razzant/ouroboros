@@ -14,6 +14,18 @@ def without_comments(text):
     return re.sub(r"/\*.*?\*/", "", text, flags=re.S)
 
 
+def test_header_presence_comes_from_writers_and_telegram_owns_its_back():
+    css = without_comments((WEB / 'style.css').read_text(encoding='utf8'))
+    settings = without_comments((WEB / 'settings.css').read_text(encoding='utf8'))
+    assert 'html[data-telegram-back="back"] .app-page-return { display: none; }' in css
+    assert '.app-page-header[data-return]' in css and '[data-search-place="list"]' in settings
+    assert ':has([data-settings-search-slot]:empty)' not in settings
+    assert 'data-page-back' not in css and '.dashboard-back' not in css
+    scope = 'html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header'
+    assert scope + ' > .app-page-leading { display: none; }' in css
+    assert scope + ' {' in css, 'Telegram section placement excludes room bars'
+
+
 # No exception: status/provenance/stat labels keep the renderer's sentence case.
 UPPERCASE_ALLOWLIST = {}
 

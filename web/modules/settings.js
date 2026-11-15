@@ -200,7 +200,7 @@ export function initSettings(ctx = {}) {
     }
 
     // `opener` is the control that opened the level, where focus returns: WebKit does not focus a pressed button.
-    // A level put aside with unsaved words (`close`) comes back as it was left; any other is drawn anew.
+    // A retained level comes back as it was left; a path not visited yet is drawn once.
     function open(path, { row, under, opener, view = '', remember = true }) {
         if (remember && !under && path !== lastFirst) {
             lastFirst = path;

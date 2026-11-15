@@ -145,7 +145,7 @@ export function focusSettingRow(panel, id) {
  * The Dashboard: a place with seven pages, drawn as Settings is (ui.css "The section list"). Its pages are the rows of
  * one list, a vertical tablist whose rows keep the `[data-dashboard-tab]` hooks; the open page is that row's panel.
  * The place's box decides the layout: from 40rem the list stands beside the open page (never an empty page: the one
- * last shown, Logs the first time) and the header's band names that page over it; narrower, the Dashboard opens as
+ * last shown, Logs the first time), named by its chosen row; narrower, the Dashboard opens as
  * its list, and a pressed row opens its page as a level (`☰` gives way to Back, then the page's name, in one row),
  * one `page: true` layer, so Escape, the system's Back and Telegram's Back return to the list. A page opened from a
  * jump gets the shell's named return instead. Each row says its
@@ -157,7 +157,7 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     page.id = 'page-dashboard';
     page.className = 'page app-page-glass section-place';
     page.dataset.sectionView = 'page';
-    // The band: over the list nothing; over the page `(‹) <page>` in the header's one title style.
+    // The page column owns the return and controls; its heading stays accessible when the list names it.
     const leadHtml = `<div class="section-lead dashboard-lead">
             <span class="section-lead-col section-lead-rail"></span>
             <span class="section-lead-col section-lead-page"><span class="app-page-return" data-page-return></span><h2 class="app-page-lead-title" data-dashboard-lead-name></h2></span>

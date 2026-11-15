@@ -1,6 +1,6 @@
 // The Dashboard tabs' own settings (dashboard.js mountTabSettings): rows of settings_rows.js that save themselves, drawn
 // once outside every region a tab repaints, in the cards the approved picture gives them; the way back to Settings
-// (settingsReturn); Costs' subscriptions from the passive quota read. The fake server below answers as the server does:
+// (the page layer); Costs' subscriptions from the passive quota read. The fake server below answers as the server does:
 // the receipt (`changes`), `_meta.effects`, a token per key, a refused `if_unchanged` and `unset`.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -691,7 +691,7 @@ test('in a wide window the Dashboard holds its list beside a page; an engine wit
     const wide = start(true);
     assert.equal(wide.dashboard.page.dataset.sectionView, 'page', 'two panes: a page stands beside the list at once');
     assert.equal(wide.dashboard.page.querySelector('.app-page-header').hasAttribute('data-empty'), true, 'a pane named by its row has no caption band');
-    assert.equal(wide.dashboard.page.querySelector('[data-dashboard-lead-name]').tagName, 'H2', 'the pane keeps its accessible heading');
+    assert.equal(wide.dashboard.page.querySelector('[data-dashboard-lead-name]').tagName.toLowerCase(), 'h2', 'the pane keeps its accessible heading');
     wide.dashboard.activateTab('costs');
     assert.deepEqual(wide.layers, [], 'and is no layer over it');
     wide.dashboard.destroy();

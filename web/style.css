@@ -1259,13 +1259,11 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
 
 /* The folder's list and the chosen file side by side while the page has room for the list's widest column and a
    working file beside it (360 + 340); a narrower page (a phone, a narrow window) shows the list first and the file
-   once one is chosen, with Back to folder above it (files.js). Only there does a row say its edits are unsaved and
+   once one is chosen, with the folder's named Back in the band (files.js). Only there does a row say its edits are unsaved and
    a new file's draft keep a row of its own, the two ways back to a draft. */
 .files-layout { container: files / inline-size; }
-.files-preview-back,
 .files-entry.is-draft,
 .files-entry-unsaved { display: none; }
-.files-back svg { display: block; width: 16px; height: 16px; }
 .files-entry-untitled {
     min-width: 0;
     overflow: hidden;
@@ -1280,7 +1278,6 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
     .files-sidebar { border-right: 0; }
     .files-layout:not([data-files-view="file"]) .files-preview,
     .files-layout[data-files-view="file"] .files-sidebar { display: none; }
-    .files-preview-back { display: flex; padding: var(--space-3) 20px 0; }
     .files-entry.is-draft { display: grid; }
     .files-entry:is(.is-draft, [data-unsaved]) .files-entry-unsaved { display: inline; color: var(--status-warn-fg); }
     .files-entry[data-unsaved] .files-entry-size { display: none; }
@@ -6896,11 +6893,6 @@ html[data-layout="stack"] #page-dashboard[data-section-view="home"] > .app-page-
 .dashboard-settings[data-solo] .ui-row-meta { font-size: var(--type-body); line-height: var(--line-body); }
 .dashboard-settings[data-solo] .ui-row-actions { margin-top: var(--space-2); justify-content: flex-start; }
 .dashboard-settings[data-solo] > .settings-row > .ui-row-actions > .ui-control { width: 100%; }
-/* A place opened from Settings leads back there with the app's one Back (dashboard.js settingsReturn): first in its
-   header's lead, before the tabs or the location; a page whose header has no lead keeps it as a first row at its own
-   gutter. */
-.dashboard-back { flex: none; display: flex; margin: var(--space-2) 0 var(--space-1); padding: 0 20px; }
-html[data-layout="stack"] .dashboard-back { padding-inline: var(--space-3); }
 /* On a phone the tab body's own gutter is the page's: with the shell's added to it a card lost 40 px of a 320 px
    screen, and a three-way choice wrapped two and one (ui.css "On a phone a card keeps 18 px at its sides"). */
 html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
@@ -12104,6 +12096,7 @@ html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-
     column-gap: var(--space-2);
 }
 html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header .app-page-toolbar { flex: none; }
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header > .app-page-leading { display: none; }
 html[data-telegram-fullscreen="active"] #page-dashboard .logs-kinds {
     margin-inline: calc(var(--space-3) - var(--telegram-header-start)) calc(var(--space-3) - var(--telegram-header-end));
     max-width: none;

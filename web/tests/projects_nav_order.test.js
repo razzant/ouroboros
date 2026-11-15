@@ -148,6 +148,21 @@ test('pressing an already open Project closes its drawer, while callers may keep
     assert.deepEqual(calls, []);
 });
 
+test('the Project close control and scrim both use the shared Back, including a jump return', () => {
+    const source = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+    const calls = [], pressed = [];
+    const button = { addEventListener: (_type, callback) => pressed.push(callback) };
+    const context = vm.createContext({ document: { getElementById: () => button }, projectPanelBackdrop: button,
+        layers: { back: reason => calls.push(reason) } });
+    for (const line of source.split('\n').filter(line => line.includes("addEventListener('click'")
+            && (line.includes("'project-panel-close'") || line.startsWith('projectPanelBackdrop?')))) {
+        vm.runInContext(line, context);
+    }
+    assert.equal(pressed.length, 2);
+    pressed.forEach(press => press());
+    assert.deepEqual(calls, ['control', 'scrim']);
+});
+
 // Show more says how many rooms it adds wherever that is known (the owner's sweep of 14.11: one control, one wording):
 // before the complete list is read too, from the state's count of listable rooms. Only a state that counts none (an
 // older server) leaves the number unsaid. A find with no match offers its two different ways back each with its own

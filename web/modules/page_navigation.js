@@ -13,8 +13,8 @@ export function createPageNavigation({ layers, capture, canLeave, doc = document
         for (const id of layers.ids()) if (layers.get(id)?.returnTo) layers.remove(id);
     }
 
-    async function go(key, commit, { map = false } = {}) {
-        const origin = capture(pressed || doc.activeElement);
+    const currentPlace = () => capture(pressed || doc.activeElement);
+    async function go(key, commit, { map = false, origin = currentPlace() } = {}) {
         if (await canLeave(key) === false) return false;
         if (origin.key !== key) doc.activeElement?.blur?.();
         layers.batch(() => {
@@ -38,5 +38,5 @@ export function createPageNavigation({ layers, capture, canLeave, doc = document
         });
         return true;
     }
-    return { go, clear, destroy: () => doc.removeEventListener('click', onPress, true) };
+    return { go, clear, capture: currentPlace, destroy: () => doc.removeEventListener('click', onPress, true) };
 }

@@ -588,7 +588,7 @@ test('Logs reads oldest to newest, gives every event one anatomy, and shows the 
     assert.deepEqual(said(), ['All 2', 'System 2']);
     const strip = mount.querySelector('.logs-filters');
     assert.equal(strip.children.at(-1), mount.querySelector('#btn-clear-logs'), 'Clear list ends the strip');
-    assert.equal(mount.querySelector('#btn-clear-logs').textContent, 'Clear list');
+    assert.equal(mount.querySelector('#btn-clear-logs').textContent, 'Clear');
     assert.equal(mount.querySelectorAll('.btn').filter((button) => button.textContent === 'Clear').length, 0, 'no Clear for the filter');
     const lit = () => chips.filter((chip) => chip.classList.contains('active') && chip.getAttribute('aria-pressed') === 'true')
         .map(label);

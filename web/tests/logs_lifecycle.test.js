@@ -17,10 +17,10 @@ function mountLogs(t, { page = 'dashboard', history = {} } = {}) {
     const fixture = setup(t);
     for (const name of STREAMS) fixture.routes.set(logUrl(name), response({ entries: history[name] || [] }));
     const state = { activePage: page, dashboardActiveSubtab: 'logs' };
-    initLogs({ mount: fixture.mount, ws: fixture.ws, state });
+    const controls = initLogs({ mount: fixture.mount, ws: fixture.ws, state });
     const list = fixture.mount.querySelector('#log-entries');
     return {
-        ...fixture, state, list,
+        ...fixture, state, list, controls,
         emit: (data) => fixture.ws.emit('log', { data }),
         show: () => {
             state.activePage = 'dashboard';
@@ -362,6 +362,28 @@ test('the compact read\'s skipped damaged records are disclosed for that read on
     await settle();
     await settle();
     assert.equal(status.hidden, true, 'a later read without damage clears it');
+});
+
+test('a return restores its own entry offset after a later visit scrolls the same Logs list', async (t) => {
+    const logs = mountLogs(t);
+    await settle();
+    logs.emit({ type: 'test_first', ts: at(1) });
+    logs.emit({ type: 'test_second', ts: at(2) });
+    await settle();
+    const page = logs.mount.querySelector('#page-logs');
+    page.scrollHeight = 1600; page.clientHeight = 500;
+    page.getBoundingClientRect = () => ({ top: 0, bottom: 500 });
+    logs.list.children.forEach((node, index) => {
+        node.getBoundingClientRect = () => ({ top: 300 + index * 400 - page.scrollTop, bottom: 400 + index * 400 - page.scrollTop });
+    });
+    page.scrollTop = 100; await page.fire('scroll');
+    const restore = logs.controls.captureReading();
+    page.scrollTop = 400; await page.fire('scroll');
+    restore(); await settle();
+    assert.equal(page.scrollTop, 100);
+    const same = logs.controls.captureReading();
+    same(); await settle();
+    assert.equal(page.scrollTop, 100, 'a place still there does not move');
 });
 
 test('adopting exact sources for live twins costs one pass over the entries, not one per backfilled row', async (t) => {
