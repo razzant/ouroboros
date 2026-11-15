@@ -459,12 +459,12 @@ def _annotate_terminal_task_truth(
                     "outcome_axes": normalize_outcome_axes(result), "_is_direct_chat": bool(result.get("_is_direct_chat")),
                     "outcome_phase": outcome_phase(result, {}), "outcome_final": task_id not in finalizing_tasks,
                     **initiator_meta(result)}  # + the origin label, from the persisted metadata
-                for key in ("model_execution", "cancel_origin", "review_projection", "review_overrides"):
+                for key in ("model_execution", "cancel_origin", "review_projection", "review_overrides", "finalization_recovery"):
                     if isinstance(result.get(key), dict):
                         terminal_truth[key] = dict(result[key])
                 if isinstance(result.get("body_adoptions"), list):  # its settled adoptions, read beside its Reviews
                     terminal_truth["body_adoptions"] = [dict(row) for row in result["body_adoptions"] if isinstance(row, dict)]
-                terminal_truth.update({key: str(result[key]) for key in ("wake_summary", "schedule_name") if result.get(key)})
+                terminal_truth.update({key: str(result[key]) for key in ("wake_summary", "schedule_name", "terminal_origin") if result.get(key)})
                 if isinstance(result.get("delegated_runs_unreconciled"), list):  # the current debt (#1583)
                     terminal_truth["delegated_runs_unreconciled"] = list(result["delegated_runs_unreconciled"])
                 retention = retention_summary(result)

@@ -421,6 +421,8 @@
  * @property {Object=} task_contract
  * @property {string=} reason_code
  * @property {Object=} cancel_origin The typed stop an owner-stopped turn's final carries (source, stop_policy).
+ * @property {Object=} finalization_recovery An adopted answer's custody (cause, answer, delivery_id), read by the status fold.
+ * @property {string=} terminal_origin Who authored the terminal text: model_final or a host origin.
  * @property {string[]=} delegated_runs_unreconciled The row's current custody debt beside its cause (#1583).
  * @property {Object=} review_status
  * @property {Object=} review_projection

@@ -818,7 +818,7 @@ def _resolve_lifecycle_fault(
         "outcome_axes": normalize_outcome_axes(stored),
     }
     for key in ("review_projection", "review_status", "artifact_status", "artifact_bundle", "root_phase_checkpoint",
-                "execution_owner", "_is_direct_chat"):
+                "execution_owner", "_is_direct_chat", "finalization_recovery", "terminal_origin"):
         if key in stored:
             task_done_event[key] = stored[key]
     try:
@@ -1099,8 +1099,11 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         task_done_event["typed_routing_action"] = str(evt.get("typed_routing_action") or "").strip()
     if isinstance(artifact_bundle, dict):
         task_done_event["artifact_bundle"] = artifact_bundle
-    if isinstance(final_task_result.get("cancel_origin"), dict):
-        task_done_event["cancel_origin"] = dict(final_task_result["cancel_origin"])
+    for key in ("cancel_origin", "finalization_recovery"):  # what the status fold reads beside the axes
+        if isinstance(final_task_result.get(key), dict):
+            task_done_event[key] = dict(final_task_result[key])
+    if final_task_result.get("terminal_origin"):
+        task_done_event["terminal_origin"] = str(final_task_result["terminal_origin"])
     review_status = final_task_result.get("review_status") if isinstance(final_task_result, dict) else None
     if not isinstance(review_status, dict):
         review_status = evt.get("review_status")

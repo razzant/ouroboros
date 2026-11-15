@@ -824,6 +824,8 @@ TASK_CAUSE_PHRASES = {
     # Recovery finalized a dead attempt from its already registered answer instead of a retry
     # (working_checkpoint.adopt_registered_answer): the answer stands, the packaging does not.
     "finalization_incomplete": "The answer was authored, but the task's finalization did not complete, so its review evidence, artifacts and cost accounting are incomplete.",
+    # The same row once the model's final answer is proven delivered (working_checkpoint.delivered_answer_cause): it reads Done.
+    "finalization_incomplete_delivered": "The answer was delivered. The task stopped before its review evidence, artifacts and cost accounting were stored.",
     # The Done card's delivery disposition (terminal_projection._project_row): not reason codes but the
     # row-level warning keys of a delivery the host could not confirm; terminal_delivery_clause adds the copy pointer.
     "terminal_delivery_exhausted": "Sending the final answer was not confirmed after the delivery attempts ran out",
@@ -866,6 +868,7 @@ def outcome_phase(result: Dict[str, Any], event: Dict[str, Any]) -> str:
                                     objective_warned)
     from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
     from ouroboros.task_status import FINAL_STATUSES
+    from ouroboros.working_checkpoint import delivered_answer_cause
     from supervisor.owner_stop import owner_stop_ending
 
     record = {**event, **{key: value for key, value in result.items() if value not in (None, "")}}
@@ -886,8 +889,9 @@ def outcome_phase(result: Dict[str, Any], event: Dict[str, Any]) -> str:
     unanswered = ending == "stop"  # a Wrap up without an answer: its own failure is the stop
     author_stopped = (axes.get("objective", {}).get("source"), axes.get("objective", {}).get("reason")) == ("task_completion", "author_stop")
     author_finished = axis.get("objective") == "pass" and (axes.get("objective") or {}).get("source") == "author_acceptance"
-    if (((lifecycle == "failed" or axis.get("execution") == "failed") and not unanswered)
-            or axis.get("execution") == "infra_failed"
+    delivered = bool(delivered_answer_cause(record))  # only the lifecycle and infrastructure legs yield to it
+    if (((lifecycle == "failed" and not delivered or axis.get("execution") == "failed") and not unanswered)
+            or axis.get("execution") == "infra_failed" and not delivered
             or (axis.get("objective") == "fail" and not author_stopped) or (axis.get("review") == "fail" and not author_finished)
             or {axis.get("artifacts"), str(record.get("artifact_status") or "").lower()} & {"failed", "missing"}):
         return "error"
@@ -1282,7 +1286,9 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
         # state a debt the same record shows as empty. The recorded open-review
         # reason speaks through the wave's class when the record names one.
         detail = veto.get("detail") if veto.get("reason") == reason else ""
-        key = _plan_review_key(result, event, reason) if reason == "plan_review_advisory" else reason
+        from ouroboros.working_checkpoint import delivered_answer_cause
+        key = (_plan_review_key(result, event, reason) if reason == "plan_review_advisory"
+               else delivered_answer_cause({**event, **result}, reason) or reason)
         clause = (" ".join(strip_markdown(str(detail)).split()) if detail
                   else _cause_phrase(key, undescribed))
     # The bypass sentence already names its rail; do not repeat the same cause.

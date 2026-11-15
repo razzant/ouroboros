@@ -460,15 +460,16 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
     from ouroboros.outcomes import normalize_outcome_axes
 
     display = {key: data[key] for key in ("status", "reason_code", "timeout_retry_from", "original_task_id",
-                                          "delegated_runs_unreconciled") if key in data}
+                                          "delegated_runs_unreconciled", "terminal_origin") if key in data}
     if isinstance(data.get("model_waits"), dict):
         from ouroboros.deployment_policy import served_waits
 
         display["model_waits"] = served_waits(data["model_waits"])
     if data.get("status") or data.get("outcome_axes"):
         display["outcome_axes"] = normalize_outcome_axes(data)
-    if isinstance(data.get("cancel_origin"), dict):
-        display["cancel_origin"] = dict(data["cancel_origin"])  # the stop the status fold reads beside the axes
+    for key in ("cancel_origin", "finalization_recovery"):  # the stop and the adopted answer the status fold reads beside the axes
+        if isinstance(data.get(key), dict):
+            display[key] = dict(data[key])
     if synthesis:
         display["root_phase_checkpoint"] = {"post_task_synthesis": synthesis}
     if _answer_stored(synthesis):
