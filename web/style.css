@@ -12093,3 +12093,20 @@ html[data-telegram-fullscreen][data-layout="docked"] .app-page-header {
 html[data-telegram-fullscreen][data-layout="docked"] .app-page-header[data-lead] { padding-top: var(--inset-top); }
 html[data-telegram-fullscreen][data-layout="docked"] .project-panel-bar { padding-top: calc(10px + var(--inset-top)); }
 html[data-telegram-fullscreen][data-layout="docked"] .sidebar-head { padding-top: calc(var(--space-4) + var(--inset-top)); }
+
+/* A section shares Telegram's own row. The host reports heights, never capsule rectangles: fixed safe sides keep
+   the name and one page action in its gap. A rail belongs on the next line. Rooms retain their own placement. */
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header {
+    --telegram-header-start: 96px;
+    --telegram-header-end: 88px;
+    padding: calc(var(--inset-top) - var(--tg-content-safe-area-inset-top)) var(--telegram-header-end) 0 var(--telegram-header-start);
+    min-height: calc(var(--inset-top) - var(--tg-content-safe-area-inset-top) + var(--touch-target-min));
+    column-gap: var(--space-2);
+}
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header .app-page-toolbar { flex: none; }
+html[data-telegram-fullscreen="active"] #page-dashboard .logs-kinds {
+    margin-inline: calc(var(--space-3) - var(--telegram-header-start)) calc(var(--space-3) - var(--telegram-header-end));
+    max-width: none;
+}
+/* Update all remains available at the list's start while Refresh occupies the shared row. */
+.skills-scroll > #skills-update-all { margin-bottom: var(--space-3); }

@@ -234,6 +234,19 @@ test('a page\'s own navigation starts its bar on a desk and goes back under the 
         assert.ok(barOnly.attrs.has('data-lead'));
         offBar();
         assert.equal(listeners.size, 0);
+        doc.documentElement = { dataset: { telegramFullscreen: 'active' } };
+        const update = el('update'), overflow = el('list'), telegramActions = el('app-page-toolbar', update, el('refresh'));
+        const telegram = el('app-page-header', el('app-page-title-block', el('app-page-lead')), telegramActions);
+        el('page', telegram, overflow);
+        update.focus();
+        const offTelegram = bindPageHeader(telegram, { secondary: update, overflow });
+        assert.deepEqual(names(telegramActions), ['refresh'], 'fullscreen: one page action in the host row');
+        assert.deepEqual(names(overflow), ['update'], 'the other action stays reachable in the list');
+        assert.equal(doc.activeElement, update);
+        doc.documentElement.dataset.telegramFullscreen = 'expanded';
+        layout('stack');
+        assert.deepEqual(names(telegramActions), ['update', 'refresh'], 'leaving fullscreen restores the same controls');
+        offTelegram();
     } finally { delete globalThis.window; delete globalThis.document; }
 });
 

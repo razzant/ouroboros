@@ -99,6 +99,7 @@ export function createTelegramHost({
     function syncFullscreen() {
         if (doc?.documentElement?.dataset) doc.documentElement.dataset.telegramFullscreen = app?.isFullscreen === true ? 'active' : 'expanded';
         mirrorInsets();
+        if (win?.Event) win.dispatchEvent?.(new win.Event('ouro:host-chrome'));
     }
 
     // ---- the host's Back control follows the layer stack and closes one layer

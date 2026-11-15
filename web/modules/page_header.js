@@ -137,7 +137,7 @@ export function bindPageBack({ layers, currentHeader, doc = document, win = wind
  * start. Nodes move and are never re-rendered, so their listeners, selection and focus stay theirs; the selected
  * tab is revealed again by its strip's own observer. Returns the disposer.
  */
-export function bindPageHeader(header, { lead = null, actions = null } = {}) {
+export function bindPageHeader(header, { lead = null, actions = null, secondary = null, overflow = null } = {}) {
     const doc = header?.ownerDocument;
     const under = header?.nextElementSibling?.classList?.contains('app-page-tabs') ? header.nextElementSibling : null;
     const moves = [[lead || under?.firstElementChild, header?.querySelector('.app-page-lead'), 'append'],
@@ -155,10 +155,16 @@ export function bindPageHeader(header, { lead = null, actions = null } = {}) {
     if (!moves.length && !toolbar) return () => {};
     let docked = null;
     const place = (layout) => {
+        const active = doc.activeElement;
+        // Telegram's shared row has room for one page action. The page names where its other action belongs.
+        if (secondary && overflow) {
+            const target = doc.documentElement.dataset.telegramFullscreen === 'active' ? overflow : toolbar;
+            if (secondary.parentElement !== target) target.prepend(secondary);
+            if (active?.isConnected && doc.activeElement !== active) active.focus?.({ preventScroll: true });
+        }
         const next = (typeof layout === 'string' ? layout : currentLayout()) === 'docked';
         if (next === docked) return;
         docked = next;
-        const active = doc.activeElement;
         for (const { node, bar, how, home } of moves) {
             if (docked) bar[how](node); else home.after(node);
         }
@@ -169,7 +175,8 @@ export function bindPageHeader(header, { lead = null, actions = null } = {}) {
     };
     place();
     const offLayout = onLayoutChange(place);
-    return offLayout;
+    doc.defaultView?.addEventListener?.('ouro:host-chrome', place);
+    return () => { offLayout(); doc.defaultView?.removeEventListener?.('ouro:host-chrome', place); };
 }
 
 /** A bar narrower than this (px) cannot hold the status, the consciousness chip, Restart, Panic and the budget. */

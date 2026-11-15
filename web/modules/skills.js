@@ -1042,7 +1042,8 @@ export function initSkills(ctx = {}) {
         onChange(tabName) { closeMenus(); activeTab = tabName; activateTab(tabName); paintChrome(); showActive(); },
     });
     // On a desk Installed, Browse and Sources start the bar that Update all and Refresh end (DESIGN "Page header").
-    const disposeBar = bindPageHeader(root.querySelector('.app-page-header'));
+    const disposeBar = bindPageHeader(root.querySelector('.app-page-header'), {
+        secondary: updateAllBtn, overflow: root.querySelector('.skills-scroll') });
 
     const onRefresh = async () => {
         refreshBtn.disabled = true;

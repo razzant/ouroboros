@@ -3533,7 +3533,9 @@ fills the screen (fullscreen if granted, the owner's to leave), turns off
 Telegram's swipe-down so lists scroll, shows
 Telegram's Back while a layer is open and its Close otherwise (the page then draws no Back), gives Telegram's
 header and bottom bar the room's colour, follows Telegram's light or dark as the
-System appearance, and respects Telegram's safe areas on all four sides
+System appearance, and respects Telegram's safe areas on all four sides. In fullscreen a section shares Telegram's
+row: its name and at most one page action between fixed safe sides (96 px, 88 px), its rail one line below.
+Skills' other action starts its list. Rooms keep their own bar placement
 (`web/modules/host_telegram.js`). Everything else is the same page.
 
 Enforcement: `tests/test_design_system_gate_browser.py` visits every registered
