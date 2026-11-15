@@ -1582,13 +1582,22 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
     --scroll-fade-edge: 32px;
     --scroll-fade-top: 0px;
     --scroll-fade-bottom: 0px;
+    --scroll-fade-bottom-clear: 0px;
     -webkit-mask-image: linear-gradient(180deg, transparent 0,
-        black var(--scroll-fade-top), black calc(100% - var(--scroll-fade-bottom)), transparent 100%);
+        black var(--scroll-fade-top), black calc(100% - var(--scroll-fade-bottom)), transparent calc(100% - var(--scroll-fade-bottom-clear)));
     mask-image: linear-gradient(180deg, transparent 0,
-        black var(--scroll-fade-top), black calc(100% - var(--scroll-fade-bottom)), transparent 100%);
+        black var(--scroll-fade-top), black calc(100% - var(--scroll-fade-bottom)), transparent calc(100% - var(--scroll-fade-bottom-clear)));
 }
 .scroll-fade-y[data-scroll-above] { --scroll-fade-top: var(--scroll-fade-edge); }
 .scroll-fade-y[data-scroll-below] { --scroll-fade-bottom: var(--scroll-fade-edge); }
+/* Room edges use the chrome owner's existing reserves, including the composer's capsule line. */
+:is(#chat-messages, .chat-messages)[data-scroll-above] {
+    --scroll-fade-top: calc(var(--chat-header-reserve, 56px) + var(--scroll-fade-edge));
+}
+:is(#chat-messages, .chat-messages)[data-scroll-below] {
+    --scroll-fade-bottom: var(--chat-input-reserve, 108px);
+    --scroll-fade-bottom-clear: calc(var(--chat-input-reserve, 108px) - var(--scroll-fade-edge));
+}
 /* Build B for the owner’s frame comparison: one root attribute keeps the room’s historical crisp top without
    changing the shared scroller or its bottom edge. The candidate default is the fade above. */
 [data-room-top="crisp"] :is(#chat-messages, .chat-messages) {

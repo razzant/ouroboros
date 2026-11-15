@@ -3,7 +3,7 @@
    (`.section-rail`), the levels the page's column (`.section-pane`), and the home's rows are `.section-row`s; the
    class names of Settings stay beside them for what is Settings' own (its card, search, overview row, pages). Each
    column scrolls by itself, keeps its place and fades at an edge where content waits (.scroll-fade-y); the header
-   above is never empty, so the shared header rules give the band. */
+   floats over a first-level page's empty band; named levels keep their header row. */
 .settings-page {
     min-width: 0;
     min-height: 0;
@@ -42,6 +42,9 @@ html[data-layout="stack"] .settings-page { padding-inline: 12px; }
 /* Two panes: the home is the rail beside the page, and a page is always open (settings.js: the last one opened, Models
    the first time; the list's Ouroboros row opens Ouroboros's card in the page's pane). */
 @container sectionplace (min-width: 40rem) {
+    #page-settings:is([data-settings-depth="0"], [data-settings-depth="1"]) > .app-page-header:not([data-return]) { position: absolute; inset: 0 0 auto; z-index: 2; }
+    #page-settings:is([data-settings-depth="0"], [data-settings-depth="1"]) > .app-page-header:not([data-return]) + .settings-shell > .settings-home { margin-top: max(50px, var(--window-chrome-top)); }
+    #page-settings:is([data-settings-depth="0"], [data-settings-depth="1"]) > .app-page-header:not([data-return]) + .settings-shell .settings-page { padding-top: calc(max(50px, var(--window-chrome-top)) + var(--space-2)); }
     .settings-shell[data-section-view="page"] .settings-page { padding-inline-start: var(--space-4); }
     .settings-shell[data-section-view="page"] > .settings-home .settings-overview { margin-block-end: var(--space-3); }
     .settings-shell[data-section-view="page"] .settings-door-glyph.settings-overview-glyph { width: 20px; height: 20px; margin-inline-end: var(--space-2); }

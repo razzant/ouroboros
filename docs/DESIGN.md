@@ -120,7 +120,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    read from one snapshot and written one way; a new part appears only when the old one cannot do
    the job, and then replaces it everywhere.
 
-9. **Moving content never ends on a line.** Where it scrolls past what stays—a bar, a strip, a sheet's head, a menu's edge or the composer—it fades over the one shared edge, only while something is hidden there; nothing opaque is laid over it. What floats over it is one glass, while the Widgets board keeps its crisp edges (owner 20.10).
+9. **Moving content never ends on a line.** Content fades past stationary bars, strips, sheet heads, menus and the full composer, including its capsule line. The shared edge appears only while content waits beyond it; nothing opaque covers it. Floating controls use one glass; the Widgets board keeps crisp edges (owner 20.10).
 
 **Seed (light | dark)**
 
@@ -3447,7 +3447,7 @@ band, actions end it, on Main's line. If the actions and navigation cannot fit b
 row scrolls sideways, keeping every control reachable. Tabs, filters and location use the shared fade; location reveals the current
 folder, none wider than the rail. Section headings follow
 “A section with pages”; a Project shows its name.
-An empty header draws nothing. The page reaches the window's top edge; its first row starts below the macOS band,
+An empty band draws nothing. Its scroller reaches the window's top; its first row starts below the macOS band,
 which stays the window's (owner 22.10). Widgets cards pass under it with crisp edges (owner 20.10); moving content
 fades by principle 9. Empty band space still drags the window. In stack layout the header row is at most 56 px: one
 leading control (the picture on a room or section list, the named Back when owed), destination name, status, then a

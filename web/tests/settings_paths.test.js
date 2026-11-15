@@ -25,6 +25,16 @@ const HOME_PAGES = HOME_ROWS.map((row) => row.to).filter((to) => !isDoorId(to));
 const PENDING_PAGES = {};
 const PENDING_ROWS = {};
 
+test('an empty Settings page band passes over its scroller; a named level retains its header row', () => {
+    const css = readFileSync(new URL('../settings.css', import.meta.url), 'utf8');
+    const wide = css.slice(css.indexOf('@container sectionplace (min-width: 40rem)'), css.indexOf('/* A phone keeps'));
+    assert.match(wide, /#page-settings:is\(\[data-settings-depth="0"\], \[data-settings-depth="1"\]\) > \.app-page-header:not\(\[data-return\]\) \{[^}]*position: absolute/);
+    assert.match(wide, /\.settings-home \{ margin-top: max\(50px, var\(--window-chrome-top\)\);/);
+    assert.match(wide, /\.settings-page \{ padding-top: calc\(max\(50px, var\(--window-chrome-top\)\) \+ var\(--space-2\)\);/);
+    assert.match(css, /\.settings-page \{[^}]*padding: var\(--space-2\) var\(--page-header-padding-x\) 56px/,
+        'a named band and one-column pages keep their ordinary inset');
+});
+
 /** Why `path` is no address ('' when it is one): the home, a door, or a page that a home row opens or a module serves. */
 function deadPath(path, { registered = (target) => Boolean(settingsPageFor(target)) } = {}) {
     if (path === '') return '';
