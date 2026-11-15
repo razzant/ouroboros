@@ -18,6 +18,17 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
+      - name: Trapped copy, up to eight runs, stop at the first runaway
+        shell: bash
+        working-directory: web
+        run: |
+          set +e
+          for i in 1 2 3 4 5 6 7 8; do
+            node --max-old-space-size=2048 --experimental-test-isolation=none --test --test-reporter=tap tests/zz_diag_portal.test.js > ../trap_$i.log 2>&1
+            code=$?
+            echo "run $i exit $code oks=$(grep -c '^ok ' ../trap_$i.log)"
+            if [ $code -ne 0 ]; then grep -n -A40 'LOOP' ../trap_$i.log | head -80; tail -c 4000 ../trap_$i.log; break; fi
+          done
       - name: Bisect the earlier cases (pairs and prefixes)
         shell: bash
         working-directory: web
