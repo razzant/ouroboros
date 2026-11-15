@@ -4,7 +4,7 @@
 // lists stays a route of its own source, never dropped or rewritten. A route's identity is its whole string, source
 // included, so one model through two sources is two rows.
 import {
-    API_PROVIDER_ORDER, apiProviderLabel, composeModelSource, connectionParts, parseModelSource, priceWords,
+    API_PROVIDER_ORDER, apiProviderLabel, cacheWriteWords, composeModelSource, connectionParts, parseModelSource, priceWords,
     unavailableConnectionState,
 } from './route_editor_primitives.js';
 import { harnessPresentation } from './harness_presentation.js';
@@ -217,7 +217,7 @@ export function describeRoute(index, raw) {
     const price = priceWords(listed?.price);
     return {
         route, key: routeKey(route), id: modelPart(route), short: shortName(route), source: id, lane,
-        sourceLabel, pay: PAY_WORDS[lane], price, window, listed: Boolean(listed),
+        sourceLabel, pay: PAY_WORDS[lane], price, cacheWrite: cacheWriteWords(listed?.price), window, listed: Boolean(listed),
         available: listed?.available ?? null,
         harness: own?.harness || (lane === 'subscription' ? id.slice(SUBSCRIPTION.length) : ''),
         kind: own?.kind || (lane === 'api' ? connectionParts(id).kind : ''),

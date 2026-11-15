@@ -11,7 +11,7 @@ import { bindModelChooser, matchingModelOptions, modelChooserHtml, modelOptions,
 import { createModelList } from '../modules/model_list.js';
 import { createModelRolesEditor } from '../modules/model_roles.js';
 import { applyPayload, CODE_PREFIX, setMissTransport } from '../modules/i18n.js';
-import { catalogModelOptions, priceWords, routeModelInputHtml } from '../modules/route_editor_primitives.js';
+import { cacheWriteWords, catalogModelOptions, priceWords, routeModelInputHtml } from '../modules/route_editor_primitives.js';
 import { ElementStub } from './chat_dom_fixture.js';
 import { appendHtml, domDouble } from './dom_double.js';
 
@@ -117,12 +117,12 @@ test('under a role: an OpenRouter model says its price per 1M tokens; every othe
     const sources = [{ id: 'codex', label: 'Codex', credentialHarness: 'codex' }];
     const codex = { provider_id: 'claudexor', source_id: 'codex', id: 'gpt-6-astra', name: 'gpt-6-astra', value: 'claudexor::codex=gpt-6-astra' };
     const editor = createModelRolesEditor({ hostId: 'roles', doc, showContext: false, store: { snapshot: {}, accountsKnown: false },
-        catalogFetch: async () => ({ items: [codex], model_sources: sources }) });
+        catalogFetch: async () => ({ items: [{ ...codex, max_context_window: 400000 }], model_sources: sources }) });
     editor.load({ OPENROUTER_API_KEY: 'k', OPENAI_API_KEY: 'k', OUROBOROS_MODEL: OPUS.value,
         OUROBOROS_MODEL_LIGHT: codex.value, OUROBOROS_MODEL_CONSCIOUSNESS: 'x-ai/grok-4.7',
         OUROBOROS_MODEL_FALLBACKS: `openai::gpt-6, openrouter@gone::${OPUS.value}` }, contract);
     editor.adoptCatalog({ model_sources: sources, items: [OPUS, codex,
-        { provider_id: 'openrouter', id: 'x-ai/grok-4.7', value: 'x-ai/grok-4.7', name: 'xAI: Grok 4.7' },
+        { provider_id: 'openrouter', id: 'x-ai/grok-4.7', value: 'x-ai/grok-4.7', name: 'xAI: Grok 4.7', context_window: 2000000 },
         // OpenRouter lists the very id the direct key below names, with a price; the key's own row states none.
         { provider_id: 'openrouter', id: 'gpt-6', value: 'gpt-6', name: 'gpt-6', price: { input: 1.25, output: 10 } },
         { provider_id: 'openai', id: 'gpt-6', value: 'openai::gpt-6', name: 'gpt-6' },
@@ -131,10 +131,16 @@ test('under a role: an OpenRouter model says its price per 1M tokens; every othe
     const said = (group) => host.querySelectorAll(`[data-model-role-group="${group}"] [data-model-role-status]`)
         .map((node) => node.textContent);
     assert.deepEqual(said('main'), ['$4 in / $20 out per 1M tokens']);
-    assert.deepEqual(said('light'), ['Uses your subscription. No API key required.']);
+    assert.deepEqual(said('light'), ['Uses your subscription. No API key required. 400K window.'], 'the window its account\'s catalog states');
     assert.deepEqual(said('vision'), ['Uses Main.']);
     assert.deepEqual(said('safety'), ['Uses Light.']);
-    assert.deepEqual(said('consciousness'), ['Price unknown'], 'an OpenRouter model whose catalog states no price');
+    assert.deepEqual(said('consciousness'), ['Price unknown · 2M window'],
+        'an OpenRouter model whose catalog states no price; the window its catalog publishes stands beside it');
+    // A window is said beside how the model is paid, never invented: the catalog's, in the model list's words.
+    editor.adoptCatalog({ model_sources: sources, items: [{ ...OPUS, context_window: 1000000 }, codex] });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(said('main'), ['$4 in / $20 out per 1M tokens · 1M window']);
+    assert.deepEqual(said('safety'), ['Uses Light.'], 'an empty slot names what it follows, no window of its own');
     const [direct, gone] = said('fallback');
     assert.equal(direct, 'Price unknown', 'a direct key names no price of its own, though OpenRouter prices the same id');
     assert.match(gone, /Accounts/, 'a key that cannot send says so first');
@@ -300,6 +306,17 @@ test('the capsule strip and the Change Main sheet say the price where "paid by k
     assert.equal(routeFacts(said), 'OpenRouter · $4 in / $20 out');
     assert.equal(said.facts, 'OpenRouter · $4 in / $20 out');
     assert.equal(routeFacts(describeRoute(index, { model: 'z-ai/glm-5.3' })), 'OpenRouter · paid by key');
+    // The sheet's cache-write price (composer_model.test.js) is the catalog's own figure for the install's cache tier
+    // (`price.cache_write`, chosen by the server): said as stated, never derived from the input price, and not said
+    // where the catalog states none, where the figure would print as zero, or where another tier prices the call.
+    assert.equal(said.cacheWrite, '');
+    const cached = { ...OPUS, price: { ...OPUS.price, cache_write: 6.4 } };
+    assert.equal(describeRoute(buildModelIndex({ catalog: { items: [cached] } }), { model: OPUS.value }).cacheWrite,
+        'Cache write: $6.40 per 1M tokens.');
+    assert.equal(describeRoute(buildModelIndex({ catalog: { items: [cached] }, tierPriced: true }), { model: OPUS.value }).cacheWrite, '');
+    for (const none of [undefined, {}, { cache_write: 0 }, { cache_write: 0.00001 }, { cache_write: -1 }, { cache_write: '6.4' }]) {
+        assert.equal(cacheWriteWords(none), '', JSON.stringify(none));
+    }
 });
 
 test('a stale account pin left from a subscription never hides an OpenRouter role price', async () => {

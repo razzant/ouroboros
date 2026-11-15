@@ -26,7 +26,7 @@ import {
     validateAvailableSubagentsSetting,
 } from '../modules/subagents_settings.js';
 import {
-    lastReviewRunText, reviewCostText, reviewTwinAllowed, rowMeta, rowStatus, rowTaskRun, sessionRouteVerdict,
+    lastReviewRunText, modelTariffText, reviewCostText, reviewMoneyLine, reviewTwinAllowed, rowMeta, rowStatus, rowTaskRun, sessionRouteVerdict,
 } from '../modules/subagent_status_primitives.js';
 import { revealNewRow } from '../modules/ui_helpers.js';
 import { accessEditorDom, apiRow, sessionRow, setting } from './helpers/subagents_editor.js';
@@ -1228,14 +1228,23 @@ test('review fields parse strictly and only their non-default values are written
 test('every card carries the Reviewer box and its Review cost; a marked API row shows its delivery and price', () => {
     const plain = availableSubagentRowMarkup(apiRow(), QUIET_STATE, 0);
     assert.match(plain, /<label class="available-subagent-reviewer"><input class="ui-checkbox" type="checkbox" data-subagent-field="review_eligible" aria-label="Subagent 1 reviews"> Reviewer<\/label>/);
-    assert.match(plain, /<dt>Review cost<\/dt><dd data-subagent-review-facts>price appears after saving</);
+    assert.match(plain, /<div hidden><dt>Review cost<\/dt><dd data-subagent-review-facts><\/dd>/, 'nothing was measured or read: nothing is promised');
+    assert.match(plain, /<div hidden data-subagent-tariff><dt>Model tariff<\/dt><dd><\/dd>/, 'no catalog was read: no tariff');
     assert.match(plain, /data-subagent-delivery-field hidden>/, 'the delivery waits, rendered, for the mark');
 
     const marked = availableSubagentRowMarkup(apiRow({ review_eligible: true }), QUIET_STATE, 0);
     assert.match(marked, /aria-label="Subagent 1 reviews" checked> Reviewer/);
     assert.doesNotMatch(marked, /In the review pool/, 'the checked box already says it');
     assert.match(marked, /<select class="ui-control" data-subagent-field="delivery" aria-label="Review delivery for Subagent 1">/);
-    assert.match(marked, /<option value="native" selected>Reads the work itself<\/option>[\s\S]*data-subagent-delivery-cost>price appears after saving</);
+    assert.match(marked, /<option value="native" selected>Reads the work itself<\/option>[\s\S]*data-subagent-delivery-cost><\/span>/);
+    // A read catalog that prices the model: the marked row says the tariff beside its delivery and keeps it in Details.
+    const priced = { ...QUIET_STATE, modelCatalog: { read_state: 'ok', items: [
+        { value: 'openai/gpt-5.6-luna', price: { input: 5, output: 25 } }, { value: 'vendor/unpriced' }] } };
+    const tariffed = availableSubagentRowMarkup(apiRow({ review_eligible: true }), priced, 0);
+    assert.match(tariffed, /data-subagent-delivery-cost>\$5 in \/ \$25 out per 1M tokens<\/span>/);
+    assert.match(tariffed, /<div data-subagent-tariff><dt>Model tariff<\/dt><dd>\$5 in \/ \$25 out per 1M tokens<\/dd>/);
+    assert.match(availableSubagentRowMarkup(apiRow({ review_eligible: true, route: { kind: ROUTE_KIND_API_MODEL, target_id: 'vendor/unpriced' } }), priced, 0),
+        /data-subagent-delivery-cost>Price unknown<\/span>[\s\S]*<div data-subagent-tariff><dt>Model tariff<\/dt><dd>Price unknown<\/dd>/);
     assert.match(availableSubagentRowMarkup(apiRow({ review_eligible: true, delivery: 'packet' }), QUIET_STATE, 0),
         /<option value="packet" selected>Packet — for models without tool calling<\/option>/);
     // Effort left to Auto reviews at the top of the chat range, and its select says so.
@@ -1272,7 +1281,7 @@ test('a price is what one review measured or plainly unknown, and a seat is spok
     assert.equal(reviewCostText(sessionRow()), 'uses a session seat and time');
     assert.equal(reviewCostText(apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'claudexor::codex-models=gpt' } })),
         'uses a session seat and time');
-    assert.equal(reviewCostText(api), 'price appears after saving');
+    assert.equal(reviewCostText(api), '', 'a row whose cost was not read promises nothing');
     assert.equal(reviewCostText(api, { usd_per_review: null, basis: 'unknown' }), 'cost unknown');
     assert.equal(reviewCostText(api, { usd_per_review: 0.5, basis: 'unknown' }), 'cost unknown');
     assert.equal(reviewCostText(api, { usd_per_review: 0.5, basis: 'route_tariff' }), 'cost unknown', 'a one-call tariff is no price');
@@ -1289,6 +1298,34 @@ test('a price is what one review measured or plainly unknown, and a seat is spok
         '<$0.0001 per review (1 measured)');
     assert.equal(reviewCostText(api, { usd_per_review: 0.02, basis: 'observed_reviews', reviews: 3, low: 0.00003, high: 0.05 }),
         '≈$0.02 per review (median of 3 measured, <$0.0001–$0.05)');
+});
+
+test('a reviewer says its model\'s published tariff until a review is measured, and never a rate it does not pay', () => {
+    const api = apiRow();
+    const catalog = { read_state: 'ok', items: [{ value: 'openai/gpt-5.6-luna', price: { input: 5, output: 25 } }, { value: 'vendor/unpriced' },
+        { value: 'local-file.gguf', use_local: true, price: { input: 1, output: 1 } }] };
+    const tariff = '$5 in / $25 out per 1M tokens';
+    assert.equal(modelTariffText(api, catalog), tariff);
+    assert.equal(modelTariffText(apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'vendor/unpriced' } }), catalog), 'Price unknown');
+    assert.equal(modelTariffText(apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'vendor/unlisted' } }), catalog), 'Price unknown');
+    // Nothing is said where the figure would not be the row's: an unread or failed catalog, a session or subscription
+    // seat, a local model, a Fast or Economy row (the row's own tier, else the install's).
+    for (const [row, read, tier] of [[api, {}, ''], [api, { ...catalog, read_state: 'transport' }, ''], [sessionRow(), catalog, ''],
+        [apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'claudexor::codex-models=gpt' } }), catalog, ''],
+        [apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'local-file.gguf' } }), catalog, ''],
+        [apiRow({ processing_preference: 'fast' }), catalog, ''], [api, catalog, 'economy']]) {
+        assert.equal(modelTariffText(row, read, tier), '');
+    }
+    // The one line beside the delivery: the measured cost once there is one, else the tariff, else what is unknown.
+    const measured = { usd_per_review: 0.42, basis: 'observed_reviews', reviews: 3, low: 0.3, high: 0.9 };
+    assert.equal(reviewMoneyLine(api, measured, tariff), '≈$0.42 per review (median of 3 measured, $0.30–$0.90)');
+    assert.equal(reviewMoneyLine(api, { usd_per_review: null, basis: 'unknown' }, tariff), tariff);
+    assert.equal(reviewMoneyLine(api, null, tariff), tariff, 'a draft row not saved yet');
+    assert.equal(reviewMoneyLine(api, { usd_per_review: null, basis: 'unknown' }, ''), 'cost unknown', 'a saved row while no catalog is read');
+    assert.equal(reviewMoneyLine(api, { usd_per_review: null, basis: 'unknown' }, 'Price unknown'), 'cost unknown');
+    assert.equal(reviewMoneyLine(api, null, 'Price unknown'), 'Price unknown');
+    assert.equal(reviewMoneyLine(api, null, ''), '');
+    assert.equal(reviewMoneyLine(sessionRow(), null, ''), 'uses a session seat and time');
 });
 
 test('a minted row names its origin, and a copy keeps the mark but never the origin', () => {
@@ -1364,7 +1401,7 @@ test('review-pool facts price saved rows by their loaded route; an edited route 
 
     // The saved price belongs to the saved route, not to the edited one.
     dom.row(0).querySelector('[data-subagent-field="model"]').emit('input', 'openai/gpt-5.6-sol');
-    assert.equal(dom.row(0).facts.textContent, 'price appears after saving');
+    assert.equal(dom.row(0).facts.textContent, '', 'nothing measured belongs to the edited route');
 
     // A failed read, or a pool error, prices nothing and says why.
     editor.load(setting([apiRow({ review_eligible: true })]));

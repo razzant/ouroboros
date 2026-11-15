@@ -38,7 +38,7 @@ async function fetchCatalog() {
 export function createModelCatalogStore({ readCatalog = fetchCatalog, readPreferences = () => apiClient.uiPreferences(),
     readSettings = () => apiClient.settings(), now = () => Date.now() } = {}) {
     const state = { catalog: null, readAt: 0, failed: false, reading: null, recents: [], recentsReading: null,
-        connections: null, connectionsReading: null, index: null, tiers: null };
+        connections: null, connectionsReading: null, index: null, tiers: null, cacheTier: null };
     const listeners = new Set();
     const notify = () => { state.index = null; listeners.forEach((listener) => listener()); };
 
@@ -92,6 +92,11 @@ export function createModelCatalogStore({ readCatalog = fetchCatalog, readPrefer
         const fallback = String(settings?.[PROCESSING_PREFERENCE_KEY] || '');
         state.tiers = { main: tierPriced(String(roles?.main || fallback)), lead: tierPriced(fallback) };
         state.connectionsFailed = false;
+        // A row's cache-write figure is the one of the cache tier the catalog was read under: another tier makes
+        // the held catalog stale, so the next opened capsule reads it again.
+        const cacheTier = String(settings?.OUROBOROS_PROMPT_CACHE_TTL || '');
+        if (state.cacheTier !== null && state.cacheTier !== cacheTier) state.readAt = 0;
+        state.cacheTier = cacheTier;
     }
 
     /** Whether a catalog price beside a model that `role` (`main`, `lead`) picks could be another tier's: so it is

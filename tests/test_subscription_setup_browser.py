@@ -169,8 +169,12 @@ def subscription_ui():
         elif path == "/api/review-pool":
             body = backend.get("review_pool", {"pool": [], "excluded": [], "last_executions": {},
                                                "row_costs": {}, "config_error": "", "migration": None})
-        elif path == "/api/model-catalog":
-            body = copy.deepcopy(backend.get("catalog_response", fixture["catalog"]))
+        elif path in ("/api/model-catalog", "/api/onboarding/model-catalog"):
+            # The wizard reads the catalog of its draft's access (POST); Settings reads the saved one (GET). A draft
+            # with no connected subscription lists none of the fixture's subscription models.
+            draft_only = path.endswith("/onboarding/model-catalog") and not fixture["status"]["profiles"]["profiles"]
+            body = copy.deepcopy(backend.get("catalog_response", {"items": [], "model_sources": [], "errors": []}
+                                             if draft_only else fixture["catalog"]))
             if backend.get("catalog_status"):
                 route.fulfill(status=backend["catalog_status"], content_type="application/json", body=json.dumps(body))
                 return
@@ -333,7 +337,7 @@ def test_quick_start_requires_a_model_source_for_the_connected_harness(subscript
     ui["fixture"]["catalog"]["model_sources"] = [
         {"id": "opaque-source", "label": "Managed models", "credentialHarness": credential_harness},
     ]
-    with page.expect_response("**/api/model-catalog"):
+    with page.expect_response("**/api/onboarding/model-catalog"):
         page.goto(ui["url"] + "/onboarding")
     page.wait_for_function(
         "expected => document.querySelector('#quick-start-btn').hidden !== expected", arg=expected)
@@ -555,7 +559,7 @@ def test_an_agent_only_subscription_reads_what_it_runs_and_retry_stays_wherever_
     page.wait_for_function("() => document.querySelector('#onboarding-access-note').textContent.includes('Raw model service unavailable')")
     assert retry.is_visible() and reason.inner_text().startswith('Claude Code can run agents;')
     ui['backend'].pop('catalog_status'), ui['backend'].pop('catalog_response')
-    with page.expect_response('**/api/model-catalog'):
+    with page.expect_response('**/api/onboarding/model-catalog'):
         retry.click()
     page.wait_for_function("() => document.querySelector('#onboarding-access-retry').hidden")
     # A key is another way to Main: Continue opens, and the button is the catalog's manual refresh again.
@@ -735,7 +739,7 @@ def test_late_catalog_does_not_restore_access_after_the_account_disconnects(subs
     ui, page = subscription_ui, subscription_ui['page']
     ui['backend']['preview_error'] = 'Agent inventory unavailable.'
     held = []
-    page.route('**/api/model-catalog', lambda route: held.append(route))
+    page.route('**/api/onboarding/model-catalog', lambda route: held.append(route))
     page.goto(ui['url'] + '/onboarding')
     page.wait_for_function("() => document.querySelector('#onboarding-access-note').textContent.includes('Checking model sources')")
     assert held
@@ -744,7 +748,7 @@ def test_late_catalog_does_not_restore_access_after_the_account_disconnects(subs
     page.wait_for_function("() => !document.querySelector('[data-agent-family=codex]').textContent.includes('Signed in')")
     for route in held:
         route.fulfill(content_type='application/json', body=json.dumps(ui['fixture']['catalog']))
-    page.unroute('**/api/model-catalog')
+    page.unroute('**/api/onboarding/model-catalog')
     assert page.locator('#next-btn').is_disabled()
     assert page.locator('#quick-start-btn').is_hidden()
 

@@ -5,7 +5,7 @@
 // and the list's place are the browser lane's.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { MAIN_RULE, MODEL_RULE, confirmMainChange, modelsRunningElsewhere } from '../modules/composer_model.js';
+import { MAIN_CACHE_NOTE, MAIN_RULE, MODEL_RULE, confirmMainChange, modelsRunningElsewhere } from '../modules/composer_model.js';
 import { createModelCatalogStore } from '../modules/model_catalog_store.js';
 import { MAIN_FOLLOW_NOTE } from '../modules/model_roles.js';
 import { ElementStub } from './chat_dom_fixture.js';
@@ -249,12 +249,17 @@ test('the confirming sheet says what Main becomes, what running work does, and i
     sheet.content.mount(content);
     assert.match(content.children[0].innerHTML, />z-ai\/glm-5\.3<\/b><span data-i18n-skip>was gpt-6-astra<\/span>$/);
     assert.deepEqual(content.children.slice(1).map((node) => node.textContent),
-        ['OpenRouter · paid by key · 1M window.', `${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`,
+        ['OpenRouter · paid by key · 1M window.', `${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`, MAIN_CACHE_NOTE,
             'How many running works follow Main is unknown right now: the list of running work is incomplete.']);
-    assert.equal(content.children.length, 4, 'no census was given: the count is unknown and there is nothing to list (main_sheet.test.js)');
+    assert.equal(content.children.length, 5, 'no census was given: the count is unknown and there is nothing to list (main_sheet.test.js)');
+    // The catalog's cache-write price for the install's cache tier follows the fact when the catalog states one.
+    await confirmMainChange({ next: { ...next, cacheWrite: 'Cache write: $16 per 1M tokens.' }, previous, dialog, doc });
+    const priced = doc.createElement('section');
+    calls[1].content.mount(priced);
+    assert.equal(priced.children[3].textContent, `${MAIN_CACHE_NOTE} Cache write: $16 per 1M tokens.`);
     // The same subscription keeps Main's account, so only the window is said.
     await confirmMainChange({ next: { ...next, source: 'subscription:codex', lane: 'subscription' }, previous, dialog, doc });
-    assert.equal(calls[1].body, 'A context window set by hand for Main is cleared.');
+    assert.equal(calls[2].body, 'A context window set by hand for Main is cleared.');
 });
 
 test('Search is a field in the row and its suggestions stand outside it: Main, the recents, then the sources', async () => {

@@ -663,11 +663,13 @@
  */
 
 /**
- * A catalog's published token price, USD per 1M tokens; `tiers` only when input length changes it.
+ * A catalog's published token price, USD per 1M tokens; `tiers` only when input length changes it; `cache_write`
+ * only where the record states the prompt-cache write figure of the tier this install sends.
  * @typedef {Object} ModelPrice
  * @property {number} input
  * @property {number} output
  * @property {ModelPriceTier[]=} tiers
+ * @property {number=} cache_write
  */
 
 /**

@@ -183,6 +183,7 @@
  * @property {boolean} ok
  * @property {Object} model_settings  // the model setting keys the draft would save
  * @property {AvailableSubagentsSetting} available_subagents
+ * @property {string[]} known_spend_gaps  // what the draft's limits cannot count, as GET /api/settings names it after a save
  * @property {string} source
  * @property {Object[]} diagnostics
  */

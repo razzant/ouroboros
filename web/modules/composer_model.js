@@ -33,6 +33,9 @@ import {
 // When a pick takes effect, the hint's rule line: for a room, and for Main itself.
 export const MODEL_RULE = 'Applies to new work here; running work keeps its model.';
 export const MAIN_RULE = 'New work starts on it everywhere, unless a room has its own model.';
+/** The sheet's own fact about what follows Main, said where Main is changed (owner 2026-11-15, #3271): a fact, never
+ *  a forecast of cost. The catalog's cache-write price follows it when the catalog states one. */
+export const MAIN_CACHE_NOTE = 'Whatever follows Main (running works, child works, a consciousness wake) may write most of its start to the new model\'s cache again at its next call.';
 const MAIN_KEY = 'main';
 // How long Main's sheet waits for a state read taken for it before it lists what the page already has.
 const FRESH_STATE_MS = 700;
@@ -167,7 +170,9 @@ export async function confirmMainChange({ next, previous, census = null, dialog 
             else if (lists.followers === 0) count.textContent = 'No running work follows Main now.';
             else if (lists.followers === 1) count.textContent = '1 running work follows Main now.';
             else fmtInto(count, '{n} running works follow Main now.', { n: lists.followers });
-            container.append(row, facts, line(`${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`), count);
+            const cache = line(translateString(MAIN_CACHE_NOTE) + (next.cacheWrite ? ` ${next.cacheWrite}` : ''));
+            cache.dataset.i18nFmt = 'main cache note';
+            container.append(row, facts, line(`${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`), cache, count);
             const sub = (text) => { const made = line(text); made.className = 'chat-model-sheet-sub'; return made; };
             const section = (entries, heading) => {
                 if (!entries.length) return;

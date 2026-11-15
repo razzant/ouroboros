@@ -18,8 +18,8 @@ import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from '.
 import { createModelRolesEditor, inheritTargetOf, modelRolesHost, modelRoleMap, parseModelSource } from './model_roles.js';
 import { ALLOW_EMPTY_REVIEW_POOL, PACKET_ONLY_POOL_WARNING, availableSubagentsEditorHost, packetOnlyReviewPool, reviewPoolRows, reviewerTickCaption } from './subagents_settings.js';
 import { PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, processingIntentLabel,
-    configuredApiProviders, apiProviderLabel, compatibleEndpoint, connectionDefaults } from './route_editor_primitives.js';
-import { MODEL_CATALOG_TIMEOUT_MS, mergeModelCatalog, catalogReadState, summarizeReadErrors } from './settings_catalog.js';
+    configuredApiProviders, apiProviderLabel, compatibleEndpoint, connectionDefaults, spendGapsWords } from './route_editor_primitives.js';
+import { mergeModelCatalog, catalogReadState, readDraftCatalog, summarizeReadErrors } from './settings_catalog.js';
 import { accountRows } from './claudexor_status_store.js';
 import { accountRowFacts } from './harness_accounts.js';
 import { createStarterSkillsRow } from './onboarding_starter_skills.js';
@@ -107,6 +107,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
     let modelSources = [];
     let modelCatalog = {};
     let catalogRequest = null;
+    let catalogRead = '';  // the access whose catalog was read whole
     let disposed = false;
     let disposeLanguage = null;
     let catalogGeneration = 0;
@@ -160,32 +161,26 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         }
     }
 
-    function refreshModelSources() {
-        const connected = state.agentsConnected.join(',');
-        if (catalogRequest?.connected === connected) return catalogRequest.promise;
-        catalogRequest?.controller.abort();
+    // The catalog of the draft's access: its keys, rows and local model, which only this draft knows, and the
+    // connected subscriptions. `once` skips an access already read whole (the Models step asks it when it opens).
+    function refreshModelSources({ once = false } = {}) {
+        const draft = draftSettings();
+        const access = JSON.stringify([state.agentsConnected, draft.OUROBOROS_CONNECTIONS, draft.OPENAI_BASE_URL,
+            PROVIDER_FIELDS.map((field) => draft[field.settingKey]), draft.LOCAL_MODEL_SOURCE, draft.LOCAL_MODEL_FILENAME, draft.LOCAL_MODEL_CONTEXT_LENGTH]);
+        if (catalogRequest?.access === access) return catalogRequest.promise;
+        if (once && access === catalogRead) return Promise.resolve();
+        catalogRequest?.abort();
         const generation = ++catalogGeneration;
-        if (!connected) { catalogRequest = null; return Promise.resolve(); }
-        const controller = new AbortController();
-        const request = { connected, controller };
-        catalogRequest = request;
-        const timer = setTimeout(() => controller.abort(), MODEL_CATALOG_TIMEOUT_MS);
-        request.promise = fetchJson('/api/model-catalog', { cache: 'no-store', signal: controller.signal })
-            .then((catalog) => {
-                if (!catalog || typeof catalog !== 'object') throw new Error('Model catalog response is unreadable.');
-                if (generation !== catalogGeneration) return;
-                modelCatalog = mergeModelCatalog(modelCatalog, catalog);
-            }).catch((error) => {
-                if (generation !== catalogGeneration) return;
-                modelCatalog = mergeModelCatalog(modelCatalog, { read_state: 'transport',
-                    errors: [{ error: error.name === 'AbortError' ? 'Model catalog request timed out.' : error.message }] });
-            }).finally(() => {
-                clearTimeout(timer);
-                if (generation !== catalogGeneration) return;
-                catalogRequest = null;
-                adoptModelCatalog();
-                refreshSummary();
-            });
+        if (!state.agentsConnected.length && !hasApiAccess() && !hasLocalModel()) { catalogRequest = null; return Promise.resolve(); }
+        const request = catalogRequest = { access, ...readDraftCatalog(draft) };
+        request.promise = request.promise.then((catalog) => {
+            if (generation !== catalogGeneration) return;
+            modelCatalog = mergeModelCatalog(modelCatalog, catalog);
+            catalogRead = catalogReadState(catalog) === 'ok' ? access : '';
+            catalogRequest = null;
+            adoptModelCatalog();
+            refreshSummary();
+        });
         syncCurrentStepActionState();
         return request.promise;
     }
@@ -205,6 +200,9 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         }
         if (Array.isArray(response.items)) adoptModelCatalog(response);
         if (state.agentsConnected.length) void refreshModelSources();
+        state.spendGaps = response.known_spend_gaps;  // what this draft's limits cannot count, said on the limits step
+        const gaps = document.getElementById('budget-gaps');
+        if (gaps) Object.assign(gaps, { textContent: spendGapsWords(state.spendGaps), hidden: !spendGapsWords(state.spendGaps) });
         refreshSummary();
     }
 
@@ -912,6 +910,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
                         </div>
                     `).join('')}
                 </div>
+                <div id="budget-gaps" class="field-note ui-field-help" data-i18n-fmt="spend gaps"${spendGapsWords(state.spendGaps) ? '' : ' hidden'}>${escapeHtml(spendGapsWords(state.spendGaps))}</div>
                 ${budgetNote ? `<div id="budget-fields-help" class="field-note ui-field-help">${escapeHtml(budgetNote)}</div>` : ''}
                 </details>
             `;
@@ -1274,6 +1273,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         loadModelRoles();
         modelRoles.mount();
         adoptModelCatalog();
+        void refreshModelSources({ once: true });
         agentsStep?.mount();
         agentsStep?.setProcessingPreference(state.processingPreference);
         syncCurrentStepActionState();
@@ -1553,7 +1553,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         root.removeEventListener('focusin', clearFooterOnFocus);
         disposeLanguage?.();
         catalogGeneration += 1;
-        catalogRequest?.controller.abort();
+        catalogRequest?.abort();
         modelRoles.destroy();
         connectionsEditor?.destroy();
         footerObserver?.disconnect();

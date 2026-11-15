@@ -18,7 +18,10 @@ import {
     accountScopedModelCatalog,
     sessionModelMatches,
     CLAUDE_BASE_QUALIFIER,
+    PRICE_UNKNOWN,
+    priceWords,
     routeSupportsAccount,
+    tierPriced,
 } from './route_editor_primitives.js';
 
 /**
@@ -333,11 +336,33 @@ export function rowTaskRun(row, state) {
     return [qualifier, evidence].filter(Boolean).join(' · ');
 }
 
+/** The published tariff of an API row's model, in a role line's words (USD per 1M tokens: a rate, never an estimate
+ * of one review): `Price unknown` where the catalog was read and states none for it; '' for a session or
+ * subscription row, a local model, a Fast or Economy row (its calls pay another rate) and while the catalog is
+ * not read whole (the section says that once). `catalog` is the editor's merged catalog. */
+export function modelTariffText(row, catalog = {}, processingPreference = '') {
+    const target = String(row?.route?.target_id || '').trim();
+    const item = (Array.isArray(catalog.items) ? catalog.items : []).find((entry) => entry.value === target);
+    if (!target || routeSupportsAccount(row.route) || catalog.read_state !== 'ok' || item?.use_local
+        || / \(local\)$/.test(target) || tierPriced(row.processing_preference || processingPreference)) return '';
+    return priceWords(item?.price, { unit: true }) || PRICE_UNKNOWN;
+}
+
+/** The one money line beside a marked API row's delivery: what one review cost once reviews were measured (or its
+ * non-money equivalent); until then the model's published tariff; with neither, that its cost is unknown, and
+ * for a row not saved yet that its price is. */
+export function reviewMoneyLine(row, cost, tariff) {
+    const measured = reviewCostText(row, cost);
+    if (cost && cost.basis !== 'unknown') return measured;
+    return tariff && tariff !== PRICE_UNKNOWN ? tariff : measured || tariff;
+}
+
 /** What one review by this row actually cost — the median of its measured reviews with their count
- * and range (the words `## Review` prints) — or its non-money equivalent; unknown is never zero. */
+ * and range (the words `## Review` prints) — or its non-money equivalent; unknown is never zero, and a row
+ * whose cost was not read (a draft not saved yet) says nothing. */
 export function reviewCostText(row, cost = null) {
     if (routeSupportsAccount(row?.route || {})) return 'uses a session seat and time';
-    if (!cost) return 'price appears after saving';
+    if (!cost) return '';
     if (cost.basis === 'local_route') return 'no API cost per review';
     const usd = cost.usd_per_review;
     if (cost.basis !== 'observed_reviews' || typeof usd !== 'number' || !Number.isFinite(usd)) return 'cost unknown';

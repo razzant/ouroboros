@@ -198,6 +198,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/onboarding",
     "GET /api/onboarding/bootstrap",
     "POST /api/onboarding/subagents/preview",
+    "POST /api/onboarding/model-catalog",
     "POST /api/onboarding/complete",
     "GET /api/onboarding/complete",
     "GET /api/files/list",
@@ -260,6 +261,9 @@ HTTP_SHAPES: dict[str, Shape] = {
     "POST /api/onboarding/subagents/preview": Shape(
         "200:OnboardingSubagentsPreviewResponse 400,503:SettingsWriteRefusal", "OnboardingCompleteRequest",
         note="read-only actor draft for the same payload completion would save"),
+    "POST /api/onboarding/model-catalog": Shape(
+        "200:ModelCatalogResponse 400:SettingsWriteRefusal", "OnboardingCompleteRequest",
+        note="read-only; the model catalog of the access an unsaved setup draft names (its access fields alone)"),
     "POST /api/onboarding/complete": Shape(
         "200:OnboardingCompleteResponse 400,403,409,500,503:SettingsWriteRefusal|OnboardingPresetFailureResponse",
         "OnboardingCompleteRequest", note="the one atomic setup writer; a 503 with can_skip offers completion without agent presets"),

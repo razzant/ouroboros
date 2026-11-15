@@ -7,7 +7,7 @@ import { accountRows, accountName, accountModelUnsupported } from './claudexor_s
 import { formatRelativeAge } from './ui_helpers.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
-import { fmt, tr } from './i18n.js';
+import { fmt, tr, translateString } from './i18n.js';
 import { modelChooserHtml, updateModelChooserOptions } from './model_chooser.js';
 
 export const ROUTE_KIND_API_MODEL = 'api_model';
@@ -338,10 +338,29 @@ function routeCatalogItems(route, items = []) {
         && (!pin || !item?.credential_profile_id || item.credential_profile_id === pin));
 }
 
+/** Said where a route paid by key has no published price that it pays (docs/DESIGN.md "Onboarding density"). */
+export const PRICE_UNKNOWN = 'Price unknown';
+
+/** What the limits cannot count, in the one line said under them (Dashboard › Costs, and the setup wizard's limits
+ *  step for its draft): the names `pricing.known_spend_gaps` gives; '' when it names none. */
+export function spendGapsWords(gaps) {
+    const names = (Array.isArray(gaps) ? gaps : []).map((name) => translateString(String(name)));
+    return names.length ? fmt('Not counted: {roles} (price unknown).', { roles: names.join(', ') }) : '';
+}
+
 // A dollar figure as the catalog states it, to four decimals and in cents at least: $4, $2.50, $0.075.
 function usd(value) {
     const [whole, fraction = ''] = String(Math.round(value * 1e4) / 1e4).split('.');
     return `$${whole}${fraction ? `.${fraction.padEnd(2, '0')}` : ''}`;
+}
+
+/** What writing 1M tokens to the prompt cache costs on the install's cache tier, as the catalog states it
+ *  (`ModelPrice.cache_write`): `Cache write: $16 per 1M tokens.`; '' when it states none or the figure would print
+ *  as zero. Words only, never a forecast: how much a call writes is not known before it is sent. */
+export function cacheWriteWords(price) {
+    const figure = price?.cache_write;
+    if (!Number.isFinite(figure) || figure <= 0 || usd(figure) === '$0') return '';
+    return fmt('Cache write: {price} per 1M tokens.', { price: usd(figure) });
 }
 
 /**

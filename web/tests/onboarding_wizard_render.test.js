@@ -243,7 +243,14 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
     const response = new Promise((resolve) => { returnReceipt = resolve; });
     let recordCompletion;
     const completed = new Promise((resolve) => { recordCompletion = resolve; });
+    const catalogReads = [];
     const fetch = (url, init) => {
+        // The Models step reads the catalog of the draft's own access: the key typed here, which no saved file holds.
+        if (String(url) === '/api/onboarding/model-catalog') {
+            catalogReads.push(JSON.parse(init.body));
+            const body = { items: [], model_sources: [], errors: [] };
+            return Promise.resolve({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
+        }
         requests.push({ url, method: init.method, body: JSON.parse(init.body) });
         recordSubmission();
         return response;
@@ -274,6 +281,8 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
         assert.match(doc.getElementById('root').innerHTML, />Access level</, 'the summary names the access level as the step does');
         doc.getElementById('next-btn').fire('click');
         await submitted;
+        assert.deepEqual(catalogReads.map((draft) => draft.OPENROUTER_API_KEY), ['test-key-not-a-secret'],
+            'one catalog read for the draft\'s access, carrying its key');
         assert.equal(requests.length, 1);
         assert.equal(requests[0].url, '/api/onboarding/complete');
         assert.equal(requests[0].method, 'POST');
@@ -800,7 +809,7 @@ test('Summary says what an exhausted subscription quota does, with and without a
     const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
     const fetch = async (url, init = {}) => {
         let body = {};
-        if (String(url) === '/api/model-catalog') body = subscription.catalog;
+        if (String(url) === '/api/onboarding/model-catalog') body = subscription.catalog;
         else if (String(url) === '/api/claudexor/status') body = subscription.status;
         else if (String(url) === '/api/onboarding/subagents/preview') {
             const payload = JSON.parse(init.body);
@@ -883,7 +892,7 @@ async function finishFromAccounts(bootstrap, query, { inputs = {}, models = {}, 
         } else if (String(url) === '/api/claudexor/status') {
             body = { ...subscription.status, profiles: { ...subscription.status.profiles,
                 profiles: connected ? subscription.status.profiles.profiles : [] } };
-        } else if (String(url) === '/api/model-catalog') {
+        } else if (String(url) === '/api/onboarding/model-catalog') {
             body = subscription.catalog;
         }
         return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };

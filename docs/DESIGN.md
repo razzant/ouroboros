@@ -2791,10 +2791,15 @@ Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role reads as a current choice (§7 "Settings") and opens one compact
 Source / Model / Account row to change it. Under Main, Settings (not the wizard or a wait
 picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the Main chat's Model capsule, whose
-confirming sheet says it before it writes Main. A model suggestion and the line under a role show the catalog's
+confirming sheet says it before it writes Main, with one more fact (`composer_model.MAIN_CACHE_NOTE`: what follows
+Main may write its start to the new model's cache again) and, where the catalog states it for the install's cache
+tier, the price of a cache write. A model suggestion and the line under a role show the catalog's
 published price per 1M tokens where it states a whole one and the role pays it (not on Fast or Economy), which never
-sorts or filters the list; the line under an API role whose price is not that says `Price unknown`;
-nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
+sorts or filters the list; the line under an API role whose price is not that says `Price unknown`. The line under a
+role also says the model's window in the list's words (`$4 in / $20 out per 1M tokens · 1M window`): the one its
+route is sized with when known, else the catalog's; an unknown window is omitted. In setup the catalog is the draft's
+own (a key typed there lists and prices its models before anything is saved), and the limits step names what its
+limits cannot count, as Dashboard › Costs does (`Not counted: …`). Nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
 independently. Fallbacks use the same row in their saved order, with adjacent

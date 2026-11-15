@@ -102,7 +102,7 @@ def test_wizard_unchanged_preview_preserves_pristine_model_focus(subscription_ui
         window.heldPosition = window.scrollY;
     }""")
     ui["fixture"]["status"]["harnesses"][0]["models"].append({"id": "another-discovered-model"})
-    with page.expect_response("**/api/model-catalog") as catalog:
+    with page.expect_response("**/api/onboarding/model-catalog") as catalog:
         page.evaluate("""async () => {
             const {claudexorStatus} = await import('/onboarding/static/modules/claudexor_status_store.js');
             await claudexorStatus.refresh({includeModels: true});

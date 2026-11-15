@@ -71,3 +71,16 @@ test('Settings\' own refresh feeds the store; the settings document\'s connectio
     assert.equal(settingsReads, 1);
     assert.deepEqual(store.index().connections.map((entry) => [entry.id, entry.label, entry.enabled]), [['openai@old', 'OpenAI · Old', false]]);
 });
+
+test('another cache tier makes the held catalog stale: its cache-write prices are the old tier\'s', async () => {
+    let reads = 0;
+    const store = createModelCatalogStore({ readCatalog: async () => { reads += 1; return { items: [item('a/one')] }; } });
+    await store.read();
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m' });
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '5m', OUROBOROS_MODEL: 'a/one' });
+    await store.read();
+    assert.equal(reads, 1, 'a settings document with the same tier leaves a fresh catalog alone');
+    store.adoptSettings({ OUROBOROS_PROMPT_CACHE_TTL: '1h' });
+    await store.read();
+    assert.equal(reads, 2);
+});
