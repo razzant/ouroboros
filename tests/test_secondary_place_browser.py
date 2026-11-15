@@ -209,7 +209,7 @@ def test_hidden_logs_take_a_burst_without_drawing_and_shown_keep_filters_raw_sel
             expect(entry.locator(".log-raw-status")).to_contain_text("Received event")
             assert json.loads(raw.inner_text())["type"].startswith("burst_note_")
             entry.locator(":scope > summary").click()
-            assert raw.evaluate("pre => pre.textContent") == ""
+            expect(raw).to_have_text("")  # Native toggle dispatches after the closing click.
 
             # The owner's filter stays across another page; so does a card's open Timeline.
             card = entries.locator(".log-task-card").last
@@ -231,7 +231,9 @@ def test_hidden_logs_take_a_burst_without_drawing_and_shown_keep_filters_raw_sel
             group = card.get_attribute("data-task-group")
             card.locator(".log-task-event summary").first.focus()
             page.evaluate("""group => {
-                const row = document.querySelector(`[data-task-group="${group}"] .log-task-event .log-name`);
+                const head = document.querySelector(`[data-task-group="${group}"] .log-task-event summary`);
+                const row = [...head.querySelectorAll('.log-name, .log-words')]
+                    .find(node => node.textContent && node.getClientRects().length);
                 const range = document.createRange();
                 range.setStart(row.firstChild, 0);
                 range.setEnd(row.firstChild, Math.min(5, row.firstChild.length));
