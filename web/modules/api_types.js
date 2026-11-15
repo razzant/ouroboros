@@ -1240,13 +1240,14 @@
  * read as "no account connected" while real accounts sat in the agent home.
  * "ok" — read, the matching collection is AUTHORITATIVE (empty means empty);
  * "not_read" — never asked: no daemon, or discovery/handshake died before the
- * fan-out (which leaves every facet untouched); "failed" — asked, and no
+ * fan-out (which leaves every facet untouched); or an answer the host discarded as
+ * older than a confirmed account write or a newer held read; "failed" — asked, and no
  * usable answer came back (refused, or a body in the wrong shape).
  * Facets are independent: one fanned-out read can fail while its siblings land.
  * @typedef {"ok"|"not_read"|"failed"} ClaudexorReadState
  */
 /**
- * Independent facets: ok=authoritative, not_read=never asked, failed=no usable answer. Empty without ok proves nothing.
+ * Independent facets: ok=authoritative, not_read=never asked or discarded, failed=no usable answer. Empty without ok proves nothing.
  * @typedef {Object} ClaudexorStatusReads
  * @property {ClaudexorReadState} catalog
  * @property {ClaudexorReadState} accounts
@@ -1283,7 +1284,7 @@
  * @property {Object=} daemon
  * @property {string=} config_dir
  * @property {Array<Object>=} harnesses
- * @property {Object=} profiles
+ * @property {Object=} profiles Full Accounts adds login_capable_harnesses (string[]|null); manifest eligibility, null retains unread-manifest fail-open.
  * @property {Array<Object>=} quota
  * @property {Array<Object>=} quota_absences
  * @property {Array<Object>=} resources Engine resource facets retain decimal strings, units and independent observation times.

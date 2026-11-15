@@ -243,7 +243,7 @@ PURE_READ_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | frozenset({
 # serially, so cap/dedup/enqueue remain single-threaded and safe.
 PARALLEL_SAFE_ENQUEUE_TOOLS: frozenset[str] = frozenset({"schedule_subagent"})
 
-# Stateful browser tools need the thread-sticky executor.
+# Browser tools run one at a time on the task's sticky executor.
 STATEFUL_BROWSER_TOOLS: frozenset[str] = frozenset({
     "browse_page", "browser_action",
 })

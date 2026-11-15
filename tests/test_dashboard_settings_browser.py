@@ -6,7 +6,8 @@ The real SPA in headless Chromium and WebKit over the shared fixture's endpoints
 tab a field the owner is in keeps its text and caret through the tab's own periodic refresh and a settings read, and
 leaving it shows the row's result line; the Updates channel keeps its focused choice through a status read; the
 Evolution choice "Every N tasks" posts both keys in one body and says itself in its own sentence; the doors of
-Consciousness and Costs lead where they say and Settings leads back. Every one of the five tabs opened from the
+Consciousness and Costs lead where they say, share a row with a long model name while keeping their chevron beside it,
+and Settings leads back. Every one of the five tabs opened from the
 Settings home shows Back first, and Escape, Back itself or the system's Back return to Settings at the scroll position
 it was left at, in a window (1087 x 740) and at the 320 x 640 floor, where the menu stays and no tab scrolls sideways.
 
@@ -69,8 +70,9 @@ def _quota():
             "quota": [window("work", 0.2, 2), window("home", 1, 5)]}
 
 
-def _open(ui, *, tab=None, width=1087, height=740):
-    """The app with the stored settings above; a save stores its body and answers the receipt."""
+def _open(ui, *, tab=None, width=1087, height=740, consciousness=None):
+    """The app with the stored settings above; a save stores its body and answers the receipt. ``consciousness`` is
+    what ``GET /api/consciousness`` answers where a test reads its facts."""
     ui["settings"].update(STORED)
     ui["settings"]["_meta"] = {**ui["settings"]["_meta"], "effects": EFFECTS}
     page = ui["new_page"](viewport={"width": width, "height": height})
@@ -94,6 +96,9 @@ def _open(ui, *, tab=None, width=1087, height=740):
     page.route("**/api/storage", lambda route: route.fulfill(content_type="application/json", body=json.dumps(
         {"count": None, "counting": COUNTING, "error": None, "volume": VOLUME, "retention_days": 7})))
     page.route("**/api/claudexor/status?view=quota", quota)
+    if consciousness is not None:
+        page.route("**/api/consciousness", lambda route: route.fulfill(
+            content_type="application/json", body=json.dumps(consciousness)) if route.request.method == "GET" else route.fallback())
     page.clock.install()
     page.goto(ui["url"] + "/")
     page.wait_for_selector("#page-chat")
@@ -234,7 +239,9 @@ def test_every_n_tasks_shows_its_count_and_saves_both_keys_in_one_body(ui):
 
 
 def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(ui):
-    page, _ = _open(ui, tab="consciousness")
+    # The Model door says the route the server publishes (an empty slot follows Main), never a guess from the slot.
+    page, _ = _open(ui, tab="consciousness", consciousness={
+        "model_route": {"value": "claudexor::codex=gpt-6-astra", "layer": "main", "local": False}})
     row = lambda name: f'#page-dashboard [data-setting-row="{name}"]'
     # The allowance door carries the name its limit has on Costs (a rolling 24 hours, never "a day") and the sum alone.
     page.wait_for_function("(s) => document.querySelector(s)?.querySelector('[data-row-value]')?.textContent === '$20'", arg=row("consciousness-allowance"))
@@ -257,7 +264,7 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     around = page.locator('#page-dashboard [data-cx-settings] > section[aria-label="Around it"] [data-setting-door]')
     assert [" ".join(text.split()) for text in around.evaluate_all(
         "(doors) => doors.map((door) => [door.querySelector('.ui-row-title').textContent, door.querySelector('[data-row-value]')?.textContent ?? ''].join(' | '))")] == [
-        "Model | Main model", f"Its actions are checked | {_scale_word(page, 'light')}", "Where it lives |", "Improving itself | Off"]
+        "Model | gpt-6-astra (Main model)", f"Its actions are checked | {_scale_word(page, 'light')}", "Where it lives |", "Improving itself | Off"]
     # The Safety door opens its row's page in Settings, whose Back names this tab and returns to it.
     page.click(row("consciousness-safety"))
     back = page.locator('#page-settings [data-settings-page="permissions"] [data-settings-back]')
@@ -370,3 +377,58 @@ def test_no_tab_scrolls_sideways_at_the_floor_and_a_three_way_choice_keeps_one_l
         const [title, meta, actions] = [box('.ui-row-title'), box('.ui-row-meta'), box('.ui-row-actions')];
         return [id, actions.left >= title.right - 1 && actions.top < Math.max(title.bottom, meta.bottom)]; }))""")
     assert ends == {"OUROBOROS_CONSCIOUSNESS_MAX_TASKS": True, "consciousness-allowance": True, "OUROBOROS_BG_WAKEUP": False}, ends
+
+
+@pytest.mark.parametrize("width,height", [(1087, 740), (390, 844)])
+def test_a_door_shares_its_row_with_a_long_value_and_keeps_its_chevron_beside_it(ui, width, height):
+    page, _ = _open(ui, width=width, height=height)
+    route = {"value": "anthropic/claude-opus-5.5", "layer": "main", "local": False}
+    page.route("**/api/consciousness*", lambda served: served.fulfill(
+        content_type="application/json", body=json.dumps({"model_route": route})))
+    _nav(page, "dashboard", width)
+    page.click('[data-dashboard-tab="consciousness"]')
+    model_row = '#page-dashboard [data-setting-row="consciousness-model"]'
+    page.wait_for_function("(s) => document.querySelector(s)?.querySelector('[data-row-value]')?.textContent === '$20'",
+                           arg='#page-dashboard [data-setting-row="consciousness-allowance"]')
+
+    def measure(expected):
+        page.wait_for_function("([s, words]) => document.querySelector(s)?.querySelector('[data-row-value]')?.textContent === words",
+                               arg=[model_row, expected])
+        return page.evaluate("""() => {
+            const ids = ['consciousness-allowance', 'consciousness-model', 'consciousness-safety', 'consciousness-places', 'consciousness-evolution'];
+            const lines = (el) => el ? Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight)) : 0;
+            return Object.fromEntries(ids.map((id) => {
+                const row = document.querySelector(`#page-dashboard [data-setting-row="${id}"]`);
+                const r = row.getBoundingClientRect();
+                const [title, meta, actions, value, chevron] = ['.ui-row-title', '.ui-row-meta', '.ui-row-actions', '[data-row-value]', '.settings-row-chevron']
+                    .map((s) => row.querySelector(s));
+                const [t, m, a, c] = [title, meta, actions, chevron].map((el) => el.getBoundingClientRect());
+                const v = value && value.getClientRects().length ? value.getBoundingClientRect() : null;
+                return [id, {
+                    rowWidth: r.width,
+                    titleLines: lines(title),
+                    valueWidth: v ? v.width : 0,
+                    valueLines: v ? lines(value) : 0,
+                    valueAlign: value ? getComputedStyle(value).textAlign : null,
+                    actionsBeside: a.left >= t.right - 1 && a.top < Math.max(t.bottom, m.bottom),
+                    chevronBeside: !v || (c.left >= v.right - 1 && c.top < v.bottom - 0.5),
+                    chevronEndGap: r.right - c.right,
+                }];
+            }));
+        }""")
+
+    medium = measure("anthropic/claude-opus-5.5 (Main model)")
+    assert all(d["actionsBeside"] and d["chevronBeside"] and d["chevronEndGap"] <= 16 for d in medium.values()), medium
+    assert medium["consciousness-model"]["titleLines"] == 1
+    assert medium["consciousness-model"]["valueLines"] <= (1 if width >= 1000 else 2), medium["consciousness-model"]
+
+    route["value"] = "groq::meta-llama/llama-4-maverick-17b-128e-instruct"
+    with page.expect_response(_answers("/api/consciousness")) as refreshed:
+        page.clock.fast_forward(21_000)
+    _applied(page, refreshed)
+    long_route = measure("meta-llama/llama-4-maverick-17b-128e-instruct (Main model)")
+    assert all(d["actionsBeside"] and d["chevronBeside"] and d["chevronEndGap"] <= 16 for d in long_route.values()), long_route
+    model = long_route["consciousness-model"]
+    assert model["titleLines"] == 1 and model["valueAlign"] == "end", model
+    assert model["valueWidth"] > model["rowWidth"] * 0.55 and model["valueLines"] <= 3, model
+    assert _sideways(page) == []

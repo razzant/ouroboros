@@ -39,11 +39,12 @@ function liftLine(start) {
 // a room beyond the feed: pinned verbatim below and run here as the list runs it.
 const IS_UNREAD = '(row) => unreadCount(row.visible_revision, state.projectSeenRevision?.[row.id], readAheadFor(row.chat_id)) > 0';
 
-function harness({ revision = null, seen = null, loaded = true, page = 'files', project = null, answer = () => ({}) } = {}) {
+function harness({ revision = null, seen = null, loaded = true, page = 'files', project = null, answer = () => ({}),
+    view = readAhead } = {}) {
     const posts = [], badges = [], acks = [], landings = [];
     const moves = {};  // what Main's feed (#chat-messages) and its ↓ (#chat-scroll-bottom) listen to
     const context = vm.createContext({
-        ...readAhead,  // app.js imports these: a message read in full elsewhere (DESIGN "Unread")
+        ...view,  // app.js imports these: a message read in full elsewhere, the observer mode (DESIGN "Unread")
         state: { mainVisibleRevision: revision, mainSeenRevision: seen, mainSeenLoaded: loaded, activePage: page },
         navState: { activeProjectId: project },  // a Project open over Main (owner 06.11)
         updateUnreadBadge: () => badges.push(context.mainUnreadCount()),
@@ -64,6 +65,26 @@ function harness({ revision = null, seen = null, loaded = true, page = 'files', 
 }
 
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+
+// A view opened with `?observer=1` (DESIGN "Unread"): its own instance of read_ahead.js, in the observer mode.
+async function observerView() {
+    const view = await import('../modules/read_ahead.js?observer-main');
+    view.captureObserverMode({ href: 'http://127.0.0.1:8765/?observer=1' }, { state: null, replaceState() {} });
+    return view;
+}
+
+test('an observer view writes no Main cursor, not even a first one; the revision stays offered', async () => {
+    const view = await observerView();
+    const first = harness({ revision: 161, seen: null, view, answer: (body) => ({ main_seen_revision: body.main_seen_revision }) });
+    first.api.observeMainRevision(161);
+    await flush();
+    assert.deepEqual(first.posts, []);
+    assert.equal(first.context.state.mainSeenRevision, null);
+    const held = harness({ revision: 5, seen: 2, view, answer: (body) => ({ main_seen_revision: body.main_seen_revision }) });
+    assert.equal(await held.api.markMainViewed(5), false);  // "still unread here", as a failed write answers
+    assert.deepEqual(held.posts, []);
+    assert.equal(held.context.state.mainSeenRevision, 2);
+});
 
 test("Main's number is its room revision less its read cursor; unknown counts none", () => {
     assert.equal(harness({ revision: 42, seen: 40 }).api.mainUnreadCount(), 2);

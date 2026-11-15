@@ -16,7 +16,7 @@ from ouroboros.config import (
     load_settings,
 )
 from ouroboros.launcher_appearance import NativeAppearance
-from ouroboros.launcher_window_chrome import paint_room
+from ouroboros.launcher_window_chrome import fit_to_work_area, paint_room
 from ouroboros.server_runtime import apply_runtime_provider_defaults, has_startup_ready_provider
 
 # The launcher's own logger: these lines belong in launcher.log next to the
@@ -163,6 +163,7 @@ def present_first_run_onboarding(
         height=780,
         min_size=(840, 640),
     )
+    fit_to_work_area(window)  # Windows: the size asked for, scaled by the display, may exceed a laptop's screen
     appearance.attach(window)
     paint_room(window)  # macOS: opens in the Mac's room colour until its page paints the saved choice
     # Share persistent local UI storage with the same-origin main window.

@@ -91,6 +91,10 @@ def engine(monkeypatch, tmp_path):
             return httpx.Response(200, json={"profiles": [{"profile": {
                 "harness_id": "claude", "profile_id": "claude-default", "enabled": False}}],
                 "harnessAccounts": [], "accountPools": []})
+        if request.url.path == "/v2/agent-capabilities" and state.get("hold_catalog"):
+            entered, release = state.pop("hold_catalog")
+            entered.set()
+            assert release.wait(10)
         if request.url.path in {"/v2/harnesses", "/v2/agent-capabilities"}:
             return httpx.Response(200, json={"harnesses": []})
         raise AssertionError(f"Unexpected engine call: {request.method} {request.url.path}")
@@ -217,11 +221,23 @@ def test_current_combined_envelope_reaches_full_and_passive_contracts_unchanged(
 
 
 def test_disabled_named_default_refresh_forwards_exact_target_without_wake(engine):
+    from ouroboros.gateway.management_contracts import ClaudexorAccountResources, ClaudexorRefreshAttempt
+    from ouroboros.gateway.schema import json_schema_for
+
     client, _, calls = engine
     target = WIRE["receipt"]["request"]["target"]
     response = client.post("/api/claudexor/quota/refresh", json={"target": target})
     assert response.status_code == 200
-    assert response.json() == WIRE["quota"]
+    from datetime import datetime
+
+    envelope = response.json()
+    assert set(envelope) <= set(get_type_hints(ClaudexorAccountResources))
+    assert "refresh_attempt" not in json_schema_for(ClaudexorAccountResources).get("required", [])
+    attempt = envelope.pop("refresh_attempt")
+    assert set(attempt) == set(get_type_hints(ClaudexorRefreshAttempt))
+    assert attempt["reused"] is False
+    assert datetime.fromisoformat(attempt["started_at"]) <= datetime.fromisoformat(attempt["completed_at"])
+    assert envelope == WIRE["quota"]
     assert calls[-1] == ("POST", "/v2/quota", {"view": "resources"}, {"target": target}, None)
     assert calls[0][1] == "/v2/handshake"
 
@@ -257,6 +273,44 @@ def test_unread_operations_catalog_does_not_erase_successful_siblings(engine, fa
     payload = client.get("/api/claudexor/status").json()
     assert payload["resource_capabilities_read"] == "ok"
     assert payload["resources"] == WIRE["quota"]["resources"]
+
+
+def test_an_older_read_keeps_the_resources_a_newer_read_could_not_negotiate(engine):
+    """A plain read held at its agent catalog lands after a models read whose operations catalog failed.
+    This engine serves resources only through the negotiated fallback, so the newer rows came without
+    them: the older read's rows are discarded, its own list is the only one observed."""
+    import threading
+
+    from ouroboros.gateway import claudexor_accounts as accounts
+
+    _, state, calls = engine
+    entered, release, answers = threading.Event(), threading.Event(), []
+    state["hold_catalog"] = (entered, release)
+    older = threading.Thread(target=lambda: answers.append(accounts._status_payload(False)))
+    older.start()
+    try:
+        assert entered.wait(10)
+        for _ in range(1000):  # its quota is read through the negotiated fallback before the catalog fails
+            if any(path == "/v2/quota" and params == {"view": "resources"} for _, path, params, *_ in list(calls)):
+                break
+            threading.Event().wait(0.01)
+        state["catalog_error"] = "http"
+        newer = accounts._status_payload(True)
+    finally:
+        state["catalog_error"] = None
+        release.set()
+        older.join(10)
+    assert (newer["reads"]["quota"], newer["resource_capabilities_read"]) == ("ok", "failed")
+    assert "resources" not in newer
+    answer = answers[0]
+    assert answer["reads"]["quota"] == "not_read" and answer["quota"] == newer["quota"]
+    assert answer["facets"]["quota"]["observed_at"] == newer["facets"]["quota"]["observed_at"]
+    assert answer["resources"] == WIRE["quota"]["resources"]
+    assert answer["resource_capabilities"]["read"] is True
+    assert len([call for call in calls if call[1] == "/v2/quota"]) == 3, "no additional engine request"
+    # A later read that negotiates again owns the list as before.
+    payload = accounts._status_payload(False)
+    assert payload["reads"]["quota"] == "ok" and payload["resources"] == WIRE["quota"]["resources"]
 
 
 @pytest.mark.parametrize(("action", "failure"), [

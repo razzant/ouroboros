@@ -146,7 +146,8 @@ test('a circle\'s head names its model only when it has one; an alias is named b
 
 test('a place row shows a model only when the place overrides; an inheriting place shows none', () => {
     const [inherits, overrides, follows, aliased] = MODELLED.places;
-    assert.deepEqual([inherits.modelRoute, overrides.modelRoute], [{ value: GLM, layer: 'circle' }, { value: 'openai::gpt-6', layer: 'place' }]);
+    assert.deepEqual([inherits.modelRoute, overrides.modelRoute],
+        [{ value: GLM, layer: 'circle', local: false }, { value: 'openai::gpt-6', layer: 'place', local: false }]);
     const own = placeRowHtml(overrides, { title: 'beta', source: 'Chat' });
     assert.match(strip(own), /^beta Chat paused · Off in Skills · no captured event · model gpt-6$/);
     assert.match(own, /aria-label="Open beta \(Chat\): paused; Off in Skills; last event no captured event; model gpt-6"/);

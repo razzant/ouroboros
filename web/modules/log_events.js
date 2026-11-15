@@ -869,9 +869,9 @@ export function summarizeLogEvent(evt) {
         const held = heldCallPhrase(evt.tool, evt.status);  // returned by Safety, or unread by it: no failure
         const failed = !held && (Boolean(evt.is_error) || signalDeath);
         const finished = t === 'tool_call_finished';
-        const label = signalDeath ? `killed (${evt.signal || evt.exit_code})`
-            : failed ? 'failed' : finished ? 'finished' : 'result';
-        return view(held ? 'warn' : failed ? 'error' : finished ? 'done' : 'result', held || `${evt.tool || 'tool'} ${label}`, {
+        const label = signalDeath ? `killed (${evt.signal || evt.exit_code})` : evt.status === 'interrupted'
+            ? `interrupted (${evt.control_reason || 'control'})` : failed ? 'failed' : finished ? 'finished' : 'result';
+        return view(held ? 'warn' : evt.status === 'interrupted' ? 'info' : failed ? 'error' : finished ? 'done' : 'result', held || `${evt.tool || 'tool'} ${label}`, {
             body: shortText(evt.result_preview || (finished ? '' : compactJson(evt.args, 220)), 260),
             meta: taskMeta(formatLogDuration(evt.duration_sec)),
         });
@@ -1497,13 +1497,13 @@ function summarizeChatLiveEventView(evt) {
         if (commandText.full) fullBodyParts.push(`Command: ${commandText.full}`);
         if (errorResult.full) fullBodyParts.push(errorResult.full);
         return chatView({
-            phase: held || evt.status === 'non_zero_exit' ? 'warn' : 'error',
+            phase: held || evt.status === 'non_zero_exit' ? 'warn' : evt.status === 'interrupted' ? 'info' : 'error',
             headline: failedStepHeadline(evt),
             body: shortText(bodyParts.join(' '), 220),
             fullBody: fullBodyParts.join('\n\n'),
             visible: true,
             dedupeKey: toolCallKey(evt, groupId),
-            toolCall: toolObservation(evt, groupId, held ? 'held' : 'error'),
+            toolCall: toolObservation(evt, groupId, held ? 'held' : evt.status === 'interrupted' ? 'interrupted' : 'error'),
         });
     }
 

@@ -256,3 +256,21 @@ def test_normalization_does_not_warn_over_authoritative_acceptance(verdict):
     original = copy.deepcopy(record)
     assert normalize_outcome_axes(record)["objective"] == original["outcome_axes"]["objective"]
     assert record == original
+
+
+@pytest.mark.parametrize("status, is_error, fails", [
+    ("ok_autocorrected", False, False), ("artifact_output_undeclared", False, False), ("untyped", False, False),
+    ("artifact_output_error", True, True), ("non_zero_exit", True, True),
+    ("review_blocked", False, True), ("git_error", False, True)])  # typed ok codes, yet not a success
+def test_the_ledger_lists_a_typed_ok_answer_without_calling_it_a_failure(status, is_error, fails):
+    """#3214: a call the execution axis reads as a success (``_OK_TOOL_STATUSES``: a shell regex corrected and run, a
+    finished command carrying the undeclared-output note, an untyped dynamic success) stays a listed ``tool_call``
+    entry, and the ledger summary's ``has_failures`` no longer counts it; a failed registration, a non-zero exit,
+    a review block and a git error still count."""
+    from ouroboros.outcomes import build_verification_ledger
+
+    trace = {"tool_calls": [{"tool": "run_command", "status": status, "is_error": is_error, "args": {}}]}
+    outcome = derive_loop_outcome("Delivered answer.", {}, trace)
+    ledger = build_verification_ledger(task={}, loop_outcome=outcome, llm_trace=trace, artifact_bundle={})
+    assert [entry["status"] for entry in ledger["entries"] if entry["kind"] == "tool_call"] == [status]
+    assert ledger["summary"]["has_failures"] is fails

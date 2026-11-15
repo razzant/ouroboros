@@ -466,20 +466,25 @@ class _StorySources:
         return self.rows
 
     def helper_route(self) -> str:
-        from ouroboros.model_slots import get_light_model
-
-        self.route = (get_light_model(),)
+        self.route = (_light_route_label(),)
         return self.route[0]
 
     def unchanged(self, label: Callable[..., str]) -> bool:
         """Whether each source, asked again (of the caller's labeler), answers as it did."""
         from ouroboros.memory_sealing import writer_terminal_rows
-        from ouroboros.model_slots import get_light_model
 
         getattr(label, "warm", lambda _rooms: None)(self.labels)
         return (all(label(room) == text for room, text in self.labels.items())
                 and writer_terminal_rows(self.root, self.starts) == self.rows
-                and (self.route is None or self.route == (get_light_model(),)))
+                and (self.route is None or self.route == (_light_route_label(),)))
+
+
+def _light_route_label() -> str:
+    """The route the folding helper runs on, as its lane labels it (``route_choice.following_route``)."""
+    from ouroboros.model_slots import local_lane_label
+    from ouroboros.route_choice import following_route
+
+    return local_lane_label(*following_route("light"))
 
 
 # The last story of each chronicle index with what it read: (journal size, legacy units, sources, story); a few

@@ -19,7 +19,6 @@ from ouroboros.config import (
     SKILL_SOURCE_OUROBOROSHUB,
     SKILL_SOURCE_SELF_AUTHORED,
     SKILL_SOURCE_USER_REPO,
-    get_light_model,
     get_runtime_mode,
 )
 from ouroboros.llm import LLMClient
@@ -82,7 +81,7 @@ from ouroboros.tool_access import (
 from ouroboros.tools.github import github_token_from_env_or_settings
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import utc_now_iso
-from ouroboros.config import runtime_setting
+from ouroboros.route_choice import following_route
 
 _BRANCH_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _PROVENANCE_SLUG_MAX = 128
@@ -584,14 +583,14 @@ def _select_optional_pr_core(
     if prompt_scan.blocker_count and not mode_has_unrestricted_agency(get_runtime_mode()):
         return fallback
     try:
-        model = get_light_model()
+        model, use_local = following_route("light")
         response, usage = LLMClient().chat(
             messages=[{"role": "user", "content": prompt}],
             model=model,
             model_role="light",
             reasoning_effort="low",
             max_tokens=8192,
-            use_local=runtime_setting("USE_LOCAL_LIGHT", "").lower() in {"true", "1"},
+            use_local=use_local,
             timeout=_PR_BODY_MODEL_TIMEOUT_SEC,
         )
         _record_llm_usage(ctx, model, usage)

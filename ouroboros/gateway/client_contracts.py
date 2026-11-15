@@ -584,10 +584,11 @@ class PlaceReadiness(TypedDict):
 
 
 class PlaceModelRoute(TypedDict):
-    """The model a place thinks with now, and the scope that chose it."""
+    """The model a place thinks with now, the scope that chose it, and whether that route is the local runtime."""
 
     value: str
     layer: Literal["place", "circle", "consciousness"]
+    local: bool
 
 
 class PlaceSummary(TypedDict):

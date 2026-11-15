@@ -263,6 +263,7 @@ _LEDGER_NON_FAILURE_STATUSES = (
     # diagnostic reporting what it was called to find). A finding, not a failure.
     | frozenset({"tool_reported_failure"}) | _NON_EFFECT_OBSERVATION_STATUSES
     | SAFETY_HELD_STATUSES  # a call Safety held is no failure; its execution-axis record keeps it visible
+    | _OK_TOOL_STATUSES  # a typed ok answer with its own bucket (autocorrected, undeclared-output note): listed, no failure
 )
 
 

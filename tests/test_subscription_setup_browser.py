@@ -23,6 +23,27 @@ pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
 
 
+def passive_status(status):
+    """The host's `GET /api/claudexor/status?view=quota` envelope (gateway/claudexor_passive.py) for a full answer."""
+    reads = status.get("reads") or {}
+    accounts, quota = reads.get("accounts", "ok"), reads.get("quota", "ok")
+    body = {"view": "quota", "profiles": status.get("profiles") or {}, "quota": status.get("quota") or [],
+            "quota_absences": status.get("quota_absences") or [], "unified_accounts": accounts == "ok",
+            "reads": {"catalog": "not_read", "accounts": accounts, "quota": quota},
+            "read_errors": {facet: {"code": (status.get("facets") or {}).get(facet, {}).get("error")}
+                            for facet in ("accounts", "quota") if reads.get(facet, "ok") != "ok"
+                            and (status.get("facets") or {}).get(facet, {}).get("error")},
+            "timings_ms": {}}
+    body.update({key: status[key] for key in ("resources", "availability_scope") if key in status})
+    return body
+
+
+def status_answer(route, status):
+    """Fulfill a Claudexor status route like the host: full, or the passive `?view=quota` envelope."""
+    passive = parse_qs(urlparse(route.request.url).query).get("view") == ["quota"]
+    route.fulfill(json=passive_status(status) if passive else status)
+
+
 @pytest.fixture
 def subscription_ui():
     if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
@@ -153,6 +174,8 @@ def subscription_ui():
                 body = {"ok": True}
         elif path == "/api/claudexor/status":
             body = fixture["status"]
+            if parse_qs(urlparse(request.url).query).get("view") == ["quota"]:
+                body = passive_status(body)
         elif path == "/api/settings":
             query = parse_qs(urlparse(request.url).query)
             if query.get("response_limit_preview") == ["1"] and backend.get("response_preview"):

@@ -21,7 +21,7 @@ import pytest
 from ouroboros.contracts import record_contract as rc
 from ouroboros.event_usage import event_token_counts
 from ouroboros.tools.tool_result import ToolResult
-from tests.test_tool_call_log import _Registry, _call, _rows
+from tests._tool_call_log_shared import _Registry, _call, _rows
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
 
