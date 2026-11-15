@@ -740,6 +740,14 @@ def test_full_lane_runs_as_nine_guarded_shards_under_step_ceilings(tmp_path):
     assert job["needs"] == "scope" and job["if"] == FULL_LANE
     assert job["strategy"] == {"fail-fast": False, "matrix": {"shard": list(range(1, 10))}}
     install, lane, tools = steps["install_browsers"], steps["ui_tests"], steps["browser_tools"]
+    # The lane itself drives the built-in browser in Chromium (tests/test_observer_view_browser.py): every shard lets
+    # Chromium's sandbox start before the lane, under the lane's own condition, not only shard 1 before the tools smoke.
+    sandbox, order = steps["chromium_sandbox"], [step.get("id") for step in job["steps"]]
+    assert order.index("install_browsers") < order.index("chromium_sandbox") < order.index("ui_tests")
+    assert sandbox["if"] == lane["if"] and "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in sandbox["run"]
+    # Nothing opts the lane or the smoke out of the sandbox, in an env block, a run line or a $GITHUB_ENV write: they
+    # prove Chromium with it on (chromium_runtime.SANDBOX_ENV).
+    assert "OUROBOROS_CHROMIUM_SANDBOX" not in (ROOT / ".github/workflows/ui-browser.yml").read_text(encoding="utf-8")
     # Every producer step has its own ceiling, and their sum stays under the job's: a step
     # ceiling fails the step and leaves the evidence steps running, the job ceiling cancels them.
     ceilings = (install["timeout-minutes"], lane["timeout-minutes"], tools["timeout-minutes"])
