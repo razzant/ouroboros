@@ -3,9 +3,11 @@
 # WHAT A GREEN CHECK HERE SAYS. On a hosted Windows runner, at the display size this
 # job sets and 100 % scale, a real pywebview window asked for more than its screen
 # shows opens outside the screen's working area without the launcher's fit and inside
-# it with the fit (ouroboros/launcher_window_chrome.py `fit_to_work_area`). The job
-# summary prints both measurements. It does NOT say anything about another display
-# scale: a hosted runner cannot change its DPI, so 125 % and 150 % stay unmeasured.
+# it with the fit (ouroboros/launcher_window_chrome.py `fit_to_work_area`): its size
+# and its place. The job summary prints both measurements. It does NOT say anything
+# about another display scale (a hosted runner cannot change its DPI, so 125 % and
+# 150 % stay unmeasured) or about a minimum larger than the screen, which WinForms
+# itself limits on a one-screen runner (the stand-in test covers that branch).
 #
 # WHY ITS OWN WORKFLOW. The test lanes of ci.yml install no desktop packages (the
 # `test` profile of .github/actions/setup-python-env has no `desktop` extra), so the
@@ -75,6 +77,7 @@ jobs:
         shell: pwsh
         env:
           PYTHONUTF8: '1'
+          OUROBOROS_WINDOWS_DESKTOP_QA: '1'  # the case opens real windows: opt-in everywhere else
         run: |
           python -m pytest -o addopts="" -o junit_family=xunit1 -q -rs -s -p no:randomly --junitxml=native-window.xml `
             "tests/test_launcher_window_chrome.py::test_on_windows_a_real_oversized_window_opens_inside_its_screen_only_with_the_fit"

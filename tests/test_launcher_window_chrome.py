@@ -21,6 +21,7 @@ Windows, pywebview and pythonnet are present (elsewhere it skips and says why).
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import threading
@@ -2064,7 +2065,7 @@ class WinForm:
 
     def __init__(self, size, least, at, visible=True):
         vars(self).update(Load=Hook(), Shown=Hook(), written=[], MinimumSize=Size(*least), Size=Size(*size),
-                          Location=Point(*at), Visible=visible)
+                          Location=Point(*at), Visible=visible, WindowState="normal")
 
     def __setattr__(self, name, value):
         if name in ("Load", "Shown"):
@@ -2089,6 +2090,7 @@ def winforms(monkeypatch):
     drawing, forms = types.ModuleType("System.Drawing"), types.ModuleType("System.Windows.Forms")
     drawing.Size, drawing.Point = Size, Point
     forms.Screen = types.SimpleNamespace(FromControl=lambda form: types.SimpleNamespace(WorkingArea=state.area))
+    forms.FormWindowState = types.SimpleNamespace(Normal="normal", Maximized="maximized")
     monkeypatch.setitem(sys.modules, "System.Drawing", drawing)
     monkeypatch.setitem(sys.modules, "System.Windows.Forms", forms)
     return state
@@ -2135,6 +2137,13 @@ def test_on_windows_a_window_larger_than_its_screen_is_fitted_and_one_that_fits_
     assert (main.Size, main.Location, setup.Size, setup.Location) == (
         Size(1375, 938), Point(410, 102), Size(1225, 975), Point(470, 65))
     assert main.written == setup.written == ["Location"]
+    # A first show that Windows itself maximized (a shortcut set to run maximized) reports bounds larger than the
+    # area: it is whole already, and resizing it would leave a maximized window with gaps.
+    maximized = WinForm((1936, 1056), (800, 500), (-8, -8))
+    vars(maximized)["WindowState"] = "maximized"
+    for form in loaded(maximized, WinForm((980, 780), (840, 640), (470, 130))):
+        form.Shown.fire(form, None)
+        assert form.written == []
 
     # A 1920×1080 screen at 100 %: both fit, so neither Load nor Shown writes a property.
     winforms.area = work_area(0, 0, 1920, 1040)
@@ -2156,7 +2165,7 @@ def test_on_windows_a_fit_that_fails_is_logged_and_never_reaches_pywebview_or_wi
     form.Load.fire(form, None)
     form.Shown.fire(form, None)
     assert form.written == [] and form.Shown.handlers == []
-    assert caplog.text.count("was not fitted to its screen") == 2
+    assert len([record for record in caplog.records if record.name == wc.log.name and record.levelname == "WARNING"]) == 2
     formless = Window(None)  # pywebview made no form
     wc.fit_to_work_area(formless)
     formless.events.before_show.fire()
@@ -2167,7 +2176,7 @@ def test_on_windows_a_fit_that_fails_is_logged_and_never_reaches_pywebview_or_wi
 # The child of the native case: a real pywebview window asked for more than any screen shows, its form's bounds and
 # its screen's working area read on the UI thread once pywebview says it is shown.
 FIT_PROBE = r"""
-import json, sys
+import json, os, sys
 
 def say(**fact):
     print(json.dumps(fact), flush=True)
@@ -2201,7 +2210,7 @@ def shown():
     try:
         form.Invoke(Func[Type](read))
     finally:
-        window.destroy()
+        os._exit(0)  # measured: pywebview's own shutdown of a window destroyed this early may never return
 
 window.events.shown += shown
 webview.start()
@@ -2211,9 +2220,13 @@ webview.start()
 def test_on_windows_a_real_oversized_window_opens_inside_its_screen_only_with_the_fit(record_property):
     """The fit's one native run: WinForms, its DPI scaling and its events are real here. Each child owns one window for
     a few seconds; a child that outlives its deadline is killed with its whole process tree (``tests/group_run``). The
-    measurement is the child's one line, whatever pythonnet's shutdown then exits with."""
+    measurement is the child's one line; the child ends itself once it has printed it. Opt-in, like every probe that
+    opens windows over a desktop (``OUROBOROS_WINDOWS_DESKTOP_QA=1``)."""
     if sys.platform != "win32":
-        pytest.skip("the fit is WinForms' (Windows); macOS and Linux window managers constrain a window themselves")
+        pytest.skip("the fit is WinForms' (Windows); macOS and Linux are left to their window managers")
+    if os.environ.get("OUROBOROS_WINDOWS_DESKTOP_QA") != "1":
+        pytest.skip("it opens two real windows over the desktop: an interactive desktop probe requires "
+                    "OUROBOROS_WINDOWS_DESKTOP_QA=1 (the Desktop window workflow sets it)")
     from tests.group_run import run_in_group
 
     seen = {}

@@ -74,7 +74,7 @@ before the held URL's page painted.
 On Windows a window can open larger than its screen shows. pywebview 5.4 gives the WinForms form the size and minimum
 it was asked for, the form scales both by the display's DPI (``AutoScaleMode.Dpi``), and a form taller than its screen's
 working area (the screen less the taskbar) opens top-aligned, its bottom edge under the taskbar and the setup window's
-Continue with it: 980×780 already on a 1366×768 laptop at 100 %, either desktop window at a larger scale.
+Continue with it: both desktop windows already on a 1366×768 laptop at 100 %, more so at a larger scale.
 ``fit_to_work_area`` hooks the form's ``Load`` and, once, its ``Shown``, because which of ``Load`` and the DPI scaling
 comes first is unproven: each lowers the minimum where it exceeds the area (WinForms otherwise restores it), then sizes
 the form to the area at most and moves it inside, in the form's own pixels. A form that lies inside is not touched,
@@ -372,8 +372,10 @@ def _fit(form: Any) -> None:
     there is no DPI arithmetic; the minimum goes down first, or WinForms holds the form at it."""
     try:
         from System.Drawing import Point, Size
-        from System.Windows.Forms import Screen
+        from System.Windows.Forms import FormWindowState, Screen
 
+        if form.WindowState != FormWindowState.Normal:
+            return  # a first show Windows itself maximizes (a shortcut set to run maximized) is whole already
         area, size, least = Screen.FromControl(form).WorkingArea, form.Size, form.MinimumSize
         width, height = min(size.Width, area.Width), min(size.Height, area.Height)
         left = max(area.Left, min(form.Left, area.Right - width))
