@@ -883,7 +883,7 @@ def _handle_send_quiz_state(evt: Dict[str, Any], ctx: Any) -> None:
 
                 key = f"question:{tid}:{qid}"
                 if verdict := obligations.members(ctx.DRIVE_ROOT, "unknowns").get(key):
-                    retire_closures_owed_nowhere(ctx.DRIVE_ROOT, {key: verdict})
+                    retire_closures_owed_nowhere(ctx.DRIVE_ROOT, {key: verdict}, mail_settled=True)  # stage above
             return
         block = mark_discharged(ctx.DRIVE_ROOT, tid, qid) or block
         ctx.bridge.send_quiz_state(quiz_id=qid, task_id=tid, state="closed", chat_id=chat_id,

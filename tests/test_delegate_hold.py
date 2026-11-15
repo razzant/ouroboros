@@ -710,12 +710,22 @@ def _hold_wake_facts(tmp_path, registry):
             [entry["msg_id"] for entry in drain_owner_entries(tmp_path, "t-hold", set(), "1")])
 
 
-def test_a_spilled_wake_reaches_the_hold_receipt_whole_before_its_acknowledgement(tmp_path, monkeypatch, _quiet_probe):
+@pytest.mark.parametrize("tombstone", ["written", "refused"])
+def test_a_spilled_wake_reaches_the_hold_receipt_whole_before_its_acknowledgement(tmp_path, monkeypatch, _quiet_probe, tombstone):
     """The hold appends its receipt and ACKs at once; a spilled wake's summary would acknowledge what it cut. The
     receipt carries the wake's exact source instead, then the ACK covers what it showed. The owner's words, written
     after this round's drain while the hold read its leaf, reach the same resumed request once, as their own row:
     the resumed hold drains again before the request (``delegate_hold.round_top`` -> ``"redrain"``)."""
     registry = _spilling_hold(tmp_path, monkeypatch)
+    if tombstone == "refused":  # the latch stays active: the resumed request still carries the mail with the receipt
+        real_write = delegate_hold.write_unknown_hold
+
+        def no_tombstone(ctx, run_id, fields):
+            if not run_id:
+                raise OSError("controlled tombstone failure")
+            return real_write(ctx, run_id, fields)
+
+        monkeypatch.setattr(delegate_hold, "write_unknown_hold", no_tombstone)
     seen = []
 
     def check(messages, accumulated_usage):

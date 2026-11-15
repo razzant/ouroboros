@@ -386,6 +386,27 @@ def test_a_closure_no_room_shows_retires_its_note_and_leaves_current_questions(r
         assert startup_migrations.prepare_startup_state(runtime.root)["question_publications"] == {}
 
 
+def test_an_owner_closure_retires_only_once_its_authors_letter_is_settled(runtime):
+    """The owner closed an older body's question whose card no room shows; the delivery attempt recorded the missing
+    address and stopped before its letter to the living author. No door retires that note yet: the author is still
+    owed the letter and the owner keeps the forced retry. Once the letter is written, the import retires it."""
+    from ouroboros import startup_migrations
+    from ouroboros.owner_quiz import mark_quiz_history_written, record_quiz_delivery_failure
+    from tests.test_main_decisions import older_body_ask
+
+    tid = runtime.task["id"]
+    write_task_result(runtime.root, tid, "running", chat_id=1)
+    older_body_ask(runtime.root, tid, "closed", chat_id=1)
+    assert startup_migrations.prepare_startup_state(runtime.root)["question_publications"] == {"bound": 0, "unknown": 1}
+    assert record_closed(runtime.root, tid, quiz_id="closed", reason="Withdrawn", actor="owner", request_id="close-1")["ok"]
+    record_quiz_delivery_failure(runtime.root, tid, "closed", "publication_address_unknown")  # stopped before the letter
+    assert "retired" not in startup_migrations.migrate_question_publications(runtime.root, legacy=True)
+    assert block(runtime, "closed")["delivery"]["state"] == "owed"
+    mark_quiz_history_written(runtime.root, tid, "closed", receipt="mailbox_at")  # the letter reached its author
+    assert startup_migrations.migrate_question_publications(runtime.root, legacy=True)["retired"] == 1
+    assert block(runtime, "closed")["delivery"]["state"] == "no_target"
+
+
 def test_photo_material_serves_exact_selected_bytes_at_existing_artifact_endpoint(tmp_path):
     from starlette.applications import Starlette
     from starlette.routing import Route

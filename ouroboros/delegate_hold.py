@@ -276,9 +276,9 @@ def round_top(tools: Any, limit_ctx: Any, controls: Dict[str, Any], emit_progres
     """The loop's round-top hold (``hold_step`` over this round's ``limit_ctx``): ``""`` or ``"resume"`` dispatch
     the round; ``"park"`` once the hold's host-armed sleep was parked here without a model call (its wake is the
     next round top's); ``"redrain"`` once it resumed on a wake read after this round's drain: the round goes back to
-    its top without a model call, and that drain brings the mail that arrived meanwhile (the wake carries none) into
-    the same request as the receipt; else the unknown no-resend terminal's ``(text, usage, trace)``, with zero
-    provider calls."""
+    its top without a model call, that drain brings the mail that arrived meanwhile (the wake carries none), and that
+    top sends it with the receipt, holding nothing, even a latch whose tombstone was not written; else the unknown
+    no-resend terminal's ``(text, usage, trace)``, with zero provider calls."""
     step = hold_step(tools, controls=controls, messages=limit_ctx.messages, drive_logs=limit_ctx.drive_logs,
                      task_id=limit_ctx.task_id, emit_progress=emit_progress, new_input=new_input)
     if step == "park":
@@ -286,11 +286,9 @@ def round_top(tools: Any, limit_ctx: Any, controls: Dict[str, Any], emit_progres
 
         wait_after_tools(tools._ctx, limit_ctx.messages, limit_ctx.llm_trace, limit_ctx.accumulated_usage,
                          limit_ctx.round_idx, limit_ctx.tool_schemas, limit_ctx.owner_msg_seen)
-    if step == "resume" and not new_input:
-        try:  # a latch its tombstone write left active would hold again at that top, before the receipt is judged
-            return step if read_unknown_hold(tools._ctx).get("run_id") else "redrain"
-        except UnknownHoldUnreadable:
-            return step
+    if step == "resume" and not new_input:  # its receipt waits for that drain and goes out at that top
+        tools._ctx._delegate_hold_receipt_pending = True
+        return "redrain"
     if step != "terminal":
         return step
     from ouroboros.loop_delivery import _merge_finalization_trace
@@ -319,6 +317,9 @@ def hold_step(
     """
     ctx = getattr(tools, "_ctx", None)
     if ctx is None or not _configured_session(ctx):
+        return ""
+    if getattr(ctx, "_delegate_hold_receipt_pending", False):  # a receipt already taken goes out with this top
+        ctx._delegate_hold_receipt_pending = False
         return ""
     try:
         hold = read_unknown_hold(ctx)

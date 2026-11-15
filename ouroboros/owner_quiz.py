@@ -479,12 +479,13 @@ def dismiss_unknown_delivery(drive_root: Any, task_id: str, *, quiz_id: str, req
     return outcome
 
 
-def retire_closure_owed_nowhere(drive_root: Any, task_id: str, quiz_id: str) -> bool:
+def retire_closure_owed_nowhere(drive_root: Any, task_id: str, quiz_id: str, *, mail_settled: bool = False) -> bool:
     """An explicit closure whose card no room shows (the publication import found no witness in
     readable, stable history) owes its note nowhere: the debt becomes ``no_target`` with
     ``no_publication_target``, never ``delivered`` and never a guessed room; the closed record
-    stays. Only a closure whose attempt already found no address qualifies, so a live author's
-    mail went ahead of the row; an answer keeps its debt."""
+    stays. Only a closure whose attempt already found no address qualifies, once its author's letter is
+    settled: none is owed (the owner did not close it), it was written (``mailbox_at``), or the delivery
+    attempt has just passed that stage (``mail_settled``). An answer keeps its debt."""
     retired: List[str] = []
 
     def mutate(quizzes: Dict[str, Dict[str, Any]]) -> Any:
@@ -492,7 +493,8 @@ def retire_closure_owed_nowhere(drive_root: Any, task_id: str, quiz_id: str) -> 
         delivery = dict((block or {}).get("delivery") or {})
         if (not block or block.get("state") != STATE_CLOSED or "publication_chat_id" in block
                 or (delivery.get("kind"), delivery.get("state"), delivery.get("reason_code"))
-                != ("closure", "owed", "publication_address_unknown")):
+                != ("closure", "owed", "publication_address_unknown")
+                or not (mail_settled or block.get("closed_actor") != "owner" or delivery.get("mailbox_at"))):
             return _KEEP
         delivery.update(state=DELIVERY_NO_TARGET, reason_code="no_publication_target", retired_at=utc_now_iso())
         block["delivery"] = delivery

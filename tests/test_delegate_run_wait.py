@@ -435,8 +435,8 @@ def test_the_unknown_outcome_hold_parks_a_host_armed_sleep_and_its_wake_is_ackno
     """The hold buys no model call and holds no slot: with nothing ready the loop's round top (``round_top``) arms
     the task's own warm sleep on its leaves and parks it through the ordinary warm park; the next round top publishes
     the wake, carries it whole as the receipt and acknowledges it synchronously. That round goes back to its top
-    once (``"redrain"``), so mail that came after its drain joins the receipt in the resumed request; a latch whose
-    tombstone was not written would hold again there, before the receipt is judged, so it resumes at once."""
+    once (``"redrain"``), so mail that came after its drain joins the receipt in the resumed request; that top sends
+    the receipt and holds nothing, even when the latch's tombstone was not written (it may hold again after it)."""
     from ouroboros import delegate_hold, delegate_supervision as ds
 
     ctx, limit = _nanny(tmp_path)
@@ -465,6 +465,7 @@ def test_the_unknown_outcome_hold_parks_a_host_armed_sleep_and_its_wake_is_ackno
     assert receipt.startswith("[DELEGATED LEAF WAKE / UNKNOWN-HOLD RESUME]") and '"status": "terminal"' in receipt
     assert _pending(ctx, "leaf")[0] == "" and _pending(ctx, "leaf")[1] in receipt, "acknowledged before dispatch"
     assert not ds.read_unknown_hold(ctx).get("run_id"), "the latch is a tombstone now"
+    assert top() == "", "the loop's next top drains, then sends the receipt"
 
     _run(tmp_path, "leaf-2")
     ds.write_unknown_hold(ctx, "leaf-2", {"run_ids": ["leaf-2"], "run_id": "leaf-2", "hold_cycles": 1})
@@ -477,8 +478,9 @@ def test_the_unknown_outcome_hold_parks_a_host_armed_sleep_and_its_wake_is_ackno
         return real_write(ctx_, run_id, fields)
 
     monkeypatch.setattr(delegate_hold, "write_unknown_hold", no_tombstone)
-    assert top() == "resume" and ds.read_unknown_hold(ctx).get("run_id") == "leaf-2", "dispatched with its receipt"
+    assert top() == "redrain" and ds.read_unknown_hold(ctx).get("run_id") == "leaf-2", "drains first, latch kept"
     assert limit.messages[-1]["content"].startswith("[DELEGATED LEAF WAKE") and _pending(ctx, "leaf-2")[0] == ""
+    assert top() == "" and len(parks) == 1, "that top sends the receipt instead of holding again"
 
 
 def test_a_hold_resumed_on_owner_words_after_its_park_sleeps_again_on_its_next_latch(tmp_path, reads):
