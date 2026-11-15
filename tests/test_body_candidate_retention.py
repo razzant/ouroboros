@@ -238,17 +238,23 @@ def test_the_owner_checks_decode_only_rows_their_columns_cannot_answer(tmp_path,
     write_task_result(tmp_path, "kid", "running", root_task_id="cand", parent_task_id="cand")
     write_task_result(tmp_path, "other", "running", root_task_id="other")
     write_task_result(tmp_path, "unrooted", "running")  # its body states no root: read whole, as before
+    # Redirected to kid by a retry: its own stated root is not its effective one, so it is read whole.
+    write_task_result(tmp_path, "moved", "failed", root_task_id="other", superseded_by="kid")
+    (tmp_path / "ws").mkdir()
+    write_task_result(tmp_path, "ws", "completed", root_task_id="ws", workspace_root=str(tmp_path / "ws"),
+                      artifact_status="pending")  # still finalizing its workspace: not a stable final
     records = [{"owner_task": owner, "host_pid": pid, "unconfirmed_since": "2026-11-15T00:00:00Z", "record_id": owner}
-               for owner, pid in (("kid", 4242), ("other", 4343), ("unrooted", 4444))]
+               for owner, pid in (("kid", 4242), ("other", 4343), ("unrooted", 4444), ("moved", 4545))]
     monkeypatch.setattr(launch_custody, "read_custody", lambda *_a, **_k: SimpleNamespace(
         records=records, rows=[], blind=False, readable=True))
     decoded, materialize = [], store.materialize
     monkeypatch.setattr(store, "materialize", lambda tid, *rest: decoded.append(tid) or materialize(tid, *rest))
     assert body._recorded_terminal("cand", tmp_path) is True and decoded == [], "a stable final answers unread"
     assert body._recorded_terminal("kid", tmp_path) is False and decoded == ["kid"], "a running row is read"
+    assert body._recorded_terminal("ws", tmp_path) is False and decoded[-1] == "ws", "so is a finalizing one"
     decoded.clear()
-    assert body.live_lineage_processes(tmp_path, "cand") == [4242], "only the lineage's process holds the copy"
-    assert sorted(decoded) == ["cand", "unrooted"], "the copy's own row and the owner that states no root"
+    assert body.live_lineage_processes(tmp_path, "cand") == [4242, 4545], "only the lineage's processes hold it"
+    assert sorted(decoded) == ["cand", "kid", "moved", "unrooted"], "its own row, the unrooted and redirected owners"
 
 
 def test_a_pass_of_held_candidates_reads_the_kept_debts_once(tmp_path, monkeypatch):

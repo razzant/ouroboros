@@ -305,7 +305,8 @@ def _update_row(row: Dict[str, Any], change, data_dir: Optional[Any] = None) -> 
 
 def _recorded_terminal(task_id: str, results_root: Any) -> bool:
     """Positive lifecycle evidence only: an unreadable or missing record is not terminal (a missing one by its typed row).
-    A row its writer derived as a stable final (``task_store.stable_finals``) answers from its columns, unread."""
+    A row its writer derived as a stable final (``task_store.stable_finals``) answers from its columns, its body unread:
+    a body damaged later without its columns is not seen here (``live_lineage_processes`` still reads the owner's)."""
     try:
         from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
         from ouroboros.task_store import exists, stable_finals
@@ -367,10 +368,11 @@ def live_lineage_processes(results_root: Any, task_id: str) -> List[int]:
             return lineage[member] in owners
 
         custody = read_custody(root, every_drive=True)
-        named = {str(entry.get("owner_task") or entry.get("task_id") or "") for entry in custody.records}
-        named.update(str(row.get("owner_task") or "") for row in custody.rows)
-        # The root each recorded owner's own body states, in one read (what its effective read answers);
-        # ``ours`` reads whole only an owner that states none or is redirected by a retry.
+        # The root each owner ``ours`` will ask about states in its own body, in one read (what its effective read
+        # answers); ``ours`` reads whole only an owner that states none or is redirected by a retry.
+        named = {str(entry.get("owner_task") or entry.get("task_id") or "") for entry in custody.records
+                 if str(entry.get("root_task_id") or "") not in owners}
+        named.update(str(row.get("owner_task") or "") for row in custody.rows if _owned_service_row(row))
         lineage.update(stated_roots(root, named - owners))
         active: List[int] = [-1] if custody.blind or not custody.readable else []
         stamped = set()

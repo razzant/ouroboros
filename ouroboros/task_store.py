@@ -597,25 +597,36 @@ def collection_flags(root: Any, task_ids: Iterable[str]) -> Dict[str, Tuple[Opti
 def stable_finals(root: Any, task_ids: Iterable[str]) -> Dict[str, Optional[bool]]:
     """Each stored task's derived ``list_stable`` in ONE read, no body decoded: whether its writer found the stored
     status final with no overlay of the effective reader able to change it (``task_status.stored_list_order_is_final``:
-    no retry or supersession pointer, no child replica, workspace finalization settled). ``None`` while the row is
-    underived; ``{}`` below the schema that holds the column. An id the store does not hold is absent."""
+    no retry or supersession pointer, no effective child overlay, workspace finalization settled). A fact about the
+    row its writer committed with the body, not a fresh read of that body. ``None`` while the row is underived; ``{}``
+    below the schema that holds the column. An id the store does not hold with a body, or not a valid id as given,
+    is absent."""
     from ouroboros.store_hot_facts import LIST_VERSION
+    from ouroboros.task_results import validate_task_id
 
-    ids = sorted({str(task_id) for task_id in task_ids if str(task_id or "").strip()})
+    def exact(task_id: Any) -> bool:  # only an id its own reader would take as given: a padded one is not this row
+        try:
+            return validate_task_id(task_id) == task_id
+        except ValueError:
+            return False
+
+    ids = sorted({str(task_id) for task_id in task_ids if exact(str(task_id or ""))})
     if not ids:
         return {}
     with open_store(root, write=False) as txn:
         if int(txn.meta("schema_version") or 1) < LIST_VERSION:
             return {}
-        captured = capture(txn.conn, "SELECT task_id, list_stable FROM tasks WHERE task_id IN "
-                           "(SELECT value FROM json_each(?))", (json.dumps(ids),), ("task_id", "list_stable"))
+        captured = capture(txn.conn, "SELECT t.task_id, t.list_stable FROM tasks AS t JOIN task_bodies AS b "
+                           "ON b.task_id=t.task_id WHERE t.task_id IN (SELECT value FROM json_each(?))",
+                           (json.dumps(ids),), ("task_id", "list_stable"))
     return {str(task_id): None if stable is None else bool(stable) for task_id, stable in captured.tuples()}
 
 
 def stated_roots(root: Any, task_ids: Iterable[str]) -> Dict[str, str]:
     """The top-level ``root_task_id`` each task's own stored body states, for the rows no retry or supersession
     pointer redirects, in ONE read: SQLite reads the one field, no body is decoded here. What the effective reader
-    answers for such a row (its replica and queue overlays never replace a stated root). A row that states none
+    answers for such a row (its replica and queue overlays never replace a stated root), for a body the store's writer
+    serialized (one key each: SQLite takes a repeated key's first value, Python its last). A row that states none
     (absent, empty or not text), has no readable text body, or is redirected is absent: its own read answers."""
     ids = sorted({str(task_id) for task_id in task_ids if str(task_id or "").strip()})
     if not ids:
