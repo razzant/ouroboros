@@ -61,8 +61,10 @@ def _nav(page, target: str) -> None:
     """A page of the shell from its navigation, through the phone's drawer where the bar is narrow."""
     if page.evaluate("document.documentElement.dataset.layout === 'stack'"):
         back = page.locator('.page.active [data-shell-back]:visible')
-        if back.count():
+        while back.count():
+            previous = page.evaluate("JSON.stringify(window.__ouroLayers.ids())")
             back.click()
+            page.wait_for_function("previous => JSON.stringify(window.__ouroLayers.ids()) !== previous", arg=previous)
     toggle = page.locator(".page.active [data-mobile-nav-toggle]:visible")
     if toggle.count():
         toggle.first.click()
