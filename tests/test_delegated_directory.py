@@ -280,9 +280,11 @@ def test_lost_start_replays_original_processing_facts_after_setting_changes(tmp_
     prepare_actor = delegate.prepare_delegate_start_actor
     preference = "economy"
 
+    # The setting that changes is the row's own tier: the history's identity (`row_processing`, #3426), which this
+    # run also asks for (`processing_preference`). The replay keeps the original in both.
     def actor(*args, **kwargs):
         captured, refusal = prepare_actor(*args, **kwargs)
-        return {**captured, "processing_preference": preference}, refusal
+        return {**captured, "processing_preference": preference, "row_processing": preference}, refusal
 
     def start(request, *, idempotency_key):
         engine.posts.append((request, idempotency_key))
@@ -303,7 +305,7 @@ def test_lost_start_replays_original_processing_facts_after_setting_changes(tmp_
     assert engine.posts[0] == engine.posts[1]
     assert engine.posts[1][0]["processingPreference"] == "economy"
     held = custody.replay(ctx.drive_root)["directory-run"]
-    assert held.processing_preference == "economy"
+    assert held.processing_preference == held.row_processing == "economy"
     assert held.effort == engine.posts[1][0].get("effort", "")
     from ouroboros.subagent_history import record_session_execution, subagent_last_delegation
     monkeypatch.setattr(custody, "invocation_record", lambda *_a, **_kw: pytest.fail("history scanned an invocation"))

@@ -522,9 +522,9 @@ closes. A room's pick posts at once and closes; Send waits for it, Panic never d
 where the route's source and model both list it and never for Main, the scope's own choice filled, `Default` beside
 it while there is one to leave. Default takes Main's tier while the scope follows Main, else the default one, and that
 tier wears a ring; an explicit Standard is a choice, never Default. Under it what the choice applies to and now is
-(`Default · Standard as Main · for new work here and its new helpers without a tier of their own; running work keeps
-its own`; in the Main chat `for Main, 3 running works that follow it and their new helpers`, counting only works on
-Main without a tier of their own; on a card `for this work from its next call and its new helpers …`, its last call's
+(`Default · Standard as Main · for new work here and its new subagents without a tier of their own; running work keeps
+its own`; in the Main chat `for Main, 3 running works that follow it and their new subagents`, counting only works on
+Main without a tier of their own; on a card `for this work from its next call and its new subagents …`, its last call's
 deviation in the sheet's head) and, under the mouse or focus before any press (a finger only taps), in a line as tall
 as its tallest, what that tier means on this route: listed, `Not confirmed for <model> here: a provider may serve it
 as Standard`, or `<source> does not list <tier> for <model>: its calls go as Standard`. No tier is refused or waited
@@ -2486,7 +2486,7 @@ anchored to it, so nothing in the transcript moves: whose model this is first, t
 work's own tier. The list's Main row is the one way to follow Main, and its facts say so (`this work will follow
 Main`; `this work follows Main` on a follower). A pick or a tier is one act, and its answer says when it applies:
 `Switches at the next step; the running call finishes.` or, for a queued work, `Applies when it starts.`; a tier
-act moves nothing else (its fallback, wait, account and window stay); new helpers without a tier of their own take
+act moves nothing else (its fallback, wait, account and window stay); new subagents without a tier of their own take
 the tier the work runs on, Main's included, started ones keep theirs.
 After the model the line names a tier other than Standard and, when its newest call was served otherwise, that too
 (`Fast · Fast asked · served Standard`). A refused act is said in the popover in the owner's

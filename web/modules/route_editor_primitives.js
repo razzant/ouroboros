@@ -48,7 +48,7 @@ export function processingDetailsHtml(attrs, selected, inherited = '', { helper 
     return `<details class="model-role-details ui-disclosure" data-processing-details><summary><span>Processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(selected, inherited, { helper }))}</span></span></summary>
         <label class="ui-field">Processing ${processingSelectHtml(attrs, selected, { helper })}</label>
         <div class="ui-field-help">Uses the same model and reasoning effort. An explicit native service choice takes precedence.${helper
-            ? ' Without one of its own, a new helper takes the tier of the work that starts it; a review seat takes the global setting.' : ''}</div></details>`;
+            ? ' Without one of its own, a new subagent takes the tier of the work that starts it; a review seat takes the global setting.' : ''}</div></details>`;
 }
 
 export function processingCapabilityNote(preference, capability, transportPreferences) {
