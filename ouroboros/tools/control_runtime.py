@@ -642,16 +642,11 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "", destinatio
     return publish_delivery_receipt(ctx, event, mode, "message")
 
 
-def _update_identity(ctx: ToolContext, content: str, expected_revision: str | None = None) -> str:
-    """Update identity manifest (who you are, who you want to become)."""
-    if not content or not isinstance(content, str) or len(content.strip()) < 50:
-        return (
-            _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=("⚠️ REJECTED: content is empty or too short "
-            f"(got {type(content).__name__}, len={len(content) if isinstance(content, str) else 'N/A'}). "
-            "Identity must be a substantial text (50+ chars). "
-            "This likely means the tool call was malformed — check your arguments.")))
-        )
-    from ouroboros.memory import Memory
+def _update_identity(ctx: ToolContext, content: str | None = None, expected_revision: str | None = None,
+                     mode: str = "overwrite", old_str: str | None = None, new_str: str | None = None,
+                     edits: list | None = None, version: str | None = None, reason: str | None = "") -> str:
+    """Revise the identity manifest (who I am, who I want to become): overwrite, edit or revert (``memory_texts``)."""
+    from ouroboros.memory_texts import Deferred, identity_source, write_text
     from ouroboros.tool_access import canonical_data_root
     from ouroboros.tool_access_reads import canonical_runtime_reader
 
@@ -659,82 +654,47 @@ def _update_identity(ctx: ToolContext, content: str, expected_revision: str | No
     # am speaking in, so a project room or an external conversation revises the
     # same continuous file. The root follows the same precedence as
     # _chat_history, so a forked execution drive still writes the identity the
-    # canonical root reads back.
-    mem = Memory(drive_root=canonical_data_root(ctx))
+    # canonical root reads back; it is resolved after the arguments parse.
+    def located():
+        root = canonical_data_root(ctx)
+        return identity_source(root, "Canonical identity reader:\n" + canonical_runtime_reader(
+            ctx, root, "memory/identity.md"))
 
-    from ouroboros.knowledge import focus_signature
-    from ouroboros.memory_publication import publish_memory_file, publication_refusal
-
-    publication = publish_memory_file(
-        mem.identity_path(), expected_revision, lambda _old: content,
-        journal=mem.identity_journal_path(), author=focus_signature(ctx),
-        source_type=str((getattr(ctx, "task_metadata", {}) or {}).get("delegation_role") or "task"))
-    reader = "\nCanonical identity reader:\n" + canonical_runtime_reader(ctx, canonical_data_root(ctx), "memory/identity.md")
-    if not publication.ok:
-        return _publish_tool_result(ctx, ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED",
-            text=publication_refusal(publication, "canonical memory/identity.md") + reader))
-    old_content = publication.old_content
-    result = f"OK: identity updated ({len(content)} chars); revision={publication.revision}"
-    old_len = len(old_content)
-    if old_len >= 400 and len(content) < old_len * 0.5:
-        result += (
-            f"\n⚠️ SELF_OVERWRITE_NOTICE: this replaced a {old_len}-char identity with "
-            f"{len(content)} chars (>50% shrink). Identity is intentionally mutable (Bible P4), "
-            "but full rewrites should be rare and reflect genuine self-creation — not a trivial turn. "
-            "Read before writing (P12) and prefer evolving over replacing wholesale."
-        )
-    return result + reader
+    return write_text(ctx, Deferred("identity", "identity", True, located), content=content, mode=mode,
+                      expected_revision=expected_revision,
+                      old_str=old_str, new_str=new_str, edits=edits, version=version, reason=reason,
+                      source_type=str((getattr(ctx, "task_metadata", {}) or {}).get("delegation_role") or "task"))
 
 
-def _update_world(ctx: ToolContext, content: str, expected_revision: str | None = None) -> str:
-    """Publish my map of my world; the host's measured block is kept or restored."""
-    if not isinstance(content, str) or not content.strip():
-        return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(
-            "⚠️ REJECTED: content is empty. Read memory/WORLD.md, revise the map and send the whole file.")))
+def _world_notices(mode: str, content: str, publication) -> list[str]:
+    """Facts an update_world receipt adds: the host's block (``world_profiler.publication_notices``), the map's size."""
     from ouroboros.context_budget import WORLD_SECTION_BUDGET_CHARS
-    from ouroboros.memory import Memory
+    from ouroboros.world_profiler import publication_notices
+
+    lines = publication_notices(mode, content, publication.old_content, publication.content)
+    size = len(publication.content)
+    if size > WORLD_SECTION_BUDGET_CHARS:
+        lines.append(f"⚠️ WORLD_SIZE_NOTICE: the map is {size} chars, above the {WORLD_SECTION_BUDGET_CHARS}-char "
+                     "context budget. It still loads whole; move detail to knowledge_write and keep the map compact.")
+    return lines
+
+
+def _update_world(ctx: ToolContext, content: str | None = None, expected_revision: str | None = None,
+                  mode: str = "overwrite", old_str: str | None = None, new_str: str | None = None,
+                  edits: list | None = None, version: str | None = None, reason: str | None = "") -> str:
+    """Publish my map of my world; the host's measured block is kept or restored (``memory_texts``)."""
+    from ouroboros.memory_texts import Deferred, world_source, write_text
     from ouroboros.tool_access import canonical_data_root
-    from ouroboros.world_profiler import measured_block_was_edited, with_measured_block
 
     # One map, every room and every drive (P1): like identity, the canonical root
     # is the one the context reads back, so a forked child drive or Light mode
-    # keeps what it learned instead of writing a copy that dies with the task.
-    canonical = canonical_data_root(ctx)
-    mem = Memory(drive_root=canonical)
-
-    from ouroboros.knowledge import focus_signature
-    from ouroboros.memory_publication import publish_memory_file, publication_refusal
-
-    publication = publish_memory_file(
-        mem.world_path(), expected_revision,
-        lambda old: with_measured_block(content, old, str(getattr(ctx, "repo_dir", "") or ""), str(canonical)),
-        journal=mem.world_journal_path(), author=focus_signature(ctx),
-        source_type=str((getattr(ctx, "task_metadata", {}) or {}).get("delegation_role") or "task"))
-    if not publication.ok:
-        return _publish_tool_result(ctx, ToolResult(status="blocked", code="RESOURCE_CONSTRAINT_BLOCKED",
-            text=publication_refusal(publication, "memory/WORLD.md")
-            + f" The map lives at {mem.world_path()}; a forked drive holds only a copy of it."))
-    # A forked drive's copy (what a child's read_file opens) mirrors what it just published,
-    # so its next read carries the revision the canonical file now has.
-    fork_copy = Memory(drive_root=Path(getattr(ctx, "drive_root"))).world_path()
-    if fork_copy.resolve(strict=False) != mem.world_path().resolve(strict=False) and fork_copy.exists():
-        try:
-            from ouroboros.utils import write_bytes_atomic
-
-            write_bytes_atomic(fork_copy, publication.content.encode("utf-8"))
-        except OSError:
-            # The map already landed canonically; a stale copy only costs the next read a refusal.
-            log.debug("world map fork copy not mirrored", exc_info=True)
-    size = len(publication.content)
-    result = f"OK: world map updated ({size} chars); revision={publication.revision}"
-    if measured_block_was_edited(content, publication.old_content):
-        result += "\nThe measured block is the host's: your edits inside it were not applied; it refreshes at startup."
-    if size > WORLD_SECTION_BUDGET_CHARS:
-        result += (
-            f"\n⚠️ WORLD_SIZE_NOTICE: the map is {size} chars, above the {WORLD_SECTION_BUDGET_CHARS}-char "
-            "context budget. It still loads whole; move detail to knowledge_write and keep the map compact."
-        )
-    return result
+    # keeps what it learned instead of writing a copy that dies with the task; the
+    # forked drive's copy (what a child's read_file opens) follows each publication.
+    source = Deferred("world", "world map", True, lambda: world_source(
+        canonical_data_root(ctx), str(getattr(ctx, "repo_dir", "") or ""), getattr(ctx, "drive_root", None)))
+    return write_text(ctx, source, content=content, mode=mode, expected_revision=expected_revision, old_str=old_str,
+                      new_str=new_str, edits=edits, version=version, reason=reason, notices=_world_notices,
+                      source_type=str((getattr(ctx, "task_metadata", {}) or {}).get("delegation_role") or "task"))
 
 
 def _toggle_evolution(ctx: ToolContext, enabled: bool, objective: str = "") -> str:

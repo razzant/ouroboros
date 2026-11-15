@@ -338,6 +338,13 @@ tokens were written at, by the provider's split when it accounts for every write
 at the model's base price.
 Delegated subscription sessions and unmetered dispatches carry no reservation time
 and are not in a period.
+A consciousness wake reads the 24-hour view once and carries its cache writes as one
+fact row of its message (`consciousness_view.cache_writes_text`): the calls that wrote,
+their tokens, the writes' share of recorded cost and every class in this view's order,
+without its detail. Dollars appear where the install holds a price list for the call's
+route (`pricing.display_tariffs`); any other call is counted as unsplit, and a route
+that reports no write count leaves no row. It is a fact for the mind's own judgment;
+nothing decides by it.
 The tariff is read without a fetch: what the process holds, else the install's
 dated catalogue record (`state/openrouter_models.json`), whose date the view
 names. Cache writes are listed by `prefix_class`. Nothing is stored and no

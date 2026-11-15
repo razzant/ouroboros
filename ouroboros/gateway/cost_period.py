@@ -8,7 +8,8 @@ RECORDED cost is shared out by what the route's tariff charges for each class of
 only price ratios enter and the parts of a model, with the cost that could not be shared, add up to its
 recorded cost. The tariff is one a display may read without a fetch (``pricing.display_tariff``); a model it
 does not price keeps its tokens and its whole cost unshared. Nothing is stored here, and no verdict,
-threshold or signal is derived.
+threshold or signal is derived. A consciousness wake reads the 24-hour view's cache writes as one fact row
+(``consciousness_view.cache_writes_text``).
 """
 
 from __future__ import annotations

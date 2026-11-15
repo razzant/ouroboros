@@ -630,6 +630,39 @@ def test_a_parent_finishing_beside_a_running_child_is_told_once_inside_the_one_h
     assert derive_loop_outcome(result, usage, trace)["outcome_axes"]["execution"]["status"] == "degraded"
 
 
+def test_a_red_last_check_alone_at_the_handoff_door_keeps_its_own_hold_cause(tmp_path, monkeypatch):
+    """The red last check rides the handoff's message like the notice's other facts, and the hold names its own
+    cause there too: a count of ``pre_delivery_notice`` holds stays a count of those other facts."""
+    from ouroboros.outcome_receipt_store import append_verification_receipt
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+    from ouroboros.tools.registry import ToolRegistry
+    from tests.test_completion_hold_observation import holds
+
+    monkeypatch.setattr(loop_mod, "get_task_review_mode", lambda: "off")
+    write_task_result(tmp_path, "child1", STATUS_COMPLETED, parent_task_id="parent1", root_task_id="parent1",
+                      delegation_role="subagent", role="reviewer", result="evidence collected")
+    assert append_verification_receipt(tmp_path, "parent1", {
+        "status": "fail", "contract_kind": "explicit_command", "check": "pytest -q", "returncode": 1,
+        "ts": "2026-11-15T00:00:00+00:00"})
+    requests = []
+
+    def fake_call_llm_with_retry(_llm, request_messages, *_args, **_kwargs):
+        requests.append([dict(row) for row in request_messages])
+        return finish("The check did not pass; child1's evidence is folded in."), 0.0
+
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
+    result, _usage, _trace = run_llm_loop(
+        messages=[{"role": "user", "content": "inspect"}], tools=ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path),
+        llm=SimpleNamespace(default_model=lambda: "test-model"), drive_logs=tmp_path / "logs",
+        emit_progress=lambda *_a, **_k: None, incoming_messages=queue.Queue(), task_id="parent1",
+        drive_root=tmp_path)
+
+    assert result.startswith("The check did not pass") and len(requests) == 2, "the second finish is accepted"
+    [door] = [row for row in requests[1] if "[SUBAGENT_RESULTS" in str(row.get("content") or "")]
+    assert "the last recorded check did not pass" in door["content"] and "`pytest -q` — exit code 1" in door["content"]
+    assert [(row["reason"], row["subreason"]) for row in holds(tmp_path)] == [("subagent_handoff", "red_check_notice")]
+
+
 def test_run_llm_loop_does_not_include_current_subagent_in_own_handoff(tmp_path, monkeypatch):
     from ouroboros.task_results import STATUS_RUNNING, write_task_result
     from ouroboros.tools.registry import ToolRegistry

@@ -87,7 +87,7 @@ export const TASK_CAUSE_PHRASES = {
     child_results_deferred: "Some sub-task results were deferred instead of being folded into this answer",
     tool_failure: "A tool this task used failed and nothing recovered it",
     receipt_absent: "No recorded check or result review examined this result after its last change; this does not establish whether other checks ran.",
-    verification_red_unreconciled: "A check of this result failed and no later run of the same check passed.",
+    verification_red_unreconciled: "A check did not pass and no later run recorded as the same check passed; this record does not say whether other checks passed after it.",
     children_undecided: "Some finished sub-task results carry no recorded decision on how this answer used them.",
     expected_output_ungrounded: "A retired check recorded no tool calls or structured answer; it does not assess the written result.",
     residual_tool_errors_without_review: "Tool errors remain in the record.",

@@ -74,8 +74,9 @@ from ouroboros.mark_anchors import anchor_problem, describe as describe_anchor
 from ouroboros.memory_view_account import (quote_line, selection_facts, source_change_lines, told_by, told_map,
                                          told_records)
 from ouroboros.store import StoreError
-from ouroboros.tool_capabilities import tool_result_limit
+from ouroboros.tool_capabilities import result_window, tool_result_limit
 from ouroboros.tool_call_log import chronicle_lead_metadata
+from ouroboros.tools.arg_feedback import with_argument_notes
 from ouroboros.tools.registry import ToolEntry
 from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
 from ouroboros.utils import sha256_text, utc_now_iso
@@ -808,15 +809,8 @@ def _collect(source: Iterator[Any], render: Callable[[Any], str], limit: int) ->
 
 
 def _window(head: str, text: str, start: int, limit: int, resume: Callable[[int], str]) -> str:
-    """A character window of one document; the second line names ``next_start`` or completeness."""
-    total = len(text)
-    start = min(max(int(start or 0), 0), total)
-    widest = f"chars {total}–{total} of {total}; next_start={total} ({_ORDER}); " + resume(total)
-    room = max(limit - len(head) - len(widest) - 2, 1)  # at least one character a page: ``next_start`` always advances
-    end = min(start + room, total)
-    cont = (f"chars {start}–{end} of {total}; next_start={end} ({_ORDER}); " + resume(end) if end < total
-            else f"chars {start}–{end} of {total}; complete")
-    return head + "\n" + cont + "\n" + text[start:end]
+    """A character window of one record or list, read older to newer (``tool_capabilities.result_window``)."""
+    return result_window(head, text, start, limit, resume, _ORDER)
 
 
 # --- memory_read: modes --------------------------------------------------------------------------
@@ -1286,10 +1280,18 @@ def _read_proposal(ctx: Any, root: Path, store: ChronicleStore, proposal: Dict[s
 def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: int = 0, rows: bool = False,
                  task_id: str = "", period: Any = None, source_ref: Any = None, start: int = 0, revision: str = "",
                  story: bool = False, proposed_selection: Any = None, fingerprint: str = "", owner_words: bool = False,
-                 **bounds: Any) -> str:
+                 source: Any = None, version: Any = None, **bounds: Any) -> str:
     unknown = sorted(set(bounds) - {"from", "to"})
     if unknown:
         return _arg_error(ctx, f"unknown argument(s): {', '.join(unknown)}")
+    from ouroboros.memory_texts import version_door  # a memory text's versions, read without the chronicle
+
+    door, notes = version_door(ctx, source, version, start, fingerprint, {  # each selector by its own omission rule
+        "node_id": node_id, "room_id": room_id, "after_seq": after_seq or None, "rows": rows or None, "task_id": task_id,
+        "period": period, "source_ref": source_ref or None, "revision": revision, "story": story or None,
+        "owner_words": owner_words or None, "proposed_selection": proposed_selection, **bounds})
+    if door is not None:
+        return door
     if (sum(bool(mode) for mode in (node_id, source_ref, rows, story, owner_words, proposed_selection is not None)) > 1
             or (story or owner_words) and room_id is not None):
         return _arg_error(ctx, "choose one mode: node_id, source_ref, rows=true, story=true, owner_words=true, "
@@ -1297,7 +1299,7 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
     if revision and not node_id:
         return _arg_error(ctx, "revision reads one record (node_id) as of that revision")
     if fingerprint and (proposed_selection is None or not isinstance(fingerprint, str)):
-        return _arg_error(ctx, "fingerprint continues a proposed_selection read, as its continuation names it")
+        return _arg_error(ctx, "fingerprint continues a proposed_selection read or a source's list of versions")
     if type(after_seq) is not int or after_seq < 0 or type(start) is not int or start < 0:
         return _arg_error(ctx, "after_seq and start are non-negative integers")
     limit = tool_result_limit("memory_read")
@@ -1350,7 +1352,7 @@ def _memory_read(ctx: Any, node_id: str = "", room_id: Any = None, after_seq: in
         return _arg_error(ctx, str(exc))
     except (OSError, TimeoutError) as exc:
         return _failure(ctx, exc)
-    return _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text))
+    return with_argument_notes(ctx, _publish_tool_result(ctx, ToolResult(status="ok", code="OK", text=text)), notes)
 
 
 # --- memory_mark ----------------------------------------------------------------------------------
@@ -1520,7 +1522,9 @@ def chronicle_tools() -> List[ToolEntry]:
                                "description": "What chronicle_write kind=selection with these fields would change, read before choosing; nothing is written, a refusal is the write's. My story and room_id's page (default this task's room) now and with it, line by line, then every record the account would tell or stop telling, whole as it acts now, all from one state; continue with start and fingerprint.",
                                "properties": {"target_id": string, "replaces": {"type": "array", "items": string},
                                               "shown": {"type": "boolean"}}},
-        "fingerprint": {"type": "string", "description": "proposed_selection: the document a later page continues, as the read's header names it; a changed one is refused position_mismatch, never joined."},
+        "fingerprint": {"type": "string", "description": "proposed_selection, or a source's list of versions: the document a later page continues, as the read's header names it; a changed one is refused position_mismatch, never joined."},
+        "source": {"type": "string", "description": "A memory text: identity, world, workpad (this task's project) or workpad:<project id>."},
+        "version": {"type": "string", "description": "source: the revision of the version to read (not a chronicle record's)."},
         "node_id": {"type": "string", "description": "One record: as it acts now — its coverage as counts, its text, the corrections and decisions under it, then the host stamp one line per task and its sources."},
         "room_id": {**room, "description": room["description"].removesuffix(".") + ", not always its view's This room; name the room_id its readers print. '*' lists all open rooms by conversation (label, period, counts, reader); 'conversations' lists the conversations whose words no page holds, with the act that seals each; 'late_reviews' lists unreleased host review marks; 'notes' lists unsealed mind notes. Lists name ids, rooms, dates and exact readers, oldest first."},
         "after_seq": {"type": "integer", "minimum": 0, "description": "Room records and the marks placed in it after this sequence (the previous page's next_after_seq)."},
@@ -1564,7 +1568,7 @@ def chronicle_tools() -> List[ToolEntry]:
             write, ["kind"]), _chronicle_write),
         ToolEntry("memory_read", schema(
             "memory_read",
-            "Read memory by address, as text: a room's records and the marks placed in it (first line: room, head and how many global marks are in force — they are in my view, not repeated), one record: what identifies it, its text, then its corrections, quotes and stamp (node_id; an account also names each source's version, what changed in it since, and the accounts a record informs; revision= reads a record as of one revision), a room's chat rows verbatim (rows=true with from/to, task_id or period), a retained source (source_ref), my human's words section for this work which its reviewers and plan council render (owner_words=true; their packets append the run's schedule text), or a selection before I make it (proposed_selection). Every page fits one tool result and its second line names the continuation (next_after_seq, next: from=…, or next_start), older to newer; chat rows in stored order. Choose the depth yourself.",
+            "Read memory by address, as text: a room's records and the marks placed in it (first line: room, head and how many global marks are in force — they are in my view, not repeated), one record: what identifies it, its text, then its corrections, quotes and stamp (node_id; an account also names each source's version, what changed in it since, and the accounts a record informs; revision= reads a record as of one revision), a room's chat rows verbatim (rows=true with from/to, task_id or period), a retained source (source_ref), my human's words section for this work which its reviewers and plan council render (owner_words=true; their packets append the run's schedule text), or a selection before I make it (proposed_selection). A memory text's versions (source=identity, world, workpad or workpad:<project id>; version=<revision> reads one exactly, the current one too; without it, the list newest first, each line naming the version its write replaced) need no chronicle. Every page fits one tool result and its second line names the continuation (next_after_seq, next: from=…, or next_start): records older to newer, chat rows in stored order, a source's versions newest first. Choose the depth yourself.",
             read, []), _memory_read),
         ToolEntry("memory_mark", schema(
             "memory_mark",

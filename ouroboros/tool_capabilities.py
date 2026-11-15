@@ -232,7 +232,7 @@ READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
 # parallel. A tool not named here stays loud unless its leftover is details-only (a command that ran and failed, a call
 # refused before running: _outcome_tool_errors).
 PURE_READ_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | frozenset({
-    "browse_page", "view_image", "github_read", "knowledge_read", "youtube_transcript",
+    "browse_page", "view_image", "github_read", "knowledge_read", "youtube_transcript", "workpad_read",
 })
 
 # Enqueue-only tools safe to emit in parallel within one tool-call round.
@@ -349,6 +349,22 @@ def tool_result_limit(tool_name: str) -> int:
     producer that emits more than this is not cut mid-document by its name.
     """
     return TOOL_RESULT_LIMITS.get(str(tool_name or ""), DEFAULT_TOOL_RESULT_LIMIT)
+
+
+def result_window(head: str, text: str, start: Any, limit: int, resume: Any, order: str = "") -> str:
+    """One character window of a document a self-paging producer emits within ``limit``: ``head``, then a line naming
+    the window and its continuation (``next_start`` and the call ``resume(next_start)``; ``order`` names the order the
+    document reads in) or completeness, then the window. The continuation line is measured, and a page holds at least
+    one character, so ``next_start`` always advances. Used by memory_read's modes and its version door."""
+    total = len(text)
+    start = min(max(int(start or 0), 0), total)
+    label = f" ({order})" if order else ""
+    widest = f"chars {total}–{total} of {total}; next_start={total}{label}; " + resume(total)
+    room = max(limit - len(head) - len(widest) - 2, 1)
+    end = min(start + room, total)
+    cont = (f"chars {start}–{end} of {total}; next_start={end}{label}; " + resume(end) if end < total
+            else f"chars {start}–{end} of {total}; complete")
+    return head + "\n" + cont + "\n" + text[start:end]
 
 
 # Explicit first-view request a call may carry: how many chars of the head and

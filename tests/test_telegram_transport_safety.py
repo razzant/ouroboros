@@ -440,6 +440,7 @@ def test_plugin_honours_env_proxies_only_in_a_proxy_routed_server_process(
     options = dict(built[0])
     assert callable(options.pop("on_message"))
     assert options.pop("reply_to_message_id") == 0
+    assert options.pop("origin_label") == ""  # an event without the host's label stays unlabelled
     assert options.pop("binding") is plugin.binding_for(api)  # the accepted token, checked before each request
     assert options.pop("generation") == plugin.binding_for(api).snapshot()[1]  # one snapshot per client
     assert options == {"trust_env": expected, "proxy": None,

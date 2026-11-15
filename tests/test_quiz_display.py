@@ -186,9 +186,10 @@ def test_send_quiz_broadcasts_publishes_and_persists_row(monkeypatch, tmp_path, 
         # task_id joined the topic payload (#Q-2b, closing review note N4):
         # a host subscriber (Telegram) cannot compose the answer address
         # "quiz:{task_id}:{quiz_id}" without it.
-        "chat_id", "transport", "quiz_id", "task_id", "question", "options",
+        "message_origin", "chat_id", "transport", "quiz_id", "task_id", "question", "options",
         "stake", "assumption", "state", "ts", "wait_for_answer", "question_delivery",
     }
+    assert payload["message_origin"] == {}
     row = json.loads(dialogue_test.log_text(tmp_path / "logs" / "chat.jsonl").splitlines()[-1])
     assert row["type"] == "quiz"
     assert row["text"] == "Merge now?"

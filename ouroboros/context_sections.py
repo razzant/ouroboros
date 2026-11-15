@@ -8,18 +8,24 @@ from __future__ import annotations
 
 import json
 import copy
+import hashlib
 import logging
 import pathlib
 import re
 from typing import Any, List, Optional
 
 from ouroboros.context_budget import LARGE_CONTEXT_SECTION_CHARS
-from ouroboros.context_health import safe_read
 from ouroboros.section_floor import HostSection
 from ouroboros.context_timing import timed_section
 
 log = logging.getLogger(__name__)
 _LARGE_CONTEXT_SECTION_CHARS = LARGE_CONTEXT_SECTION_CHARS
+
+
+def revision_line(noun: str, shown: str, revision: str) -> str:
+    """The line after a resident text naming its revision, so a write needs no read for its token: ``revision`` is the
+    sha256 of the bytes the text shown was decoded from (one capture), never of a second read."""
+    return ("" if shown.endswith("\n") else "\n") + f"\nRevision of this {noun}: {revision}.\n"
 
 
 # An unauthored common orientation is a VISIBLE GAP, never silence. Static text: this
@@ -58,7 +64,7 @@ def build_knowledge_sections(
             heading = f"## Shared understanding\n\n{overview_residency(overview)}\nSource: {reader}.\n\n"
             # Its revision rides after the body, so a write needs no read for its token. The revision covers
             # the whole note, its summary too: a summary-only edit moves this last line and no byte before it.
-            revision = ("" if overview_text.endswith("\n") else "\n") + f"\nRevision of this overview: {overview.revision}.\n"
+            revision = revision_line("overview", overview_text, overview.revision)
             # The whole authored orientation rides whole in every request: the window never
             # shortens the overview (TIER0_ALWAYS_FULL); its headings are no substitute for it.
             sections.append(HostSection("shared_understanding", heading + overview_text + revision, reader=reader))
@@ -83,7 +89,9 @@ def build_knowledge_sections(
                     f"## Project journal ({pid}) — recent milestones\n\n{journal}\n\n"
                     "(journal_read shows the full history; journal_write appends.)"
                 )
-            workpad = safe_read(project_workpad_path(pid))
+            page = project_workpad_path(pid)
+            raw = page.read_bytes() if page.is_file() else b""  # one capture: the page shown and its revision
+            workpad = raw.decode("utf-8")
             if workpad.strip():
                 # Cognitive artifact: never silently prefix-slice (BIBLE P1 — that
                 # is partial amnesia). The project's own working memory rides in
@@ -91,7 +99,8 @@ def build_knowledge_sections(
                 # consolidate, not a reason to amputate context.
                 if len(workpad) > _LARGE_CONTEXT_SECTION_CHARS:
                     log.warning("context: project workpad (%s) is large (%d chars)", pid, len(workpad))
-                sections.append(f"## Project workpad ({pid})\n\n{workpad}")
+                sections.append(f"## Project workpad ({pid})\n\n{workpad}"
+                                + revision_line("workpad", workpad, hashlib.sha256(raw).hexdigest()))
         except Exception:
             log.debug("project journal/workpad context injection failed", exc_info=True)
     return sections

@@ -48,8 +48,8 @@ PROMPT_REL = pathlib.Path("prompts") / "CONSCIOUSNESS.md"
 WAKE_OBSERVATION_KEY = "wake_observation"  # task metadata: the bound observation's source and projection
 WAKE_CONTINUITY_KEY = "wake_continuity"  # task metadata: the notes this wake carries to the next (``previous_wake_text``)
 OBSERVATION_BOUNDARY_VERSION = 1
-PLACEHOLDERS = ("reason", "last_wake_ago", "events", "level", "level_line", "withheld_tools",
-                "spent_usd", "daily_usd", "running", "max_tasks", "interval", "spend_by_cause", "counted_roots", "places", "previous_wake")
+PLACEHOLDERS = ("reason", "last_wake_ago", "events", "level", "level_line", "withheld_tools", "spent_usd", "daily_usd",
+                "running", "max_tasks", "interval", "spend_by_cause", "counted_roots", "places", "previous_wake", "cache_writes")
 LEVEL_LINES = {
     "observe": "On its own it studies, keeps its memory and tells you; it changes nothing outside.",
     "act": "Also acts on its own: starts work, runs commands, speaks and acts in places. It does not change itself.",
@@ -881,7 +881,7 @@ def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
     facts = task.pop("_wake_prepare", None)
     if not isinstance(facts, dict):
         return
-    from ouroboros.consciousness_view import cause_views, place_views, root_views
+    from ouroboros.consciousness_view import cache_writes_text, cause_views, place_views, root_views
 
     root = pathlib.Path(drive_root)
     now = float(facts.get("now") or 0.0)
@@ -899,8 +899,9 @@ def prepare_wake(task: Dict[str, Any], drive_root: Any) -> None:
         places = place_views(root, window)
     except Exception:
         places = None
-    context = {"spend_by_cause": cause_views(window.get("spend_by_cause"), places),
-               "counted_roots": root_views(list(facts.get("counted_roots") or []), places), "places": places}
+    context = {"spend_by_cause": cause_views(window.get("spend_by_cause"), places), "places": places,
+               "counted_roots": root_views(list(facts.get("counted_roots") or []), places),
+               "cache_writes": cache_writes_text(root, now)}  # read once: ``render`` runs for each form of the wake
     def render(events: str) -> str:
         return render_wake_message(
             facts.get("repo_dir"), drive_root=root, reason=reason, last_wake_at=float(facts.get("last_wake_at") or 0.0),
@@ -961,7 +962,7 @@ def render_wake_message(repo_dir: Any, *, drive_root: Any, reason: str, last_wak
                         disabled_tools: List[str], spent_usd: Any, daily_usd: Any, running: int,
                         max_tasks: int, interval: int, events: str, spent_is_floor: bool = False,
                         spend_by_cause=None, counted_roots=None, places=None, previous_wake: str = "none",
-                        appointment_at: float = 0.0) -> str:
+                        appointment_at: float = 0.0, cache_writes: str = "unknown") -> str:
     """Fill ``prompts/CONSCIOUSNESS.md`` for one wake; every placeholder is substituted.
 
     "On time" is lateness below ``ago_text``'s one-minute display granularity, not a new scheduling threshold.
@@ -983,7 +984,7 @@ def render_wake_message(repo_dir: Any, *, drive_root: Any, reason: str, last_wak
         "withheld_tools": ", ".join(disabled_tools) if disabled_tools else "none",
         "spent_usd": spent, "daily_usd": f"{float(daily_usd):.2f}",
         "running": str(int(running)), "max_tasks": str(int(max_tasks)), "interval": str(int(interval)),
-        "spend_by_cause": spend_text(spend_by_cause), "counted_roots": roots_text(counted_roots),
+        "spend_by_cause": spend_text(spend_by_cause), "counted_roots": roots_text(counted_roots), "cache_writes": cache_writes,
     }
     # One pass: a fact (a task title inside {events}) that happens to contain "{daily_usd}"
     # is never substituted again.

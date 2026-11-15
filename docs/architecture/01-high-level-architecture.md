@@ -219,7 +219,7 @@ ouroboros/ — agent core and shared runtime (§6)
   chronicle_import.py, memory_nomination_receipts.py, memory_inventory.py — one model-free import of prior dialogue memory as `legacy` records; nominations imported once as marks; what is open or folded (§6)
   consolidator.py, memory_fallback.py — Light transport, one signed draft per root with wakes OFF; no knowledge writes (§6)
   memory.py — scratchpad, identity, chat history
-  knowledge.py, knowledge_edits.py, knowledge_versions.py, knowledge_rows.py, text_change.py, memory_publication.py — linked-Markdown notes, shelf indexes, version reads; revision-checked writes of notes and per-file identity/world-map/registry: origin-stamped history row, then atomic replacement (§6)
+  knowledge.py, knowledge_edits.py, knowledge_versions.py, knowledge_rows.py, text_change.py, memory_publication.py, memory_texts.py — linked-Markdown notes, shelf indexes, version reads; revision-checked writes of notes and per-file identity/world-map/workpad/registry: origin-stamped history row, then atomic replacement (§6)
   project_facts.py — project_id resolution and per-project knowledge under `projects/<id>/knowledge`, isolated from `memory/knowledge`
   task_tree_ledger.py — append-only `data/task_trees/<root>/blackboard.jsonl`: ephemeral swarm coordination (`tree_note`/`tree_read`), mirrored into the project journal at root completion
   projects_registry.py, project_admission.py, project_closure.py — registry lifecycle, admission and reversible closure (§6 Project registry and lease)
