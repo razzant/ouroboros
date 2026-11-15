@@ -462,7 +462,8 @@ class Txn:
         through its sorter (an order of magnitude slower on a ledger of months, inside the store's read hold)."""
         return [dict(record) for record in self.conn.execute(
             "SELECT review_wave_id AS wave_id, review_slot_id AS row_id, GROUP_CONCAT(DISTINCT model) AS models, "
-            "COALESCE(SUM(CAST(cost_usd AS REAL)), MAX(CASE WHEN state='settled' THEN 0.0 END)) AS usd, "
+            "COALESCE(SUM(CAST(cost_usd AS REAL)), MAX(CASE WHEN state='settled' "
+            "AND COALESCE(settle_reason, '')!='abandoned' THEN 0.0 END)) AS usd, "
             "MIN(CASE WHEN state='released' THEN 1 WHEN state!='settled' THEN 0 "
             "WHEN cost_usd IS NULL THEN COALESCE(settle_reason, '')!='abandoned' "
             "AND (COALESCE(kind, 'attempt')='subscription_session' OR COALESCE(provider, '')='claudexor') "

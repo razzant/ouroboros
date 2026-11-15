@@ -925,7 +925,8 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
         printed = {local_lane_label(*route): route for route in map(route_choice.following_route, ("light", "main"))
                    if route[1]}
         if model not in available and model not in printed:
-            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(f"⚠️ Unknown model: {model}. Available: {', '.join(available)}")))
+            offered = [*available, *(label for label in printed if label not in available)]  # every name it takes
+            return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(f"⚠️ Unknown model: {model}. Available: {', '.join(offered)}")))
 
         use_local = False
         if model in printed:

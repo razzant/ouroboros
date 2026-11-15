@@ -274,7 +274,8 @@ def startup_upgrade_notices(settings: Mapping[str, Any]) -> None:
             # Display-only backup values never authorize delivery. The Light rule is judged at the first start of
             # this version: an install with no owner to tell yet (a fresh one, seeded or not) ran no work under the
             # old rule, so it is marked now and a box it has or gets is never told as news of an update.
-            update_state(lambda st: st.setdefault(LIGHT_LOCAL_NOTICE_KEY, utc_now_iso()))
+            if known:  # an unconfirmed state (a recovery, a read that is not current) leaves it owed
+                update_state(lambda st: st.setdefault(LIGHT_LOCAL_NOTICE_KEY, utc_now_iso()))
             return
         owner_chat = int(owner_chat)
         owed = []
