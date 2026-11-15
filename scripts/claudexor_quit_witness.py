@@ -17,7 +17,9 @@ engine's exact identity (ledger PID plus measured birth) and the active run; the
 the engine home's holders are observed by PID, birth, path and handle (Windows: Sysinternals
 ``handle.exe`` in CSV and text form, psutil beside it; macOS: ``lsof -F``; Linux: ``/proc``), and
 on Windows a rename of that home must be refused. Each source's full output is saved under
-``--evidence-dir``. A holder counts only when its PID belongs to the engine identity, its path lies
+``--evidence-dir``. ``job-diagnostics`` records the generation's immediate Windows Job before engine
+start and the launcher's Job members around recycle, using the verification interpreter unchanged.
+A holder counts only when its PID belongs to the engine identity, its path lies
 in the home and it names a handle or descriptor; anything else is ``unknown`` and fails the run.
 Then the real headless Quit runs (``_headless_signal_handler``, ``_run_headless_main``) and the
 seconds until the home renames (Windows) or the engine identity is gone (POSIX) are measured.
@@ -54,11 +56,55 @@ from ouroboros.force_remove import force_rmtree  # noqa: E402
 from scripts.claudexor_lifecycle_smoke import isolate, require  # noqa: E402
 from scripts.claudexor_platform_smoke import SmokeFailure  # noqa: E402
 
+# Read-only diagnostics embedded in both children, so a base replay uses that checkout's platform ABI too.
+# A Windows venv redirector can put the executing Python in a different immediate Job from the launcher's.
+# Record both before recycle; an unknown observation never changes any lifecycle or acceptance decision.
+_JOB_DIAGNOSTICS = r'''
+def job_snapshot(job=None):
+    import ctypes, os, sys, time
+    from ouroboros import platform_layer as pl
+    facts = {"observer_pid": os.getpid(), "observer_ppid": os.getppid(), "time_ns": time.time_ns(),
+             "executable": sys.executable, "base_executable": getattr(sys, "_base_executable", None),
+             "job_scope": "immediate" if job is None else "launcher_generation", "status": "not_windows"}
+    if not pl.IS_WINDOWS:
+        return facts
+    facts["status"] = "unknown"
+    try:
+        limits, members = pl._ExtendedLimitInfo(), pl._JOBOBJECT_BASIC_PROCESS_ID_LIST()
+        for label, info, kind in (("limits", limits, pl._JOBOBJECTINFOCLASS_EXTENDED),
+                                  ("members", members, pl._JOBOBJECTINFOCLASS_PROCESS_ID_LIST)):
+            if not pl._kernel32.QueryInformationJobObject(job, kind, ctypes.byref(info), ctypes.sizeof(info), None):
+                raise OSError(f"QueryInformationJobObject({label}) failed: {ctypes.get_last_error()}")
+            if label == "limits":
+                facts["limit_flags"] = int(limits.BasicLimitInformation.LimitFlags)
+        facts["members"] = [{"pid": int(pid), "birth": pl.process_start_time(int(pid)) or None,
+                             "command": pl.process_command(int(pid)) or None}
+                            for pid in members.ProcessIdList[:members.NumberOfProcessIdsInList]]
+        if job is None:
+            # A read of the same selector the daemon uses, not a claim to have intercepted its Popen.
+            facts["daemon_group_kwargs_at_observation"] = pl.subprocess_new_group_kwargs(breakaway_from_job=True)
+        facts["status"] = "observed"
+    except Exception as exc:
+        facts["error"] = f"{type(exc).__name__}: {exc}"
+    return facts
+
+def save_diagnostic(root, name, facts):
+    import json
+    try:
+        folder = root / "job-diagnostics"
+        folder.mkdir(exist_ok=True)
+        path = folder / (name + ".json")
+        path.with_suffix(".tmp").write_text(json.dumps(facts), encoding="utf-8")
+        path.with_suffix(".tmp").replace(path)
+    except Exception as exc:
+        print(f"Job diagnostic {name} not saved: {type(exc).__name__}: {exc}", flush=True)
+'''
+
 # The generation's server.py: ensure (or attach to) the owned engine; the first one starts one fake run and one
 # run whose harness CLI is the stand-in below, with a grandchild, both in the run's project folder (a real child
 # process the engine spawned there); then leave on the launcher's quit line or pipe EOF (exit 0) or on a planned
 # Restart request (exit 42).
-_GENERATION = r'''
+_GENERATION = _JOB_DIAGNOSTICS + r'''
 import json, os, pathlib, sys, threading, time, traceback, uuid
 checkout = os.environ["OUROBOROS_WITNESS_CHECKOUT"]
 os.environ["OUROBOROS_REPO_DIR"] = checkout  # this stub stands in for the checkout's own server.py
@@ -69,6 +115,7 @@ from scripts.claudexor_platform_smoke import seed_fixture_repo
 from ouroboros.claudexor_daemon import ensure_owned_gateway
 from ouroboros.config import DATA_DIR
 pid, run_file = os.getpid(), root / "client-run.json"
+save_diagnostic(root, f"generation-{pid}-before-engine", job_snapshot())
 with fixture_catalog():
     gateway = ensure_owned_gateway()
     if not run_file.exists():
@@ -209,7 +256,7 @@ SEAMS = {"sync_existing_repo_from_bundle": None, "install_deps": True, "launcher
 # control pipe stays this driver's own, as the server keeps its launcher pipe (``watch_launcher_stop``: an inherited
 # control pipe can strand Windows Git at boot): a private non-inheritable reader, and null stdin in both native tables
 # for every child the launcher starts. The first native run's missing generation recorded no stack; ``stacks`` does.
-_LAUNCHER = r'''
+_LAUNCHER = _JOB_DIAGNOSTICS + r'''
 import faulthandler, json, os, pathlib, sys, threading
 root, repo, stub = (pathlib.Path(arg) for arg in sys.argv[1:4])
 control = os.dup(0)
@@ -242,7 +289,20 @@ if hasattr(launcher, "_quit"):
 lifecycle.start()
 for line in control:
     if line.strip() == "recycle":
+        with launcher._agent_lock:  # the Job handle cannot retire during this read
+            before = job_snapshot(launcher._agent_job) if launcher._agent_job is not None else {"status": "no_job"}
+            before["managed_pid"] = getattr(launcher._agent_proc, "pid", None)
+        save_diagnostic(root, "before-recycle", before)
         launcher._request_agent_restart()
+        after = {"time_ns": __import__("time").time_ns(), "status": before["status"]}
+        try:
+            from ouroboros import platform_layer as pl
+            after["former_members"] = [
+                {**row, "birth_now": pl.process_start_time(row["pid"]) or None,
+                 "pid_alive_now": pl.pid_is_alive(row["pid"])} for row in before.get("members", [])]
+        except Exception as exc:
+            after.update(status="unknown", error=f"{type(exc).__name__}: {exc}")
+        save_diagnostic(root, "after-recycle", after)
     elif line.strip() == "stacks":  # every thread's stack, for a generation that never became ready
         with open(root / "launcher-stacks.tmp", "w", encoding="utf-8") as stacks:
             faulthandler.dump_traceback(stacks, all_threads=True)
@@ -574,6 +634,7 @@ def witness(repo, expect, quit_seconds, out, handle_exe, facts, state):
     root, data, env = Path(os.environ["OUROBOROS_TEST_TEMP_ROOT"]), Path(DATA_DIR), dict(os.environ)
     home, stub = data / "claudexor", root / "stub-repo"
     state["roots"] = {"owned": data, "foreign": root / "foreign-data"}  # before anything can start on them
+    state["job_diagnostics"] = root / "job-diagnostics"
     facts.update(checkout=str(repo), expect=expect, windows=windows, substituted=SUBSTITUTED,
                  handle_exe=tool_identity(handle_exe) if windows else None)
     subprocess.run([sys.executable, str(REPO_ROOT / "scripts/fetch_claudexor_runtime.py"),
@@ -805,10 +866,14 @@ def cleanup(state, out, env):
     data, foreign = state.get("roots", {}).get("owned"), state.get("roots", {}).get("foreign")
     for name, source in (("launcher.log", data and data / "logs" / "launcher.log"),
                          ("agent_stdout.log", data and data / "logs" / "agent_stdout.log"),
+                         ("supervisor.jsonl", data and data / "logs" / "supervisor.jsonl"),
                          ("engine-daemon.log", data and data / "claudexor" / "daemon.log"),
                          ("foreign-daemon.log", foreign and foreign / "claudexor" / "daemon.log")):
         if source and source.is_file() and not (out / name).exists():
             _step(steps, f"log:{name}", lambda source=source, name=name: str(shutil.copy2(source, out / name)))
+    diagnostics = state.get("job_diagnostics")
+    if diagnostics and diagnostics.is_dir():
+        _step(steps, "job_diagnostics", lambda: str(shutil.copytree(diagnostics, out / "job-diagnostics")))
     remaining = {}
     for label, root in state.get("roots", {}).items():
         _step(steps, f"ledger_stop:{label}", lambda root=root, label=label: _ledger_stop(root, env, out, label))

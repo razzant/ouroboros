@@ -267,6 +267,72 @@ def test_the_witness_launcher_passes_recycle_and_planned_restart_without_a_real_
     assert json.loads((root / "seam-calls.json").read_text(encoding="utf-8")) == dict.fromkeys(witness.SEAMS, 1)
     logged = (tmp_path / "data" / "logs" / "launcher.log").read_text(encoding="utf-8")
     assert "Agent requested restart (exit code 42)" in logged and "manifest is missing" not in logged
+    before = json.loads((root / "job-diagnostics" / "before-recycle.json").read_text(encoding="utf-8"))
+    after = json.loads((root / "job-diagnostics" / "after-recycle.json").read_text(encoding="utf-8"))
+    if os.name == "nt":
+        assert before["status"] == "observed" and before["limit_flags"] & 0x800
+        assert before["managed_pid"] in {row["pid"] for row in before["members"]}
+        assert after["time_ns"] > before["time_ns"] and after["status"] == "observed"
+    else:
+        assert before["status"] == after["status"] == "no_job"
+
+
+@pytest.mark.parametrize("query_fails", [False, True])
+@pytest.mark.parametrize("job,flags", [(None, 0x3000), (42, 0x2800)])
+def test_job_diagnostics_retain_members_or_the_query_error_without_interpreting_a_stop(tmp_path, monkeypatch,
+                                                                                     query_fails, job, flags):
+    """Portable diagnostic/export test; its synthetic ABI proves no native Job membership or breakaway."""
+    import ctypes
+    from types import SimpleNamespace
+    from ouroboros import platform_layer as pl
+
+    class Limits(ctypes.Structure):
+        _fields_ = [("LimitFlags", ctypes.c_uint32)]
+
+    class Extended(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", Limits)]
+
+    class Members(ctypes.Structure):
+        _fields_ = [("NumberOfProcessIdsInList", ctypes.c_uint32), ("ProcessIdList", ctypes.c_size_t * 2)]
+
+    def query(handle, kind, result, size, length):
+        assert handle == job
+        if kind == 9:
+            result._obj.BasicLimitInformation.LimitFlags = flags
+        elif query_fails:
+            return False
+        else:
+            result._obj.NumberOfProcessIdsInList = 2
+            result._obj.ProcessIdList[:] = [123, 456]
+        return True
+
+    for name, value in {"IS_WINDOWS": True, "_ExtendedLimitInfo": Extended,
+                        "_JOBOBJECT_BASIC_PROCESS_ID_LIST": Members, "_JOBOBJECTINFOCLASS_EXTENDED": 9,
+                        "_JOBOBJECTINFOCLASS_PROCESS_ID_LIST": 3,
+                        "_kernel32": SimpleNamespace(QueryInformationJobObject=query),
+                        "process_start_time": lambda pid: f"birth-{pid}",
+                        "process_command": lambda pid: f"command-{pid}",
+                        "subprocess_new_group_kwargs": lambda **kw: {"creationflags": 0x200}}.items():
+        monkeypatch.setattr(pl, name, value, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 5, raising=False)
+    namespace = {}
+    exec(witness._JOB_DIAGNOSTICS, namespace)
+    facts = namespace["job_snapshot"](job)
+    namespace["save_diagnostic"](tmp_path, "before-recycle", facts)
+    if query_fails:
+        assert facts["status"] == "unknown" and "QueryInformationJobObject(members) failed: 5" in facts["error"]
+        assert "members" not in facts, "a failed query is never an empty Job"
+    else:
+        assert facts["status"] == "observed"
+        assert [(row["pid"], row["birth"]) for row in facts["members"]] == [(123, "birth-123"), (456, "birth-456")]
+        if job is None:
+            assert facts["daemon_group_kwargs_at_observation"] == {"creationflags": 0x200}
+    assert facts["limit_flags"] == flags and facts["job_scope"] == ("immediate" if job is None else "launcher_generation")
+    out = tmp_path / "evidence"
+    out.mkdir()
+    result = witness.cleanup({"job_diagnostics": tmp_path / "job-diagnostics"}, out, {})
+    assert result["steps"]["job_diagnostics"]["ok"]
+    assert json.loads((out / "job-diagnostics" / "before-recycle.json").read_text(encoding="utf-8")) == facts
 
 
 def test_a_launcher_without_a_substituted_name_is_refused_before_any_generation(tmp_path):
