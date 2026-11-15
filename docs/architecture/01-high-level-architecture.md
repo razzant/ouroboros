@@ -173,7 +173,7 @@ ouroboros/ — agent core and shared runtime (§6)
   _outcome_receipts.py, _outcome_tool_errors.py — receipt parsing and the one canonical receipt identity (§10 invariant 16); tool-trace status vocabularies, re-exported by `outcomes.py`
   code_intelligence.py, code_intelligence_architecture.py — internal code inventory in a derived cache without source bodies; architecture facts over the pinned domain/contract carriers (Code navigation below)
   code_navigation.py, code_occurrences.py, code_import_candidates.py, code_search_rg.py — `query_code` views, token/import evidence, import candidates with explicit ambiguity, optional ripgrep for `search_code` behind the protected/secret gates (Code navigation below)
-  pricing.py, usage_accounting.py, usage_admission.py, _usage_wait.py — exact-route provider-catalog lookup with nullable estimates, no static tariffs (they go stale); physical attempts (reserved → dispatched → settled|unresolved) under global/root/group and review-wave admission (§6 Budget tracking)
+  pricing.py, usage_accounting.py, usage_admission.py, _usage_wait.py — exact-route catalog lookup, nullable estimates; physical attempts (states: §6) under global/root/group and review-wave admission (§6 Budget tracking)
   physical_attempt_context.py — frozen context-fit facts, including the memory view kind, carried by one physical model attempt (§6 Context fitting)
   _usage_rows.py, _usage_money.py, _usage_response.py, usage_ledger.py — the reducer, Decimal cash, the usage normalizer, row rules and the money lock (§6 Usage ledger substrate vs. accounting policy)
   _usage_cache_splits.py — process-local cache split by task/provider/route/review; a missing entry prices a full cache write (§6)

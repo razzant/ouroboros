@@ -101,6 +101,7 @@ async function withWizard(bootstrap, query, body, { fetch, location, prepare } =
         __OURO_ONBOARDING_BOOTSTRAP__: bootstrap,
         addEventListener(type, listener) { listeners.set(listener, type); },
         removeEventListener(type, listener) { listeners.delete(listener); },
+        dispatchEvent(event) { for (const [listener, type] of [...listeners]) if (type === event.type) listener(event); return true; },
         setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
         requestAnimationFrame: (fn) => setTimeout(fn, 0), getComputedStyle: () => ({}),
         matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
@@ -141,6 +142,7 @@ async function withWizard(bootstrap, query, body, { fetch, location, prepare } =
         for (const [listener, type] of listeners) {
             if (type === 'pagehide') listener({ persisted: false });
         }
+        assert.ok(![...listeners.values()].includes('ouro:language-changed'), 'leaving the page drops its language listener');
         for (const [name, descriptor] of Object.entries(installed)) {
             if (descriptor) Object.defineProperty(globalThis, name, descriptor);
             else delete globalThis[name];
@@ -813,12 +815,12 @@ test('Summary says what an exhausted subscription quota does, with and without a
         else if (String(url) === '/api/claudexor/status') body = subscription.status;
         else if (String(url) === '/api/onboarding/subagents/preview') {
             const payload = JSON.parse(init.body);
-            body = { ok: true, available_subagents: { enabled: true, items: [] }, known_spend_gaps: gaps,
+            body = { ok: true, available_subagents: { enabled: true, items: [] }, known_spend_gaps: gaps, partly_counted_spend: partly,
                 model_settings: Object.fromEntries(Object.keys(subscription.preview.model_settings).map((key) => [key, payload[key]])) };
         }
         return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
     };
-    let gaps = [];
+    let gaps = [], partly = [];
     const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
     // Walk from Accounts (where the connected subscription is observed) to Summary.
     const summary = async (query, fallbackModel, mainModel = 'claudexor::codex=gpt-test', openrouterKey = '') => {
@@ -854,6 +856,11 @@ test('Summary says what an exhausted subscription quota does, with and without a
     gaps = ['Light', 'Web search'];
     const uncounted = await summary('limits-not-counted', '', 'google/gemini-3.8-flash', 'sk-or-v1-test-not-a-secret');
     assert.match(uncounted.budget, /id="budget-gaps"[^>]*data-i18n-fmt="spend gaps">Not counted: Light, Web search \(price unknown\)\.<\/div>/);
+    // What the draft counts only under a condition shares that one line (Dashboard › Costs' words).
+    gaps = [];
+    partly = [{ name: 'all model roles', condition: 'off_peak_usd' }, { name: 'Web search', condition: 'usd' }];
+    const partial = await summary('limits-partly-counted', '', 'google/gemini-3.8-flash', 'sk-or-v1-test-not-a-secret');
+    assert.match(partial.budget, /id="budget-gaps"[^>]*>Partly counted: all model roles \(text only, off-peak, USD only\); Web search \(USD only\)\.<\/div>/);
 });
 
 // A read in flight for another access is no longer wanted once the draft is back at an access already read: its late
@@ -889,7 +896,7 @@ test('a replaced key\'s catalog never lands late, the key asked again stays the 
     };
     const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
     const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, mainModel: 'first/model', automaticModels: [] } };
-    await withWizard(bootstrap, 'late-catalog', async ({ doc }) => {
+    await withWizard(bootstrap, 'late-catalog', async ({ doc, win }) => {
         await settle();
         const type = (value) => { const key = doc.getElementById('openrouter-key'); key.value = value; key.fire('input'); };
         const click = async (id) => { doc.getElementById(id).fire('click'); await settle(); };
@@ -909,6 +916,20 @@ test('a replaced key\'s catalog never lands late, the key asked again stays the 
         await click('next-btn');                                        // Models → Access
         await click('next-btn');                                        // Access → limits: the answered preview's line
         assert.match(doc.getElementById('root').innerHTML, /id="budget-gaps"[^>]*>Not counted: Light \(price unknown\)\.</);
+        // Its words are composed (data-i18n-fmt, which the page walker skips): a language change says them again.
+        const { applyPayload } = await import('../modules/i18n.js');
+        const say = (payload) => { const kept = globalThis.document; globalThis.document = undefined;
+            try { applyPayload(payload); } finally { globalThis.document = kept; } };
+        say({ language: 'ru', english: false, revision: 81, entries: {
+            'Not counted: {roles} (price unknown).': { text: 'Не учитываются: {roles} (цена неизвестна).' }, Light: { text: 'Лёгкая' } } });
+        try {
+            win.dispatchEvent(new CustomEvent('ouro:language-changed'));
+            assert.equal(doc.getElementById('budget-gaps').textContent, 'Не учитываются: Лёгкая (цена неизвестна).');
+        } finally {
+            say({ language: '', english: true, revision: 82, entries: {} });
+            win.dispatchEvent(new CustomEvent('ouro:language-changed'));
+        }
+        assert.equal(doc.getElementById('budget-gaps').textContent, 'Not counted: Light (price unknown).');
         previewFails = true;
         await click('back-btn');
         await click('next-btn');                                        // a forced preview that fails

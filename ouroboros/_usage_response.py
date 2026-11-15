@@ -211,8 +211,8 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD) -> Tuple[Dict
         usage = {}
     native_cache_read = _reported_token_count(usage, "cache_read_input_tokens")
     native_cache_write = _reported_token_count(usage, "cache_creation_input_tokens")
-    cache_read = _reported_token_count(
-        usage, "cache_read_input_tokens", "cached_tokens", "precached_prompt_tokens",
+    cache_read = _reported_token_count(  # DeepSeek's top-level prompt_cache_hit_tokens last; its details block wins
+        usage, "cache_read_input_tokens", "cached_tokens", "precached_prompt_tokens", "prompt_cache_hit_tokens",
     )
     cache_write = _reported_token_count(
         usage, "cache_creation_input_tokens", "cache_write_tokens",
@@ -239,6 +239,21 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD) -> Tuple[Dict
         "cached_tokens": cache_read,
         "cache_write_tokens": cache_write,
     }
+    # Tariff validation needs the reported counts, not the ledger's historical int/clamp projection.
+    # Keep only token fields; never accept a provider-supplied witness under this internal key.
+    reported = {key: usage[key] for key in (
+        "prompt_tokens", "completion_tokens", "prompt_cache_hit_tokens", "prompt_cache_miss_tokens", "total_tokens",
+        "input_tokens", "output_tokens", "cached_tokens", "precached_prompt_tokens", "cache_read_input_tokens",
+        "cache_write_tokens", "cache_creation_input_tokens") if key in usage}
+    nested_keys = {
+        "prompt_tokens_details": ("cached_tokens", "cache_write_tokens", "cache_creation_tokens", "cache_creation_input_tokens"),
+        "input_tokens_details": ("cached_tokens", "cache_write_tokens", "cache_creation_tokens", "cache_creation_input_tokens"),
+        "completion_tokens_details": ("reasoning_tokens",),
+        "cache_creation": ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"),
+    }
+    reported.update({key: {field: usage[key][field] for field in fields if field in usage[key]}
+                     for key, fields in nested_keys.items() if isinstance(usage.get(key), dict)})
+    normalized["_reported_token_usage"] = copy.deepcopy(reported)
     # Candidate facts and validated engine reports come from their host owners,
     # never arbitrary extensions inside a provider's token-usage block.
     normalized.pop("effort", None)
@@ -284,6 +299,9 @@ def usage_from_response(response: Any, *, payload=_UNREAD_PAYLOAD) -> Tuple[Dict
         and isinstance(payload.get("error"), dict)
         and prompt == 0
         and completion == 0
+        and all(value is None or (type(value) is int and value == 0)
+                for source in ({key: value for key, value in reported.items() if key not in nested_keys},
+                               *(reported.get(key, {}) for key in nested_keys)) for value in source.values())
         and not invalid  # no amount was reported at all
         and not cache_usage_reported
     ):

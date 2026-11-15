@@ -32,6 +32,7 @@ from ouroboros import (  # noqa: F401
 from ouroboros import usage_accounting as ua
 from ouroboros.llm_attempt import _PhysicalSendNotStarted
 from ouroboros.model_wait import ModelWaitInterrupted
+from tests._tariff_guard import _no_unscripted_tariff_reads  # noqa: F401  (autouse: DeepSeek sends here)
 from ouroboros.tools import search
 from tests._usage_store_testing import ledger_rows
 from tests._cases import chosen_rows
