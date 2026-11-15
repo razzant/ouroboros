@@ -1211,8 +1211,8 @@ def dispatch_control_reason(owner, *, handed_off=False, before_task_start=False)
             paused = fence_closed(fence) and owner.task_id not in (fence.get("selected_members") or {})
             if paused:
                 owner.prestart_pause_fence = dict(fence)
-        else:
-            paused = scope_fence()
+        elif (paused := scope_fence()).get("state") == "unknown":
+            return str(paused["reason"])  # an unreadable fence is no Pause; it names the gap, as budget_pause reads it
         if paused:
             return RAIL_OWNER_PAUSE
     except StoreBusy as exc:

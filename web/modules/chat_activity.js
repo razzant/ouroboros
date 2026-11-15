@@ -184,7 +184,7 @@ function ensureToolFold(record) {
 /**
  * One frame's fact about one invocation: {key, status, receipt, tool}. Status
  * preserves independent start/wait/settlement facts. Reordered starts never reopen
- * a settled call; a true result replaces only a provisional host-error settlement.
+ * a settled call; a true result replaces only one the host settled (host_error, interrupted).
  */
 export function noteToolCall(record, observation) {
     const key = observation?.key;
@@ -197,7 +197,8 @@ export function noteToolCall(record, observation) {
         tool: observation.tool || prev?.tool || '',
     };
     if (fact === 'settled') {
-        if (!next.settlement || (next.settlement.hostError && !observation.hostError)) {
+        const provisional = (settled) => settled.hostError || settled.status === 'interrupted';  // tool_call_log.HOST_SETTLED_STATUSES
+        if (!next.settlement || (provisional(next.settlement) && !provisional(observation))) {
             next.settlement = { status: observation.status, hostError: Boolean(observation.hostError) };
             next.receipt = Boolean(observation.receipt);
         }
