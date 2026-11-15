@@ -18,6 +18,10 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
+      - name: Bisect the earlier cases (pairs and prefixes)
+        shell: bash
+        working-directory: web
+        run: node tests/zz_bisect_3501.mjs
       - name: The suspect case alone, one process, a 512 MB heap
         shell: bash
         working-directory: web
