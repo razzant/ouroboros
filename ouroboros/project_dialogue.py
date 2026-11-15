@@ -415,8 +415,8 @@ def _compact_annotations_locked(drive_root: Any, path: pathlib.Path) -> None:
         (message_id for message_id in latest if message_id.startswith(AGENT_RECEIPT_ID_PREFIX)),
         key=lambda message_id: str(latest[message_id].get("ts") or ""),
     )[-_RETAINED_AGENT_RECEIPTS:])
-    retained_ids = {message_id for message_id in latest if not message_id.startswith(AGENT_RECEIPT_ID_PREFIX)
-                    and (coverage["gaps"] or ds.rows_by_client_id(drive_root, message_id, limit=1))}
+    named = [message_id for message_id in latest if not message_id.startswith(AGENT_RECEIPT_ID_PREFIX)]
+    retained_ids = set(named) if coverage["gaps"] else ds.carried_ids(drive_root, named)
     # Retained per (message, token): an older act's receipt under a message that
     # is still in the chat survives beside the message's newest act.
     rows = [

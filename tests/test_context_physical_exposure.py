@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 from dataclasses import replace
 import json
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -225,3 +226,141 @@ def test_legacy_helper_capsule_with_the_retired_contract_digest_stays_readable(t
     restored, _ = cc._restored_source_views([{"checkpoint_ref": checkpoint, "unit_id": unit.unit_id, "raw_sha256": unit.raw_sha256}],
                                             drive_root=tmp_path, task_id="legacy", request=request)
     assert "exact evidence" in restored[0]["content"][0]["text"]
+
+
+DEEP_KEY = "unencodable_here"
+
+
+def _unencodable_here(monkeypatch):
+    """This reader's encoder fails on the decoded sentinel value only, as it really does for nesting its decoder
+    still accepts near the stack limit (that band is reproduced in the real loop, not here). The raw JSON text,
+    its decoding and the transcript's unit hashing stay real."""
+    encode = cc._canonical_bytes
+
+    def canonical_bytes(value):
+        caller = sys._getframe(1)
+        if (caller.f_code.co_name == "add" and caller.f_back.f_code is cc._source_atoms.__code__
+                and any(isinstance(part, dict) and DEEP_KEY in part for part in value)):
+            raise RecursionError("maximum recursion depth exceeded while encoding a JSON object")
+        return encode(value)
+
+    monkeypatch.setattr(cc, "_canonical_bytes", canonical_bytes)
+
+
+def _unencodable(part, value, *, two_calls=False):
+    """One unit whose call arguments or result decode to the sentinel; ``two_calls`` puts a healthy call beside it."""
+    rows = source("deep", "plain result")
+    if part == "arguments":
+        rows[0]["tool_calls"][0]["function"]["arguments"] = json.dumps({"path": value, DEEP_KEY: 1})
+    else:
+        rows[1]["content"] = json.dumps({DEEP_KEY: value})
+    if two_calls:
+        rows[0]["tool_calls"].insert(0, {"id": "fine", "type": "function",
+                                         "function": {"name": "read_file", "arguments": '{"path": "fine.py"}'}})
+        rows.insert(1, {"role": "tool", "tool_call_id": "fine", "content": "fine result"})
+    return rows
+
+
+def _ref(unit):
+    return {"unit_id": unit.unit_id, "raw_sha256": unit.raw_sha256}
+
+
+@pytest.mark.parametrize("two_calls", [False, True], ids=["call_with_text", "two_calls"])
+@pytest.mark.parametrize("part", ["arguments", "result"])
+def test_a_part_this_reader_cannot_encode_leaves_its_whole_unit_unproven(monkeypatch, part, two_calls):
+    """Neither the unit's healthy atoms nor a marker on the sent side prove it: the same send (the in-memory and
+    live readers see the marker on both sides) and a send with other content in that part both leave it unexposed,
+    while the healthy neighbour stays exposed and the transcript is untouched."""
+    _unencodable_here(monkeypatch)
+    canonical = source("near", "neighbour evidence") + _unencodable(part, "x.py", two_calls=two_calls)
+    before = copy.deepcopy(canonical)
+    near, deep = cc.context_units(canonical, scope="dialogue")
+    assert deep.end == len(canonical) - 1
+    assert cc._source_atoms(canonical)[cc.UNENCODABLE_SOURCE_ATOM] == (2 if part == "arguments" else 1)
+    other = source("near", "neighbour evidence") + _unencodable(part, "other.py", two_calls=two_calls)
+    for label, sent in (("other content", other), ("same send", canonical)):
+        assert cc.exposed_context_units(canonical, sent) == (_ref(near),), label
+        assert cc.exposed_context_units_from_atoms(canonical, cc._source_atoms(sent)) == (_ref(near),), label
+    assert canonical == before
+
+
+def test_a_send_record_keeps_only_real_digests_and_a_marker_only_send_records_none(tmp_path, monkeypatch):
+    """The persisted identities are sha256/count only: the marker is filtered before the empty check, so a send
+    whose only parts are unencodable records no atoms and the view falls back to the redacted projection, which
+    proves nothing either; the healthy neighbour of a mixed send is proven from the recorded atoms."""
+    from ouroboros import model_send_seal
+    from ouroboros.model_send_seal import persist_physical_candidate
+    from ouroboros.observability import read_call_manifest_ref
+    from ouroboros.tools.compact_context import record_context_view
+
+    _unencodable_here(monkeypatch)
+    ctx = SimpleNamespace(task_id="exposure", drive_root=tmp_path, budget_drive_root=tmp_path)
+
+    def recorded(messages, attempt_id):
+        persisted = persist_physical_candidate(tmp_path, task_id="exposure", attempt_id=attempt_id,
+                                               candidate={"messages": messages}, candidate_facts={})
+        record_context_view(ctx, messages, [], physical_capture=SimpleNamespace(
+            candidate_manifest_ref=persisted["manifest_ref"], attempt_id=attempt_id))
+        return read_call_manifest_ref(tmp_path, persisted["manifest_ref"], task_id="exposure"), ctx._last_context_observation
+
+    mixed = source("near", "neighbour evidence") + _unencodable("result", "x.py")
+    manifest, observed = recorded(mixed, "attempt-mixed")
+    atoms = cc._source_atoms(mixed)
+    assert atoms[cc.UNENCODABLE_SOURCE_ATOM] == 1
+    del atoms[cc.UNENCODABLE_SOURCE_ATOM]
+    assert manifest["exposure_atoms"] == dict(atoms) and manifest["exposure_atoms_basis"] == EXPOSURE_ATOMS_BASIS
+    assert all(len(key) == 64 and set(key) <= set("0123456789abcdef") for key in manifest["exposure_atoms"])
+    assert observed["exposure_basis"] == EXPOSURE_ATOMS_BASIS
+    assert observed["exposed_units"] == [_ref(cc.context_units(mixed, scope="dialogue")[0])]
+
+    lone = _unencodable("arguments", "x.py")
+    lone[0]["content"] = ""  # no text: the call and its result are the unit's only parts
+    assert set(cc._source_atoms(lone)) == {cc.UNENCODABLE_SOURCE_ATOM}
+    assert model_send_seal._exposure_atoms_manifest({"messages": lone}) == {}
+    manifest, observed = recorded(lone, "attempt-lone")
+    assert "exposure_atoms" not in manifest
+    assert observed["exposure_basis"] == "redacted_projection" and observed["exposed_units"] == []
+    assert observed["physical_source_status"] == "observed_projection"
+
+
+@pytest.mark.parametrize("shape", ["truncated", "balanced"])
+@pytest.mark.parametrize("part", ["arguments", "result"])
+def test_a_part_nesting_past_the_decoder_is_its_own_raw_text(part, shape):
+    """Real decoder depth: the raw text is the part's identity, so the whole part is exposed by its own bytes and
+    one bracket fewer is not; no marker is needed and the transcript is unchanged."""
+    depth = 1_000_000  # exceeds decoder limits measured on CPython 3.10, 3.12 and 3.14
+    deep = '{"path": ' + ("[" * depth if shape == "truncated" else "[" * depth + "]" * depth + "}")
+    with pytest.raises(RecursionError):
+        json.loads(deep)
+
+    def transcript(text):
+        rows = source("deep", "plain result")
+        if part == "arguments":
+            rows[0]["tool_calls"][0]["function"]["arguments"] = text
+        else:
+            rows[1]["content"] = text
+        return rows
+
+    canonical = transcript(deep)
+    before = copy.deepcopy(canonical)
+    assert cc.UNENCODABLE_SOURCE_ATOM not in cc._source_atoms(canonical)
+    assert cc.exposed_context_units(canonical, transcript(deep)) == (_ref(cc._atomic_units(canonical)[0]),)
+    fewer = deep.replace("[", "", 1)
+    assert cc.exposed_context_units(canonical, transcript(fewer)) == ()
+    assert canonical == before
+
+
+def test_structured_sent_input_nesting_past_this_encoder_is_counted_without_failing_the_reader():
+    """A sent part with no raw text (native structured input) nesting past the encoder is one marker per atom it
+    enters; the reader stays total and the healthy canonical unit is still proven by its own atoms."""
+    nested: list = []
+    for _ in range(1_000_000):  # exceeds measured encoder depths; built iteratively, never compared or copied here
+        nested = [nested]
+    canonical = source()
+    sent = canonical + [
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "deep", "name": "read_file", "input": {"path": nested}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "deep", "content": "ok"}]},
+    ]
+    atoms = cc._source_atoms(sent)
+    assert atoms[cc.UNENCODABLE_SOURCE_ATOM] == 2  # the call and its result, which names the call
+    assert cc.exposed_context_units(canonical, sent) == (_ref(cc._atomic_units(canonical)[0]),)

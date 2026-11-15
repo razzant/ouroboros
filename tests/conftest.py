@@ -1018,6 +1018,17 @@ def _act_as_the_installs_a_browser_or_e2e_test_launched(request, monkeypatch, tm
 
 
 @pytest.fixture(autouse=True)
+def _keep_the_pytest_switch_interval():
+    """``server.main()`` run in this process sets the server's interpreter switch interval
+    (``server_entrypoint.shorten_switch_interval``); the pytest process keeps its own for the next test."""
+    import sys
+
+    interval = sys.getswitchinterval()
+    yield
+    sys.setswitchinterval(interval)
+
+
+@pytest.fixture(autouse=True)
 def _release_server_admission_between_tests():
     """``server.main()`` and an in-process lifespan hold their data root's admission lock
     until the process exits — production's contract. One pytest process plays many servers
