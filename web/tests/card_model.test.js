@@ -340,7 +340,7 @@ test('the sheet is the composer\'s Model sheet; its Main row is the one way to f
     assert.deepEqual(c.outline(), ['main', '§ Recent', `route|${GLM} * -pin`, 'sources'], 'the work\'s own model is the chosen row');
     assert.deepEqual([c.rows()[0].name, c.rows()[0].facts, c.rows()[0].pin], ['Main', 'this work will follow Main', null]);
     assert.equal(c.rows()[1].facts, 'OpenRouter · paid by key', 'any other row keeps its route\'s facts');
-    assert.equal(c.tierView().scope, 'Default · Standard · for this work from its next call and its new helpers without a tier of their own; the running call and started helpers keep theirs');
+    assert.equal(c.tierView().scope, 'Default · Standard · for this work from its next call and its new subagents without a tier of their own; the running call and started subagents keep theirs');
     assert.ok(c.doc.activeElement === c.popup().querySelector('.chat-model-query'), 'a keyboard types at once');
     c.fact().click();
     assert.equal(c.popup(), null, 'a second press closes it');
@@ -352,7 +352,7 @@ test('the sheet is the composer\'s Model sheet; its Main row is the one way to f
     assert.deepEqual(c.acts(), []);
     assert.equal(c.popup().querySelector('.card-model-pop-words').textContent, 'Model for this work · follows Main');
     assert.deepEqual([c.rows()[0].selected, c.rows()[0].facts], [true, 'this work follows Main'], 'Main\'s row is its own');
-    assert.equal(c.tierView().scope, 'Default · Standard · for this work when it starts, and its new helpers without a tier of their own', 'a queued work says when a change lands');
+    assert.equal(c.tierView().scope, 'Default · Standard · for this work when it starts, and its new subagents without a tier of their own', 'a queued work says when a change lands');
     // A follower whose next step is another route has not arrived yet: the row still says what a press does.
     c.paint({ lead: lead(GLM, 'main', { pending: route(ASTRA) }) });
     assert.deepEqual([c.rows()[0].selected, c.rows()[0].facts], [false, 'this work will follow Main']);
@@ -621,7 +621,7 @@ test('a tier press is this work\'s own act from its next call: the sheet stays o
     c.fact().click();
     await flush();
     assert.deepEqual(c.tierView(), { checked: [], ring: ['standard'], busy: false, reset: false,
-        scope: 'Default · Standard · for this work from its next call and its new helpers without a tier of their own; the running call and started helpers keep theirs',
+        scope: 'Default · Standard · for this work from its next call and its new subagents without a tier of their own; the running call and started subagents keep theirs',
         means: 'The ordinary service at the catalog price.' });
     let answer;
     c.reply.value = new Promise((resolve) => { answer = resolve; });
@@ -634,7 +634,7 @@ test('a tier press is this work\'s own act from its next call: the sheet stays o
     assert.ok(c.popup(), 'a tier is no pick: the sheet stays open');
     assert.deepEqual(c.toasts, [['Fast for this work. Switches at the next step; the running call finishes.', 'ok']]);
     assert.deepEqual([c.tierView().checked, c.tierView().ring, c.tierView().busy, c.tierView().reset, c.tierView().scope],
-        [['fast'], [], false, true, 'Fast · for this work from its next call and its new helpers without a tier of their own; the running call and started helpers keep theirs']);
+        [['fast'], [], false, true, 'Fast · for this work from its next call and its new subagents without a tier of their own; the running call and started subagents keep theirs']);
     assert.equal(c.popup().hasAttribute('aria-busy'), false);
     assert.deepEqual([c.said('tier'), c.said('name')], ['· Fast', 'OpenRouter · glm-5.3'], 'the answer\'s own tier stands on the card; its model is untouched');
     c.reply.value = { ok: true, task_id: 't1', applied: 'at_start', processing: { choice: '', source: 'owner' } };
@@ -655,7 +655,7 @@ test('the strip says before a press what a tier means for this work\'s route; th
     const served = () => { const node = c.popup().querySelector('.card-model-served'); return node.hidden ? '' : node.textContent; };
     // Above the field, so a receipt arriving while the sheet is open never moves the strip at its foot.
     assert.deepEqual([c.tierView().checked, c.tierView().scope, served()],
-        [['economy'], 'Flex · for this work when it starts, and its new helpers without a tier of their own', 'Flex asked · served Standard']);
+        [['economy'], 'Flex · for this work when it starts, and its new subagents without a tier of their own', 'Flex asked · served Standard']);
     c.paint({ lead: lead(GLM, 'owner'), queued: true, tiers: STANDARD,
         processing: { choice: 'economy', source: 'room', last: { requested: 'economy', submitted: 'economy', observed: 'economy' } } });
     assert.deepEqual([c.tierView().scope.endsWith('of their own'), served()], [true, ''], 'served as asked: the head says nothing');

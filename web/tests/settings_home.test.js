@@ -168,9 +168,12 @@ test('This computer and Updates answer on every host: who can open it where the 
 });
 
 test('the card says who it is and its state, never that nothing waits', () => {
-    assert.deepEqual(beingState({ connected: true, state: { supervisor_ready: true } }), { text: 'Online', tone: 'ok' });
-    assert.deepEqual(beingState({ connected: false, state: { supervisor_ready: true } }), { text: 'Reconnecting…', tone: 'muted' });
-    assert.equal(beingState({ connected: true, state: { supervisor_ready: false, boot: { phase: 'failed', error: 'x' } } }).tone, 'danger');
+    assert.deepEqual(beingState({ connected: true, ready: true }), { text: 'Online', tone: 'ok' });
+    assert.deepEqual(beingState({ connected: false, ready: true }), { text: 'Reconnecting…', tone: 'muted' });
+    assert.deepEqual(beingState({ connected: true, ready: false, boot: { phase: 'failed', error: 'x' } }), { text: 'Start failed', tone: 'danger' });
+    // Only a body that said ready is Online: none read yet, or one forgotten at a disconnect, keeps Starting….
+    assert.deepEqual(beingState({ connected: true }), { text: 'Starting…', tone: 'muted' });
+    assert.deepEqual(beingState({ connected: true, ready: false, boot: null }), { text: 'Starting…', tone: 'muted' });
 });
 
 test('showing the home reads only what is passive: no catalogue, no review pool, no wake, no refresh, no status poll', async (t) => {
@@ -230,6 +233,71 @@ test('the card\'s first word follows the socket: an open or a close repaints it 
     assert.equal(env.calls.length, reads, 'neither reads anything');
     home.dispose();
     assert.equal(handlers.has('open') || handlers.has('close'), false, 'dispose lets the socket go');
+});
+
+test('the card keeps the header\'s readiness rule over the page\'s sequencer: a reconnect never paints a retired Online', async (t) => {
+    // The home is mounted at start and reads only when it comes on screen. app.js retires the page's sequencer on the
+    // socket's close and open before the home's own handlers run (it registers first); the card and the list's own
+    // Ouroboros row follow every body the sequencer applies (`watch`), keep what the last one said over a failed read,
+    // and forget it at the close, not at the open, as the header's createHostStart does (chat.js showOutage).
+    const { env, content } = world(t);
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    const snapshots = createStateSnapshotSequencer(() => {});
+    let connected = false;
+    const handlers = new Map();
+    const ws = { isConnected: () => connected, on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); } };
+    const emit = (type) => { snapshots.retire(); handlers.get(type)?.({}); };  // app.js's handler, then the home's
+    const apply = async (body) => snapshots.apply(await snapshots.gate(false), body);
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws, stateSnapshots: snapshots } });
+    t.after(() => home.dispose());
+    const words = () => [content.querySelector('[data-settings-card]').querySelector('[data-being-state]').textContent,
+        content.querySelector('[data-overview-answer]').textContent];
+    const said = (word) => [word, word];
+    assert.deepEqual(words(), said('Reconnecting…'), 'painted while the socket was down');
+    connected = true;
+    emit('open');
+    assert.deepEqual(words(), said('Starting…'), 'open, no state read yet: not Online');
+    await apply({ supervisor_ready: true });
+    assert.deepEqual(words(), said('Online'), 'a body the page read repaints the card: the home read nothing for it');
+    snapshots.fail(await snapshots.gate(false));
+    assert.deepEqual(words(), said('Online'), 'a failed read states nothing: the card keeps the last word, as the header does');
+    await apply({ version: '7.10.2' });
+    assert.deepEqual(words(), said('Online'), 'neither does a body without supervisor_ready');
+    await apply({ supervisor_ready: true });
+    await home.refresh([]);  // the home comes on screen while ready: its own copy now holds that Online body
+    connected = false;
+    emit('close');
+    assert.deepEqual(words(), said('Reconnecting…'));
+    connected = true;
+    emit('open');
+    assert.deepEqual(words(), said('Starting…'), 'the reconnect forgot the old Online: a restart is no longer Online here');
+    const held = await snapshots.gate(false);
+    assert.deepEqual(words(), said('Starting…'), 'still Starting… while the fresh read is in flight');
+    snapshots.apply(held, { supervisor_ready: false, boot: { phase: 'failed', error: 'init failed' } });
+    assert.deepEqual(words(), said('Start failed'), 'the restart failed: the card says so');
+    await apply({ supervisor_ready: true });
+    assert.deepEqual(words(), said('Online'));
+    connected = false;
+    emit('close');
+    await apply({ supervisor_ready: true });  // a state poll answered while the socket was down
+    assert.deepEqual(words(), said('Reconnecting…'));
+    connected = true;
+    emit('open');
+    assert.deepEqual(words(), said('Online'), 'a body read after the close proves readiness: the open keeps it, as the header does');
+    await apply({ supervisor_ready: true });
+    connected = false;
+    handlers.get('close')?.({});  // the home's close handler first this time, then app.js's retire
+    snapshots.retire();
+    connected = true;
+    emit('open');
+    assert.deepEqual(words(), said('Starting…'), 'in either order, the close does not read back the body before it');
+    await apply({ supervisor_ready: true });
+    assert.deepEqual(words(), said('Online'));
+    assert.equal(env.calls.length, 0, 'the home read nothing');
+    home.dispose();
+    await apply({ supervisor_ready: false, boot: { phase: 'failed', error: 'later' } });
+    assert.deepEqual(words(), said('Online'), 'dispose lets the sequencer go: a later body no longer repaints the card');
 });
 
 test('a page reads when it is shown, not when Settings is', async (t) => {

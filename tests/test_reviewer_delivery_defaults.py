@@ -257,7 +257,7 @@ LIGHT_BOX = ("⚙️ An empty Light model now follows its “Use the local model
              "Untick the box under Light in Settings › Models to keep them on Main.")
 _SAFETY_HOLD = " A Safety check the local model does not answer holds the action."
 _SAFETY_WALK = " A Safety check the local model does not answer goes to your Fallback models and holds the action if none answers."
-_LIGHT_MOVED = "memory consolidation, Light helper agents, review verdict reading and duplicate checks"
+_LIGHT_MOVED = "memory consolidation, Light subagents, review verdict reading and duplicate checks"
 _ALL_MOVED = f"Safety checks, {_LIGHT_MOVED}"
 
 

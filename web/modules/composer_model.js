@@ -295,14 +295,14 @@ export function createModelControl({
         const state_ = isMain ? (tiers()?.main ? tierWord(tier) : fmt('Default · {tier}', { tier: tierWord(tier || 'standard') }))
             : state.tier ? tierWord(state.tier)
                 : fmt(follows() ? 'Default · {tier} as Main' : 'Default · {tier}', { tier: tierWord(tier || 'standard') });
-        // The tier a work runs on, its own or Default's (Main's included), reaches its new helpers without one
+        // The tier a work runs on, its own or Default's (Main's included), reaches its new subagents without one
         // (owner 13.11).
-        if (!isMain) return `${state_} · ${tr('processing.scope.room_helpers', 'for new work here and its new helpers without a tier of their own; running work keeps its own')}`;
+        if (!isMain) return `${state_} · ${tr('processing.scope.room_helpers', 'for new work here and its new subagents without a tier of their own; running work keeps its own')}`;
         const n = followersOfMainTier();
-        const followers = n === null ? tr('processing.scope.main_unknown', 'for Main, the running works that follow it and their new helpers')
-            : n === 0 ? tr('processing.scope.main_none', 'for Main and its new helpers; no running work follows it now')
-                : n === 1 ? tr('processing.scope.main_one', 'for Main, 1 running work that follows it and their new helpers')
-                    : fmt('for Main, {n} running works that follow it and their new helpers', { n });
+        const followers = n === null ? tr('processing.scope.main_unknown', 'for Main, the running works that follow it and their new subagents')
+            : n === 0 ? tr('processing.scope.main_none', 'for Main and its new subagents; no running work follows it now')
+                : n === 1 ? tr('processing.scope.main_one', 'for Main, 1 running work that follows it and their new subagents')
+                    : fmt('for Main, {n} running works that follow it and their new subagents', { n });
         return `${state_} · ${followers}`;
     }
     const tierView = () => {
