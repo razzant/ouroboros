@@ -7,7 +7,7 @@ import test from 'node:test';
 import { APP_SETTINGS_ORIGIN } from '../modules/api_client.js';
 import { forgetSettingRows, readSettings } from '../modules/settings_controls.js';
 import { settingsPageFor } from '../modules/settings_pages.js';
-import { HAND_WRITTEN, ROWS, rowsOf } from '../modules/settings_rows.js';
+import { HAND_WRITTEN, ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
 import { agentName, rosterResult } from '../modules/subagents_settings.js';
 import { recheckDraft, recheckSaved } from '../modules/safety_recheck.js';
 import { SAFETY_MODEL_KEYS } from '../modules/consciousness_api.js';
@@ -421,4 +421,76 @@ test('a roster write says Saved with when it applies, a refusal with the server\
     assert.equal(rosterResult({ state: 'refused', effect: 'next_task', message: TWINS }).text, `Not saved. ${TWINS}`);
     assert.equal(rosterResult({ state: 'unknown', effect: 'next_task', message: 'timeout' }).text, 'Not confirmed yet');
     assert.deepEqual(rosterResult({ state: 'unchanged' }), {});
+});
+
+test('the roster\'s switch is never off before a read: inert and reading, then the stored value; opened again, the last read at once', async (t) => {
+    const first = await open(t);  // the fixture, the server and the status reads answered by themselves, as for every page here
+    first.handle.unmount();
+    forgetSettingRows();
+    const answer = first.env.routes.get('/api/settings');
+    let gate = null;
+    first.env.routes.set('/api/settings', async (url, init = {}) => { if (init.method !== 'POST') await gate.promise; return answer(url, init); });
+    const hold = () => { let resolve; gate = { promise: new Promise((done) => { resolve = done; }) }; gate.resolve = resolve; };
+    const mount = () => {
+        const container = new NodeStub();
+        first.env.mount.appendChild(container);
+        const handle = settingsPageFor('agents').mount(container, { path: 'agents', row: '', view: '', ctx: { readSettings, openSettings: () => true, ask: async () => true } });
+        t.after(() => handle.unmount());
+        return container;
+    };
+    const facts = (container) => {
+        const row = container.querySelector(`[data-setting-row="${KEY}"]`);
+        const control = row.querySelector('[data-setting-control]');
+        return [control.disabled, isOn(control), row.querySelector('[data-setting-meta]').textContent, container.querySelectorAll('[data-entry-id]').length];
+    };
+    hold();
+    const cold = mount();
+    assert.deepEqual(facts(cold), [true, false, 'Reading…', 0], 'nothing read: the switch says so, and no list stands');
+    gate.resolve();
+    await settle();
+    assert.deepEqual(facts(cold), [false, true, rowById(KEY).meta, 3]);
+    hold();
+    const warm = mount();
+    assert.deepEqual(facts(warm), [false, true, rowById(KEY).meta, 3], 'the last read, before this page\'s own read answers');
+    gate.resolve();
+    await settle();
+    assert.deepEqual(facts(warm), [false, true, rowById(KEY).meta, 3]);
+});
+
+test('the roster\'s switch follows the reads made anywhere: its own fails while a newer one runs, then what that one and the next find', async (t) => {
+    const first = await open(t);
+    first.handle.unmount();
+    forgetSettingRows();
+    const answer = first.env.routes.get('/api/settings');
+    const gates = [];
+    first.env.routes.set('/api/settings', async (url, init = {}) => {
+        if (init.method === 'POST') return answer(url, init);
+        const gate = {};
+        gate.promise = new Promise((done) => { gate.resolve = done; });
+        gates.push(gate);
+        return (await gate.promise) === 200 ? answer(url, init) : response({ error: 'offline' }, 500);
+    });
+    const container = new NodeStub();
+    first.env.mount.appendChild(container);
+    const handle = settingsPageFor('agents').mount(container, { path: 'agents', row: '', view: '', ctx: { readSettings, openSettings: () => true, ask: async () => true } });
+    t.after(() => handle.unmount());
+    const facts = () => {
+        const row = container.querySelector(`[data-setting-row="${KEY}"]`);
+        const control = row.querySelector('[data-setting-control]');
+        return [control.disabled, isOn(control), row.querySelector('[data-setting-meta]').textContent, container.querySelectorAll('[data-entry-id]').length];
+    };
+    const newer = readSettings().catch(() => 'failed');
+    await settle();
+    gates[0].resolve(500);
+    await settle();
+    assert.deepEqual(facts(), [true, false, 'Reading…', 0], 'its own read failed, a newer one still runs');
+    gates[1].resolve(500);
+    await newer;
+    assert.deepEqual(facts(), [true, false, 'Could not be read', 0]);
+    assert.match(container.textContent, /could not be loaded/, 'the editor keeps its own words for a failed read');
+    const elsewhere = readSettings();
+    await settle();
+    gates[2].resolve(200);
+    await elsewhere;
+    assert.deepEqual(facts(), [false, true, rowById(KEY).meta, 3], 'the read that lands is the page\'s too');
 });

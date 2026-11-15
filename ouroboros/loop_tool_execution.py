@@ -26,8 +26,8 @@ from ouroboros.deadline_utils import deadline_clamped_timeout_sec
 from ouroboros.late_tool_results import late_watch_fields, record_call_id
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_call_log import (
-    CALL_STARTED, CALL_SETTLED, CALL_WAIT_ENDED, HOST_INTERRUPTED, append_call_row, append_failed, claim_settlement,
-    elapsed_ms, invocation_fields, new_invocation, start_log_field, persist_dispatch_source, worker_phrase,
+    CALL_STARTED, CALL_SETTLED, CALL_WAIT_ENDED, append_call_row, append_failed, claim_settlement, elapsed_ms,
+    host_settlement, invocation_fields, new_invocation, start_log_field, persist_dispatch_source, worker_phrase,
     worker_position,
 )
 from ouroboros.tool_capabilities import (
@@ -116,19 +116,15 @@ def _publish_settlement(tools, drive_logs, row):
 
 
 def _settle_host_error(tools, drive_logs, live, invocation, outcome):
-    """Record a submission failure or a failed future through one settlement guard.
-
-    A control that ended the call (Pause, Cancel, a deadline: the exception carries its ``control_reason``;
-    a send fenced by a pause being written names it as ``pausing``) settles as ``interrupted``, never as a host failure."""
+    """Record a submission failure or a failed future through one settlement guard: ``interrupted`` when a control
+    ended the call, else the host's own failure (``tool_call_log.host_settlement``)."""
     try:
         exc = outcome if isinstance(outcome, BaseException) else outcome.exception()
     except BaseException as failure:
         exc = failure
     if exc is not None and claim_settlement(invocation):
-        reason = str(getattr(exc, "control_reason", "") or ("pausing" if getattr(exc, "limit_scope", "") == "pausing" else ""))
         _publish_settlement(tools, drive_logs, {
-            **live, "ts": utc_now_iso(), "type": CALL_SETTLED, "is_error": True,
-            **({"status": HOST_INTERRUPTED, "control_reason": reason} if reason else {"status": "host_error"}),
+            **live, "ts": utc_now_iso(), "type": CALL_SETTLED, "is_error": True, **host_settlement(exc),
             "elapsed_ms": elapsed_ms(invocation),
             "result_preview": f"{type(exc).__name__}: {sanitize_tool_result_for_log(str(exc))[:500]}",
             **start_log_field(invocation),
@@ -767,7 +763,7 @@ def _execute_single_tool(
 
 
 class StatefulToolExecutor:
-    """Thread-sticky executor for Playwright/greenlet stateful tools."""
+    """One sticky worker that serializes a task's browser calls in their caller context."""
     def __init__(self):
         self._executor: Optional[ThreadPoolExecutor] = None
 
@@ -1107,18 +1103,13 @@ def _retire_stateful_tool(stateful_executor, tool_ctx, future):
             cleanup_browser_handles,
         )
 
-        # CROSS-THREAD INVARIANT (#409): Playwright objects are bound
-        # to the worker thread that created them. This main-thread
-        # path may only DETACH (retire) the generation — never call
-        # close()/stop() here (a cross-thread stop() kills the driver
-        # under the hung worker and turns its dispatcher wait into a
-        # CPU busy-loop). The close is QUEUED on the retiring
-        # executor behind the hung call, so it runs on the owning
-        # worker thread whenever that call settles — including the
-        # already-settled race, where the queued task runs at once on
-        # that same thread (a done-callback would have run HERE, on
-        # the main thread, exactly the cross-thread close this path
-        # exists to prevent).
+        # SETTLEMENT ORDER (#409): this path only DETACHES (retires)
+        # the generation — it never closes here, so a timeout never
+        # preempts the call. The close is QUEUED on the retiring
+        # executor behind the hung call and runs once that call
+        # settles (at once in the already-settled race); it closes on
+        # the generation's own event loop, from whichever thread runs
+        # it. The task's end closes what a call never settled.
         retired_generation, _fresh = _detach_browser(tool_ctx)
         try:
             settlement_target = stateful_executor.submit(

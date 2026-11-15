@@ -17,7 +17,7 @@ import httpx
 import pytest
 from tests.settings_browser_helpers import open_settings
 
-from tests.test_subscription_setup_browser import subscription_ui as subscription_ui  # noqa: F401  (fixture)
+from tests.test_subscription_setup_browser import status_answer, subscription_ui as subscription_ui  # noqa: F401  (fixture)
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 pytestmark = [pytest.mark.ui_browser]
@@ -230,7 +230,7 @@ def test_accounts_render_every_account_model_state_and_recover_on_refresh(direct
                         page.on("pageerror", lambda error, errors=errors: errors.append(str(error)))
                         page.add_init_script(f"Date.now = () => Date.parse({json.dumps(NOW)});"
                                              f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)});")
-                        page.route("**/api/claudexor/status**", _fulfill(payload))
+                        page.route("**/api/claudexor/status**", lambda route: status_answer(route, payload))
                         _open_accounts(page, direct_server_with_data["url"], width)
                         banner = page.locator("#agents-service-banner")
                         page.wait_for_function("() => !document.querySelector('#agents-service-banner')"
@@ -268,7 +268,7 @@ def test_accounts_render_every_account_model_state_and_recover_on_refresh(direct
             page = browser.new_page(viewport={"width": 1110, "height": 750})
             current = {"payload": payloads["legacy"]}
             page.add_init_script(f"Date.now = () => Date.parse({json.dumps(NOW)});")
-            page.route("**/api/claudexor/status**", lambda route: route.fulfill(json=current["payload"]))
+            page.route("**/api/claudexor/status**", lambda route: status_answer(route, current["payload"]))
             page.route("**/api/claudexor/quota/refresh", lambda route: route.fulfill(
                 json={"snapshots": SCENES["modern"]["quota"], "absences": []}))
             _open_accounts(page, direct_server_with_data["url"], 1110, "codex")
@@ -305,7 +305,7 @@ def test_an_empty_family_login_confirms_only_the_engine_resolved_row(direct_serv
             for after, expected in ((sibling, "unconfirmed"), (resolved, "success")):
                 page = browser.new_page(viewport={"width": 1110, "height": 750})
                 state = {"status": empty, "creates": []}
-                page.route("**/api/claudexor/status**", lambda route: route.fulfill(json=state["status"]))
+                page.route("**/api/claudexor/status**", lambda route: status_answer(route, state["status"]))
 
                 page.route("**/api/claudexor/login**", _login_transport(state, after))
                 _open_accounts(page, direct_server_with_data["url"], 1110)

@@ -254,8 +254,8 @@ def run(root, should_stop):
                 # An open gate holds nothing. The field goes: Storage reads any ``holds``, an empty
                 # list too, as a retirer pass's report.
                 maintenance_jobs.forget_in(txn, JOB, "holds")
-    if errors or any(report.get(key) for report in reports.values()
-                     for key in ("removed", "swept", "restored", "deleted_dirs", "deleted_files", "observed")):
+    if errors or any(report.get(key) for report in reports.values() for key in (
+            "removed", "pruned", "unlinked", "swept", "restored", "deleted_dirs", "deleted_files", "observed")):
         append_jsonl(pathlib.Path(root) / "logs/events.jsonl",
                      {"ts": utc_now_iso(), "type": "runtime_retirement", "reports": reports, "errors": errors})
     return {"state": state, "items": len(reports)}

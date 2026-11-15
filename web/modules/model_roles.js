@@ -6,7 +6,7 @@ import { SAFETY_MODEL_KEYS } from './consciousness_api.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { sourceMark } from './model_source_mark.js';
 import { MODEL_CATALOG_TIMEOUT_MS, catalogReadNote, mergeModelCatalog, refreshModelCatalog, watchAccountModelCatalog, withConnectionCatalogs } from './settings_catalog.js';
-import { CODECS, CONFIRMS, bindSettingRows, commitSetting, doorSign, outcomeLine, setButtonBusy, settingsRow, searchModelAfterSourceSwitch, searchModelForKey, syncSearchKey, webSearchPreviewWords } from './settings_controls.js';
+import { CODECS, CONFIRMS, bindSettingRows, commitSetting, doorSign, outcomeLine, setButtonBusy, settingsRow, searchModelAfterSourceSwitch, searchModelForKey, settingsReadMessage, settingsSnapshot, syncSearchKey, webSearchPreviewWords } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { HAND_WRITTEN, rowsOf } from './settings_rows.js';
 import { setResult } from './ui_primitives.js';
@@ -1017,6 +1017,14 @@ function mountWebSearch(container, { path, ctx }) {
     let searchKeys = {};  // the DeepSeek keys of Accounts the Key select offers
     let dirty = false;
     let previews = 0;
+    const save = container.querySelector('[data-editor-save]');
+    const discard = container.querySelector('[data-editor-discard]');
+    const formControls = [source, model, key, save, discard].filter(Boolean);
+    const paintReadState = (settings = null) => {
+        const unread = settings ? '' : settingsReadMessage();
+        formControls.forEach((control) => { control.disabled = Boolean(unread); });
+        if (unread && !dirty) preview.textContent = unread;
+    };
     // An edited native Anthropic id takes the routed spelling, so dispatch recognizes the new intent.
     const selection = () => {
         const text = model.value.trim();
@@ -1032,9 +1040,8 @@ function mountWebSearch(container, { path, ctx }) {
         } catch { if (mine === previews) preview.textContent = 'Search routes could not be checked. Your choices are kept.'; }
     };
     let asRead = null;  // the choice as read when the typing began (null before a read): a Save writes only what changed
-    const read = async () => {
-        let settings;
-        try { settings = await ctx.readSettings(); } catch { if (dirty) void showPreview(); return; }
+    const adopt = (settings) => {
+        if (!settings) { source.value = ''; paintReadState(); return; }
         // A typed choice stays, one begun while this read was pending too; the routes it would take and the keys of
         // Accounts (where the Key select's pointer leads) are read again for it. Only the first read fills the fields
         // under typing, so a Save never writes a Source the owner was not shown.
@@ -1047,7 +1054,13 @@ function mountWebSearch(container, { path, ctx }) {
         searchKeys = { connections: apiConnections(settings, profiles), providers: configuredApiProviders(settings, profiles),
             providerProfiles: profiles };
         syncSearchKey(source, model, key, searchKeys);
+        paintReadState(settings);
         void showPreview();
+    };
+    const read = async () => {
+        let settings;
+        try { settings = await ctx.readSettings(); } catch { settings = settingsSnapshot(); }
+        adopt(settings);
     };
     const say = (words) => setResult(container.querySelector('[data-editor-result]'), words);
     const edited = () => { dirty = true; syncSearchKey(source, model, key, searchKeys);
@@ -1076,6 +1089,7 @@ function mountWebSearch(container, { path, ctx }) {
     model.addEventListener('input', edited);
     container.addEventListener('click', onClick);
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
+    adopt(settingsSnapshot());
     void read();
     return { unsaved: () => dirty, unmount() { container.removeEventListener('click', onClick); globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown); } };
 }

@@ -1458,3 +1458,41 @@ def cancel_pending(drive_root: Any, task_id: str, *, strict: bool = False, propa
             raise
         log.debug("cancel-pending legacy latch read failed for %s", task_id, exc_info=True)
         return False
+
+
+def immediate_stop_pending(drive_root: Any, task_id: str, *, tree_root_id: str = "") -> bool:
+    """An owner Stop with no wrap-up governs ``task_id`` now: its own pending cancel (``cancel_pending``) that
+    ``resolve_owner_stop_intent`` finds no graceful intent for. With ``tree_root_id`` also an immediate cascade over
+    an ancestor (a graceful cascade or a single Stop does not govern a member): the tree root first, then the
+    host-written parent chain, one strict row read per hop, read only while such a cascade is open for another
+    task. Unknown authority is never "no Stop": an unreadable projection or intent row, an absent, unbindable or
+    cyclic lineage link, or a contended store raises."""
+    if cancel_pending(pathlib.Path(drive_root), task_id, propagate_busy=True) and not resolve_owner_stop_intent(
+            drive_root, task_id, propagate_busy=True)[1]:
+        return True
+    if not tree_root_id:
+        return False
+    intents, unseen = read_active_intents(drive_root)
+    if unseen is None or task_id in unseen:
+        raise CancelIntentProjectionCorrupt(f"the cancel intent of {task_id} is unreadable")
+    governing = {tid for tid, row in intents.items()
+                 if str(row.get("scope") or "") == SCOPE_CASCADE and stop_policy(row) != STOP_POLICY_FINALIZE}
+    if not (governing | set(unseen)) - {task_id}:
+        return False
+    from ouroboros.task_results import load_task_result
+
+    ancestor, current, seen = tree_root_id if tree_root_id != task_id else "", task_id, {task_id}
+    while True:
+        if ancestor in unseen:
+            raise CancelIntentProjectionCorrupt(f"the cancel intent of {ancestor}, above {task_id}, is unreadable")
+        if ancestor in governing:
+            return True
+        row = load_task_result(drive_root, current, strict=True)
+        if row is None:
+            raise CancelIntentLineageIndeterminate(f"the lineage row of {current} is absent")
+        ancestor = current = str(row.get("parent_task_id") or "").strip()
+        if not ancestor or ancestor == tree_root_id:
+            return False
+        if ancestor in seen:
+            raise CancelIntentLineageIndeterminate(f"the parent chain of {task_id} returns to {ancestor}")
+        seen.add(ancestor)

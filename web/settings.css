@@ -1352,9 +1352,12 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
    door keep their hands off it (:not([data-lead])), so the mark keeps its own column. */
 .settings-row[data-lead] { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "mark words actions" "mark meta actions"; }
 .settings-row[data-lead] .settings-row-value { white-space: nowrap; }
-/* A door's value is a fact said at the row's end: the words keep at least three fifths of the row and a long value
-   ("No voice on this device") wraps at the end instead of squeezing them into a column of a few words. */
-.settings-row[data-kind="door"]:not([data-lead]) { grid-template-columns: minmax(60%, 1fr) auto; }
+/* A door's value is a fact said at the row's end, flush against its sign: the two sides share a narrow row up to what
+   each actually holds, so a short name ("Model") gives a long route the open middle while longer words beside a long
+   value still split the row evenly, and the sign never drops under the value. */
+.settings-row[data-kind="door"]:not([data-lead]) { grid-template-columns: auto auto; justify-content: space-between; }
+.settings-row[data-kind="door"]:not([data-lead]) > .ui-row-actions { flex-wrap: nowrap; }
+.settings-row[data-kind="door"]:not([data-lead]) .settings-row-value { text-align: end; }
 /* A wide control (settings_controls.js marks it `data-wide`) goes under the words below 36rem, while beside it the
    words would keep only a narrow column (ui.css moves every row's actions only below 28rem). */
 @container (max-width: 36rem) {

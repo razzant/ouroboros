@@ -2177,10 +2177,20 @@ test('an unknown auth row refreshes status on the real click, never starts login
         },
         quota: [],
     };
+    // Login uses apiClient/global fetch, not the status store's injected
+    // transport. Observe both so a mistaken OAuth launch cannot escape this
+    // assertion by taking the other HTTP path.
+    globalThis.fetch = async (url, init = {}) => {
+        requests.push(`${init.method || 'GET'} ${url}`);
+        return fakeResponse(200, { job_id: 'unexpected-login', job: { state: 'failed' } });
+    };
     const store = createClaudexorStatusStore({
         fetchImpl: async (url, init = {}) => {
             requests.push(`${init.method || 'GET'} ${url}`);
-            return fakeResponse(200, snapshot);
+            return fakeResponse(200, url.includes('?view=quota') ? {
+                view: 'quota', profiles: snapshot.profiles, quota: [], quota_absences: [],
+                reads: { accounts: 'ok', quota: 'ok' },
+            } : snapshot);
         },
         doc,
     });
@@ -2194,7 +2204,12 @@ test('an unknown auth row refreshes status on the real click, never starts login
     };
     try {
         assert.equal(await initHarnessAccounts({ store }), true);
-        await refreshPromise;
+        // Mount starts snapshot-first discovery through the store's internal
+        // lazy path, not its public refresh wrapper. Wait for its real reads
+        // before finding the row listener rather than awaiting an unset spy.
+        await store.refresh();
+        await store.observe();
+        assert.equal(store.facet('accounts'), 'ok', 'unknown auth is not a failed roster read');
         refreshCalls = 0;
         requests.length = 0;
         const click = loginButton.listeners

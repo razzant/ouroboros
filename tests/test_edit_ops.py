@@ -225,7 +225,7 @@ class _FakeCtx:
 def ws(tmp_path, monkeypatch):
     repo = tmp_path / "ws"
     repo.mkdir()
-    (repo / "s.py").write_text(SAMPLE, encoding="utf-8")
+    (repo / "s.py").write_bytes(SAMPLE.encode("utf-8"))  # LF bytes: Windows text mode would write CRLF
     ctx = _FakeCtx(repo)
     # Route guard helpers around ToolContext specifics: keep the real access
     # logic out of scope — these tests exercise edit mechanics.
@@ -361,7 +361,7 @@ def test_patch_and_batch_leave_a_file_already_holding_their_bytes_untouched(ws):
     changed nothing is the typed ``completed_no_effect`` (no effect reader counts it as production); a call that
     changed other files names it in ``unchanged_paths``, which the result review leaves out of what was produced."""
     target, other = ws.repo_dir / "s.py", ws.repo_dir / "t.py"
-    other.write_text("T = 1\n", encoding="utf-8")
+    other.write_bytes(b"T = 1\n")
     stamp = target.stat().st_mtime_ns
     same_patch = "*** Update File: s.py\n-def ddd(x):\n+def ddd(x):\n"
     same_edit = {"path": "s.py", "old_str": "def ddd(x):", "new_str": "def ddd(x):", "count": 1}

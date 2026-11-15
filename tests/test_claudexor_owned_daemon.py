@@ -333,6 +333,7 @@ def test_status_payload_filters_api_key_only_adapters(monkeypatch, tmp_path):
 
     payload = _status_payload(include_models=False)
     assert [h["id"] for h in payload["harnesses"]] == ["codex"]
+    assert payload["profiles"]["login_capable_harnesses"] == ["codex"]
     assert [w["profile"]["profile_id"] for w in payload["profiles"]["profiles"]] == ["koshak"]
     assert payload["profiles"]["harnessAccounts"] == [{"harness_id": "openrouter", "native_login_detected": True}]
 
@@ -345,6 +346,7 @@ def test_status_payload_filters_api_key_only_adapters(monkeypatch, tmp_path):
     # Fail-open: a blip in the manifest read must not blank the panel.
     assert [h["id"] for h in payload["harnesses"]] == ["codex", "openrouter"]
     assert len(payload["profiles"]["profiles"]) == 2
+    assert payload["profiles"]["login_capable_harnesses"] is None
 
 
 def test_a_legacy_native_login_vouches_no_harness_past_a_readable_manifest(monkeypatch, tmp_path):
@@ -2989,7 +2991,10 @@ def test_status_payload_fans_out_the_independent_daemon_reads(monkeypatch, tmp_p
     payload = _status_payload(include_models=False)
 
     assert [h["id"] for h in payload["harnesses"]] == ["codex"]
-    assert payload["quota"] and payload["profiles"] == {"profiles": [], "harnessAccounts": [], "accountPools": []}
+    assert payload["quota"] and payload["profiles"] == {
+        "profiles": [], "harnessAccounts": [], "accountPools": [],
+        "login_capable_harnesses": ["codex"],
+    }
 
 
 def test_status_payload_keeps_a_typed_facet_failure_when_a_fanned_out_read_refuses(monkeypatch, tmp_path):

@@ -1036,6 +1036,12 @@ revision, so this counter guarantees no delivery durability.
 - **Several clients** share one read cursor that only moves forward: a room read
   on one client stops showing the crimson mark on the others at their next state
   refresh, and nothing read is shown unread again.
+- **Observer views** (`?observer=1`) show unread without creating or moving read
+  cursors or recording message reads. The builtin browser uses this mode for
+  this installation's UI; scripts opt in. Session storage keeps it across reloads
+  until `?observer=0`, and passes it to windows with an opener. Without storage
+  it lasts only for the current document: reload needs `?observer=1` again.
+  Intentional writes and human views are unchanged.
 - **One message in two rooms** counts in each until read, then is read in both
   (owner 28.10, A): shown whole in either room, every part on screen at some moment
   (a long one by scrolling, a wide block by panning it; a folded or hidden part, or
@@ -2944,7 +2950,8 @@ screen's working area, so that edge is on screen.
 ### Settings
 
 **A row is a question with its current answer, and a setting has one row** (§6); its one line says what it
-means and what a change did, and a paragraph waits behind `More`. Settings is a section with pages (§10): its
+means and what a change did, and a paragraph waits behind `More`; before its value is first read the line says
+Reading… (Could not be read after a failed read) and the control waits. Settings is a section with pages (§10): its
 list is search, Ouroboros's card and groups of navigation rows (§10), each a page's name over its current answer;
 the list and an open page stand together, and a page is always open, Models the first time and later the last
 one. A row opens its page or is a door: what lives elsewhere (a Dashboard page beside its live state, Main's
