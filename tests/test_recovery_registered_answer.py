@@ -358,6 +358,10 @@ def test_an_adopted_answer_reads_by_its_delivery_on_every_surface_of_its_row(qen
     shown = next(item for item in json.loads(response.body.decode("utf-8"))["messages"] if item.get("task_id") == tid)
     assert (shown["finalization_recovery"], shown["terminal_origin"]) == (recovery, "model_final")
     assert shown["outcome_phase"] == ("done" if state == "delivered" else "error")
+    from ouroboros.gateway.state import _task_activity_facts
+
+    census = _task_activity_facts(qenv.drive, tid)["display"]  # Activity folds the same record
+    assert (census["finalization_recovery"], census["terminal_origin"]) == (recovery, "model_final")
 
     published: list = []
     monkeypatch.setattr(events, "_finish_task_done_dispatch", lambda *_a, **kw: published.append(kw["task_done_event"]))

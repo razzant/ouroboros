@@ -696,9 +696,11 @@ Status, owner action, and urgent notification are separate product concepts:
   `Done`, `Done with warnings`, `Failed`, `Stopped`, shared by host task rows in
   Main and the Project thread (`OUTCOME_PHASE_HEADLINE`). `Done` says the turn ended, not that its goal was
   met. A model's final answer delivered before a stop cut its task's finalization
-  reads `Done`: the cause sentence names what was not stored, and the record
-  stays failed (an answer the host salvaged, or one not yet delivered when the
-  record was written, keeps `Failed`). Stop now reads `Stopped` whatever it kept (answer and files stay shown);
+  is not a failure of the work (owner 15.11, A): its status is `Done` unless another
+  fact of the record fails or warns, with no warning mark; the cause sentence, on the
+  collapsed line like any cause, names what was not stored, and the record stays
+  failed. An answer the host salvaged, one not yet delivered when the record was
+  written and one whose origin was not recorded keep `Failed`. Stop now reads `Stopped` whatever it kept (answer and files stay shown);
   a Wrap up reads `Done` over its final answer and `Stopped` without one; failed
   file preservation beside Wrap up reads `Failed`; the cause names the button.
   Explicit `task_completion/author_stop` reads `Stopped`, keeping its cause and Continue, including saved records.
