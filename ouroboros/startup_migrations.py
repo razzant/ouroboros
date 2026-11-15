@@ -6,7 +6,8 @@ Run before producers on every startup door: ``ensure_current_store`` opens or cr
 boot admissions no document derives (drives present on disk, the one-time upgrade
 receipts) join the owner-held rows, and legacy questions bind their publication
 address once (a closed one whose card no room shows retires its closure note). ``state/migrations.json``
-keeps the watermarks: the store, the cancel-latch, the question-publication and the retired-set generations.
+keeps the watermarks: the store, the cancel-latch, the question-publication, the closures-owed-nowhere and the
+retired-set generations.
 ``python -m ouroboros.startup_migrations`` is the explicit rebuild job, including
 its historical seal audit (no audit watermark). An owner-held obligation set whose producer
 this body retired (``RETIRED_SETS``) has no reader or remover left, so the first boot of its

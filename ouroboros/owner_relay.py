@@ -70,8 +70,8 @@ def _own_held_state(ctx) -> dict | None:
 
 def _settle_seed(ctx) -> bool:
     """A first build that could not read the record left a partial view: no write replaces the record until a read
-    lands. It then keeps the record's rows and those of its open relays that were not inherited, or still open here:
-    one the inherited view reopened, or this work answered since, stays closed."""
+    lands. It then keeps the record's rows and its open relays not inherited or still open here: an inherited relay
+    the record had closed, or this work answered since, stays closed (one only the record held comes back)."""
     seed = getattr(ctx, "_held_state_seed", None)
     if seed is None:
         return True

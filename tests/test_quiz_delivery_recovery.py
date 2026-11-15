@@ -317,13 +317,13 @@ def test_a_closure_owing_its_unpublished_ask_is_no_import_unknown(runtime, monke
 
 
 @pytest.mark.parametrize("history", ["no_card_row", "ambiguous"])
-@pytest.mark.parametrize("attempt", ["this_body", "older_body"])
+@pytest.mark.parametrize("attempt", ["this_body", "older_body", "import"])
 def test_a_closure_no_room_shows_retires_its_note_and_leaves_current_questions(runtime, monkeypatch, history, attempt):
     """An older body's question whose card left no row in readable, stable history, closed by a model after its
     task ended, owes its closure note nowhere: the closure's delivery attempt retires it as ``no_target`` (never
     delivered, no guessed room, the closed record kept), its task leaves the current questions and its
     ``question:`` unknown goes with it. One an older body's attempt left owed retires at this body's first boot,
-    once; a stamped boot reads no row. An answer under the same verdict keeps its debt (it carries my human's
+    once, or in a later import of its verdict (the legacy reconcile job); a stamped boot reads no row. An answer under the same verdict keeps its debt (it carries my human's
     words); with an ambiguous history an import may still bind the address, so the closure note keeps waiting."""
     from ouroboros import dialogue_store as ds, obligations, startup_migrations
     from ouroboros.gateway.task_decision import answer_decision
@@ -360,6 +360,9 @@ def test_a_closure_no_room_shows_retires_its_note_and_leaves_current_questions(r
         (runtime.root / "state" / "migrations.json").write_text(json.dumps(marks), encoding="utf-8")
         assert block(runtime, "closed")["delivery"]["reason_code"] == "publication_address_unknown"
         assert {tid, other} <= set(obligations.members(runtime.root, "owner_questions"))
+    if attempt == "import":  # an attempt left the note owed; the legacy reconcile job repeats the import
+        record_quiz_delivery_failure(runtime.root, tid, "closed", "publication_address_unknown")
+        imported = startup_migrations.migrate_question_publications(runtime.root, legacy=True)
 
     report = startup_migrations.prepare_startup_state(runtime.root)["question_publications"]
     closed, answered = block(runtime, "closed"), quiz_states(runtime.root, other)["a"]
@@ -370,6 +373,7 @@ def test_a_closure_no_room_shows_retires_its_note_and_leaves_current_questions(r
         assert closed["delivery"]["state"] == "owed" and f"question:{tid}:closed" in unknowns
         return
     assert report == ({"retired": 1} if attempt == "older_body" else {})
+    assert attempt != "import" or imported["retired"] == 1
     assert (closed["state"], closed["closed_reason"]) == ("closed", "Answered elsewhere")
     assert (closed["delivery"]["state"], closed["delivery"]["reason_code"]) == ("no_target", "no_publication_target")
     assert not closed.get("discharged_at") and "publication_chat_id" not in closed and question_delivery_projection(closed) == {}
