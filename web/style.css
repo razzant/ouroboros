@@ -146,6 +146,8 @@ html[data-layout="stack"] .shell-icon-control {
     scrollbar-width: thin;
     container-type: inline-size;  /* a narrow column stands the tools two to a line */
 }
+/* One maximum for a drag, a restored width and a narrowing window; the adjacent room keeps its composer. */
+html[data-layout="docked"] #primary-sidebar { max-width: min(560px, calc(100vw - var(--room-min-width))); }
 @media (pointer: coarse) {
     #primary-sidebar { --nav-item-h: 44px; --nav-control-h: 44px; }
 }

@@ -263,6 +263,8 @@
        with whole names and the foot hold whole down to it, measured on the owner's data (14.11). CSS px, so it
        follows the Interface size, which zooms the window. */
     --sidebar-min-width: 270px;
+    /* A docked room holds the fully folded composer, a question count and Latest's reserved end on one line. */
+    --room-min-width: 320px;
     --project-panel-width: clamp(340px, 36vw, 440px);
     /* One hover fill for an item in a popup menu or a picker list. Six menus
        used five different fills (0.04 / 0.06 / 0.08 / an accent tint / an
