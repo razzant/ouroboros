@@ -1007,8 +1007,7 @@ function mountWebSearch(container, { path, ctx }) {
     const discard = container.querySelector('[data-editor-discard]');
     const formControls = [source, model, key, save, discard].filter(Boolean);
     const paintReadState = (settings = null) => {
-        const known = settings ?? settingsSnapshot();
-        const unread = known ? '' : settingsReadMessage();
+        const unread = settings ? '' : settingsReadMessage();
         formControls.forEach((control) => { control.disabled = Boolean(unread); });
         if (unread && !dirty) preview.textContent = unread;
     };
@@ -1027,9 +1026,8 @@ function mountWebSearch(container, { path, ctx }) {
         } catch { if (mine === previews) preview.textContent = 'Search routes could not be checked. Your choices are kept.'; }
     };
     let asRead = null;  // the choice as read when the typing began (null before a read): a Save writes only what changed
-    const read = async () => {
-        let settings;
-        try { settings = await ctx.readSettings(); } catch { paintReadState(); if (dirty) void showPreview(); return; }
+    const adopt = (settings) => {
+        if (!settings) { source.value = ''; paintReadState(); return; }
         // A typed choice stays, one begun while this read was pending too; the routes it would take and the keys of
         // Accounts (where the Key select's pointer leads) are read again for it. Only the first read fills the fields
         // under typing, so a Save never writes a Source the owner was not shown.
@@ -1044,6 +1042,11 @@ function mountWebSearch(container, { path, ctx }) {
         syncSearchKey(source, model, key, searchKeys);
         paintReadState(settings);
         void showPreview();
+    };
+    const read = async () => {
+        let settings;
+        try { settings = await ctx.readSettings(); } catch { settings = settingsSnapshot(); }
+        adopt(settings);
     };
     const say = (words) => setResult(container.querySelector('[data-editor-result]'), words);
     const edited = () => { dirty = true; syncSearchKey(source, model, key, searchKeys);
@@ -1072,16 +1075,7 @@ function mountWebSearch(container, { path, ctx }) {
     model.addEventListener('input', edited);
     container.addEventListener('click', onClick);
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
-    const initial = settingsSnapshot();
-    if (initial) {
-        source.value = initial.OUROBOROS_WEBSEARCH_BACKEND || '';
-        model.value = String(initial.OUROBOROS_WEBSEARCH_MODEL || '');
-        asRead = { OUROBOROS_WEBSEARCH_BACKEND: source.value, OUROBOROS_WEBSEARCH_MODEL: model.value };
-    } else {
-        source.value = '';
-        model.value = '';
-    }
-    paintReadState(initial);
+    adopt(settingsSnapshot());
     void read();
     return { unsaved: () => dirty, unmount() { container.removeEventListener('click', onClick); globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown); } };
 }
