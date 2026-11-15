@@ -250,8 +250,9 @@ def test_a_tight_row_keeps_one_line_while_the_strip_closes(direct_server_with_da
             _open_chat(page, url, width=1440)
             # Narrow the composer row until the strip only fits beside the other capsules below full padding. Where that
             # happens depends on what the row holds (since the room's Model capsule leads it, 7d65f99394, a docked
-            # window of about 1180-1220 px), so the sweep covers every docked desktop width rather than one band.
-            for width in range(1440, 700, -8):
+            # window of about 1180-1220 px), so the sweep covers every docked desktop width rather than one band: 1440 down to
+            # 720, the narrowest docked window (docs/DESIGN.md "One layout switch"; narrower is the stack layout).
+            for width in range(1440, 719, -8):
                 page.set_viewport_size({"width": width, "height": 900})
                 page.click(HEAD)
                 _wait(page, "el.dataset.open === 'true'")
@@ -262,7 +263,7 @@ def test_a_tight_row_keeps_one_line_while_the_strip_closes(direct_server_with_da
                 page.keyboard.press("Escape")
                 _wait(page, "el.dataset.open === 'false'")
             else:
-                pytest.fail("no viewport between 1440 and 708 px gave an inline strip below full padding")
+                pytest.fail("no docked viewport between 1440 and 720 px gave an inline strip below full padding")
             closed_height = page.evaluate(f"() => document.querySelector('{CONTROL}').parentElement.getBoundingClientRect().height")
             heights = page.evaluate(f"""() => new Promise((resolve) => {{
                 const row = document.querySelector('{CONTROL}').parentElement;
