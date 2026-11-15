@@ -43,8 +43,8 @@ html[data-layout="stack"] .settings-page { padding-inline: 12px; }
    the first time; the list's Ouroboros row opens Ouroboros's card in the page's pane). */
 @container sectionplace (min-width: 40rem) {
     #page-settings:is([data-settings-depth="0"], [data-settings-depth="1"]) > .app-page-header:not([data-return]) { position: absolute; inset: 0 0 auto; z-index: 2; }
-    #page-settings:is([data-settings-depth="0"], [data-settings-depth="1"]) > .app-page-header:not([data-return]) + .settings-shell > .settings-home { margin-top: max(50px, var(--window-chrome-top)); }
-    #page-settings:is([data-settings-depth="0"], [data-settings-depth="1"]) > .app-page-header:not([data-return]) + .settings-shell .settings-page { padding-top: calc(max(50px, var(--window-chrome-top)) + var(--space-2)); }
+    #page-settings:is([data-settings-depth="0"], [data-settings-depth="1"]) > .app-page-header:not([data-return]) + .settings-shell > .settings-home { margin-top: max(50px, var(--window-chrome-top, 0px)); }
+    #page-settings:is([data-settings-depth="0"], [data-settings-depth="1"]) > .app-page-header:not([data-return]) + .settings-shell .settings-page { padding-top: calc(max(50px, var(--window-chrome-top, 0px)) + var(--space-2)); }
     .settings-shell[data-section-view="page"] .settings-page { padding-inline-start: var(--space-4); }
     .settings-shell[data-section-view="page"] > .settings-home .settings-overview { margin-block-end: var(--space-3); }
     .settings-shell[data-section-view="page"] .settings-door-glyph.settings-overview-glyph { width: 20px; height: 20px; margin-inline-end: var(--space-2); }
