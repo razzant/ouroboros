@@ -698,6 +698,7 @@ async def api_onboarding_model_catalog(request: Request) -> JSONResponse:
     never the whole-draft validator: Main is picked from this list, so it answers while Main is blank."""
     from ouroboros.config import load_settings
     from ouroboros.gateway.models import draft_catalog
+    from ouroboros.provider_models import CONNECTIONS_KEY
     from ouroboros.settings_setup_contract import draft_access
 
     try:
@@ -711,7 +712,7 @@ async def api_onboarding_model_catalog(request: Request) -> JSONResponse:
     if error:
         return unsaved_error(error, 400, code="invalid_onboarding_settings")
     local = {key: body[key] for key in ("LOCAL_MODEL_SOURCE", "LOCAL_MODEL_FILENAME", "LOCAL_MODEL_CONTEXT_LENGTH") if key in body}
-    return JSONResponse(await draft_catalog(saved, {**saved, **keys, "OUROBOROS_CONNECTIONS": connections, **local}, typed))
+    return JSONResponse(await draft_catalog(saved, {**saved, **keys, CONNECTIONS_KEY: connections, **local}, typed))
 
 
 async def api_onboarding_subagents_preview(request: Request) -> JSONResponse:
