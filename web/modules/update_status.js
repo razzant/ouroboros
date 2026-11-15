@@ -89,8 +89,42 @@ function reviewLine(review) {
     return `Review observed ${review.observed || 'unknown'}, author declared ${review.declared || 'unknown'}; ${seen}${other}.`;
 }
 
+// A receipt's observed verdict that says its merge went in over a review FAIL or with no verdict. PASS, an absent
+// or an unrecognized value is not counted: what is unknown names nothing.
+const OVER_REVIEW = new Set(['FAIL', 'NOT_PERFORMED', 'QUORUM_FAILED', 'NOT_DISPATCHED', 'unknown']);
+const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
+// Said wherever this install's own landed rows were not read for a range: unknown, never "none".
+const NOT_READ = 'Not read for this range: whether its commits landed over a review FAIL or no verdict is unknown.';
+
 /**
- * The exact range's evidence as the confirmation's detail rows: every first-parent commit's receipt
+ * What a range brings over a review FAIL or no verdict, from its qualification: this install's own commits it
+ * recorded so (`landed_over_review`, written when the check collected the range) and the first-parent merges whose
+ * receipt observed it; a commit that is both counts once, as a commit. `line` is the one host sentence above the
+ * description and `detail` the same with its items named, for Details; both say how many receipts were not read
+ * (a range checked before every first-parent receipt was read) and are '' when the facts name nothing: absent is
+ * unknown, never "clean".
+ * @returns {{line: string, detail: string, names: string[], landed: object[]}}
+ */
+export function updateOverReview(facts) {
+    const listed = Array.isArray(facts?.commits) ? facts.commits : [];
+    const landed = Array.isArray(facts?.landed_over_review) ? facts.landed_over_review.filter((row) => row?.sha) : [];
+    const own = new Set(landed.map((row) => row.sha));
+    const merges = listed.filter((commit) => !own.has(commit.sha) && OVER_REVIEW.has(commit.receipt?.review?.observed));
+    const unread = listed.filter((commit) => !commit.receipt && commit.body_read === false).length;
+    const parts = [...(merges.length ? [plural(merges.length, 'merge')] : []),
+        ...(landed.length ? [`${plural(landed.length, 'commit')} Ouroboros made on this computer`] : [])];
+    const names = [...landed.map((row) => `${String(row.sha).slice(0, 8)} (made on this computer; ${row.outcome})`),
+        ...merges.map((commit) => `${String(commit.sha).slice(0, 8)} (merge; ${
+            commit.receipt.review.observed === 'FAIL' ? 'review FAIL' : 'no review verdict recorded'})`)];
+    const said = (items) => [items.length ? `Went in over a review FAIL or no verdict: ${items.join(', ')}.` : '',
+        unread ? `The review receipts of ${plural(unread, 'older commit')} were not read.` : ''].filter(Boolean);
+    const blind = facts && !Array.isArray(facts.landed_over_review) ? [`Made on this computer: ${NOT_READ}`] : [];
+    return { line: said(parts).join(' '), detail: [...said(names), ...blind].join(' '), names, landed };
+}
+
+/**
+ * The exact range's evidence as the confirmation's detail rows: this install's own commits recorded over a review
+ * outcome (or that they were not read), every first-parent commit's receipt
  * (declarations stay labelled as such; each observed verdict keeps its own record state and request-time
  * relation), the post-merge read and each observed run. Missing, unread and non-green stay distinct;
  * nothing here becomes a verdict.
@@ -102,8 +136,19 @@ export function preflightEvidenceRows(preflight) {
     if (!facts || facts.base_sha !== plan.base_sha || facts.target_sha !== plan.target_sha) {
         return [{ label: 'Checks', value: 'Qualification for this range is unknown.' }];
     }
-    const rows = [];
-    for (const commit of facts.commits || []) {
+    const rows = updateOverReview(facts).landed.map((row) => ({ label: String(row.sha).slice(0, 8),
+        value: `${row.subject ? `${row.subject}\n` : ''}Ouroboros made it on this computer; ${row.outcome}${/[.!?]"?$/.test(row.outcome) ? '' : '.'}` }));
+    if (!Array.isArray(facts.landed_over_review)) {
+        rows.push({ label: 'Made on this computer', value: NOT_READ });
+    }
+    const listed = facts.commits || [];
+    const receipts = listed.filter((commit) => commit.receipt).length;
+    const unread = listed.filter((commit) => !commit.receipt && commit.body_read === false).length;
+    if (receipts < listed.length) {
+        rows.push({ label: 'Review receipts', value: `${receipts} of the ${plural(listed.length, 'commit')} listed here carry one${
+            unread ? `; ${unread} commit ${unread === 1 ? 'body was' : 'bodies were'} not read` : ''}. Without a receipt the review is unknown.` });
+    }
+    for (const commit of listed) {
         // The short SHA names the row; the subject leads its value, where a long one has room.
         const label = String(commit.sha).slice(0, 8);
         const lines = commit.subject ? [String(commit.subject)] : [];
