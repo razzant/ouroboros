@@ -526,7 +526,6 @@ test('one writer: these tabs post nothing to /api/settings themselves and read n
 
 test('Back to Settings: a first row and one page layer; the press, Escape or Back blur the field first and open Settings', async (t) => {
     const { mount } = setup(t);
-    window.ouroLayout = { layout: 'stack' };
     const layers = [];
     const fakeLayers = { push: (layer) => layers.push(layer), remove: (id) => { layers.splice(0, layers.length, ...layers.filter((layer) => layer.id !== id)); } };
     const order = [];
@@ -576,16 +575,17 @@ test('Settings returns stay in place on pointer-only events in both layouts', (t
         window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout } }));
         const first = panel.firstChild;
         const button = panel.querySelector('[data-dashboard-back]');
-        (button || first).focus();
+        assert.ok(button, `${layout}: the return exists`);
+        button.focus();
         const before = changes;
         window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout, pointer: 'coarse' } }));
         kept.push([layout, panel.firstChild === first, panel.querySelector('[data-dashboard-back]') === button,
-            document.activeElement === (button || first), changes - before]);
+            document.activeElement === button, changes - before]);
     }
     assert.deepEqual(kept, ['stack', 'docked', 'stack', 'docked'].map(layout => [layout, true, true, true, 0]));
 });
 
-test('Settings returns follow both layout crossings, yielding to the section Back in docked', (t) => {
+test('Settings returns survive both layout crossings; a direct page keeps its section Back', (t) => {
     const { mount, window } = setup(t);
     window.ouroLayout = { layout: 'docked' };
     const observers = [];
@@ -626,18 +626,18 @@ test('Settings returns follow both layout crossings, yielding to the section Bac
         window.ouroLayout.layout = layout;
         window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout } }));
         observers.forEach(observer => observer.fn([{ target: dashboard.page }]));
-        const stack = layout === 'stack';
-        const ownBack = !stack && (width < 640 || !supports);
-        assert.equal(slot.children.length, stack ? 1 : 0, `${layout}/${width}: door return is placed only in stack`);
-        assert.equal(listBack.hidden, !ownBack, `${layout}/${width}: the section's own Back stays available`);
+        assert.equal(slot.children.length, 1, `${layout}/${width}: the door return stays in its slot`);
+        assert.equal(listBack.hidden, true, 'the Settings return takes the section Back slot');
         assert.equal(dashboard.page.dataset.sectionView, 'page', 'the open Costs page survives resizing');
-        assert.deepEqual([...layers.keys()], stack ? ['dashboard-back'] : ownBack ? ['dashboard-level'] : []);
+        assert.deepEqual([...layers.keys()], ['dashboard-back']);
         for (const page of pages) {
-            assert.equal(page.querySelectorAll('[data-dashboard-back]').length, stack ? 1 : 0);
-            assert.equal(Boolean(page.querySelector('.dashboard-back')), stack && !page.querySelector('.app-page-header'),
+            assert.equal(page.querySelectorAll('[data-dashboard-back]').length, 1);
+            assert.equal(Boolean(page.querySelector('.dashboard-back')), !page.querySelector('.app-page-header'),
                 'the headerless fallback follows the same decision');
         }
     }
+    dashboard.activateTab('storage');
+    assert.equal(listBack.hidden, false, 'a page opened directly keeps its own Back in one column');
     listBack.dispatchEvent({ type: 'click' });
     assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['home', 0], 'the section Back returns to its list');
     window.ouroLayout.layout = 'stack';
@@ -648,7 +648,6 @@ test('Settings returns follow both layout crossings, yielding to the section Bac
 
 test('openDashboardTab: back gives the tab its Back, a row is brought into view and focused; another tab or page drops Back', async (t) => {
     const { mount, window } = setup(t);
-    window.ouroLayout = { layout: 'stack' };
     const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
     const opened = [];
     const layers = [];
@@ -709,7 +708,6 @@ test('openDashboardTab: back gives the tab its Back, a row is brought into view 
 // show in one task (layers.js: one snapshot per batch).
 test('openDashboardTab with back changes the layer stack once in one column', (t) => {
     const { mount } = setup(t);
-    window.ouroLayout = { layout: 'stack' };
     const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
     const stack = [];
     const seen = [''];

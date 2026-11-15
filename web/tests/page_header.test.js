@@ -1,9 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { bindHeaderControlPlacement, bindPageHeader, renderMobileNavToggle, renderPageHeader } from '../modules/page_header.js';
-import { settingsReturn } from '../modules/dashboard.js';
-import { NodeStub, setup } from './dashboard_dom_fixture.js';
+import { bindHeaderControlPlacement, bindPageHeader, placePageBack, renderMobileNavToggle, renderPageHeader } from '../modules/page_header.js';
 import { createRoomHeader } from '../modules/chat_header.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
@@ -263,34 +261,31 @@ test('the optional toolbar class cannot create an HTML attribute or node', () =>
     assert.match(html, /&lt;img/);
 });
 
-test('a destination return is placed only in stack and follows both layout crossings', (t) => {
-    const { mount, window } = setup(t);
-    window.ouroLayout = { layout: 'docked' };
-    const page = new NodeStub(); page.className = 'page';
-    page.innerHTML = renderPageHeader({ page: 'skills', tabsHtml: '<div role="tablist"></div>' });
-    const query = page.querySelector.bind(page);
-    page.querySelector = selector => query(selector.replace(':scope > ', ''));
-    mount.append(page);
-    const header = page.querySelector('.app-page-header');
-    const slot = header.querySelector('[data-page-back]');
-    const tabs = page.querySelector('.app-page-tabs');
-    const back = settingsReturn();
-    t.after(() => back.clear());
-    back.show(page, 'models');
-    let button;
-    for (const layout of ['docked', 'stack', 'docked', 'stack']) {
-        window.ouroLayout.layout = layout;
-        window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout } }));
-        assert.equal(slot.children.length, layout === 'stack' ? 1 : 0, `${layout}: the real return slot`);
-        assert.equal(header.hasAttribute('data-back'), layout === 'stack', 'header state follows placement');
-        assert.equal(tabs.querySelector('[data-dashboard-back]'), null, 'Back never moves into the tabs');
-        if (layout === 'stack') {
-            button ||= slot.firstChild;
-            assert.equal(slot.firstChild, button, 'the same return control comes back');
-            assert.equal(button.getAttribute('aria-label'), 'Back to Settings');
-        }
+test('a page that leads back keeps Back in its header\'s slot in every layout: one leading control, its tabs as they were', () => {
+    const listeners = new Map();
+    const before = { window: globalThis.window, document: globalThis.document };
+    globalThis.window = { ouroLayout: { layout: 'stack' }, addEventListener: (type, fn) => listeners.set(type, fn),
+        removeEventListener: (type) => listeners.delete(type) };
+    globalThis.document = { documentElement: { dataset: { layout: 'stack' } } };
+    try {
+        // Skills opened from Settings on a phone: its header (☰, the name, the Back slot before the lead) and its tabs under it.
+        const attrs = new Set();
+        const lead = { name: 'lead' };
+        const block = { querySelector: () => lead, insertBefore() {} };
+        const slot = { parentElement: block, children: [], replaceChildren(...nodes) { this.children = nodes; } };
+        const tabs = { prepended: [], marks: new Set(), classList: { contains: (name) => name === 'app-page-tabs' },
+            prepend(node) { this.prepended.push(node); }, toggleAttribute(name, on) { if (on) this.marks.add(name); else this.marks.delete(name); },
+            removeAttribute(name) { this.marks.delete(name); } };
+        const header = { nextElementSibling: tabs, querySelector: (selector) => (selector === '[data-page-back]' ? slot : null),
+            setAttribute: (name) => attrs.add(name), removeAttribute: (name) => attrs.delete(name) };
+        const control = { name: 'Back to Settings' };
+        const dispose = placePageBack(header, control);
+        // The sheet puts a header's Back where ☰ stood and hides ☰ (style.css `.app-page-header[data-back]`): Back stays.
+        assert.deepEqual([slot.children, attrs.has('data-back'), tabs.prepended, [...tabs.marks]], [[control], true, [], []],
+            'the stack layout: Back in the header\'s slot, never a second leading control in the tabs row');
+        dispose();
+        assert.deepEqual([slot.children, attrs.has('data-back'), listeners.size], [[], false, 0]);
+    } finally {
+        Object.assign(globalThis, before);
     }
-    back.clear();
-    window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout: 'stack' } }));
-    assert.deepEqual([slot.children.length, header.hasAttribute('data-back')], [0, false], 'clearing releases the listener');
 });

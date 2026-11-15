@@ -6,9 +6,9 @@ The real SPA in headless Chromium and WebKit over the shared fixture's endpoints
 tab a field the owner is in keeps its text and caret through the tab's own periodic refresh and a settings read, and
 leaving it shows the row's result line; the Updates channel keeps its focused choice through a status read; the
 Evolution choice "Every N tasks" posts both keys in one body and says itself in its own sentence; the doors of
-Consciousness and Costs lead where they say. The docked sidebar returns each of the five tabs to Settings; in one
-column its Back, Escape and the system's Back return there, with the list's scroll preserved. At the 320 x 640 floor
-each page's own Back reaches the list, and every tab and three-way choice fits.
+Consciousness and Costs lead where they say and Settings leads back. Every one of the five tabs opened from the
+Settings home has Back in the header; Escape, Back itself and the system's Back return to Settings at its scroll
+position in both layouts. At the 320 x 640 floor each page's own Back reaches the list, and every choice fits.
 
 The settings endpoint is answered here the way the server answers it: `_meta.effects` on a read, the receipt
 (`changes`: old, new, token) on a save. Undo's precondition and its refusal are the node test's
@@ -317,26 +317,19 @@ def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, widt
         back = page.locator("#page-dashboard > .app-page-header [data-dashboard-back]")
         assert page.locator(f"#dashboard-panel-{tab} > .dashboard-back").count() == 0
         assert _sideways(page) == [], (tab, leave)
-        if page.viewport_size["width"] >= 720:
-            # Review res3: beside the sidebar a door between sections adds no Back and no layer.
-            assert back.count() == 0
-            assert page.evaluate("() => window.__ouroLayers.ids().includes('dashboard-back')") is False
-            if leave == "Escape":
-                page.keyboard.press("Escape")
-                assert page.locator(f"#dashboard-panel-{tab}.active").is_visible()
-            page.locator('[data-nav-page="settings"]').click()
-        else:
-            back.wait_for(state="visible")
-            assert back.get_attribute("aria-label") == "Back to Settings"
-            assert back.inner_text().strip() == ""
-            assert page.locator("#page-dashboard [data-dashboard-list-back]").is_hidden()
+        back.wait_for(state="visible")
+        assert back.get_attribute("aria-label") == "Back to Settings"
+        assert back.inner_text().strip() == ""
+        assert page.locator("#page-dashboard [data-dashboard-list-back]").is_hidden()
+        assert page.evaluate("() => window.__ouroLayers.ids().includes('dashboard-back')") is True
+        if width < 720:
             assert page.locator("#page-dashboard [data-mobile-nav-toggle]").is_hidden()
-            if leave == "Escape":
-                page.keyboard.press("Escape")
-            elif leave == "Back":
-                back.click()
-            else:
-                page.go_back()
+        if leave == "Escape":
+            page.keyboard.press("Escape")
+        elif leave == "Back":
+            back.click()
+        else:
+            page.go_back()
         page.wait_for_selector("#page-settings.active")
         assert back.count() == 0, leave
 
@@ -347,17 +340,10 @@ def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, widt
         assert page.evaluate("(s) => document.querySelector(s).scrollTop", HOME) == tops[tab], f"Escape from {tab} returns where Settings was"
     assert tops["storage"] > 0 and tops["updates"] > 0, f"the home was scrolled when its last rows were pressed: {tops}"
     for leave in ("Back", "system Back"):
-        # Physical and system Back remain exercised in the one-column layout that supplies them.
-        if width >= 720:
-            page.set_viewport_size({"width": 320, "height": height})
-            open_settings(page)
         top = leave_home("storage")
         check_back("storage", leave)
         assert top > 0
         assert page.evaluate("(s) => document.querySelector(s).scrollTop", HOME) == top, f"{leave} returns where Settings was"
-        if width >= 720:
-            page.set_viewport_size({"width": width, "height": height})
-            page.wait_for_function("() => document.documentElement.dataset.layout === 'docked'")
     # A tab reached any other way has no Back.
     _nav(page, "dashboard", width)
     assert page.locator("#page-dashboard [data-dashboard-back]").count() == 0

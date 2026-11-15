@@ -265,7 +265,7 @@ class ScopeStub extends Stub {
     }
 }
 
-test('a Settings door keeps its path and places its header Back only in stack, following layout changes', async (t) => {
+test('a Settings door keeps its path and header Back in both layouts', async (t) => {
     const { env, content, state, shown, showPage } = world(t);
     const layout = (name) => {
         env.window.ouroLayout = { layout: name };
@@ -314,7 +314,7 @@ test('a Settings door keeps its path and places its header Back only in stack, f
     // Circles: Back stands in its header's Back slot, never as a row of its own, with its one layer.
     await press('page:circles');
     assert.deepEqual(shown.at(-1), ['circles']);
-    assert.deepEqual(backOf(circles), none, 'the sidebar is the way back while docked');
+    assert.deepEqual(backOf(circles), back, 'the docked header leads back to Settings too');
     layout('stack');
     assert.deepEqual(backOf(circles), back);
     assert.equal(layered.at(-1), 'push settings-door-back', 'Escape and the system\'s Back return to Settings too');
@@ -328,7 +328,7 @@ test('a Settings door keeps its path and places its header Back only in stack, f
     await press('page:skills');
     assert.deepEqual(backOf(skills), back);
     layout('docked');
-    assert.deepEqual(backOf(skills), none);
+    assert.deepEqual(backOf(skills), back);
     layout('stack');
     assert.deepEqual(backOf(skills), back);
     assert.deepEqual(partsOf(skills), skillsParts);

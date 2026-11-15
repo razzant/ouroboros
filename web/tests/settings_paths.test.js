@@ -594,7 +594,9 @@ test('Settings search belongs to the phone list and returns to the desktop heade
     const search = field.parentElement;
     const home = content.querySelector('.settings-home-column');
     const slot = content.querySelector('[data-settings-search-slot]');
+    const header = content.querySelector('.app-page-header');
     assert.equal(home.firstChild, search, 'one phone band: the search starts the scrolling list');
+    assert.equal(header.hasAttribute('data-search-in-home'), true);
     field.value = 'context';
     await field.fire('input');
     assert.ok(content.querySelectorAll('[data-settings-open]').some(row => row.dataset.settingsOpen === 'models'));
@@ -617,6 +619,7 @@ test('Settings search belongs to the phone list and returns to the desktop heade
         observers.forEach(fn => fn([{ target: content.querySelector('.settings-shell') }]));
         await settle();
         assert.equal(search.parentElement, parent, `${layoutName}/${two}: search follows the list`);
+        assert.equal(header.hasAttribute('data-search-in-home'), parent === home, 'the header state follows Search both ways');
         assert.equal(content.querySelector('#settings-search'), field);
         assert.equal(field.value, 'context', 'moving the field preserves the query and its listener');
     }
