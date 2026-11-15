@@ -63,7 +63,7 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
     // Told after `latest()` changed; a watcher that throws neither skips another nor fails the read that changed it.
     const watchers = new Set();
     const tell = () => watchers.forEach((watcher) => { try { watcher(); } catch { /* that reader's own fault */ } });
-    const deferred =() => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
+    const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
     const begin = () => ({ generation: ++requestedGeneration, requestedAt: now(),
         path: held ? `/api/state?bindings_since=${encodeURIComponent(held.revision)}` : '/api/state' });
     const withBindings = (data) => {

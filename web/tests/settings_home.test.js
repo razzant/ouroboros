@@ -239,7 +239,7 @@ test('the card keeps the header\'s readiness rule over the page\'s sequencer: a 
     // The home is mounted at start and reads only when it comes on screen. app.js retires the page's sequencer on the
     // socket's close and open before the home's own handlers run (it registers first); the card and the list's own
     // Ouroboros row follow every body the sequencer applies (`watch`), keep what the last one said over a failed read,
-    // and forget it at a disconnect, as the header's createHostStart does.
+    // and forget it at the close, not at the open, as the header's createHostStart does (chat.js showOutage).
     const { env, content } = world(t);
     const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
     t.after(() => store.dispose());
@@ -276,6 +276,13 @@ test('the card keeps the header\'s readiness rule over the page\'s sequencer: a 
     assert.deepEqual(words(), said('Start failed'), 'the restart failed: the card says so');
     await apply({ supervisor_ready: true });
     assert.deepEqual(words(), said('Online'));
+    connected = false;
+    emit('close');
+    await apply({ supervisor_ready: true });  // a state poll answered while the socket was down
+    assert.deepEqual(words(), said('Reconnecting…'));
+    connected = true;
+    emit('open');
+    assert.deepEqual(words(), said('Online'), 'a body read after the close proves readiness: the open keeps it, as the header does');
     assert.equal(env.calls.length, 0, 'the home read nothing');
     home.dispose();
     await apply({ supervisor_ready: false, boot: { phase: 'failed', error: 'later' } });

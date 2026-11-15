@@ -207,8 +207,8 @@ test('a watcher is told after each change of latest(): an applied body, a failed
     let painting = true;
     const sequencer = createStateSnapshotSequencer(() => { if (painting) throw new Error('a consumer failed to paint'); });
     const seen = [];
+    sequencer.watch(() => { throw new Error('one watcher fails'); });  // told first: its fault must not skip the next
     const off = sequencer.watch(() => seen.push(sequencer.latest()));
-    sequencer.watch(() => { throw new Error('one watcher fails'); });  // its fault stays its own
     const first = await sequencer.gate(false);
     assert.throws(() => sequencer.apply(first, { supervisor_ready: true }), /failed to paint/);
     assert.deepEqual(seen, [{ supervisor_ready: true }], 'told even when the apply callback threw, and past the failing watcher');
