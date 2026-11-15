@@ -81,6 +81,11 @@ def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui,
     assert _layout(page) == ("stack" if width < 720 else "docked")
     assert page.locator("#page-settings").bounding_box()["width"] == (627 if width == 1087 else width)
     assert _menu_visible(page)
+    if width == 320:
+        # A phone's home has one band; Search starts the list right under it, where the band's second row stood.
+        gap = page.evaluate("""() => document.querySelector('#page-settings .settings-search').getBoundingClientRect().top
+            - document.querySelector('#page-settings > .app-page-header').getBoundingClientRect().bottom""")
+        assert 0 <= gap <= 4, gap
     # On a phone a sideways finger over a page's scroller is the drawer's (style.css, the stack layout's scrollers).
     touch = "pan-y pinch-zoom" if width < 720 else "auto"
     assert page.locator(HOME).evaluate("node => getComputedStyle(node).touchAction") == touch
