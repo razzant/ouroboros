@@ -164,11 +164,14 @@ export function settingsReturn({ layers = null, openSettings = null, id = BACK_L
         scope = null;
         layers?.remove(id);
     };
-    const go = (path) => {
+    const go = async (path) => {
         const field = document.activeElement;
         if (field && scope?.contains(field)) field.blur?.();
-        clear();
-        void openSettings?.(path);
+        const returning = control;
+        const opened = await openSettings?.(path);
+        // Settings installs its levels before this return retires; a refused leave keeps the way back.
+        if (opened !== false && control === returning) clear();
+        return opened;
     };
     const show = (host, path, before = host.firstChild) => {
         clear();
@@ -247,11 +250,11 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
     const leadName = page.querySelector('[data-dashboard-lead-name]');
     const listBack = page.querySelector('[data-dashboard-list-back]');
     const backSlot = page.querySelector('[data-dashboard-back-slot]');
-    const tabStrip = bindTabStrip(list, { dataAttr: 'data-dashboard-tab', onChange: (name) => showTab(name) });
+    const tabStrip = bindTabStrip(list, { dataAttr: 'data-dashboard-tab', onChange: (name) => showTab(name, { asLevel: panes() }) });
     const disposeFade = bindScrollFade(rail);
     // Two panes from a 40rem box where the engine draws them (ui.css @container sectionplace), as Settings.
     const panes = () => sectionHoldsTwoPanes(page);
-    let level = false;   // one column: the open page stands as a level over the list
+    let level = false;   // an explicit choice stays open when two panes narrow to one
     let layered = false;
 
     // The way back to Settings stands in the band's Back slot, before the page's name.
@@ -297,10 +300,9 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
     }
 
     function openLevel() {
-        if (panes()) return;
         level = true;
         paint();
-        (listBack && !listBack.hidden ? listBack : panelsEl).focus?.({ preventScroll: true });
+        if (!panes()) (listBack && !listBack.hidden ? listBack : panelsEl).focus?.({ preventScroll: true });
     }
 
     function closeLevel() {
@@ -312,10 +314,10 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
     }
     listBack?.addEventListener('click', () => closeLevel());
 
-    // A row pressed in one column opens its page as a level (pressed again, the page it already shows).
+    // Pressing even the already selected row chooses its page, so it stays open if the list later gives way.
     list.addEventListener('click', (event) => {
         const row = event.target.closest?.('[data-dashboard-tab]');
-        if (row && rows.includes(row) && !panes()) openLevel();
+        if (row && rows.includes(row)) openLevel();
     });
 
     const onPageShown = (event) => {
@@ -369,7 +371,7 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
                 each.hidden = !on;
             });
             state.dashboardActiveSubtab = name;
-            if (asLevel && !panes()) level = true;
+            if (asLevel) level = true;  // an outside door keeps its page open when two panes narrow to one
             paint();
             window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: name } }));
             if (typeof path === 'string') back.show(panel, path);

@@ -97,7 +97,8 @@ def test_reads_meet_in_either_order_by_request_time_and_a_deleted_room_stays_gon
     stale_route, stale_body = control["held"].pop(0)
     with page.expect_request(is_state):  # the forced read queued behind it starts once it settles, and is held
         stale_route.fulfill(content_type="application/json", body=stale_body)
-    expect()(page.locator('#nav-projects-count')).to_have_text("2")  # the old feed has landed
+    expect()(page.locator('#nav-projects-count')).to_have_count(0)  # Projects has no aggregate unread total
+    expect()(row(page, "newer")).to_have_count(0)  # the renamed room is outside this find, so its row is not painted
     find.fill("Renamed freshly")
     expect()(row(page, "newer").locator('.nav-row-label')).to_have_text("Renamed freshly")
     find.fill("Old project")
@@ -310,10 +311,8 @@ def test_show_more_reaches_every_room_once_read_and_keeps_its_rows(pins_ui, tmp_
     assert abs(page.locator('#nav-projects-list').evaluate("list => list.scrollTop") - before) <= 1
     expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(499)
     page.locator('#primary-sidebar').screenshot(path=str(evidence / f"browse-{ui['tag']}.png"), animations="disabled")
-    # The owner's own collapse ends the browse: the list rests on the pin and the fifty newest again.
-    page.locator('#nav-projects-toggle').click()
-    page.locator('#nav-projects-toggle').click()
-    expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(51)
+    # The approved list stays browsable; there is no collapse step to discard the snapshot.
+    expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(499)
 
 
 def test_find_matches_every_name_in_any_case_or_accent_and_never_claims_a_room_is_missing(pins_ui, tmp_path):
@@ -356,7 +355,8 @@ def test_find_matches_every_name_in_any_case_or_accent_and_never_claims_a_room_i
     find.evaluate("input => input.setSelectionRange(2, 2)")
     control["unread"].add("newer")
     refresh(page)
-    expect()(page.locator('#nav-projects-count')).to_have_text("2")  # the snapshot has landed (a feed fact)
+    expect()(page.locator('#nav-projects-count')).to_have_count(0)  # a hidden room has no Projects total to speak for it
+    expect()(row(page, "newer")).to_have_count(0)  # its mark appears only when this find matches the room
     assert find.evaluate("input => [document.activeElement === input, input.value, input.selectionStart]") == [True, "archive", 2]
     expect()(shown).to_have_count(51)
     # No match: said of the names, with Clear search and Show all projects; a tombstone is never found.
@@ -550,40 +550,37 @@ def test_an_unread_room_beyond_the_feed_counts_while_a_find_shows_it_and_another
     refresh(page)
     expect()(page.locator('.nav-project-item')).to_have_count(51)
     assert "archive-200" not in shown_ids(page)
-    expect()(count).to_have_text("")
+    expect()(count).to_have_count(0)
     expect()(nav).to_have_attribute("aria-label", "Open navigation")
     with page.expect_response(is_cursors):  # a list that shows an unread room asks after its cursor at once
         find.fill("archive 200")
     expect()(mark).to_have_attribute("data-unread", "")
-    expect()(count).to_have_text(str(revision))
+    expect()(count).to_have_count(0)
     expect()(nav).to_have_attribute("aria-label", "Open navigation · new messages")
-    assert "in Projects" in page.locator('#nav-projects-toggle').get_attribute("title")
+    assert nav.get_attribute("aria-label") == "Open navigation · new messages"
     assert page.locator('#nav-projects-list [data-unread]').count() == 1  # the old room alone
     ui["client"].post('/api/ui/preferences', json={"project_seen_revision": {"archive-200": revision}}).raise_for_status()
     with page.expect_response(is_cursors):
         refresh(page)  # an ordinary state read: Main and the feed show nothing unread, the old room shown here does
     expect()(mark).not_to_have_attribute("data-unread", "")
-    expect()(count).to_have_text("")
+    expect()(count).to_have_count(0)
     expect()(nav).to_have_attribute("aria-label", "Open navigation")
-    assert "in Projects" not in (page.locator('#nav-projects-toggle').get_attribute("title") or "")
+    assert nav.get_attribute("aria-label") == "Open navigation"
     find.fill("")
     expect()(row(page, "archive-200")).to_have_count(0)
-    expect()(count).to_have_text("")
+    expect()(count).to_have_count(0)
     assert not [body for body in posts if "project_seen_revision" in body]
 
 
 def test_an_old_unread_room_no_find_shows_counts_nowhere_and_no_complete_list_is_read_for_it(pins_ui):
-    """The number counts what this sidebar shows: the feed's rooms and those an open find or browse lists, never one a
-    complete list only holds. A find for another old room reads a list that holds an unread room no row shows: the
-    number and ☰ stay as the feed says. While the find is open a registry change reads the list again. A find that
-    shows the room ends by a collapse or by clearing it: the number drops at once, and then neither a registry change
-    nor a reopened socket reads the list for the unread it holds. The next find or browse reads it again, as does a
-    socket reopened while that browse is open. Nothing is acknowledged."""
+    """Only a shown room's mark contributes to navigation's unread dot; Projects has no total. Finding another old
+    room must not leak an unseen room's unread fact. A registry change refreshes an open find, while ending the find
+    stops complete-list reads until the next find or browse. A reconnect respects that same boundary. No room is read."""
     page, root, control = pins_ui["page"], pins_ui["root"], pins_ui["control"]
     seed_archive(root)
     dialogue_store.append(root, "chat", {"ts": "2025-01-03T00:00:00Z", "direction": "out", "chat_id": 40200,
                                          "text": "An old reply this sidebar does not show"})
-    revision = advance_room_revision(root, project_id="archive-200")["visible_revision"]
+    advance_room_revision(root, project_id="archive-200")
     control["shared_cursors"] = True
     reads, posts = [], []
     page.on("request", lambda request: reads.append(request.url))
@@ -598,26 +595,27 @@ def test_an_old_unread_room_no_find_shows_counts_nowhere_and_no_complete_list_is
     find.fill("archive 201")
     expect()(status).to_have_text("1 project found")  # that list is applied, and the number said after it
     expect()(row(page, "archive-201")).to_be_visible()
-    expect()(count).to_have_text("")
+    expect()(count).to_have_count(0)
     expect()(nav).to_have_attribute("aria-label", "Open navigation")
     with page.expect_response(is_list):  # while a find is open, a registry change reads its list again
         changed(control, "archive-201")
     find.fill("archive 200")
     expect()(row(page, "archive-200").locator('.nav-project-row')).to_have_attribute("data-unread", "")
-    expect()(count).to_have_text(str(revision))
+    expect()(count).to_have_count(0)
     expect()(nav).to_have_attribute("aria-label", "Open navigation · new messages")
-    toggle = page.locator('#nav-projects-toggle')
-    toggle.click()  # a collapse ends the find: the number and ☰ say the feed's rooms again, at once
-    expect()(count).to_have_text("")
+    # Clear ends a find; the approved feed stays expanded and has no unread total in either state.
+    page.locator('.nav-find-clear').click()
+    expect()(count).to_have_count(0)
     expect()(nav).to_have_attribute("aria-label", "Open navigation")
-    toggle.click()
+    expect()(page.locator('#nav-projects-toggle')).to_have_count(0)
+    expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(51)
     expect()(find).to_have_value("")
     with page.expect_response(is_list):  # the next find reads the list as it starts
         find.fill("archive 200")
-    expect()(count).to_have_text(str(revision))
+    expect()(count).to_have_count(0)
     find.fill("")  # clearing it ends it the same way
     expect()(row(page, "archive-200")).to_have_count(0)
-    expect()(count).to_have_text("")
+    expect()(count).to_have_count(0)
     expect()(nav).to_have_attribute("aria-label", "Open navigation")
     before = lists()
     with page.expect_response(lambda response: is_state(response.request)):
@@ -626,7 +624,7 @@ def test_an_old_unread_room_no_find_shows_counts_nowhere_and_no_complete_list_is
         reopen(page, control)
     settle(page)
     assert lists() == before, "a list was read again for unread no row shows"
-    expect()(count).to_have_text("")
+    expect()(count).to_have_count(0)
     more = page.locator('#nav-projects-list > .nav-projects-more')
     expect()(more).to_have_text("Show 50 more")
     with page.expect_request(is_list):  # the next browse reads the list as it starts
@@ -635,7 +633,7 @@ def test_an_old_unread_room_no_find_shows_counts_nowhere_and_no_complete_list_is
     with page.expect_request(is_list):  # and a socket reopened while it is open reads it again
         reopen(page, control)
     expect()(row(page, "archive-200")).to_have_count(0)
-    expect()(count).to_have_text("")
+    expect()(count).to_have_count(0)
     assert not [body for body in posts if "project_seen_revision" in body]
 
 
@@ -679,30 +677,35 @@ def test_a_no_match_is_not_repeated_while_its_list_is_read_again(pins_ui):
     expect()(note).to_have_count(0)
 
 
-@pytest.mark.parametrize("press", ["#nav-projects-count", "#nav-projects-toggle"], ids=["header-facts", "toggle"])
+@pytest.mark.parametrize("press", [".nav-find-clear", ".nav-find-input"], ids=["header-facts", "toggle"])
 def test_a_pointer_collapse_of_a_browse_leaves_the_keyboard_on_the_toggle(pins_ui, press):
-    """A deep row has the keyboard when a pointer presses the header. A press need not focus the toggle (WebKit), the
-    number beside it is no control at all, and the row goes with the browse: the toggle takes the keyboard."""
+    """The retired header/collapse has no target. Clear (or the field's Escape) returns from a find to the kept
+    browse and leaves the keyboard on Find, with every browsed room still reachable."""
     page, root, control = pins_ui["page"], pins_ui["root"], pins_ui["control"]
     seed_archive(root)
-    control["unread"].add("newer")  # the header's number has a body to press
+    control["unread"].add("newer")
     refresh(page)
-    expect()(page.locator('#nav-projects-count')).to_have_text("2")
-    page.locator('.nav-find-input').fill("no such name")
+    expect()(page.locator('#nav-projects-count, #nav-projects-toggle')).to_have_count(0)
+    expect()(row(page, "newer").locator('.nav-project-row')).to_have_attribute("data-unread", "")
+    find = page.locator('.nav-find-input')
+    find.fill("no such name")
     page.locator('.nav-projects-more', has_text="Show all projects").click()
     expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(499)
-    row(page, "archive-000").locator('.nav-project-row').focus()
+    find.fill("archive 000")
+    deep = row(page, "archive-000").locator('.nav-project-row')
+    expect()(deep).to_be_visible()
+    deep.focus()
     page.locator(press).click()
-    expect()(page.locator('#nav-projects-list > .nav-project-item:not([hidden])')).to_have_count(1)  # the pin
-    expect()(page.locator('#nav-projects-toggle')).to_be_focused()
+    if press == ".nav-find-input":
+        page.keyboard.press("Escape")
+    expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(499)
+    expect()(find).to_have_value("")
+    expect()(find).to_be_focused()
 
 
 def test_a_collapse_leaves_the_keyboard_on_a_pinned_row_and_takes_it_from_any_other(pins_ui):
-    """A press that moves no focus, as an assistive technology's does: a pinned row stays where it is, with the
-    keyboard; a row or a command that goes with the browse hands it to the toggle first."""
+    """The approved Projects feed has no collapse control: pinned and ordinary rows stay in one keyboard list."""
     page, root = pins_ui["page"], pins_ui["root"]
-    toggle = page.locator('#nav-projects-toggle')
-    press = "button => button.click()"
     seed_archive(root)
     refresh(page)
 
@@ -714,17 +717,15 @@ def test_a_collapse_leaves_the_keyboard_on_a_pinned_row_and_takes_it_from_any_ot
     browse()
     pinned = row(page, "archive-100").locator('.nav-project-row')
     pinned.focus()
-    toggle.evaluate(press)
-    expect()(row(page, "archive-000")).to_have_count(0)
+    expect()(page.locator('#nav-projects-toggle')).to_have_count(0)
     expect()(pinned).to_be_visible()
     expect()(pinned).to_be_focused()
-    toggle.evaluate(press)
+    page.locator('.nav-find-input').fill("")
+    expect()(page.locator('#nav-projects-list > .nav-project-item')).to_have_count(499)
     browse()
     row(page, "archive-000").locator('.nav-project-row').focus()
-    toggle.evaluate(press)
-    expect()(row(page, "archive-000")).to_have_count(0)
-    expect()(toggle).to_be_focused()
-    assert page.evaluate("document.activeElement.id") == "nav-projects-toggle"
+    expect()(row(page, "archive-000")).to_be_visible()
+    assert page.evaluate("document.activeElement.dataset.projectId") == "archive-000"
 
 
 def test_find_field_is_a_row_high_capsule_on_the_rows_columns(pins_ui, tmp_path):
@@ -739,10 +740,10 @@ def test_find_field_is_a_row_high_capsule_on_the_rows_columns(pins_ui, tmp_path)
         return {
             height: box(find).height, rowHeight: box(row).height, radius: parseFloat(style.borderTopLeftRadius),
             glyphX: box(find.querySelector('.nav-find-glyph')).left,
-            iconX: box(document.querySelector('#nav-projects-toggle .nav-row-icon')).left,
+            iconX: box(document.querySelector('#primary-sidebar [data-nav-page="circles"] > svg')).left,
             textX: box(input).left + parseFloat(getComputedStyle(input).paddingLeft),
             labelX: box(row.querySelector('.nav-row-label')).left,
-            above: box(find).top - box(document.querySelector('.nav-projects-header')).bottom,
+                above: box(find).top - box(document.querySelector('.nav-projects-header')).top,
             below: box(row).top - box(find).bottom,
             shadow: style.boxShadow, inputBorder: getComputedStyle(input).borderTopWidth,
             fontSize: parseFloat(getComputedStyle(input).fontSize), placeholder: input.placeholder,
@@ -751,13 +752,15 @@ def test_find_field_is_a_row_high_capsule_on_the_rows_columns(pins_ui, tmp_path)
     }""")
     touch = coarse(page)
     assert geometry["height"] == pytest.approx(44 if touch else 32, abs=0.5), geometry
-    assert geometry["height"] == pytest.approx(geometry["rowHeight"], abs=0.5), geometry
+    # The find capsule keeps the compact control height; Project rows now spend their second line on the newest fact.
+    assert geometry["rowHeight"] >= geometry["height"], geometry
     assert geometry["radius"] >= geometry["height"] / 2, geometry  # a capsule, as every one-line control
     assert geometry["glyphX"] == pytest.approx(geometry["iconX"], abs=1), geometry
-    assert geometry["textX"] == pytest.approx(geometry["labelX"], abs=1), geometry
+    # The field's words follow its magnifier; Project names have no leading glyph in the approved two-line rows.
+    assert geometry["textX"] == pytest.approx(geometry["glyphX"] + 30, abs=1), geometry
     assert geometry["shadow"] != "none" and geometry["inputBorder"] == "0px", geometry
     assert geometry["fontSize"] >= (16 if touch else 14), geometry
-    assert 0 < geometry["above"] < geometry["below"], geometry
+    assert geometry["above"] >= 0 and geometry["below"] > 0, geometry
     assert geometry["placeholder"] == "Find a project" and geometry["clearHidden"] is True
     find = page.locator('#nav-projects .nav-find-input')
     find.fill("Recent")
@@ -768,12 +771,9 @@ def test_find_field_is_a_row_high_capsule_on_the_rows_columns(pins_ui, tmp_path)
     expect()(find).to_have_value("")
     expect()(find).to_be_focused()
     expect()(page.locator('#nav-projects .nav-find-clear')).to_be_hidden()
-    # Collapsed, the field hides with the rest and a query ends; reopened, the list is as it rested.
-    find.fill("Recent")
-    page.locator('#nav-projects-toggle').click()
-    expect()(page.locator('#nav-projects .nav-projects-find')).to_be_hidden()
-    page.locator('#nav-projects-toggle').click()
-    expect()(find).to_have_value("")
+    # The field is permanent; clearing it returns to the resting feed without a collapse control.
+    assert page.locator('#nav-projects-toggle').count() == 0
+    expect()(page.locator('#nav-projects .nav-projects-find')).to_be_visible()
     assert order(page) == ["newer", "older"]
 
 
@@ -895,9 +895,7 @@ def test_show_more_keeps_sorting_and_holds_the_place_and_reads_again_when_an_old
         with page.expect_response(lambda response: urlparse(response.url).path == '/api/state'):
             refresh(page)
     assert len(reads_of(reads, "/api/projects", all="1")) == lists + len(ui["control"]["sockets"]) - sockets
-    page.locator('#nav-projects-toggle').click()
-    page.locator('#nav-projects-toggle').click()
-    expect()(items).to_have_count(51)
+    expect()(items).to_have_count(101)
     assert shown_ids(page)[:3] == ["archive-100", first, "archive-420"]
 
 

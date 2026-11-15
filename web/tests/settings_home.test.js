@@ -267,8 +267,13 @@ class ScopeStub extends Stub {
     }
 }
 
-test('a door pressed inside Settings leads back to it: a Dashboard tab by its path, a page of its own by its header Back', async (t) => {
+test('a Settings door keeps its path and header Back in both layouts', async (t) => {
     const { env, content, state, shown, showPage } = world(t);
+    const layout = (name) => {
+        env.window.ouroLayout = { layout: name };
+        env.window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout: name } }));
+    };
+    layout('docked');
     env.document.createElement = (tag) => new ScopeStub(tag);
     const dashboard = [];
     const layered = [];
@@ -311,6 +316,8 @@ test('a door pressed inside Settings leads back to it: a Dashboard tab by its pa
     // Circles: Back stands in its header's Back slot, never as a row of its own, with its one layer.
     await press('page:circles');
     assert.deepEqual(shown.at(-1), ['circles']);
+    assert.deepEqual(backOf(circles), back, 'the docked header leads back to Settings too');
+    layout('stack');
     assert.deepEqual(backOf(circles), back);
     assert.equal(layered.at(-1), 'push settings-door-back', 'Escape and the system\'s Back return to Settings too');
     // Its press returns to Settings, and the slot is emptied and its layer gone.
@@ -321,6 +328,10 @@ test('a door pressed inside Settings leads back to it: a Dashboard tab by its pa
 
     // Skills: in its header's slot as well; the page's own parts stay as they were.
     await press('page:skills');
+    assert.deepEqual(backOf(skills), back);
+    layout('docked');
+    assert.deepEqual(backOf(skills), back);
+    layout('stack');
     assert.deepEqual(backOf(skills), back);
     assert.deepEqual(partsOf(skills), skillsParts);
     // Leaving that page any other way empties the slot.
@@ -431,6 +442,49 @@ test('the Accounts row counts the accounts beside every page: the home\'s passiv
     await home.refresh();
     await settle();
     assert.deepEqual([answer(), passive()], ['4 accounts, 2 API keys', before]);
+});
+
+test('a Settings door keeps one history entry from the list or a page, and a refused leave keeps its levels', async (t) => {
+    const { createLayerStack } = await import('../modules/layers.js');
+    const { registerSettingsPage } = await import('../modules/settings_pages.js');
+    for (const origin of ['list', 'one-column', 'two-pane']) for (const door of ['page:skills', 'dashboard:costs']) for (const allowed of [true, false]) {
+        await t.test(`${origin}/${door}/${allowed}`, async (sub) => {
+            const { env, content, state } = world(sub);
+            const calls = [];
+            const layers = createLayerStack({ win: null, doc: null, history: {
+                pushState: () => calls.push('push'), back: () => calls.push('back'),
+            } });
+            sub.after(() => layers.destroy());
+            const skills = env.document.createElement('div'); skills.id = 'page-skills';
+            skills.innerHTML = '<div class="app-page-header"></div><section></section>';
+            content.append(skills);
+            let leave;
+            registerSettingsPage('test-door-history', { title: 'Door', mount(_body, { ctx }) { leave = ctx.openSettings; } });
+            const showPage = async (name) => {
+                await Promise.resolve(); // app.js awaits its before-page-leave handlers
+                if (name !== 'settings' && !allowed) return false;
+                state.activePage = name;
+                env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: name } }));
+                return true;
+            };
+            const controls = initSettings({ state, ws: env.ws, layers, showPage, openDashboardTab: async () => {
+                if (await showPage('dashboard')) layers.push({ id: 'dashboard-back', page: true, focus: false });
+            } });
+            const home = content.querySelector('[data-settings-home]');
+            home.getClientRects = () => origin === 'one-column' ? [] : [{}];
+            await controls.open(origin === 'list' ? '' : 'test-door-history');
+            await settle();
+            const hadLayer = origin === 'one-column';
+            assert.deepEqual(calls, hadLayer ? ['push'] : []);
+            if (origin === 'list') await home.fire('click', { target: home.querySelector(`[data-settings-open="${door}"]`) });
+            else await leave(door);
+            await settle();
+            assert.deepEqual(calls, hadLayer || allowed ? ['push'] : [], 'the handover never consumes and replaces an existing history entry');
+            assert.equal(layers.size(), hadLayer || allowed ? 1 : 0);
+            assert.equal(layers.top(), allowed ? (door === 'page:skills' ? 'settings-door-back' : 'dashboard-back') : hadLayer ? 'settings-level-1' : null);
+            assert.equal(state.activePage, allowed ? (door === 'page:skills' ? 'skills' : 'dashboard') : 'settings');
+        });
+    }
 });
 
 // The list's reads (settings.js shows it, settings_home.js reads): its sources are read when it comes on screen, one

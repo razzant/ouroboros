@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
+import { bindScrollFade } from '../modules/scroll_fade.js';
 
 // The shell's one layout switch: theme.js writes html[data-layout] before CSS from one number pair and keeps
 // it current; layout.js is the door every module reads it through (docs/DESIGN.md "Shell", P1).
@@ -104,6 +105,7 @@ test('measurePinnedBars writes the pinned head and foot heights, and says when t
     const attrs = new Set();
     // The foot is the whole bar a short window pins: the six sections, the version and the update.
     const sidebar = { style: { setProperty: (name, value) => props.set(name, value) }, clientHeight: 500,
+        ownerDocument: { defaultView: { getComputedStyle: () => ({ getPropertyValue: name => name === '--space-4' ? '16px' : '' }) } },
         toggleAttribute: (name, on) => { if (on) attrs.add(name); else attrs.delete(name); },
         querySelector: (sel) => ({ '.sidebar-head': head, '.sidebar-foot': foot, '.nav-project-row': row })[sel] ?? null };
     const observed = [];
@@ -131,11 +133,48 @@ test('measurePinnedBars writes the pinned head and foot heights, and says when t
     sidebar.clientHeight = 500;
     fire();
     assert.equal(attrs.has('data-bars-crowd'), false, 'and is pinned again when the room returns');
+    head.getBoundingClientRect = () => ({ height: 106 });
+    foot.getBoundingClientRect = () => ({ height: 152 });
+    for (const [height, crowded] of [[340, false], [320, true], [306, true], [300, true], [340, false]]) {
+        sidebar.clientHeight = height;
+        fire();
+        assert.equal(attrs.has('data-bars-crowd'), crowded, `${height}px includes the 16px scroll clearance at both bars`);
+    }
     dispose();
     assert.equal(disconnected, true);
     // A page without the bars, or without ResizeObserver, measures nothing and still returns a disposer.
     assert.equal(typeof measurePinnedBars({ querySelector: () => null }, { Observer }), 'function');
     assert.equal(typeof measurePinnedBars(sidebar, { Observer: undefined }), 'function');
+});
+
+test('app startup binds the column fade to hidden rows, and clears it at settled edges', () => {
+    const source = fs.readFileSync(new URL('../app.js', import.meta.url), 'utf8');
+    const start = source.indexOf('const primarySidebar =');
+    const end = source.indexOf('const navProjectsHeader =', start);
+    assert.ok(start >= 0 && end > start, 'execute the sidebar startup including its real fade binding');
+    const attrs = new Set(), listeners = new Map(), frames = [];
+    class Observer { observe() {} disconnect() {} }
+    const sidebar = { scrollTop: 0, clientHeight: 320, scrollHeight: 1000, children: [],
+        ownerDocument: { defaultView: { ResizeObserver: Observer, MutationObserver: Observer,
+            requestAnimationFrame: fn => frames.push(fn) } },
+        querySelector: () => null,
+        toggleAttribute: (name, on) => on ? attrs.add(name) : attrs.delete(name),
+        addEventListener: (name, fn) => listeners.set(name, fn) };
+    vm.runInNewContext(source.slice(start, end), {
+        document: { getElementById: id => id === 'primary-sidebar' ? sidebar : null },
+        createShellMotion: () => ({}), isStackLayout: () => false,
+        renderNavRows: () => '', measurePinnedBars: () => {}, bindScrollFade,
+    });
+    const check = (top, height, expected) => {
+        sidebar.scrollTop = top; sidebar.clientHeight = height;
+        listeners.get('scroll')?.();
+        while (frames.length) frames.shift()();
+        assert.deepEqual([attrs.has('data-scroll-above'), attrs.has('data-scroll-below')], expected);
+    };
+    check(0, 320, [false, true]);
+    check(300, 320, [true, true]);
+    check(680, 320, [true, false]);
+    check(0, 1000, [false, false]);
 });
 
 // The primary input, the switch's one other fact (owner 06.11; docs/DESIGN.md "Shell"): theme.js paints

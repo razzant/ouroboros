@@ -10,7 +10,8 @@ import { SIDEBAR_MIN_FALLBACK, setupResizablePanels, sidebarMinWidth } from '../
 
 const MIN = 270;
 
-function fakeShell({ min = `${MIN}px`, sidebarWidth = 300 } = {}) {
+function fakeShell({ min = `${MIN}px`, max = '560px', sidebarWidth = 300 } = {}) {
+    const bounds = { maxWidth: max };
     const vars = new Map();
     const style = (map) => ({ setProperty: (k, v) => map.set(k, v), removeProperty: (k) => map.delete(k), getPropertyValue: (k) => map.get(k) || '' });
     const root = { dataset: { layout: 'docked' }, style: style(vars) };
@@ -38,15 +39,24 @@ function fakeShell({ min = `${MIN}px`, sidebarWidth = 300 } = {}) {
             return { listeners, addEventListener: (k, fn) => { listeners[k] = fn; }, setPointerCapture() {}, releasePointerCapture() {} };
         },
     };
-    globalThis.getComputedStyle = (node) => ({ getPropertyValue: (k) => (node === root && k === '--sidebar-min-width' ? min : '') });
+    globalThis.getComputedStyle = (node) => ({ maxWidth: node === sidebar ? bounds.maxWidth : 'none',
+        getPropertyValue: (k) => (node === root && k === '--sidebar-min-width' ? min : '') });
     globalThis.requestAnimationFrame = (fn) => { fn(); return 0; };
     globalThis.cancelAnimationFrame = () => {};
     globalThis.fetch = async (url, init) => { posts.push(JSON.parse(init.body)); return { ok: true }; };
     const restore = () => Object.assign(globalThis, previous);
-    return { root, vars, sidebar, posts, restore };
+    return { root, vars, sidebar, bounds, posts, restore };
 }
 
 const settle = () => new Promise((ok) => setTimeout(ok, 450));  // the stored width is posted after 400 ms
+const drag = (shell, delta) => {
+    const handle = shell.sidebar.handles[0];
+    handle.listeners.pointerdown({ clientX: 500, pointerId: 1, preventDefault() {} });
+    handle.listeners.pointermove({ clientX: 500 + delta });
+    const during = shell.sidebar.own.get('--drag-width');
+    handle.listeners.pointerup({ pointerId: 1 });
+    return during;
+};
 
 test('the minimum is the stylesheet one, and the stylesheet draws the sidebar no narrower', () => {
     const shell = fakeShell();
@@ -79,14 +89,6 @@ test('a narrower stored width is raised to the minimum and stored again; an allo
 });
 
 test('a drag stops at the minimum, and a drag inside the range keeps its width', async () => {
-    const drag = (shell, delta) => {
-        const handle = shell.sidebar.handles[0];
-        handle.listeners.pointerdown({ clientX: 500, pointerId: 1, preventDefault() {} });
-        handle.listeners.pointermove({ clientX: 500 + delta });
-        const during = shell.sidebar.own.get('--drag-width');
-        handle.listeners.pointerup({ pointerId: 1 });
-        return during;
-    };
     const shell = fakeShell({ sidebarWidth: 300 });
     try {
         setupResizablePanels({ sidebar_width: 300 });
@@ -98,4 +100,35 @@ test('a drag stops at the minimum, and a drag inside the range keeps its width',
         await settle();
         assert.deepEqual(shell.posts, [{ sidebar_width: MIN + 40 }]);
     } finally { shell.restore(); }
+});
+
+test('the stylesheet caps every sidebar width by the room, including a saved width and window narrowing', () => {
+    const ui = fs.readFileSync(new URL('../ui.css', import.meta.url), 'utf8');
+    assert.match(ui, /--room-min-width: 320px;/, 'the folded composer and question count fit this column');
+    const css = fs.readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.ok(/html\[data-layout="docked"\] #primary-sidebar \{ max-width: min\(560px, calc\(100vw - var\(--room-min-width\)\)\); \}/.test(css),
+        'the CSS maximum leaves the room its minimum, even without a drag event');
+});
+
+test('restore and drag read the same CSS maximum: a starving width is clamped and an ordinary width is kept', async () => {
+    for (const [stored, expected] of [[560, 480], [400.25, 400.25]]) {
+        const shell = fakeShell({ max: '480px' });  // an 800 px window leaves the room 320 px
+        try {
+            setupResizablePanels({ sidebar_width: stored });
+            assert.equal(shell.vars.get('--sidebar-width'), `${expected}px`);
+            await settle();
+            assert.deepEqual(shell.posts, stored === expected ? [] : [{ sidebar_width: expected }]);
+            assert.equal(drag(shell, 260), '480px');
+            assert.equal(shell.vars.get('--sidebar-width'), '480px');
+            assert.equal(drag(shell, 100), '400px');
+            assert.equal(shell.vars.get('--sidebar-width'), '400px');
+            // The stylesheet's maximum changes with the viewport, including during a handle's lifetime.
+            shell.bounds.maxWidth = '440px';
+            assert.equal(drag(shell, 200), '440px');
+            shell.bounds.maxWidth = '560px';
+            assert.equal(drag(shell, 200), '500px');
+            await settle();
+            assert.deepEqual(shell.posts.at(-1), { sidebar_width: 500 });
+        } finally { shell.restore(); }
+    }
 });
