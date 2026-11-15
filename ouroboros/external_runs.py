@@ -431,11 +431,12 @@ def _name(row: Dict[str, Any]) -> str:
 
 def passed_reviews_notice(observation: Any) -> str:
     """What a sleep's return names of the independent reviews its Resume did not wait for
-    (``budget_resume._resume_custody_refusal``): still open, never a writer of this work. ``""`` for none."""
+    (``budget_resume._resume_custody_refusal``): still open, never a writer of this work. ``""`` for none.
+    A row this return's observation tried to stop carries that attempt's recorded outcome word, sent or not."""
     rows = [row for row in (observation or {}).get("runs") or [] if isinstance(row, dict)
             and row.get("independent_review") is True and str(row.get("state") or "") != EXTERNAL_STOP_CONFIRMED]
-    named = ", ".join(_name(row) + (" (its stop was requested)" if row.get("stop_policy") == "request_stop" else "")
-                      for row in rows)
+    named = ", ".join(_name(row) + (f" (stop outcome: {row.get('stop_outcome') or 'unrecorded'})"
+                                    if row.get("stop_policy") == "request_stop" else "") for row in rows)
     return (f"[SYSTEM NOTICE]\nThis return did not wait for {named}: independent review that cannot change this "
             "work. Its outcome and cost are unresolved.") if rows else ""
 
