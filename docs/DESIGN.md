@@ -3287,9 +3287,9 @@ are this row; a list groups it under a quiet group name, on a phone one card of 
 
 ### A section with pages
 
-Settings and Dashboard are sections with pages, and their pages stand as a list beside the open page: from 40rem
+Settings and Dashboard hold a list beside the open page: from 40rem
 of the section's box the list is a rail (`--section-rail-w`) and the page stands beside it. The band holds the list's
-controls (Settings' search) and the page's controls. Its chosen row names the page; the heading stays for readers,
+controls (Settings' search; on a phone, in the list) and the page's controls. Its chosen row names the page; the heading stays for readers,
 and a deeper Settings level keeps its name. A page is always open: the section's first page the first time
 (Settings: Models), later the last one opened on the device. Narrower, one column shows the list, under the
 section's name led by Ouroboros's picture, or the page, under Back and its name. Choosing a row keeps the list

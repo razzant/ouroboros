@@ -102,35 +102,36 @@ SECTION_PAGE_ALONE = "@container sectionplace (max-width: calc(40rem - 0.02px)) 
 
 
 def _block(css: str, head: str) -> str:
-    """The body of the one block that starts with `head` (balanced braces)."""
-    assert css.count(head) == 1, (head, css.count(head))
-    start = css.index(head) + len(head)
-    depth, pos = 1, start
-    while depth and pos < len(css):
-        depth += {"{": 1, "}": -1}.get(css[pos], 0)
-        pos += 1
-    return css[start:pos - 1]
+    """Bodies governed by this query, including rules beside their component (balanced braces)."""
+    assert head in css, head
+    bodies, end = [], 0
+    while (index := css.find(head, end)) >= 0:
+        start = index + len(head)
+        depth, end = 1, start
+        while depth and end < len(css):
+            depth += {"{": 1, "}": -1}.get(css[end], 0)
+            end += 1
+        bodies.append(css[start:end - 1])
+    return "\n".join(bodies)
 
 
 def test_a_section_gives_the_places_control_up_only_where_a_page_replaced_its_list():
-    """In the stack layout a section's page is one row, Back and its name, where the places control stood. From 40rem
-    a section holds its list beside the page and the first-level page has no Back: there the places control is the
-    only way to another destination. So the rule that hides it lives inside the query that is true only below 40rem
-    (the complement of the two-pane query) and nowhere else: outside it a person at 640 to 719 px is shut in."""
+    """A level's Back replaces the picture only when its page replaced the list. A jump independently owes a
+    return in either layout; its writer marks the header, so its single capsule also replaces the picture."""
     for rel, page in (("web/style.css", "#page-dashboard"), ("web/settings.css", "#page-settings")):
         css = _read(rel)
         hide = f'html[data-layout="stack"] {page}[data-section-view="page"] > .app-page-header > .app-page-leading'
         inside = _block(css, SECTION_PAGE_ALONE)
         assert hide in inside, f"{rel}: a page that replaced the list keeps one leading control, its Back"
-        assert hide not in css.replace(inside, ""), f"{rel}: outside the below-40rem query this hides the places control beside the list"
+        assert css.count(hide) == inside.count(hide), f"{rel}: the level rule belongs below 40rem"
+    css = _read("web/style.css")
+    assert 'html[data-layout="stack"] .app-page-header[data-return] > .app-page-leading { display: none; }' in css
     assert "@container sectionplace (min-width: 40rem) {" in _read("web/ui.css"), "the two panes start where the query above ends"
 
 
-def test_a_touch_window_names_a_sections_two_columns_on_a_row_under_its_band():
-    """From 40rem a touch window (the stack layout) holds a section's list beside its page: the band keeps the places
-    control and the place's name on one centre line, and the columns' names stand on a row under it, the Dashboard as
-    Settings. The stack layout's header is inset by --space-3, not by the desk's padding, so the lead counts that inset:
-    it starts at the list's own, Settings' search over its rows and the page's name over its cards."""
+def test_a_touch_sections_controls_can_follow_its_row_but_an_empty_lead_draws_nothing():
+    """At the touch/two-pane overlap, a rail can follow the row. Empty captions cannot keep a second row alive;
+    Settings puts Search in its list, with its one named Back and level in the header when owed."""
     two = _block(_read("web/ui.css"), "@container sectionplace (min-width: 40rem) {")
     header = 'html[data-layout="stack"] .section-place > .app-page-header'
     assert f'{header} {{ grid-template-areas: "leading title toolbar" "lead lead lead"; }}' in two
@@ -140,3 +141,5 @@ def test_a_touch_window_names_a_sections_two_columns_on_a_row_under_its_band():
     assert ('html[data-layout="stack"] .section-place[data-section-view="page"] .section-lead '
             "{ margin-inline-start: calc(var(--section-rail-start) - var(--space-3)); }") in two
     assert "padding: var(--chrome-inset) var(--space-3);" in _read("web/style.css"), "the stack header's inset the lead counts"
+    assert '#page-dashboard > .app-page-header[data-empty]:not([data-return]) .app-page-lead { display: none; }' in _read('web/style.css')
+    assert '#page-settings > .app-page-header[data-return] .app-page-lead { display: flex; }' in _read('web/settings.css')

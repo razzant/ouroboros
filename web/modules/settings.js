@@ -124,7 +124,7 @@ export function initSettings(ctx = {}) {
     }
     const panes = () => sectionHoldsTwoPanes(page);
     function placeSearch() {
-        const inHome = currentLayout() === 'stack' && !panes();
+        const inHome = currentLayout() === 'stack';
         page.dataset.searchPlace = inHome ? 'list' : 'band';
         const parent = inHome ? cardHome : searchSlot;
         if (!searchField || !parent) return;

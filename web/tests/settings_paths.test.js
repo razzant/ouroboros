@@ -617,7 +617,7 @@ test('Settings search belongs to the phone list and returns to the desktop heade
         await settle();
         assert.equal(env.document.activeElement, field, 'a resize keeps the keyboard in Search');
     }
-    for (const [layoutName, two, parent] of [['docked', false, slot], ['docked', true, slot], ['stack', true, slot], ['stack', false, home]]) {
+    for (const [layoutName, two, parent] of [['docked', false, slot], ['docked', true, slot], ['stack', true, home], ['stack', false, home]]) {
         wide.on = two;
         env.window.ouroLayout.layout = layoutName;
         observers.forEach(fn => fn([{ target: content.querySelector('.settings-shell') }]));
