@@ -1,0 +1,40 @@
+# Temporary diagnostic for issue #3501 (Windows node lane memory overload since #3484); never merged.
+name: diag-3501
+on:
+  push:
+    branches: ['diag/3501-windows-node']
+permissions:
+  contents: read
+jobs:
+  node:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: The suspect case alone, one process, a 512 MB heap
+        shell: bash
+        working-directory: web
+        run: |
+          node --version
+          set +e
+          node --max-old-space-size=512 --stack-trace-limit=60 --test --test-isolation=none --test-timeout=120000 \
+            --test-name-pattern='census arrives before the history draws the card' tests/work_portal.test.js > ../suspect.log 2>&1
+          echo "suspect exit $?"
+          tail -c 20000 ../suspect.log
+      - name: The whole portal file, one process, a 512 MB heap
+        shell: bash
+        working-directory: web
+        run: |
+          set +e
+          node --max-old-space-size=512 --stack-trace-limit=60 --test --test-isolation=none --test-timeout=120000 \
+            tests/work_portal.test.js > ../whole.log 2>&1
+          echo "whole exit $?"
+          grep -E '^(not ok|ok) ' ../whole.log | tail -15
+          tail -c 12000 ../whole.log
