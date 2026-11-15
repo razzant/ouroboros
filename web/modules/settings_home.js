@@ -407,8 +407,10 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     // is a sequencer. Every applied body repaints (`watch`), so a text is written only when it changes.
     const hostStart = createHostStart();
     const put = (el, text) => { if (el.textContent !== text) el.textContent = text; };
-    function paintCard() {
-        const body = ctx.stateSnapshots ? ctx.stateSnapshots.latest?.() : facts.state;
+    // `read: false` paints without taking a body: the close, which forgets, takes none, so whichever close handler runs
+    // first (app.js's retires the sequencer), a body from before the disconnect is never read back.
+    function paintCard({ read = true } = {}) {
+        const body = !read ? null : ctx.stateSnapshots ? ctx.stateSnapshots.latest?.() : facts.state;
         if (body) hostStart.read(body);
         const being = beingState({ connected: ctx.ws?.isConnected?.() !== false, ready: hostStart.ready(),
             boot: hostStart.status().bootPhase });
@@ -620,7 +622,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     const offs = [getContributions().onLifecycle(() => renew(['skills'])),
         ...['update_status_ready', 'update_progress_changed'].map((type) => ctx.ws?.on?.(type, () => renew(['update']))),
         ctx.ws?.on?.('open', () => paintCard()),
-        ctx.ws?.on?.('close', () => { hostStart.forget(); paintCard(); }),
+        ctx.ws?.on?.('close', () => { hostStart.forget(); paintCard({ read: false }); }),
         ctx.stateSnapshots?.watch?.(() => paintCard())];
     root.addEventListener('click', onClick);
     cardEl?.addEventListener('click', onClick);

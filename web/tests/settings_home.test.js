@@ -285,6 +285,15 @@ test('the card keeps the header\'s readiness rule over the page\'s sequencer: a 
     connected = true;
     emit('open');
     assert.deepEqual(words(), said('Online'), 'a body read after the close proves readiness: the open keeps it, as the header does');
+    await apply({ supervisor_ready: true });
+    connected = false;
+    handlers.get('close')?.({});  // the home's close handler first this time, then app.js's retire
+    snapshots.retire();
+    connected = true;
+    emit('open');
+    assert.deepEqual(words(), said('Starting…'), 'in either order, the close does not read back the body before it');
+    await apply({ supervisor_ready: true });
+    assert.deepEqual(words(), said('Online'));
     assert.equal(env.calls.length, 0, 'the home read nothing');
     home.dispose();
     await apply({ supervisor_ready: false, boot: { phase: 'failed', error: 'later' } });
