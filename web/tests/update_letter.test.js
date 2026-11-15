@@ -281,6 +281,31 @@ test('the description hides wherever it could only mislead', () => {
 });
 
 
+test('the host line about the update on offer shows with or without a description, only from that range\'s facts', () => {
+    const range = { base_sha: 'a'.repeat(40), target_sha: 'b'.repeat(40) };
+    const receipt = { checks: [], review: { observed: 'FAIL', declared: 'PASS' } };
+    const facts = { ...range, landed_over_review: [], commits: [{ sha: 'm'.repeat(40), subject: 'merge', receipt }] };
+    const line = 'Went in over a review FAIL or no verdict: 1 merge.';
+    const described = updateLetterView({ ...AVAILABLE, letter: letter({ qualification: facts, checked_key: range }) });
+    assert.equal(described.over, line);
+    assert.deepEqual(described.overNames, ['mmmmmmmm (merge; review observed FAIL)']);
+    // No description yet: the section shows for the update on offer, and the line with it.
+    const bare = updateLetterView({ ...AVAILABLE, letter: { state: 'none', text: '', checked_key: range, qualification: facts } });
+    assert.equal(bare.state, 'empty');
+    assert.equal(bare.over, line);
+    // Facts of another range, a range that is not on offer, or facts that name nothing: no line.
+    const other = { ...facts, target_sha: 'c'.repeat(40) };
+    assert.equal(updateLetterView({ ...AVAILABLE, letter: letter({ qualification: other, checked_key: range }) }).over, '');
+    assert.equal(updateLetterView({ ...CURRENT, letter: letter({ relation: 'applied', qualification: facts }) }).over, '');
+    const quiet = { ...facts, commits: [{ sha: 'm'.repeat(40), subject: 'merge', receipt: { checks: [], review: { observed: 'PASS' } } }] };
+    assert.equal(updateLetterView({ ...AVAILABLE, letter: letter({ qualification: quiet, checked_key: range }) }).over, '');
+    // The panel paints it before the unchanged-body return, in its own element above the description body, and the
+    // Apply confirmation mounts its content region for the line alone.
+    assert.ok(SOURCE.indexOf("letterOver.textContent = view.over") < SOURCE.indexOf('if (nextKey === letterKey)'));
+    assert.ok(SOURCE.indexOf('id="updates-letter-over"') < SOURCE.indexOf('id="updates-letter-body"'));
+    assert.match(SOURCE, /content: description \|\| over \? \{/);
+});
+
 test('a description-bearing payload leaves the verdict byte-for-byte identical', () => {
     for (const base of [CURRENT, AVAILABLE, { managed: true, update_tx: { active: true, phase: 'rolling_back' } }]) {
         for (const phase of ['', 'checking', 'updating', 'restart_required']) {
