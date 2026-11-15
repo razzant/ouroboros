@@ -24,7 +24,7 @@ jobs:
         run: |
           node --version
           set +e
-          node --max-old-space-size=512 --stack-trace-limit=60 --test --test-isolation=none --test-timeout=120000 \
+          node --max-old-space-size=512 --stack-trace-limit=60 --test --experimental-test-isolation=none --test-timeout=120000 \
             --test-name-pattern='census arrives before the history draws the card' tests/work_portal.test.js > ../suspect.log 2>&1
           echo "suspect exit $?"
           tail -c 20000 ../suspect.log
@@ -33,7 +33,7 @@ jobs:
         working-directory: web
         run: |
           set +e
-          node --max-old-space-size=512 --stack-trace-limit=60 --test --test-isolation=none --test-timeout=120000 \
+          node --max-old-space-size=512 --stack-trace-limit=60 --test --experimental-test-isolation=none --test-timeout=120000 \
             tests/work_portal.test.js > ../whole.log 2>&1
           echo "whole exit $?"
           grep -E '^(not ok|ok) ' ../whole.log | tail -15
