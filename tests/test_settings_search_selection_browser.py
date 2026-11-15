@@ -325,8 +325,12 @@ def _fields(page):
 
 
 def _help_under(field, control):
-    """A field's help sits in its own column right under its control (DESIGN.md: help belongs to that field)."""
-    box, help_box = control.bounding_box(), field.locator('.ui-field-help').bounding_box()
+    """A field's help sits in its own column right under its control (DESIGN.md: help belongs to that field). Both boxes
+    are read in one frame: a page that has just opened is still sliding in, and two separate reads would see it move."""
+    box, help_box = control.evaluate("""(node, help) => [node, help].map((el) => {
+        const r = el.getBoundingClientRect();
+        return { x: r.x, y: r.y, width: r.width, height: r.height };
+    })""", field.locator('.ui-field-help').element_handle())
     assert abs(help_box['x'] - box['x']) < 1 and help_box['y'] >= box['y'] + box['height'], (box, help_box)
 
 
