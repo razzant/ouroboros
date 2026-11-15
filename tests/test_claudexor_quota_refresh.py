@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from concurrent.futures import Future, ThreadPoolExecutor
+from threading import Event
 
 import httpx
 import pytest
@@ -76,6 +78,172 @@ def _request() -> Request:
         "client": ("127.0.0.1", 1),
         "server": ("127.0.0.1", 8765),
     }, receive)
+
+
+@pytest.fixture(autouse=True)
+def _fresh_refresh_state(monkeypatch):
+    from ouroboros.gateway import claudexor_quota
+
+    monkeypatch.setattr(claudexor_quota, "_REFRESH_FLIGHTS", {})
+
+
+def _joined_future(monkeypatch, quota):
+    """Future whose result() reports a caller that had to wait for an unfinished attempt."""
+    joined = Event()
+
+    class JoinedFuture(Future):
+        def result(self, timeout=None):
+            if not self.done():
+                joined.set()
+            return super().result(timeout)
+
+    monkeypatch.setattr(quota, "Future", JoinedFuture)
+    return joined
+
+
+def test_shared_refresh_joins_only_an_identical_attempt_in_flight(monkeypatch, tmp_path):
+    from ouroboros import claudexor_daemon as owned
+    from ouroboros.gateway import claudexor_quota as quota
+
+    monkeypatch.setattr(owned, "owned_config_dir", lambda: tmp_path)
+    joined = _joined_future(monkeypatch, quota)
+    entered, release = Event(), Event()
+    calls = []
+
+    def refresh(target=None):
+        calls.append(target)
+        entered.set()
+        assert release.wait(10)
+        return _envelope()
+
+    monkeypatch.setattr(quota, "_refresh_quota", refresh)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(quota._shared_refresh)
+        try:
+            assert entered.wait(10)
+            second = pool.submit(quota._shared_refresh)
+            assert joined.wait(10)
+        finally:
+            release.set()
+        answers = [call.result(10) for call in (first, second)]
+    assert calls == [None]
+    attempts = [answer.pop("refresh_attempt") for answer in answers]
+    assert [item["reused"] for item in attempts] == [False, True]
+    assert attempts[0]["started_at"] == attempts[1]["started_at"] <= attempts[0]["completed_at"]
+    assert attempts[0]["completed_at"] == attempts[1]["completed_at"]
+    answers[0]["snapshots"].clear()
+    assert answers[1] == _envelope()
+    # A completed attempt is never served again: the next owner request asks the engine anew.
+    fresh = quota._shared_refresh()
+    assert fresh.pop("refresh_attempt")["reused"] is False
+    assert fresh == _envelope() and calls == [None, None] and quota._REFRESH_FLIGHTS == {}
+
+
+def test_a_failed_refresh_is_neither_cached_nor_retried(monkeypatch, tmp_path):
+    from ouroboros import claudexor_daemon as owned
+    from ouroboros.gateway import claudexor_quota as quota
+
+    monkeypatch.setattr(owned, "owned_config_dir", lambda: tmp_path)
+    calls = []
+
+    def refuse(target=None):
+        calls.append(target)
+        raise ClaudexorUnavailable("quota_refresh_paced", "paced", status_code=429)
+
+    monkeypatch.setattr(quota, "_refresh_quota", refuse)
+    target = {"harness": "codex", "profile_id": "a"}
+    for _ in range(2):
+        with pytest.raises(ClaudexorUnavailable, match="paced"):
+            quota._shared_refresh(target)
+    # Each owner request reaches the engine once; its pacing answer is not replayed here.
+    assert calls == [target, target] and quota._REFRESH_FLIGHTS == {}
+
+
+def test_a_refresh_is_retired_before_its_outcome_is_published(monkeypatch, tmp_path):
+    """No identical request may join a completed attempt: the flight leaves the registry first."""
+    from ouroboros import claudexor_daemon as owned
+    from ouroboros.gateway import claudexor_quota as quota
+
+    monkeypatch.setattr(owned, "owned_config_dir", lambda: tmp_path)
+    registered_at_publish = []
+
+    class WatchedFuture(Future):
+        def set_result(self, result):
+            registered_at_publish.append(self in quota._REFRESH_FLIGHTS.values())
+            super().set_result(result)
+
+        def set_exception(self, exception):
+            registered_at_publish.append(self in quota._REFRESH_FLIGHTS.values())
+            super().set_exception(exception)
+
+    monkeypatch.setattr(quota, "Future", WatchedFuture)
+    monkeypatch.setattr(quota, "_refresh_quota", lambda target=None: _envelope())
+    assert quota._shared_refresh()["refresh_attempt"]["reused"] is False
+
+    def refuse(target=None):
+        raise ClaudexorUnavailable("quota_refresh_paced", "paced", status_code=429)
+
+    monkeypatch.setattr(quota, "_refresh_quota", refuse)
+    with pytest.raises(ClaudexorUnavailable):
+        quota._shared_refresh()
+    assert registered_at_publish == [False, False]
+    assert quota._REFRESH_FLIGHTS == {}
+
+
+def test_a_retiring_refresh_never_removes_a_newer_flight(monkeypatch, tmp_path):
+    from ouroboros import claudexor_daemon as owned
+    from ouroboros.gateway import claudexor_quota as quota
+
+    monkeypatch.setattr(owned, "owned_config_dir", lambda: tmp_path)
+    newer = Future()
+
+    def refresh(target=None):
+        # Model a newer identical flight registered under the same key before this one retires.
+        key = next(iter(quota._REFRESH_FLIGHTS))
+        quota._REFRESH_FLIGHTS[key] = newer
+        return _envelope()
+
+    monkeypatch.setattr(quota, "_refresh_quota", refresh)
+    quota._shared_refresh()
+    assert list(quota._REFRESH_FLIGHTS.values()) == [newer]
+
+
+def test_refresh_scopes_join_only_the_same_home_and_exact_target(monkeypatch, tmp_path):
+    from ouroboros import claudexor_daemon as owned
+    from ouroboros.gateway import claudexor_quota as quota
+
+    home, calls = [tmp_path / "a"], []
+    monkeypatch.setattr(owned, "owned_config_dir", lambda: home[0])
+    joined = _joined_future(monkeypatch, quota)
+    entered, release = Event(), Event()
+    a = {"harness": "codex", "profile_id": "a"}
+
+    def refresh(target=None):
+        calls.append((str(home[0]), target))
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(10)
+        return {"snapshots": [], "target": target}
+
+    monkeypatch.setattr(quota, "_refresh_quota", refresh)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        held = pool.submit(quota._shared_refresh, a)
+        try:
+            assert entered.wait(10)
+            # Full, another account and another home never join the held exact attempt.
+            assert quota._shared_refresh()["target"] is None
+            assert quota._shared_refresh({"harness": "codex", "profile_id": "b"})["target"]["profile_id"] == "b"
+            home[0] = tmp_path / "b"
+            assert quota._shared_refresh(a)["refresh_attempt"]["reused"] is False
+            home[0] = tmp_path / "a"
+            same = pool.submit(quota._shared_refresh, {"profile_id": "a", "harness": "codex"})
+            assert joined.wait(10)
+        finally:
+            release.set()
+        first, second = held.result(10), same.result(10)
+    assert first["refresh_attempt"]["reused"] is False and second["refresh_attempt"]["reused"] is True
+    assert calls == [(str(tmp_path / "a"), a), (str(tmp_path / "a"), None),
+                     (str(tmp_path / "a"), {"harness": "codex", "profile_id": "b"}), (str(tmp_path / "b"), a)]
 
 
 def test_gateway_refresh_quota_posts_once_and_keeps_token_host_side(caplog, monkeypatch):
@@ -270,17 +438,21 @@ def test_inbound_refresh_returns_exact_foreground_envelope_via_thread(monkeypatc
         calls.append(("refresh",))
         return envelope
 
-    async def to_thread(function, *args):
-        calls.append(("to_thread", function, args))
-        return function(*args)
+    async def to_thread(function, *args, **kwargs):
+        calls.append(("to_thread", function, args, kwargs))
+        return function(*args, **kwargs)
 
     monkeypatch.setattr(claudexor_quota, "_refresh_quota", refresh)
     monkeypatch.setattr(claudexor_quota.asyncio, "to_thread", to_thread)
 
     response = asyncio.run(claudexor_quota.api_claudexor_quota_refresh(_request()))
     assert response.status_code == 200
-    assert json.loads(response.body) == envelope
-    assert calls == [("to_thread", refresh, ()), ("refresh",)]
+    actual = json.loads(response.body)
+    attempt = actual.pop("refresh_attempt")
+    assert attempt["reused"] is False
+    assert attempt["started_at"] <= attempt["completed_at"]
+    assert actual == envelope
+    assert calls == [("to_thread", claudexor_quota._shared_refresh, (), {}), ("refresh",)]
 
 
 @pytest.mark.parametrize("code", [
@@ -299,6 +471,19 @@ def test_inbound_refresh_preserves_typed_engine_failure(monkeypatch, code):
     assert response.status_code == 429
     assert json.loads(response.body) == {"error": "typed upstream refusal", "code": code,
                                         "required_actions": []}
+
+
+@pytest.mark.parametrize("answer", [None, [], "text"])
+def test_inbound_refresh_types_a_malformed_engine_answer_instead_of_blaming_the_request(monkeypatch, answer):
+    from ouroboros.gateway import claudexor_quota
+
+    monkeypatch.setattr(claudexor_quota, "_refresh_quota", lambda: answer)
+    response = asyncio.run(claudexor_quota.api_claudexor_quota_refresh(_request()))
+    assert response.status_code == 503, "a 2xx engine answer without an object is not the owner's bad request"
+    body = json.loads(response.body)
+    assert body["code"] == "malformed_response" and body["required_actions"] == []
+    assert "Invalid JSON" not in body["error"]
+    assert claudexor_quota._REFRESH_FLIGHTS == {}, "the failed attempt is retired, never joined"
 
 
 def test_quota_refresh_route_is_post_only_and_indexed(tmp_path):
