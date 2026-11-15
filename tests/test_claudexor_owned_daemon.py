@@ -269,6 +269,26 @@ def test_zero_readable_manifests_is_a_read_failure_not_an_empty_filter():
     ]) == set()
 
 
+def test_a_catalog_is_login_evidence_only_when_every_row_is_current():
+    """The catalog answers login eligibility only when every row is null or a
+    known mode; any gap (an empty list, a legacy row, a duplicate or missing
+    id, a row that is not an object) answers None, so the caller reads the
+    manifests instead of trusting a partial list (review, 2026-11-15)."""
+    from ouroboros.gateway.claudexor_accounts import _catalog_login_capable_harness_ids as login_set
+
+    current = [{"id": "codex", "setupLogin": {"mode": "in_app"}},
+               {"id": "cursor", "setupLogin": {"mode": "external_terminal"}},
+               {"id": "openrouter", "setupLogin": None}]
+    assert login_set({"harnesses": current}) == {"codex", "cursor"}
+    assert login_set({"harnesses": [{"id": "openrouter", "setupLogin": None}]}) == set()
+    for gaps in ([], current + [{"id": "codex", "setupLogin": {"mode": "in_app"}}],
+                 current + [{"id": "", "setupLogin": {"mode": "in_app"}}],
+                 current + [{"setupLogin": {"mode": "in_app"}}], current + ["not-a-row"],
+                 current + [{"id": "agy"}], current + [{"id": "agy", "setupLogin": "in_app"}]):
+        assert login_set({"harnesses": gaps}) is None, gaps
+    assert login_set({}) is None and login_set(None) is None
+
+
 def test_status_payload_filters_api_key_only_adapters(monkeypatch, tmp_path):
     """The catalog projection AND named profile wrappers are filtered to
     login-capable harnesses; a transient manifest-read failure fails OPEN. An
