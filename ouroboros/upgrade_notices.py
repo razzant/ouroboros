@@ -22,8 +22,9 @@ The facts are only what the document, the environment and the imported memory
 show — a key absent from the document, an invalid value, a saved value, an
 environment variable, the imported legacy sections. A saved value is never
 presented as proof of a manual choice. Delivery follows the existing
-retired-settings notice (``server_maintenance``): nothing is sent or marked
-while no owner chat is bound, and ``state.json`` records each notice only after
+retired-settings notice (``server_maintenance``): nothing is sent while no owner
+chat is bound, and nothing is marked then but the Light rule's notice (judged at the
+first start of its version: ``light_local_notice``); ``state.json`` records each notice only after
 it was handed to the owner-chat writer, so a failed write is retried at a later
 boot rather than claimed as published.
 """
@@ -274,7 +275,7 @@ def startup_upgrade_notices(settings: Mapping[str, Any]) -> None:
             # Display-only backup values never authorize delivery. The Light rule is judged at the first start of
             # this version: an install with no owner to tell yet (a fresh one, seeded or not) ran no work under the
             # old rule, so it is marked now and a box it has or gets is never told as news of an update.
-            if known:  # an unconfirmed state (a recovery, a read that is not current) leaves it owed
+            if known and not state.get(LIGHT_LOCAL_NOTICE_KEY):  # an unconfirmed state (a recovery, a stale read) leaves it owed
                 update_state(lambda st: st.setdefault(LIGHT_LOCAL_NOTICE_KEY, utc_now_iso()))
             return
         owner_chat = int(owner_chat)
