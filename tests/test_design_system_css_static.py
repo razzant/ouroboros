@@ -37,7 +37,7 @@ def test_header_presence_comes_from_writers_and_telegram_owns_its_back():
     css = without_comments((WEB / 'style.css').read_text(encoding='utf8'))
     settings = without_comments((WEB / 'settings.css').read_text(encoding='utf8'))
     assert 'html[data-telegram-back="back"] .app-page-return { display: none; }' in css
-    assert '.app-page-header[data-return]' in css and '[data-search-place="list"]' in settings
+    assert '.app-page-header[data-return]' in css and '[data-search-in-home]' in settings
     assert ':has([data-settings-search-slot]:empty)' not in settings
     assert 'data-page-back' not in css and '.dashboard-back' not in css
     scope = 'html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header'
@@ -213,7 +213,7 @@ def test_no_has_on_an_element_holding_a_rooms_rows():
 # painted without it stood alone at the window's top edge (owner 14.11), and a Settings row whose words came later kept
 # its line hidden. Playwright's WebKit re-matches it, so no browser test sees this; this static check is the guard. Ask
 # for a child (`.x:has(> .slot > *)`) where the tested element only holds elements, or let the text's one writer say it
-# in an attribute the sheet keys on (`data-no-meta`, settings_controls.js setRowMeta). A plain `:empty` on the element
+# in an attribute the sheet keys on (`data-no-meta`, ui_primitives.js setRowMeta). A plain `:empty` on the element
 # itself is re-matched.
 def late_state_in_has(selectors):
     """A `:has()` whose argument tests `:empty`, `:focus`, or `:focus-within`, at any depth (inside `:not()`/`:is()`, after a combinator)."""

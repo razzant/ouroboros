@@ -101,10 +101,14 @@ def test_mains_count_and_read_follow_one_predicate():
 SECTION_PAGE_ALONE = "@container sectionplace (max-width: calc(40rem - 0.02px)) {"
 
 
-def test_layers_is_the_only_browser_history_writer():
-    writers = [path.name for path in (REPO / 'web/modules').glob('*.js')
-               if re.search(r'\bhistory\.(?:pushState|replaceState)\(', path.read_text(encoding='utf8'))]
-    assert writers == ['layers.js']
+def test_layers_is_the_only_browser_history_entry_writer():
+    modules = {path.name: path.read_text(encoding='utf8') for path in (REPO / 'web/modules').glob('*.js')}
+    assert sorted(name for name, source in modules.items() if re.search(r'\bhistory\.pushState\(', source)) == ['layers.js']
+    replacements = sorted(name for name, source in modules.items() if re.search(r'\bhistory\.replaceState\(', source))
+    assert replacements == ['layers.js', 'read_ahead.js']
+    # The residual observer-mode handoff only consumes its boot parameter, preserving the current sentinel state.
+    assert "history.replaceState(history.state, '', address)" in modules['read_ahead.js']
+    assert not re.search(r'\bhistory\.(?:pushState|back|go)\(', modules['read_ahead.js'])
     assert not re.search(r'\bhistory\.(?:pushState|replaceState)\(', _read('web/app.js'))
 
 
