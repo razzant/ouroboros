@@ -11,6 +11,7 @@ import pytest
 
 from tests import test_ui_smoke_playwright as smoke
 from tests.settings_browser_helpers import open_entry, open_settings, settings_page
+from tests.settings_section_helpers import show_card
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET, _SETTLE_RESTORE_FRAMES
 from tests.ui_console_errors import PageErrors
 
@@ -88,7 +89,10 @@ def test_pending_survives_reconnect_draft_and_restart_request(settings_server, e
         try:
             def show(path="", row=""):
                 page.wait_for_function("() => Boolean(window.__ouroSettings)", timeout=30_000)
-                assert page.evaluate("([path, row]) => window.__ouroSettings.open(path, { row })", [path, row]) is not False
+                if path:
+                    assert page.evaluate("([path, row]) => window.__ouroSettings.open(path, { row })", [path, row]) is not False
+                else:  # Ouroboros's card: on the list in one column, beside a page the pane its row opens
+                    show_card(page, timeout=30_000)
                 page.evaluate(_SETTLE_RESTORE_FRAMES)
 
             def open_home():
@@ -195,7 +199,7 @@ def test_a_saved_local_model_setting_waits_for_the_local_models_own_stop_then_st
     settings wait for Stop, then Start, no restart of Ouroboros is offered, and Stop, then Start applies them."""
     from playwright.sync_api import expect, sync_playwright
 
-    from tests.settings_browser_helpers import HOME, commit_row, open_settings
+    from tests.settings_browser_helpers import commit_row, open_settings
 
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch(headless=True)
@@ -224,8 +228,7 @@ def test_a_saved_local_model_setting_waits_for_the_local_models_own_stop_then_st
             evidence.mkdir(parents=True, exist_ok=True)
             page.screenshot(path=str(evidence / f'local-model-pending-{engine}.png'))
             # Ouroboros's card names the local model's own action, and no restart of Ouroboros waits.
-            open_settings(page, "")
-            card = page.locator(f"{HOME} [data-settings-card]")
+            card = show_card(page, timeout=30_000)
             expect(card.locator('[data-needs="local-model"]')).to_contain_text("Stop, then Start", timeout=30_000)
             assert card.locator('[data-needs="restart"]').count() == 0
             level = open_settings(page, "models/local")
