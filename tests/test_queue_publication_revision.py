@@ -295,6 +295,30 @@ def test_a_tick_measures_the_pool_once_for_its_census_its_document_and_its_certi
     assert (root / "state/queue_snapshot.json").read_bytes() == document
 
 
+def test_a_refresh_a_later_capture_overtook_leaves_that_captures_newer_counts(published, monkeypatch):
+    """A quiet tick's measurement waits for the writer; a barrier that published a new generation meanwhile certified
+    newer counts, and the older refresh must not put its own back (here they would read as a started pool)."""
+    from supervisor import pool_admission, worker_pool_lifecycle, workers
+
+    root, now = published
+    pool = {"max_workers": None, "worker_total": 2, "busy_worker_count": 0, "acting_worker_count": 0,
+            "parked_worker_count": 0, "booting_count": 0, "reaping_count": 0, "retiring_count": 0,
+            "assignable_idle_workers": 2, "lane_carrier_total": 0}
+    monkeypatch.setattr(worker_pool_lifecycle, "pool_slot_counts", lambda *_a, **_k: dict(pool))
+    monkeypatch.setattr(workers, "_worker_pool_execution_state", lambda: {"disabled_reason": ""})
+    monkeypatch.setattr(pool_admission, "_FACTS", {})
+    queue.RUNNING["r0"] = {"task": _task("r0"), "attempt": 1, "started_at": now[0] - 10, "last_heartbeat_at": now[0] - 1}
+    assert queue.persist_queue_snapshot("start") is True
+    pool["worker_total"] = 3
+    with queue._queue_lock:  # the quiet tick's one measurement, handed to the writer
+        measured, after = queue_publication._pool_counts(), queue_publication._STATE["capture_seq"]
+    pool.update(worker_total=0, assignable_idle_workers=0)  # the pool empties; a barrier publishes that first
+    assert queue.publish_queue_snapshot("barrier") is True
+    assert queue_publication._refresh_alive(measured, after) is True
+    assert _read(root, "queue.alive")["pool"]["worker_total"] == 0
+    assert queue_observation.load_queue_document(root)["worker_total"] == 0
+
+
 def test_an_unknown_document_keeps_its_unknown_counts_under_a_certificate_that_carries_some(tmp_path):
     """The overlay serves an observed document only: a failed measurement's nulls are never filled in."""
     (tmp_path / "state").mkdir()

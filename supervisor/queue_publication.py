@@ -135,7 +135,7 @@ class _TickWriter:
         self.thread: Optional[threading.Thread] = None
         self.wake = threading.Condition()
         self.capture: Optional[Dict[str, Any]] = None  # the newest capture not taken yet
-        self.refresh: Optional[Dict[str, Any]] = None  # the pool the newest quiet tick measured, to certify
+        self.refresh: Optional[tuple] = None  # (pool, measured_after) of the newest quiet tick, to certify
         self.syncs: list = []
         self.closed = False
 
@@ -155,9 +155,9 @@ class _TickWriter:
             self.capture = capture  # a capture not taken yet is superseded: the newest state is what lands
             self.wake.notify()
 
-    def ask_refresh(self, pool: Dict[str, Any]) -> None:
+    def ask_refresh(self, pool: Dict[str, Any], measured_after: int) -> None:
         with self.wake:
-            self.refresh = pool
+            self.refresh = (pool, measured_after)
             self.wake.notify()
 
     def drain(self, timeout: float) -> bool:
@@ -194,7 +194,7 @@ class _TickWriter:
                 if capture is not None:
                     _publish(capture, writer=self)  # a publication certifies too: the refresh is subsumed
                 elif refresh is not None:
-                    _refresh_alive(refresh)
+                    _refresh_alive(*refresh)
             except Exception:
                 log.warning("queue publisher thread: the write failed", exc_info=True)
             for done in syncs:
@@ -330,15 +330,17 @@ def publish_queue_changes() -> Optional[bool]:
         # with no mark). One small identity per tick, so a changed fact is published and an unchanged
         # live set still captures, serializes and writes nothing. A failed write is itself a reason to
         # publish: the bundle on disk is unknown until a complete rewrite lands (R2). The pool is measured
-        # once: the census, the capture and the certificate all read that one measurement.
-        pool = _pool_counts()
+        # once: the census, the capture and the certificate all read that one measurement, which is newer
+        # than every capture numbered up to ``measured_after`` and older than every later one.
+        pool, measured_after = _pool_counts(), _STATE["capture_seq"]
         census = _census(pool)
         moved = (_STATE["revision"] != _STATE["published"] or census != _STATE["census"] or _STATE["write_failed"])
         capture = _capture(_STATE["reason"] or "main_loop", census=census, pool=pool) if moved else None
     if not _WRITER.alive():
         # Written where the tick stands: the outcome answers for this tick's own write, so every failure so
         # far is answered with it.
-        outcome = _refresh_alive(pool) if not moved else (None if capture is None else _publish(capture))
+        outcome = (_refresh_alive(pool, measured_after) if not moved
+                   else None if capture is None else _publish(capture))
         _STATE["failures_answered"] = _STATE["failed_writes"]
         return outcome
     # The writer thread lands it (the newest capture replaces one it has not taken yet); a quiet tick asks it for
@@ -347,7 +349,7 @@ def publish_queue_changes() -> Optional[bool]:
     if capture is not None:
         _WRITER.offer(capture)
     elif not moved and _queue().QUEUE_PUBLICATION is not None:
-        _WRITER.ask_refresh(pool)
+        _WRITER.ask_refresh(pool, measured_after)
     else:
         return None  # kept, or nothing of this process certified yet
     failed, answered = _STATE["failed_writes"], _STATE["failures_answered"]
@@ -690,9 +692,10 @@ def _publish(capture: Dict[str, Any], *, writer: Optional[_TickWriter] = None) -
             return False
 
 
-def _refresh_alive(pool: Dict[str, Any]) -> Optional[bool]:
+def _refresh_alive(pool: Dict[str, Any], measured_after: int) -> Optional[bool]:
     """A tick with nothing to publish: keep the certificate fresh for its readers (the heartbeats, and the counts of
-    the pool that tick measured), never a new generation."""
+    the pool that tick measured after capture ``measured_after``), never a new generation. A capture taken after that
+    measurement, once written, certified newer counts of its own: the refresh leaves them."""
     published = _queue().QUEUE_PUBLICATION
     if published is None:
         return None  # nothing of this process is certified; a kept saved queue stays uncertified
@@ -707,8 +710,8 @@ def _refresh_alive(pool: Dict[str, Any]) -> Optional[bool]:
     with _PUBLISH_LOCK:
         if _STATE["write_failed"]:
             return False  # a barrier failed while this refresh was in flight: its revoked certificate stays revoked (R3-B)
-        if _queue().QUEUE_PUBLICATION is not published:
-            return True  # a publication landed meanwhile and certified itself
+        if _queue().QUEUE_PUBLICATION is not published or _STATE["published_seq"] > measured_after:
+            return True  # a publication landed meanwhile and certified itself, or a later capture's counts stand
         try:
             _certify(_queue().QUEUE_SNAPSHOT_PATH.parent, published[3], heartbeats, pool)
         except Exception:
