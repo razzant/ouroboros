@@ -988,8 +988,8 @@ test('closed names give way one at a time, the longest first: two equal values k
 
 // A row laid out by numbers: each closed capsule is its glyph, its name while it has one and its value as the row's
 // fit leaves it (cut to the cap, or folded away with the glyphs); the last capsule drops to a second line while the
-// four are wider than the row.
-function layRow(m, { width, values, names = { model: 30, subagents: 70, context: 52, effort: 40 } }) {
+// four, with the row's `gap` between them, are wider than the row.
+function layRow(m, { width, values, names = { model: 30, subagents: 70, context: 52, effort: 40 }, gap = 0 }) {
     const GLYPH = 34;
     const els = { model: m.modelEl, subagents: m.subagentsEl, context: m.contextEl, effort: m.effortEl };
     const kinds = Object.keys(els).filter((kind) => els[kind].parentNode === m.row && els[kind].children.length);
@@ -998,7 +998,7 @@ function layRow(m, { width, values, names = { model: 30, subagents: 70, context:
         : m.row.dataset.ownerCompact === 'values' ? Math.min(values[kind], cap()) : values[kind]);
     const nameWidth = (kind) => (els[kind].dataset.nameFit === 'off' ? 0 : names[kind]);
     const capsuleWidth = (kind) => GLYPH + nameWidth(kind) + valueWidth(kind);
-    const total = () => kinds.reduce((sum, kind) => sum + capsuleWidth(kind), 0);
+    const total = () => kinds.reduce((sum, kind) => sum + capsuleWidth(kind), 0) + gap * Math.max(0, kinds.length - 1);
     m.row.getBoundingClientRect = () => ({ top: 0, bottom: 32, left: 0, right: width, width, height: 32 });
     for (const kind of kinds) {
         const last = kind === kinds.at(-1);
@@ -1060,6 +1060,29 @@ test('latest occupies its reserved pad, not a second share of the closed capsule
         const line = layRow(m, { width: 370, values: { model: 50, subagents: 100, context: 100, effort: 100 } });
         m.controls.syncState({});
         assert.deepEqual(line.said(), ['values', undefined, '61px'], 'the neighbours keep their values while Model fits whole');
+        m.controls.destroy();
+    }
+});
+
+test('chips take only the room the capsules leave: their slot gives the row its gap back, so the capsules keep their fit', () => {
+    // The slot's negative start margin cancels the row's gap before it (style.css .chat-composer-chips): hidden, laid
+    // out with chips, or laid out with none shown (no room even for "+N"), it moves no capsule. Counting its gap took
+    // 6 px from the capsules on a phone, and one chip folded Subagents, Context and Effort to their glyphs.
+    for (const shown of ['hidden', 'chips', 'none']) {
+        const store = createModelCatalogStore({ readCatalog: async () => ({ items: [] }), readPreferences: async () => ({}) });
+        const styles = new Map();
+        const m = mountPair({ subagents: true, model: { store }, win: { ...hoverWindow(false), getComputedStyle: (node) => styles.get(node) || {} } });
+        styles.set(m.row, { paddingLeft: '0px', paddingRight: '0px', columnGap: '6px' });
+        const slot = new ElementStub('span', m.doc);
+        slot.className = 'chat-composer-chips';
+        slot.setAttribute('data-composer-chips', '');
+        slot.getBoundingClientRect = () => ({ top: 0, bottom: 32, width: shown === 'chips' ? 40 : 0 });
+        slot.getClientRects = () => (shown === 'hidden' ? [] : [slot.getBoundingClientRect()]);
+        m.row.appendChild(slot);
+        const line = layRow(m, { width: 358, gap: 6, values: { model: 50, subagents: 100, context: 100, effort: 100 } });
+        m.controls.syncState({});
+        assert.deepEqual(line.said(), ['values', undefined, '51px'], `${shown}: the neighbours keep their values while Model fits whole`);
+        assert.ok(line.total() <= 358, shown);
         m.controls.destroy();
     }
 });
