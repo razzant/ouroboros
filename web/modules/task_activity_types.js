@@ -50,6 +50,8 @@
  * @property {Object=} outcome_axes
  * @property {string=} reason_code
  * @property {Object=} cancel_origin  // the stored stop origin the status fold reads (an owner-stopped turn's typed stop)
+ * @property {Object=} finalization_recovery The stored result's adopted answer, read by that fold.
+ * @property {string=} terminal_origin
  * @property {string[]=} delegated_runs_unreconciled  // the stored result's current custody debt, read by that fold
  * @property {Object=} root_phase_checkpoint  // compact post_task_synthesis fact only
  * @property {string=} timeout_retry_from  // explicit automatic-retry predecessor, never owner Continue

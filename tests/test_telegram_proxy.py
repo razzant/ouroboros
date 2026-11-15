@@ -259,12 +259,14 @@ def test_every_bridge_client_carries_exactly_the_local_proxy(tmp_path, monkeypat
     assert asyncio.run(notifier._push_notification(api, 42, "done", trust_env=False)) == ("sent", None)
 
     assert [(level, message) for level, message in api.logs if level != "info"] == []
-    assert len(_RecordingClient.built) == 10
+    # One client per path, except the quiz card's: its event client sends it (6) and its lifecycle client,
+    # built right after to read a settled state the card may hold (7, telegram_quiz.apply_retained_fact).
+    assert len(_RecordingClient.built) == 11
     for index, (token, options) in enumerate(_RecordingClient.built):
         assert token == _TOKEN
         options = dict(options)
         assert options.pop("origin_label", "") == ""  # unlabelled events and the notifier carry none
-        if index in {1, 2, 3, 4, 5, 6}:  # mirrored rows, excluding quiz-state edits and typing
+        if index in {1, 2, 3, 4, 5, 6}:  # mirrored rows, excluding lifecycle and quiz-state edits and typing
             assert callable(options.pop("on_message"))
             assert options.pop("reply_to_message_id") == 0
         assert options.pop("binding") is plugin.binding_for(api)  # one accepted token for every path

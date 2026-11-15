@@ -290,6 +290,8 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     task_contract: NotRequired[Dict[str, Any]]
     reason_code: NotRequired[str]
     cancel_origin: NotRequired[Dict[str, Any]]  # the typed stop an owner-stopped turn's final carries
+    finalization_recovery: NotRequired[Dict[str, Any]]  # an adopted answer's custody (cause, answer, delivery_id), read by the status fold
+    terminal_origin: NotRequired[str]  # who authored the terminal text: model_final or a host origin
     delegated_runs_unreconciled: NotRequired[List[str]]  # the row's current custody debt beside its cause (#1583)
     review_status: NotRequired[Dict[str, Any]]
     # panels retain subject/goal/revision/wave; actors separate requested/observed models,
@@ -738,6 +740,8 @@ class ActiveChatActivity(ActiveDirectTurn):  # global root census (kind also pre
     outcome_axes: NotRequired[Dict[str, Any]]
     reason_code: NotRequired[str]
     cancel_origin: NotRequired[Dict[str, Any]]  # the stored result's stop origin, read by the same status fold
+    finalization_recovery: NotRequired[Dict[str, Any]]  # the stored result's adopted answer, read by that fold
+    terminal_origin: NotRequired[str]
     delegated_runs_unreconciled: NotRequired[List[str]]  # the stored result's current custody debt, read by that fold
     root_phase_checkpoint: NotRequired[Dict[str, Any]]
     timeout_retry_from: NotRequired[str]
@@ -1412,6 +1416,7 @@ class OnboardingSubagentsPreviewResponse(TypedDict):
     ok: bool
     model_settings: Dict[str, Any]  # the model setting keys the draft would save
     available_subagents: Dict[str, Any]
+    known_spend_gaps: List[str]  # what the draft's limits cannot count, as GET /api/settings names it after a save
     source: str
     diagnostics: list[Dict[str, Any]]
 

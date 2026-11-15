@@ -183,6 +183,7 @@
  * @property {boolean} ok
  * @property {Object} model_settings  // the model setting keys the draft would save
  * @property {AvailableSubagentsSetting} available_subagents
+ * @property {string[]} known_spend_gaps  // what the draft's limits cannot count, as GET /api/settings names it after a save
  * @property {string} source
  * @property {Object[]} diagnostics
  */
@@ -421,6 +422,8 @@
  * @property {Object=} task_contract
  * @property {string=} reason_code
  * @property {Object=} cancel_origin The typed stop an owner-stopped turn's final carries (source, stop_policy).
+ * @property {Object=} finalization_recovery An adopted answer's custody (cause, answer, delivery_id), read by the status fold.
+ * @property {string=} terminal_origin Who authored the terminal text: model_final or a host origin.
  * @property {string[]=} delegated_runs_unreconciled The row's current custody debt beside its cause (#1583).
  * @property {Object=} review_status
  * @property {Object=} review_projection

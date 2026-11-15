@@ -3,7 +3,7 @@ import { formatUsd } from './storage_format.js';
 import { compactTokens } from './cost_period.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
 import { DETAIL_ONLY_WARNINGS, TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
-    failedStepHeadline, heldCallPhrase, heldCallsLine } from './task_reason_words.js';
+    failedStepHeadline, heldCallPhrase, heldCallsLine, deliveredAnswerCause } from './task_reason_words.js';
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
 import { taskCheckpointLabel, taskCheckpointIdentity, checkpointHasProgressRow, waitEpisode } from './task_checkpoints.js';
 export { taskCheckpointLabel } from './task_checkpoints.js';
@@ -566,7 +566,7 @@ export function taskReasonDetail(evt, codes = []) {
         const receiptVeto = objective?.receipt_veto;
         clause = receiptVeto?.reason === reason && receiptVeto.detail
             ? String(receiptVeto.detail).split(/\s+/).filter(Boolean).join(' ')
-            : phrase(reason === 'plan_review_advisory' ? planReviewKey(record, reason) : reason);
+            : phrase(reason === 'plan_review_advisory' ? planReviewKey(record, reason) : deliveredAnswerCause(record, reason) || reason);
     }
     if (reviewCause && (reason === reviewCause || bypass[reason] === reviewCause)) clause = '';
     const excluded = ['', 'delegated_custody_unreconciled', 'terminal_delivery_unknown', 'terminal_delivery_exhausted'];
@@ -639,8 +639,8 @@ export function taskOutcomeSeverity(evt) {
     const artifacts = String(record.outcome_axes?.artifacts?.status || record.artifact_bundle?.status || record.artifact_status || '').toLowerCase();
     const artifactStatus = String(record.artifact_bundle?.status || record.artifact_status || '').toLowerCase();
     if (
-        ((lifecycle === 'failed' || execution === 'failed') && !unanswered)
-        || execution === 'infra_failed'
+        ((lifecycle === 'failed' && !deliveredAnswerCause(record) || execution === 'failed') && !unanswered)
+        || (execution === 'infra_failed' && !deliveredAnswerCause(record))
         || (objective === 'fail' && !authorStopped)
         || (review === 'fail' && !authorFinished)
         || ['failed', 'missing'].includes(artifacts)

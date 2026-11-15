@@ -131,6 +131,10 @@ _ROW = """() => {
     const listBox = list ? list.getBoundingClientRect() : null;
     return {
         area: box(document.querySelector('#chat-input-area')), field: box(document.querySelector('#chat-input')),
+        // How the field's height was set (chat_input_sizing.js): the selected mode and the written measured height.
+        sizing: `${document.querySelector('#chat-input').dataset.sizing || ''}`
+            + ` ${document.querySelector('#chat-input').style.getPropertyValue('--chat-input-height') || 'unwritten'}`
+            + ` ${getComputedStyle(document.querySelector('#chat-input')).height}`,
         messages: box(document.querySelector('#chat-messages')), row: box(row),
         value: model.querySelector('.chat-capsule-value').textContent, valueShown: shown(model.querySelector('.chat-capsule-value')),
         glyphs: row.dataset.ownerGlyphs || '', open: model.dataset.open || 'false', search: model.dataset.search || '',
@@ -149,7 +153,8 @@ _ROW = """() => {
 def _capsule_walk(page, tag: str) -> None:
     def still(now: dict, was: dict, what: str) -> None:
         assert now["area"] == was["area"] and now["field"] == was["field"] and now["messages"] == was["messages"], \
-            (tag, what, "the composer and the transcript stay where they were", was, now)
+            (tag, what, "the composer and the transcript stay where they were",
+             f"field sizing {was['sizing']} -> {now['sizing']}", was, now)
         assert now["wide"] <= 0 and not now["out"] and not now["factsOver"], (tag, what, now)
         assert now["value"] == "gpt-6-astra", (tag, what, "the capsule still holds Main's model", now)
 

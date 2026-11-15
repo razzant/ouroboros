@@ -21,7 +21,7 @@ import { catalogPrograms } from './model_program.js';
 import { modelChooserHtml, bindModelChoosers } from './model_chooser.js';
 import { mergeModelCatalog, catalogReadNote, mergeHarnessModelCatalog, refreshModelCatalog, watchAccountModelCatalog } from './settings_catalog.js';
 import {
-    harnessMap, lastReviewRunText, reviewCostText, reviewTwinAllowed, rowIdentity, rowMeta, rowStatus, rowStatusReason, rowTaskRun,
+    harnessMap, lastReviewRunText, modelTariffText, reviewCostText, reviewMoneyLine, reviewTwinAllowed, rowIdentity, rowMeta, rowStatus, rowStatusReason, rowTaskRun,
     sessionRouteVerdict,
 } from './subagent_status_primitives.js';
 import { bindRecheckMarks, recheckMarkHtml, syncRecheckState } from './safety_recheck.js';
@@ -32,7 +32,7 @@ import { revealNewRow } from './ui_helpers.js';
 import { setResult, setRowMeta } from './ui_primitives.js';
 import { effortLabel } from './effort_levels.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
-import { currentLanguage } from './i18n.js';
+import { currentLanguage, dictionaryRevision } from './i18n.js';
 
 export const MAX_AVAILABLE_SUBAGENTS = 26;
 const KEY = 'OUROBOROS_SUBAGENTS';
@@ -260,12 +260,18 @@ const UNKNOWN_COST = Object.freeze({ usd_per_review: null, basis: 'unknown' });
 
 // Each review fact has the one place its meaning gives it (docs/DESIGN.md §6):
 // the mark itself is the checkbox; a marked row switched off is a current
-// exception under the head; a marked twin's repeat stays visible; the price or
-// seat is the row's Review cost in Details and, for a marked API row, beside
-// its delivery choice; the last review is history in Details.
-function reviewCost(row, state) {
-    return reviewCostText(row, state.reviewCosts?.get(reviewCostKey(row, state.processingPreference)) || null);
+// exception under the head; a marked twin's repeat stays visible; the measured price or
+// seat is the row's Review cost in Details, the model's published tariff its Model tariff there, and a marked
+// API row says one of them beside its delivery choice (the measured cost once it has one); the last review is
+// history in Details.
+function reviewCost(row, state, { line = false } = {}) {
+    const cost = state.reviewCosts?.get(reviewCostKey(row, state.processingPreference)) || null;
+    return line ? reviewMoneyLine(row, cost, modelTariff(row, state)) : reviewCostText(row, cost);
 }
+const modelTariff = (row, state) => modelTariffText(row, state.modelCatalog || {}, state.processingPreference);
+// The delivery line shows the tariff: composed words the translation overlay leaves alone.
+const tariffMark = (row, state) => (modelTariff(row, state) && reviewCost(row, state, { line: true }) === modelTariff(row, state)
+    ? ' data-i18n-fmt="model price"' : '');
 
 function reviewException(row) {
     return row.review_eligible === true && row.enabled === false ? 'Switched off, so not in the review pool.' : '';
@@ -380,7 +386,7 @@ function reviewDeliveryHtml(row, state, index) {
                         { value: 'native', label: 'Reads the work itself' },
                         { value: 'packet', label: 'Packet — for models without tool calling' },
                     ] }], row.delivery === 'packet' ? 'packet' : 'native')}</label>
-                    <span class="ui-field-help" data-subagent-delivery-cost>${escapeHtml(reviewCost(row, state))}</span>
+                    <span class="ui-field-help" data-subagent-delivery-cost${tariffMark(row, state)}>${escapeHtml(reviewCost(row, state, { line: true }))}</span>
                 </div>`;
 }
 
@@ -465,7 +471,8 @@ function rowDetailsHtml(row, state, rowKey) {
     return `<details class="model-role-details available-subagent-details ui-disclosure" data-subagent-details>
                 <summary>Details &amp; history</summary>
                 <dl class="available-subagent-facts">
-                    <div><dt>Review cost</dt><dd data-subagent-review-facts>${escapeHtml(reviewCost(row, state))}</dd></div>
+                    <div${reviewCost(row, state) ? '' : ' hidden'}><dt>Review cost</dt><dd data-subagent-review-facts>${escapeHtml(reviewCost(row, state))}</dd></div>
+                    <div${modelTariff(row, state) ? '' : ' hidden'} data-subagent-tariff><dt>Model tariff</dt><dd data-i18n-fmt="model price">${escapeHtml(modelTariff(row, state))}</dd></div>
                     ${fact('Last review', review, 'data-subagent-last-review')}
                     ${fact('Last task run', task, 'data-subagent-last-task')}
                     ${session ? '' : fact('Stored as', stored, 'data-subagent-stored')}
@@ -641,7 +648,7 @@ export function availableSubagentsRenderSignature(state, nowMs = Date.now()) {
         state.apiModels, state.modelSources, state.modelCatalog, state.modelCatalogNote, state.processingPreference,
         state.providers, state.connections, state.providerProfiles, state.reviewPool, state.allowEmptyReviewPool,
         state.filter, state.tickCaption, state.unsavedId,
-        currentLanguage(),  // the suggestions' prices are composed words: another language is another paint
+        currentLanguage(), dictionaryRevision(),  // prices and tariffs are composed words: another language, or its dictionary arriving, is another paint
     ]);
 }
 
@@ -819,13 +826,15 @@ export function createAvailableSubagentsEditor({
             show('[data-subagent-review-notes]', said(reviewRepeat(row, state, index)));
             const delivery = el.querySelector('[data-subagent-delivery-field]');
             if (delivery) delivery.hidden = row.review_eligible !== true;
-            const cost = reviewCost(row, state);
-            for (const selector of ['[data-subagent-review-facts]', '[data-subagent-delivery-cost]']) {
-                const node = el.querySelector(selector);
-                if (node) node.textContent = cost;
-            }
+            const money = el.querySelector('[data-subagent-delivery-cost]');
+            if (money) money.textContent = reviewCost(row, state, { line: true });
+            if (money?.dataset) { if (tariffMark(row, state)) money.dataset.i18nFmt = 'model price'; else delete money.dataset.i18nFmt; }
+            const measured = el.querySelector('[data-subagent-review-facts]');
+            if (measured) measured.textContent = reviewCost(row, state);
+            if (measured?.parentElement) measured.parentElement.hidden = !reviewCost(row, state);
             syncEffortFacet(el, row, index);
-            for (const [selector, text] of [['[data-subagent-last-review]', lastReview(row, state)],
+            for (const [selector, text] of [['[data-subagent-tariff]', modelTariff(row, state)],
+                ['[data-subagent-last-review]', lastReview(row, state)],
                 ['[data-subagent-last-task]', rowTaskRun(row, state)],
                 ['[data-subagent-stored]', String(row.route.target_id || '').trim()]]) {
                 const fact = el.querySelector(selector);

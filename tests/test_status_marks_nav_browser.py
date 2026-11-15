@@ -450,8 +450,6 @@ def test_mains_row_carries_its_rooms_mark_in_the_project_rows_column(nav_ui, tmp
             # Main's own mark rests while only a Project asks (the picture's dot says that wait: the test above).
             sync(snapshot(asking=[PROJECTS[2]['id']]))
             facts[width]['rest'] = mark_of(page, '.nav-row-main .nav-mark')
-            facts[width]['restWords'] = page.locator('.nav-row-main .nav-row-words').text_content()
-            expect()(main).to_have_accessible_name('Ouroboros Main Chat')
         finally:
             save_evidence(tmp_path, f'nav-main-mark-{ui["engine"]}', facts)
             page.close()

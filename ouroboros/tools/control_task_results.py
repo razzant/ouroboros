@@ -78,6 +78,8 @@ def _subtask_outcome_summary(data: Dict[str, Any], receipts: list | None = None,
     data = project_task_output_readers(data)
     summary: Dict[str, Any] = {
         "outcome_axes": normalize_outcome_axes(data),
+        # an adopted answer's custody beside its failed axes: delivered, owed, given up or unreadable
+        **({"finalization_recovery": dict(data["finalization_recovery"])} if isinstance(data.get("finalization_recovery"), dict) else {}),
     }
     if isinstance(data.get("execution_observation"), dict):
         summary["execution_observation"] = dict(data["execution_observation"])

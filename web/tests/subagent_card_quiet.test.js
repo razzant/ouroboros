@@ -149,7 +149,11 @@ test('Details & history keeps review cost, both histories, the stored spelling, 
     const html = availableSubagentRowMarkup(api({ review_eligible: true, minted_from: 'factory_default' }), state, 0);
     const details = html.slice(html.indexOf('data-subagent-details'));
     assert.match(details, /<summary>Details &amp; history<\/summary>/);
-    assert.match(details, /<dt>Review cost<\/dt><dd data-subagent-review-facts>price appears after saving<\/dd>/);
+    assert.match(details, /<div hidden><dt>Review cost<\/dt><dd data-subagent-review-facts><\/dd><\/div>/, 'unsaved: no cost is promised');
+    const measured = new Map([[JSON.stringify([ROUTE_KIND_API_MODEL, 'openai::gpt-x', '']),
+        { usd_per_review: 0.5, basis: 'observed_reviews', reviews: 1, low: 0.5, high: 0.5 }]]);
+    assert.match(availableSubagentRowMarkup(api({ review_eligible: true }), { ...state, reviewCosts: measured }, 0),
+        /<div><dt>Review cost<\/dt><dd data-subagent-review-facts>≈\$0\.50 per review \(1 measured\)<\/dd><\/div>/);
     assert.match(details, /<div data-subagent-last-review><dt>Last review<\/dt><dd>API model · gpt-x · record rev_9<\/dd>/);
     assert.match(details, /<div hidden data-subagent-last-task><dt>Last task run<\/dt>/, 'no receipt, nothing claimed');
     assert.match(details, /<dt>Stored as<\/dt><dd>openai::gpt-x<\/dd>/);

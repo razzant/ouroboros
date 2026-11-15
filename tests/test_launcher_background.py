@@ -279,6 +279,37 @@ def test_without_an_adapter_or_native_hooks_closing_quits_and_never_asks(setting
     assert window.calls == []
 
 
+@pytest.mark.parametrize("indicator", ["broken_hooks", None])
+def test_a_hookless_close_keeps_the_engine_for_a_saved_keep_running_choice_and_an_explicit_quit_stops_it(
+        settings, make, indicator):
+    """Without close hooks a close still exits; a saved "keep running" makes it no owner Quit (``owner_exit``
+    unset: the engine is kept), while an explicit Quit and a saved or undecided quit-on-close stay owner exits."""
+    class Broken(FakeIndicator):
+        def attach_native(self, window):
+            raise RuntimeError("delegate unavailable")
+
+    kind = Broken if indicator else None
+    choose(settings, "true")
+    background, window = make(indicator=kind)
+    assert not background.native_ready
+    close(background, window)
+    wait_for(lambda: background.events == ["exit"])
+    assert background.shutdown.is_set() and not background.owner_exit.is_set() and window.calls == []
+
+    background, window = make(indicator=kind)
+    background.quit.set()  # Cmd+Q, the indicator's Quit or sign-out before the close
+    close(background, window)
+    wait_for(lambda: background.events == ["exit"])
+    assert background.owner_exit.is_set()
+
+    for choice in ("false", ""):
+        choose(settings, choice)
+        background, window = make(indicator=kind)
+        close(background, window)
+        wait_for(lambda: background.events == ["exit"])
+        assert background.owner_exit.is_set(), choice
+
+
 def test_quit_requests_bypass_the_question_and_are_never_cancelled(settings, monkeypatch, make):
     background, window = make(answer=True)
     background.quit.set()  # Cmd+Q / Dock Quit / logout (macOS delegate) or a tray Quit
@@ -811,7 +842,7 @@ def test_macos_quit_requests_are_marked_before_pywebviews_closing_runs(monkeypat
         def applicationShouldTerminate_(self, sender):
             return answers[-1] if background.quit.is_set() else "asked as a close"
 
-    background = SimpleNamespace(quit=threading.Event(), shown=[])
+    background = SimpleNamespace(quit=threading.Event(), shown=[], window=Window())  # the main window exists
     background.show_window = lambda: background.shown.append(True)
     mac._shared["background"] = background
     delegate_class, _target = mac._classes(PywebviewDelegate)
@@ -826,6 +857,111 @@ def test_macos_quit_requests_are_marked_before_pywebviews_closing_runs(monkeypat
     assert mac.MacStatusItem.confirm(None, window, "t", "m") is True
     assert window.calls[-1][2] == {"global.ok": "Keep running", "global.cancel": "Quit"}
     assert window.localization == {"global.ok": "OK", "global.cancel": "Cancel"}, "labels restored"
+
+
+class NSApp:
+    """``NSApplication.sharedApplication()``: pywebview's delegate until the launcher installs its own."""
+
+    def __init__(self):
+        self.current = self.Pywebview()
+
+    class Pywebview:
+        @classmethod
+        def alloc(cls):  # Objective-C allocation: the launcher's subclass is made the same way
+            return cls.__new__(cls)
+
+        def init(self):
+            return self
+
+        def applicationShouldTerminate_(self, sender):
+            return 1  # YES: no closing handler kept a setup window, so AppKit would end the process now
+
+    def delegate(self):
+        return self.current
+
+    def setDelegate_(self, delegate):
+        self.current = delegate
+
+
+def appkit_doubles(monkeypatch, app):
+    objc = types.ModuleType("objc")
+    objc.super = lambda cls, obj: super(cls, obj)
+    appkit = types.ModuleType("AppKit")
+    appkit.NSObject, appkit.NSTerminateLater, appkit.NSTerminateCancel = object, 2, 0
+    appkit.NSApplication = SimpleNamespace(sharedApplication=lambda: app)
+    monkeypatch.setitem(sys.modules, "objc", objc)
+    monkeypatch.setitem(sys.modules, "AppKit", appkit)
+    from ouroboros import launcher_tray_macos as mac
+
+    monkeypatch.setattr(mac, "_shared", {})
+    return mac
+
+
+def test_a_macos_app_quit_before_the_main_window_is_the_owners_quit_and_its_close_keeps_its_meaning(make,
+                                                                                                    monkeypatch):
+    """Cmd+Q, Dock Quit or logout over a setup window: the delegate installed at that window's ``before_show``
+    (the native seam) asks this launcher's Quit and answers ``NSTerminateLater``: AppKit (and a logout) waits for
+    the closer's exit, never cancelled; the window gets no close policy, so its red button and a programmatic
+    destroy ask nothing."""
+    app = NSApp()
+    mac = appkit_doubles(monkeypatch, app)
+    monkeypatch.setattr(lb, "indicator_class", lambda: mac.MacStatusItem)
+    background = lb.Background(lambda: background.events.append("close body"), lambda: 1, threading.Event())
+    background.events = []
+    setup = Window()
+    assert background.attach_setup(setup) is setup and background.window is None
+    assert setup.events.closing.handlers == [] and not background.native_ready, "no window policy"
+    assert isinstance(app.delegate(), NSApp.Pywebview)
+    fire(setup, "before_show")
+    delegate = app.delegate()
+    assert type(delegate).__name__ == "OuroborosAppDelegate" and not background.native_ready
+    assert not background.owner_exit.is_set(), "installing the hook is no Quit"
+    assert delegate.applicationShouldTerminate_(app) == 2, "NSTerminateLater: not YES (exit first), not Cancel"
+    assert background.app_quit.is_set() and background.quit.is_set() and background.owner_exit.is_set()
+    wait_for(lambda: background.events == ["close body"])
+    main = Window()
+    background.attach(main)
+    fire(main, "before_show")
+    assert background.native_ready and type(app.delegate()).__name__ == "OuroborosAppDelegate"
+
+
+def test_a_dock_click_over_a_setup_window_keeps_appkits_own_reopen(make, monkeypatch):
+    """Before the main window ``show_window`` only keeps the request, so a minimized Git, onboarding or Startup Failed
+    window comes back by AppKit's own reopen (YES), and nothing is kept for later; once the main window exists the
+    launcher opens it (NO), as before."""
+    app = NSApp()
+    mac = appkit_doubles(monkeypatch, app)
+    monkeypatch.setattr(lb, "indicator_class", lambda: mac.MacStatusItem)
+    background = lb.Background(lambda: None, lambda: 1, threading.Event())
+    fire(background.attach_setup(Window()), "before_show")
+    delegate = app.delegate()
+    assert delegate.applicationShouldHandleReopen_hasVisibleWindows_(app, False) is True
+    assert not background._open_pending, "no open kept for a main window the Dock click never asked for"
+    opened = []
+    monkeypatch.setattr(background, "show_window", lambda: opened.append(True))
+    background.attach(Window())
+    assert delegate.applicationShouldHandleReopen_hasVisibleWindows_(app, False) is False and opened == [True]
+
+
+@pytest.mark.parametrize("pending,panic", [(True, False), (False, False), (True, True)])
+def test_a_startup_close_answers_a_pending_app_terminate_by_its_exit_before_any_window_closes(monkeypatch, make,
+                                                                                               pending, panic):
+    """``end_setup``: AppKit waits on ``NSTerminateLater``, so the process's exit (lock first) is the answer, and no
+    window is destroyed before it (pywebview's last close calls ``app.stop_`` and ``abortModal``). Without a pending
+    terminate the windows close and main returns; an accepted Panic owns the exit and is not waited for."""
+    events = []
+    monkeypatch.setattr(lb.os, "_exit", lambda code: events.append(("exit", code)))
+    monkeypatch.setattr(lb, "indicator_class", lambda: None)
+    background = lb.Background(lambda: None, lambda: 1, threading.Event())
+    if pending:
+        background.app_quit.set()
+    if panic:
+        background.panic.set()
+    windows = [SimpleNamespace(destroy=lambda: events.append("destroy"))]
+    background.end_setup(lambda: events.append("lock released"), windows)
+    expected = {(True, False): ["lock released", ("exit", 0), "destroy"],  # the exit never returns natively
+                (False, False): ["destroy"], (True, True): ["lock released", "destroy"]}[(pending, panic)]
+    assert events == expected
 
 
 @pytest.mark.parametrize("intent,answered,other,expected", [
@@ -1223,3 +1359,80 @@ def test_the_poll_turning_background_off_never_races_a_hide_past_its_icon(settin
         chrome.later[0]()
     stranded = "hide" in window.calls and not background.indicator.ready.is_set()
     assert not stranded and background.indicator.hidden is ("hide" in window.calls)
+
+
+def test_only_owner_gestures_mark_an_owner_exit(settings, monkeypatch, make):
+    """Quit's engine stop reads ``owner_exit``: a lost indicator, an unshowable window, an unshowable question and a
+    hide that failed after the owner chose to keep running exit without it; the owner's own close or Quit marks it."""
+    calls = []
+
+    def recorded(background):
+        background.exit_launcher = lambda *, owner=True: calls.append(owner) or False
+        return background
+
+    background, window = make()
+    recorded(background)
+    window.show = lambda: (_ for _ in ()).throw(RuntimeError("no window"))
+    background.indicator._hidden = True
+    background.indicator._show_or_exit(window)  # the indicator is gone and the window cannot come back
+    background.indicator._hidden, background.window = True, None
+    background.indicator._stopped()  # the indicator went away with no window at all
+    background, window = make(answer=None)
+    recorded(background)
+    background.indicator.confirm = lambda *a: (_ for _ in ()).throw(RuntimeError("no dialog"))
+    background._asking.acquire()
+    background._ask()  # the background question could not be shown: the owner's answer is unknown
+    choose(settings, "")
+    background, window = make()
+    recorded(background)
+    background.indicator.confirm = lambda *a: True
+    monkeypatch.setattr(background.indicator, "hide_on_close", lambda window: False)
+    background._asking.acquire()
+    background._ask()  # the owner chose to keep running and the hide failed
+    assert calls == [False, False, False, False]
+    background, window = make()
+    recorded(background)
+    background.indicator.confirm = lambda *a: False
+    background._asking.acquire()
+    background._ask()  # the owner declined background: closing quits
+    background.request_quit()
+    assert calls[4:] == [True, True]
+
+
+def test_an_owner_exit_marks_the_launchers_quit_before_the_body_runs(make):
+    background, window = make()
+    shared = threading.Event()
+    background.owner_exit = shared
+    background._close = lambda: background.events.append(("body", shared.is_set()))
+    background.exit_launcher()
+    wait_for(lambda: background.events)
+    assert background.events == [("body", True)]
+
+
+def test_a_saved_keep_running_choice_whose_indicator_or_hide_fails_exits_without_an_owner_quit(
+        settings, monkeypatch, make):
+    """The saved "keep running" answer means the owner's close is no Quit: a missing icon or a failed hide still
+    exits (never a hidden window without a way back) but leaves ``owner_exit`` unset, so the engine is kept. A
+    saved "quit on close" and the explicit Quit stay owner exits."""
+    class NoIcon(FakeIndicator):
+        comes_up = False
+
+    choose(settings, "true")
+    background, window = make(indicator=NoIcon)
+    close(background, window)  # the indicator never came up
+    wait_for(lambda: background.events == ["exit"])
+    assert background.shutdown.is_set() and not background.owner_exit.is_set() and window.calls == []
+    background.request_quit()  # the owner's explicit Quit afterwards still marks the engine stop
+    assert background.owner_exit.is_set()
+
+    background, window = make()
+    window.hide = lambda: (_ for _ in ()).throw(RuntimeError("hide failed"))
+    close(background, window)  # the icon is up, the hide itself fails
+    wait_for(lambda: background.events == ["exit"])
+    assert not background.owner_exit.is_set() and not background.indicator.hidden
+
+    choose(settings, "false")
+    background, window = make()
+    close(background, window)  # the saved answer is "quit on close": the owner's close is Quit
+    wait_for(lambda: background.events == ["exit"])
+    assert background.owner_exit.is_set()

@@ -335,7 +335,7 @@ def execute_panic_stop(
     Owner-local request-only APIs signal captured children before settlement.
     Normal admission pins attested daemon identities; ``stop_outcome`` later
     settles custody and attempts same-home CLI shutdown for unresolved targets.
-    The shared daemon survives ordinary close outside the Windows launcher Job,
+    The shared daemon runs outside the Windows launcher Job (closing that Job never ends it),
     so that Job is not a Panic backstop.
     Unconfirmed shutdown remains disclosed with custody retained; names or
     recycled descriptor ports never authorize signalling an unrelated process.

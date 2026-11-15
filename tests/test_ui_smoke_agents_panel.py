@@ -11,6 +11,7 @@ import json
 import pytest
 
 from tests.settings_browser_helpers import open_entry, open_settings, settings_page
+from tests.settings_section_helpers import lead_name
 
 pytest_plugins = ("tests.test_ui_smoke_playwright",)
 
@@ -57,7 +58,7 @@ def _agents_add_saves_and_the_list_reveals_it(page) -> str:
     editor = settings_page(page, "agents/new")
     form = editor.locator("[data-subagent-row]")
     form.wait_for(state="visible", timeout=10_000)
-    assert editor.locator(".settings-page-title").inner_text().strip() == "New agent"
+    assert lead_name(page) == "New agent"  # the section's header names the page
     line = form.locator("[data-subagents-validation]")
     assert line.is_hidden() and form.get_attribute("data-invalid") is None
     assert "Choose how this subagent runs" in form.locator("[data-subagent-meta]").inner_text()

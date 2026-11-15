@@ -20,6 +20,7 @@ import pytest
 from tests import test_subscription_setup_browser as setup_browser
 from tests.settings_browser_helpers import (
     HOME, commit_row, go_back, open_entry, open_settings, press_editor_save, search_settings, setting_row, settings_page, top_path)
+from tests.settings_section_helpers import header_back, lead_name, show_card, show_page
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
@@ -263,8 +264,10 @@ def test_a_tool_servers_page_saves_its_entry_keeps_typed_text_and_remove_asks_fi
     _settled(page, "tools").locator('[data-entry-id="github"]').wait_for(state="visible")
     editor = open_entry(page, "github")
     assert top_path(page) == "tools/github"
-    assert page.locator("#page-settings [data-settings-lead-name]").inner_text() == "GitHub"
-    assert page.locator("#page-settings > .app-page-header [data-shell-back]").inner_text().strip() == "Tools"
+    # The header names the server's page, and its Back leads to the list it was opened from.
+    assert lead_name(page) == "GitHub"
+    back = header_back(page)
+    assert back.is_visible() and back.inner_text().strip() == "Tools" and back.get_attribute("aria-label") == "Back to Tools"
     name = editor.locator('[data-mcp-field="name"]')
     name.fill("GitHub (work)")
     # A status read lands while the form holds typed text: the text stays, and so does the caret.
@@ -310,17 +313,46 @@ def test_a_tool_servers_page_saves_its_entry_keeps_typed_text_and_remove_asks_fi
     page.close()
 
 
+# Who asked for each catalogue read, recorded as it starts: its stack names the module that read (the home's own reads
+# start in settings_home.js), since another page may read the catalogue for itself.
+_RECORD_CATALOGUE_READERS = """() => {
+    const fetch = window.fetch;
+    window.__catalogueReaders = [];
+    window.fetch = (url, init) => {
+        if (String(url).split('?')[0].endsWith('/api/model-catalog')) window.__catalogueReaders.push(String(new Error().stack));
+        return fetch(url, init);
+    };
+}"""
+
+
 @pytest.mark.parametrize("width,height", SIZES)
 def test_models_from_search_a_role_saves_through_its_writer_and_the_context_door_posts_nothing(subscription_ui, width, height):
     page, server = _page(subscription_ui, width, height)
+    # The list with Ouroboros's card (beside a page, the card is the pane its row opens). The list reads its answers when
+    # it comes on screen (settings.js look): Settings shown again after another page reads every one of them, and none
+    # of the home's reads is the catalogue.
+    show_card(page)
+    page.evaluate(_RECORD_CATALOGUE_READERS)
+    show_page(page, "skills")
     subscription_ui["reads"].clear()
-    page.locator(f"{HOME} [data-settings-card]").wait_for(state="visible")
-    assert not [url for url in subscription_ui["reads"] if "/api/model-catalog" in url], "the home reads no catalogue"
+    show_page(page, "settings")
+    for _ in range(200):  # its storage read, one of the answers it reads each time, has reached the server
+        if any(urlparse(url).path == "/api/storage" for url in subscription_ui["reads"]):
+            break
+        page.wait_for_timeout(50)
+    else:
+        raise AssertionError(("the home did not read its answers again", subscription_ui["reads"]))
+    page.wait_for_function("() => document.querySelector('#page-settings [data-settings-open=rules] [data-settings-answer]')?.textContent")
+    readers = page.evaluate("() => window.__catalogueReaders")
+    assert not [stack for stack in readers if "settings_home.js" in stack], ("the home reads no catalogue", readers)
+    subscription_ui["reads"].clear()  # from here a catalogue read is the one Models makes when it is shown
     assert "OUROBOROS_PROMPT_CACHE_TTL" in search_settings(page, "prompt cache")
     page.locator(f'{HOME} [data-settings-result="OUROBOROS_PROMPT_CACHE_TTL"]').click()
     level = _settled(page, "models")
     page.wait_for_function("() => document.querySelector('#page-settings [data-setting-row=\"OUROBOROS_PROMPT_CACHE_TTL\"]')?.closest('details')?.open")
     assert [url for url in subscription_ui["reads"] if "/api/model-catalog" in url], "the catalogue is read when Models is shown"
+    # The recorder saw that read too, so its silence over the home's reads above was a real "none".
+    assert len(page.evaluate("() => window.__catalogueReaders")) > len(readers), "the recorder sees Models' catalogue read"
     # The roles in the picture's order, each with its route.
     page.wait_for_function("() => document.querySelector('#page-settings [data-setting-row=\"models:light\"] [data-row-value]')?.textContent")
     assert level.locator("[data-entry-id]").evaluate_all("rows => rows.map((row) => row.dataset.entryId)") == [
@@ -371,24 +403,43 @@ def test_models_from_search_a_role_saves_through_its_writer_and_the_context_door
     page.close()
 
 
+def _open_role(page, role):
+    """A role's page as the owner opens it: from Models, so it lies over that page and its Back leads there (beside
+    the list a first-level page has no Back: the list is its way back, docs/DESIGN.md "Settings")."""
+    open_settings(page, "models")
+    _settled(page, "models").locator(f'[data-entry-id="{role}"]').click()  # the role's row is its door
+    settings_page(page, f"models/role/{role}").wait_for(state="visible")
+    back = header_back(page)
+    assert back.is_visible() and back.get_attribute("aria-label") == "Back to Models"
+    return _settled(page, f"models/role/{role}")
+
+
 def test_a_role_left_with_unsaved_words_comes_back_as_it_was_left_and_a_saved_one_is_read_again(subscription_ui):
-    """Back from an editor with unsaved words puts its page aside: its path opens it again as it was left, and Save
-    then writes those words. Around the typed role the page follows the read: a key saved in Accounts meanwhile is
-    offered. With nothing unsaved the page is let go and shows what is stored the next time."""
+    """Back from an editor with unsaved words puts its page aside: its path opens it again as it was left (from
+    outside Settings too, as a first-level page beside the list), its row in Models does too, and Save then writes
+    those words. Around the typed role the page follows the read: a key saved in Accounts meanwhile is offered. With
+    nothing unsaved the page is let go and shows what is stored the next time."""
     from playwright.sync_api import expect
 
     page, server = _page(subscription_ui, 1087, 740, ANTHROPIC_API_KEY="")
-    open_settings(page, "models/role/vision")
-    editor = _settled(page, "models/role/vision")
+    editor = _open_role(page, "vision")
     editor.locator("[data-editor-save]").wait_for(state="visible")
     assert editor.locator('[data-model-role-source] option[value="api:anthropic"]').count() == 0, "no Anthropic key yet"
     editor.locator("[data-model-role-source]").select_option("api:openai")
     _type_model(editor, "gpt-vision")
     go_back(page)
     assert not server.posts, "leaving wrote nothing"
-    server.values["ANTHROPIC_API_KEY"] = "***set***"  # saved in Accounts and keys while the role waited aside
+    # Its path, asked from outside Settings (a deep link), brings the page back as it was left; another page opened
+    # beside the list puts it aside again.
     open_settings(page, "models/role/vision")
     editor = _settled(page, "models/role/vision")
+    assert editor.locator("[data-model-role-source]").input_value() == "api:openai"
+    assert editor.locator("[data-model-role-model]").input_value() == "gpt-vision"
+    assert editor.locator("[data-editor-discard]").is_visible()
+    open_settings(page, "models")
+    assert not server.posts, "leaving wrote nothing"
+    server.values["ANTHROPIC_API_KEY"] = "***set***"  # saved in Accounts and keys while the role waited aside
+    editor = _open_role(page, "vision")
     expect(editor.locator('[data-model-role-source] option[value="api:anthropic"]')).to_have_count(1)
     assert editor.locator("[data-model-role-source]").input_value() == "api:openai"
     assert editor.locator("[data-model-role-model]").input_value() == "gpt-vision"
@@ -398,8 +449,7 @@ def test_a_role_left_with_unsaved_words_comes_back_as_it_was_left_and_a_saved_on
     # Saved, the page holds nothing of its own: left and opened again, it reads what is stored now.
     go_back(page)
     server.values["OUROBOROS_MODEL_VISION"] = "openai::gpt-other"
-    open_settings(page, "models/role/vision")
-    editor = _settled(page, "models/role/vision")
+    editor = _open_role(page, "vision")
     page.wait_for_function("() => document.querySelector('#page-settings [data-settings-page=\"models/role/vision\"] "
                            "[data-model-role-model]')?.value === 'gpt-other'")
     assert not editor.locator("[data-editor-discard]").is_visible()
@@ -412,15 +462,13 @@ def test_a_kept_role_saves_only_what_was_changed_and_a_model_chosen_elsewhere_me
     from playwright.sync_api import expect
 
     page, server = _page(subscription_ui, 1087, 740, OUROBOROS_MODEL_VISION="openai::gpt-vision-old")
-    open_settings(page, "models/role/vision")
-    editor = _settled(page, "models/role/vision")
+    editor = _open_role(page, "vision")
     expect(editor.locator("[data-model-role-model]")).to_have_value("gpt-vision-old")
     editor.locator(".model-role-details > summary").click()  # processing and window wait behind More
     editor.locator("[data-model-role-processing]").select_option("fast")
     go_back(page)
     server.values["OUROBOROS_MODEL_VISION"] = "openai::gpt-vision-new"  # chosen elsewhere while the page waited aside
-    open_settings(page, "models/role/vision")
-    editor = _settled(page, "models/role/vision")
+    editor = _open_role(page, "vision")
     editor.locator(".model-role-details").evaluate("node => { node.open = true; }")
     assert editor.locator("[data-model-role-processing]").input_value() == "fast", "the typed field stays"
     assert press_editor_save(page).startswith("Saved")
@@ -436,7 +484,8 @@ def test_the_local_model_page_saves_a_row_for_its_own_restart_and_never_offers_a
     open_settings(page, "models")
     _settled(page, "models").locator('[data-setting-row="models:local"]').click()
     level = _settled(page, "models/local")
-    assert page.locator("#page-settings > .app-page-header [data-shell-back]").inner_text().strip() == "Models"
+    back = header_back(page)
+    assert back.is_visible() and back.inner_text().strip() == "Models" and back.get_attribute("aria-label") == "Back to Models"
     page.wait_for_function("() => /Ready/.test(document.querySelector('#local-model-status')?.textContent || '')")
     assert commit_row(page, "LOCAL_MODEL_CONTEXT_LENGTH", 32768) == "Saved · applies when the local model is restarted · was 16384 · Undo"
     assert server.writes() == [{"LOCAL_MODEL_CONTEXT_LENGTH": 32768}]

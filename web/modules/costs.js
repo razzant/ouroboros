@@ -12,7 +12,7 @@ import { mountCostPeriod } from './cost_period.js';
 import { READ_OK, accountRows, facetReadState } from './claudexor_status_store.js';
 import { humanizeResetAt, quotaSummary } from './harness_accounts.js';
 import { controlIcon, fluentIcon } from './page_icons.js';
-import { fmt, translateString } from './i18n.js';
+import { spendGapsWords } from './route_editor_primitives.js';
 
 // The limits card is rows of settings_rows.js (their home is this tab), drawn and written by settings_controls.js: each
 // saves itself and says what happened. The consciousness allowance has its one editor here (owner, 10 Nov 2026: moved
@@ -498,14 +498,13 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         if (focused) (host.contains(focused) ? focused : host.querySelector('[data-costs-account="accounts"]'))?.focus({ preventScroll: true });
     }
 
-    // What the limits cannot count, one line under them (pricing.known_spend_gaps). The words are composed here,
-    // so the overlay leaves them alone and a language change says them again.
+    // What the limits cannot count, one line under them (pricing.known_spend_gaps). The words are composed
+    // (spendGapsWords), so the overlay leaves them alone and a language change says them again.
     let spendGaps = [];
     function paintGaps() {
         const line = page.querySelector('#costs-gaps');
         if (!line) return;
-        line.textContent = spendGaps.length ? fmt('Not counted: {roles} (price unknown).',
-            { roles: spendGaps.map((name) => translateString(name)).join(', ') }) : '';
+        line.textContent = spendGapsWords(spendGaps);
         line.hidden = !spendGaps.length;
         if (spendGaps.length) line.dataset.i18nFmt = 'spend gaps'; else delete line.dataset.i18nFmt;
     }

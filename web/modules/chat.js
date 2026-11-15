@@ -2483,6 +2483,7 @@ export function createChatInstance({
             _historyAppending = false;
             replayKeys = null; replaySelection = null;
         }
+        portals.refresh();
         syncChatStatus();
     }
 
@@ -3473,6 +3474,7 @@ export function createChatInstance({
             return changed;
         });
         hostStart.forget();
+        portals.retire();
         hideTypingIndicatorOnly();
         syncChatStatus();
         syncHeaderControlState({ accounting: { available: false } });

@@ -414,8 +414,9 @@ function pageHarness({ unread = 0, page = 'files', project = null } = {}) {
         // chat.js: `showLatest` goes to the present (with `arrive`, onto what came); `resume` is a return, as left.
         mainChat: { showLatest(options) { claims.push(options?.arrive === true ? 'land' : 'latest'); },
             resume(arrive) { claims.push(['resume', arrive]); }, closeTransient() {}, ws: { paused: page !== 'chat' } },
-        rooms: { suspend(room) { room.ws.paused = true; }, restore(room) { room.ws.paused = false; },
+        rooms: { suspend(room) { room.ws.paused = true; }, restore(room) { room.ws.paused = false; }, rememberSelection() {},
             forgetShownSelections(others, options) { context.forgottenSelections += 1; context.forgetOptions = options; } },
+        projectInstances: new Map(),
         forgottenSelections: 0,
         roomCoversMain: () => true,
         document: { hidden: false, querySelectorAll: () => [], getElementById: () => ({ classList: { add() {} } }) },
@@ -451,6 +452,18 @@ test('Main shown from another page is a return: chat.js `resume` puts it as left
     await leaving.context.show('settings');
     assert.deepEqual(leaving.claims, [], 'another page shown while Main has news claims nothing for Main');
     assert.equal(leaving.context.mainChat.ws.paused, true, 'Main behind another page is away');
+});
+
+test('a Project over Main keeps its selection before the next page is shown and takes focus', async () => {
+    for (const [page, project, kept] of [['chat', 'p1', [['kept', 'p1'], ['shown', 'settings']]], ['files', null, [['shown', 'settings']]]]) {
+        const { context } = pageHarness({ page, project });
+        const order = [];
+        if (project) context.projectInstances.set(project, { id: project });
+        context.rooms.rememberSelection = (room) => { if (room) order.push(['kept', room.id]); };
+        context.window.dispatchEvent = (event) => order.push(['shown', event.detail?.page]);
+        await context.show('settings');
+        assert.deepEqual(order.slice(0, 2), kept, `from ${page}`);
+    }
 });
 
 test("Main pressed again while shown (its row) lands what came; read, under a Project, or for a task's place it does not", async () => {

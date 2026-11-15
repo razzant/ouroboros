@@ -211,6 +211,34 @@ test('showing the home reads only what is passive: no catalogue, no review pool,
     assert.deepEqual(statusReads, [], 'still no read of the status and no wake');
 });
 
+test('the card\'s first word follows the socket: an open or a close repaints it and reads nothing', async (t) => {
+    // The home can finish its reads before the socket's first open; since it reads only when it comes on screen, that
+    // open alone must move the card off Reconnecting.
+    const { env, content } = world(t);
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    let connected = false;
+    const handlers = new Map();
+    const ws = { isConnected: () => connected, on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); } };
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws, stateSnapshots: { latest: () => ({ supervisor_ready: true }) } } });
+    t.after(() => home.dispose());
+    await home.refresh();
+    await settle();
+    const word = () => content.querySelector('[data-settings-card]').querySelector('[data-being-state]').textContent;
+    assert.equal(word(), 'Reconnecting…', 'painted while the socket was down');
+    const reads = env.calls.length;
+    connected = true;
+    handlers.get('open')?.({});
+    assert.equal(word(), 'Online', 'the first open repaints the card');
+    connected = false;
+    handlers.get('close')?.({});
+    assert.equal(word(), 'Reconnecting…', 'a close repaints it back');
+    await settle();
+    assert.equal(env.calls.length, reads, 'neither reads anything');
+    home.dispose();
+    assert.equal(handlers.has('open') || handlers.has('close'), false, 'dispose lets the socket go');
+});
+
 test('a page reads when it is shown, not when Settings is', async (t) => {
     const { env, content, state, showPage } = world(t);
     const reads = [];

@@ -491,7 +491,8 @@ own; then the name is that source. Closed, it always shows the room's choice, ne
 wears no mark for one; open, its hint adds one fact line when works here run on other
 models, over `Applies to new work here; running work keeps its model.` In the Main chat the capsule is Main itself:
 a pick asks first in the shared confirm dialog (what Main becomes and was, the route's facts,
-`model_roles.MAIN_FOLLOW_NOTE`, and in one line the pinned account and manual window it resets), then writes Main.
+`model_roles.MAIN_FOLLOW_NOTE`, `composer_model.MAIN_CACHE_NOTE` with the catalog's cache-write price where it
+states one (§7), and in one line the pinned account and manual window it resets), then writes Main.
 **The sheet also says what the change does not move**: how many running works follow Main (said as unknown, never as zero, while the list
 of works is incomplete), then what is not on Main now — running and queued works on other models, each with why
 (`you chose it`, `its room's model`, `Ouroboros switched to it`, `fallback since 02:14` in amber) and its room, and
@@ -697,7 +698,12 @@ Status, owner action, and urgent notification are separate product concepts:
   owner can or must act. Task status uses one factual word family, `Working`,
   `Done`, `Done with warnings`, `Failed`, `Stopped`, shared by host task rows in
   Main and the Project thread (`OUTCOME_PHASE_HEADLINE`). `Done` says the turn ended, not that its goal was
-  met. Stop now reads `Stopped` whatever it kept (answer and files stay shown);
+  met. A model's final answer delivered before a stop cut its task's finalization
+  is not a failure of the work (owner 15.11, A): its status is `Done` unless another
+  fact of the record fails or warns, with no warning mark; the cause sentence, on the
+  collapsed line like any cause, names what was not stored, and the record stays
+  failed. An answer the host salvaged, one not yet delivered when the record was
+  written and one whose origin was not recorded keep `Failed`. Stop now reads `Stopped` whatever it kept (answer and files stay shown);
   a Wrap up reads `Done` over its final answer and `Stopped` without one; failed
   file preservation beside Wrap up reads `Failed`; the cause names the button.
   Explicit `task_completion/author_stop` reads `Stopped`, keeping its cause and Continue, including saved records.
@@ -2807,10 +2813,15 @@ Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role reads as a current choice (§7 "Settings") and opens one compact
 Source / Model / Account row to change it. Under Main, Settings (not the wizard or a wait
 picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the Main chat's Model capsule, whose
-confirming sheet says it before it writes Main. A model suggestion and the line under a role show the catalog's
+confirming sheet says it before it writes Main, with one more fact (`composer_model.MAIN_CACHE_NOTE`: what follows
+Main may write its start to the new model's cache again) and, where the catalog states it for the install's cache
+tier, the price of a cache write. A model suggestion and the line under a role show the catalog's
 published price per 1M tokens where it states a whole one and the role pays it (not on Fast or Economy), which never
-sorts or filters the list; the line under an API role whose price is not that says `Price unknown`;
-nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
+sorts or filters the list; the line under an API role whose price is not that says `Price unknown`. The line under a
+role also says the model's window in the list's words (`$4 in / $20 out per 1M tokens · 1M window`): the one its
+route is sized with when known, else the catalog's; an unknown window is omitted. In setup the catalog is the draft's
+own (a key typed there lists and prices its models before anything is saved), and the limits step names what its
+limits cannot count, as Dashboard › Costs does (`Not counted: …`). Nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
 independently. Fallbacks use the same row in their saved order, with adjacent

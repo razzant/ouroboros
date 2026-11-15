@@ -894,7 +894,7 @@ def test_owner_uploads_and_delivered_documents_keep_their_own_doors(direct_serve
             _open(page, "room-brief.md", ready=".document-reader-markdown", feed=feed)
             page.evaluate(OPEN_ROOM, other)
             page.locator(f'#pchat-{other["id"]}-messages').wait_for(state="visible", timeout=30_000)
-            assert page.evaluate(LEFT_BEHIND, feed) == {"readers": 0, "open_dialogs": 0, "room": False, "focus_connected": True}
+            assert page.evaluate(LEFT_BEHIND, feed) == {"readers": 0, "open_dialogs": 0, "room_kept_away": True, "focus_connected": True}
             assert len([row for row in _inbound(data) if row.get("chat_id") == room["chat_id"]]) == 1, "saved once"
         finally:
             browser.close()

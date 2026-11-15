@@ -9,6 +9,7 @@ import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
 from tests.settings_browser_helpers import HOME, open_settings, top_path, walk_settings
+from tests.settings_section_helpers import header_back
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
@@ -65,10 +66,11 @@ def test_a_narrow_column_in_a_wide_window_is_laid_out_as_a_phone(subscription_ui
     page.route("**/api/extensions", lambda route: route.fulfill(json=FORM))
     page.goto(ui["url"] + "/#settings")
     page.locator(HOME).wait_for(state="visible")
-    # The window is wide; the Settings box is not. One column, a Back on the page, nothing wider than its column.
+    # The window is wide; the Settings box is not. One column, the page's Back in the header, nothing wider than its
+    # column.
     page.add_style_tag(content="#page-settings { max-width: 250px; }")
     results = _walk(page)
     assert all(extra <= 1 for extra in results.values()), json.dumps(results, indent=2)
-    open_settings(page, "skill-sources")
-    assert page.locator("#page-settings > .app-page-header [data-shell-back]").is_visible() and not page.locator(HOME).is_visible()
+    level = open_settings(page, "skill-sources")
+    assert level.is_visible() and header_back(page).is_visible() and not page.locator(HOME).is_visible()
     page.close()

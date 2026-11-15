@@ -110,6 +110,7 @@ export const TASK_CAUSE_PHRASES = {
     // Recovery finalized a dead attempt from its registered answer; the Done card's delivery
     // disposition keys (the row's typed terminal_delivery), rendered by terminalDeliveryClause.
     finalization_incomplete: "The answer was authored, but the task's finalization did not complete, so its review evidence, artifacts and cost accounting are incomplete.",
+    finalization_incomplete_delivered: "The answer was delivered. The task stopped before its review evidence, artifacts and cost accounting were stored.",
     terminal_delivery_exhausted: "Sending the final answer was not confirmed after the delivery attempts ran out",
     terminal_delivery_unknown: "Delivery of the final answer could not be confirmed because the delivery registry could not be read; the result is in task details.",
     // Presentation only; no producer stamps this as a reason code.
@@ -122,6 +123,13 @@ export const TASK_CAUSE_PHRASES = {
 // a red check no later run passed, finished children without a decision. Twin: outcomes.DETAIL_ONLY_WARNINGS.
 export const DETAIL_ONLY_WARNINGS = ['receipt_absent', 'verification_red_unreconciled', 'children_undecided'];
 export const UNSTARTED_REASONS = new Set(['subagent_executor_unavailable', 'delegate_tools_invisible', 'delegate_visibility_unverified']);
+
+// Twin of working_checkpoint.delivered_answer_cause: the model's own final answer, proven delivered before its
+// task's finalization was cut, reads Done with this cause; '' for every other record.
+export function deliveredAnswerCause(record, reason = 'finalization_incomplete') {
+    return reason === 'finalization_incomplete' && record?.reason_code === reason && record.terminal_origin === 'model_final'
+        && record.finalization_recovery?.answer === 'delivered' ? 'finalization_incomplete_delivered' : '';
+}
 
 export function taskReasonPhrase(code) {
     const raw = String(code || '');
