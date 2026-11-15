@@ -220,6 +220,17 @@ def collect_range_material(
             commit["body"] = truncate_within_limit(body, COMMIT_BODY_MAX_CHARS) if body else ""
     for commit in commits:
         commit["body_read"] = commit["sha"] in bodies
+    # The review receipt of EVERY first-parent commit is read, behind the body bound too: the Update window counts the
+    # merges that went in over a review outcome, and a receipt left unread would make that count silently short.
+    behind = [commit for commit in material["first_parent_commits"] if not commit["body_read"]]
+    if behind:
+        rc, out, err = capture(["git", "log", "--first-parent", "--format=%H%x1f%b%x1e", spec])
+        if rc != 0:
+            raise MaterialUnavailable(f"git log --first-parent bodies {spec} failed (rc={rc}): {str(err)[:200]}")
+        receipts = dict(chunk.strip("\n").split("\x1f", 1) for chunk in out.split("\x1e") if "\x1f" in chunk)
+        for commit in behind:
+            if commit["sha"] in receipts:
+                commit["qualification"], commit["receipt_read"] = commit_qualification(receipts[commit["sha"]].strip()), True
     material["bodies_omitted"] = max(0, len(commits) - max_bodies)
     material["commits"] = commits
 

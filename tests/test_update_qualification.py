@@ -370,6 +370,14 @@ def test_check_writes_exact_real_git_range_and_preflight_reads_unqualified_items
                                            drive_root=other)["qualification"]
         assert facts.get("landed_over_review", "absent") == expected, name
         assert ("landed_over_review" in qualification.qualification_summary(facts)) is (expected == [])
+    # A long range keeps only its newest bodies, yet reads the receipt of every first-parent commit: the count of
+    # merges that went in over a review outcome is never short by the commits behind the body bound.
+    (repo / "later.txt").write_text("later", encoding="utf-8")
+    newest = _commit(repo, "A later commit")
+    long = letter.collect_range_material(base, newest, git=_capture_for(repo), max_bodies=1)
+    assert [c["body_read"] for c in long["commits"] if c["sha"] in (newest, target)] == [True, False]
+    behind = next(c for c in qualification.range_qualification(long, "")["commits"] if c["sha"] == target)
+    assert behind["body_read"] and behind["receipt"]["checks"][0]["detail"] == "Author accepted two FAILs"
     # Green evidence stays green; host code does not invent a failure from prose.
     green = qualification.merge_qualification({"record": {"verdict": {"aggregate": "PASS"}}},
         [{"name": name, "status": "passed"} for name in qualification.CHECKS])

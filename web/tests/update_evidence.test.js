@@ -75,14 +75,23 @@ test('confirmation details name failed, absent and green evidence without conver
         at('earlier', { observed: 'PASS', relation: 'changes_after_review' }), at('sparse', {}), at('future', { observed: 'LATER' }),
         { sha: 'bare', subject: 'no receipt' }] }).line, 'Went in over a review FAIL or no verdict: 3 merges.');
     assert.deepEqual(updateOverReview({ ...plan, commits: [at('m1', { observed: 'FAIL' }), at('m3', { observed: 'unknown' })] }).names,
-        ['m1 (merge; review FAIL)', 'm3 (merge; no review verdict)']);
+        ['m1 (merge; review FAIL)', 'm3 (merge; no review verdict recorded)']);
+    // A range checked before every first-parent receipt was read: the commits behind its body bound are counted as
+    // not read, beside what is named and also when nothing is, in the line and in Details alike.
+    const unread = (sha) => ({ sha, subject: sha, receipt: null, body_read: false });
+    const short = updateOverReview({ ...plan, landed_over_review: [], commits: [at('m1', { observed: 'FAIL' }), unread('o1'), unread('o2'),
+        { sha: 'bare', subject: 'read, no receipt', receipt: null, body_read: true }] });
+    assert.equal(short.line, 'Went in over a review FAIL or no verdict: 1 merge. The review receipts of 2 older commits were not read.');
+    assert.equal(short.detail, 'Went in over a review FAIL or no verdict: m1 (merge; review FAIL). The review receipts of 2 older commits were not read.');
+    assert.equal(updateOverReview({ ...plan, landed_over_review: [], commits: [unread('o1')] }).line,
+        'The review receipts of 1 older commit were not read.');
     qualification.landed_over_review = [];
     qualification.commits = [{ sha: 'bbbb', subject: 'green', receipt: { checks: [{ name: 'full_battery', status: 'passed', source: 'author_declared' }], review: { observed: 'PASS', declared: 'PASS' } } }];
     qualification.github.runs[0].conclusion = 'success';
     const green = rowsText(preflightEvidenceRows({ merge_plan: plan, letter, qualification }));
     assert.match(green, /full_battery passed/);
     assert.doesNotMatch(green, /failed|failure|No qualification receipt|FAIL|Review receipts|this computer/);
-    assert.deepEqual(updateOverReview(qualification), { line: '', names: [], landed: [] }, 'nothing named is no line, never "clean"');
+    assert.deepEqual(updateOverReview(qualification), { line: '', detail: '', names: [], landed: [] }, 'nothing named is no line, never "clean"');
     assert.doesNotMatch(green, /also covers/);
     qualification.github.runs[0].covered_shas = ['earlier-merge'];
     assert.match(rowsText(preflightEvidenceRows({ merge_plan: plan, letter, qualification })), /This run also covers: earlier-/);

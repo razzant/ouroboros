@@ -218,6 +218,10 @@ test('a passed review stays the evidence while a newer round has no verdict: one
     assert.equal(runs('cyber_authority'), 'Reviewed on this computer · passed.', 'a current clean verdict passed, whoever admits it');
     assert.equal(runs('author_accepted_advisory', { review_status: 'warnings' }), 'Reviewed on this computer · passed with notes.');
     assert.match(detailsReview(renderInstalledSkillCard(skill())), /data-tone="ok"[^>]*>clean</);
+    // The word of a review of earlier files never stands beside "No review passed its current files"; current findings keep theirs.
+    const gate = { executable_review: true, blocking_reason: 'author_accepted_advisory' };
+    assert.doesNotMatch(detailsReview(renderInstalledSkillCard(skill({ review_gate: gate, review_status: 'clean', review_stale: true }))), /ui-chip/);
+    assert.match(detailsReview(renderInstalledSkillCard(skill({ review_gate: gate, review_status: 'blockers' }))), /data-tone="danger"[^>]*>blockers</);
 });
 
 test('per-release withdrawal names the withdrawn version supplied by the host', () => {

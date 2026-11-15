@@ -288,7 +288,7 @@ test('the host line about the update on offer shows with or without a descriptio
     const line = 'Went in over a review FAIL or no verdict: 1 merge.';
     const described = updateLetterView({ ...AVAILABLE, letter: letter({ qualification: facts, checked_key: range }) });
     assert.equal(described.over, line);
-    assert.deepEqual(described.overNames, ['mmmmmmmm (merge; review FAIL)']);
+    assert.equal(described.overDetail, 'Went in over a review FAIL or no verdict: mmmmmmmm (merge; review FAIL).');
     // No description yet: the section shows for the update on offer, and the line with it.
     const bare = updateLetterView({ ...AVAILABLE, letter: { state: 'none', text: '', checked_key: range, qualification: facts } });
     assert.equal(bare.state, 'empty');

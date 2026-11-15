@@ -201,7 +201,7 @@ def range_qualification(material: dict, repo_url: str) -> dict:
     return {"base_sha": material["base_sha"], "target_sha": material["target_sha"],
             "commits": [{"sha": c["sha"], "subject": c["subject"], "date": c.get("date"),
                          "receipt": c.get("qualification", commit_qualification(c.get("body") or "")),
-                         "body_read": c.get("body_read", True)}
+                         "body_read": bool(c.get("receipt_read") or c.get("body_read", True))}
                         for c in commits],
             "github": post_merge_checks(commits, repo_url)}
 

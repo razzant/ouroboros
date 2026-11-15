@@ -98,23 +98,25 @@ const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
  * What a range brings over a review FAIL or no verdict, from its qualification: this install's own commits it
  * recorded so (`landed_over_review`, written when the check collected the range) and the first-parent merges whose
  * receipt observed it; a commit that is both counts once, as a commit. `line` is the one host sentence above the
- * description, '' when the facts name nothing (absent is unknown, never "clean"); `names` are its items for Details.
- * @returns {{line: string, names: string[], landed: object[]}}
+ * description and `detail` the same with its items named, for Details; both say how many receipts were not read
+ * (a range checked before every first-parent receipt was read) and are '' when the facts name nothing: absent is
+ * unknown, never "clean".
+ * @returns {{line: string, detail: string, names: string[], landed: object[]}}
  */
 export function updateOverReview(facts) {
+    const listed = Array.isArray(facts?.commits) ? facts.commits : [];
     const landed = Array.isArray(facts?.landed_over_review) ? facts.landed_over_review.filter((row) => row?.sha) : [];
     const own = new Set(landed.map((row) => row.sha));
-    const merges = (Array.isArray(facts?.commits) ? facts.commits : [])
-        .filter((commit) => !own.has(commit.sha) && OVER_REVIEW.has(commit.receipt?.review?.observed));
+    const merges = listed.filter((commit) => !own.has(commit.sha) && OVER_REVIEW.has(commit.receipt?.review?.observed));
+    const unread = listed.filter((commit) => !commit.receipt && commit.body_read === false).length;
     const parts = [...(merges.length ? [plural(merges.length, 'merge')] : []),
         ...(landed.length ? [`${plural(landed.length, 'commit')} Ouroboros made on this computer`] : [])];
-    return {
-        line: parts.length ? `Went in over a review FAIL or no verdict: ${parts.join(', ')}.` : '',
-        names: [...landed.map((row) => `${String(row.sha).slice(0, 8)} (made on this computer; ${row.outcome})`),
-            ...merges.map((commit) => `${String(commit.sha).slice(0, 8)} (merge; ${
-                commit.receipt.review.observed === 'FAIL' ? 'review FAIL' : 'no review verdict'})`)],
-        landed,
-    };
+    const names = [...landed.map((row) => `${String(row.sha).slice(0, 8)} (made on this computer; ${row.outcome})`),
+        ...merges.map((commit) => `${String(commit.sha).slice(0, 8)} (merge; ${
+            commit.receipt.review.observed === 'FAIL' ? 'review FAIL' : 'no review verdict recorded'})`)];
+    const said = (items) => [items.length ? `Went in over a review FAIL or no verdict: ${items.join(', ')}.` : '',
+        unread ? `The review receipts of ${plural(unread, 'older commit')} were not read.` : ''].filter(Boolean).join(' ');
+    return { line: said(parts), detail: said(names), names, landed };
 }
 
 /**

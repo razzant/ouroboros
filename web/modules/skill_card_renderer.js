@@ -582,6 +582,14 @@ function reviewHistory(skill) {
 }
 
 /** Exactly one sentence of review evidence for the current bytes (UX §3.4). */
+// What a ready skill runs over when no review passed its current files (twin of `skill_review_status.runs_over`):
+// 'review_problems' (current blocker findings), 'no_review_verdict', or '' when a review passed or another basis runs it.
+function runsOver(skill) {
+    const current = !skill.review_stale;
+    if (!reviewReady(skill) || !RUNS_WITHOUT_PASS.has(acceptedAs(skill)) || (current && ['clean', 'warnings'].includes(skill.review_status))) return '';
+    return current && skill.review_status === 'blockers' ? 'review_problems' : 'no_review_verdict';
+}
+
 export function reviewSentence(skill) {
     const install = installFacts(skill);
     const ready = reviewReady(skill);
@@ -600,12 +608,10 @@ export function reviewSentence(skill) {
         return `Ouroboros read it before accepting it and recorded why: “${boundedText(notes, 240)}”.`;
     }
     if (ready && skill.review_profile === 'native_seed') return 'Comes with the app; it runs without a separate review.';
-    // Allowed to run is not a passed review (twin of `skill_review_status.runs_over`): the gate's own reasons to run a
-    // payload over findings, on its author's acceptance or on Cyber Pro's judgment never read as "passed".
-    if (ready && RUNS_WITHOUT_PASS.has(acceptedAs(skill)) && (skill.review_stale || !['clean', 'warnings'].includes(skill.review_status))) {
-        return skill.review_status === 'blockers' && !skill.review_stale ? 'Review found problems; it may still run.'
-            : 'No review passed its current files; it may still run.';
-    }
+    // Allowed to run is not a passed review: the gate's own reasons to run a payload over findings, on its author's
+    // acceptance or on Cyber Pro's judgment never read as "passed".
+    const over = runsOver(skill);
+    if (over) return over === 'review_problems' ? 'Review found problems; it may still run.' : 'No review passed its current files; it may still run.';
     // A passed review stays the evidence while a newer round of the same files has no verdict yet.
     const job = ready && reviewJob(skill);
     const again = job && (reviewRunningNow(skill, false) || reviewRunOutcome(job).label === 'pending')
@@ -824,7 +830,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
     // Details: two fact groups the listing re-reads in place and the review block (kept while its key holds).
     const details = `<details class="ui-disclosure skills-details"><summary>Details</summary>
         <div class="skills-details-body">
-            <div class="skills-details-facts" data-skill-detail-review>${detailRow('Review', `${escapeHtml(reviewSentence(skill))} ${statusBadge(skill.review_status, skill.review_gate, skill.review_profile)}`)}</div>
+            <div class="skills-details-facts" data-skill-detail-review>${detailRow('Review', `${escapeHtml(reviewSentence(skill))} ${statusBadge(runsOver(skill) === 'no_review_verdict' ? '' : skill.review_status, skill.review_gate, skill.review_profile)}`)}</div>
             <div class="skills-review-block" data-review-key="${escapeHtml(reviewBlockKey(skill))}">${reviewHistory(skill)}${reviewFindings(skill)}</div>
             <div class="skills-details-overflow" data-skill-detail-overflow>${(model.overflow || []).join('')}</div>
             ${contributionVisibilityHtml(skill, options)}

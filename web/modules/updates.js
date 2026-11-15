@@ -471,7 +471,7 @@ export function updateLetterView(data = {}, phase = '') {
         write,
         request,
         over: over?.line || '',
-        overNames: over?.line ? over.names : [],
+        overDetail: over?.detail || '',
     };
 }
 
@@ -823,8 +823,8 @@ export function initUpdates({ mount, state, ws }) {
         letterProvenance.hidden = !letterProvenance.textContent;
         letterOver.textContent = view.over;
         letterOver.hidden = !view.over;
-        letterOverNames.textContent = view.over ? `${view.over.slice(0, view.over.indexOf(':'))}: ${view.overNames.join(', ')}.` : '';
-        letterOverNames.hidden = !view.over;
+        letterOverNames.textContent = view.overDetail;
+        letterOverNames.hidden = !view.overDetail;
         const lastFailure = letterRefreshError?.text || letter.error_text || letter.error_kind || '';
         const failedAt = attemptTime(letterRefreshError?.at || letter.failed_at);
         // Failed-attempt provenance must never borrow the shown
