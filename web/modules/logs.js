@@ -113,7 +113,8 @@ export function initLogs({ ws, state, mount, setControls }) {
     const historyStatus = page.querySelector('.logs-history-status');
     const emptyLine = page.querySelector('[data-log-empty]');
     function isLogsVisible() {
-        return state.activePage === 'dashboard' && state.dashboardActiveSubtab === 'logs' && !document.hidden;
+        return state.activePage === 'dashboard' && state.dashboardActiveSubtab === 'logs' && !document.hidden
+            && page.closest('[data-section-view]')?.dataset.sectionView !== 'home';
     }
 
     const raw = createLogRaw({ visible: isLogsVisible });

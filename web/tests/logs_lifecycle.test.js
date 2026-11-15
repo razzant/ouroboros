@@ -108,6 +108,21 @@ test('a hidden panel writes no node and reads no history; shown, it catches up a
     assert.equal(logs.calls.length, STREAMS.length);
 });
 
+test('the selected Logs tab stays hidden while the one-column Dashboard shows its list', async (t) => {
+    const logs = mountLogs(t, { page: 'chat' });
+    logs.mount.setAttribute('data-section-view', 'home');
+    logs.emit({ type: 'waiting_for_its_page', ts: at(1) });
+    logs.show();
+    await settle();
+    assert.equal(logs.calls.length, 0, 'the section list is not the selected tab being shown');
+    assert.equal(logs.list.children.length, 0);
+    logs.mount.setAttribute('data-section-view', 'page');
+    logs.window.dispatchEvent({ type: 'ouro:dashboard-subtab-shown', detail: { tab: 'logs' } });
+    await settle();
+    assert.equal(logs.calls.length, STREAMS.length);
+    assert.equal(logs.list.children.length, 1, 'the selected reader catches up when its page is revealed');
+});
+
 test('the first showing after a burst draws the newest entries at once and the rest a chunk per frame, in order', async (t) => {
     const logs = mountLogs(t, { page: 'chat' });
     const frames = [];

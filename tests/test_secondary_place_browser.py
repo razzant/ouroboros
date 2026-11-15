@@ -271,6 +271,40 @@ def test_hidden_logs_take_a_burst_without_drawing_and_shown_keep_filters_raw_sel
 
 
 @pytest.mark.parametrize("engine", ENGINES)
+def test_logs_sidebar_return_restores_reading_when_one_column_reopens_the_selected_row(direct_server_with_data, engine):
+    from playwright.sync_api import expect, sync_playwright
+
+    with sync_playwright() as pw:
+        browser = getattr(pw, engine).launch()
+        try:
+            page, _logs, errors = _page(browser, direct_server_with_data["url"], {"width": 900, "height": 700})
+            page.evaluate(_BURST, [150, "reading"])
+            _nav(page, "dashboard")
+            dashboard = page.locator("#page-dashboard")
+            expect(dashboard).to_have_attribute("data-section-view", "home")
+            page.locator('[data-dashboard-tab="logs"]').click()
+            page.wait_for_function("() => document.getElementById('log-entries').children.length >= 100")
+            page.wait_for_function("() => !document.querySelector('.logs-history-status')?.textContent.includes('Loading')")
+            page.evaluate(_SETTLE_RESTORE_FRAMES)
+            body = page.locator("#page-logs")
+            body.evaluate("box => { box.scrollTop = (box.scrollHeight - box.clientHeight) / 2; }")
+            page.wait_for_timeout(250)
+            place = body.evaluate("box => box.scrollTop")
+            assert place > 100
+            for _ in range(2):
+                _nav(page, "skills")
+                _nav(page, "dashboard")
+                expect(dashboard).to_have_attribute("data-section-view", "home")
+                page.locator('[data-dashboard-tab="logs"]').click()
+                expect(body).to_be_visible()
+                page.evaluate(_SETTLE_RESTORE_FRAMES)
+                assert abs(body.evaluate("box => box.scrollTop") - place) <= 2, "the selected Logs row restores its reader"
+            assert not errors, errors
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("engine", ENGINES)
 def test_logs_reader_inside_the_newest_open_card_keeps_their_place_when_that_card_updates(direct_server_with_data, engine):
     """The owner reads the middle of an open task card that is the newest entry. A live event for that task redraws the
     card where it stands, so the reader stays on the row they were reading; nothing sends them to the new bottom."""

@@ -842,6 +842,23 @@ test('in a wide window the Dashboard holds its list beside a page; an engine wit
     old.dashboard.destroy();
 });
 
+test('reopening the selected Dashboard row announces its page after the one-column list gives way', async (t) => {
+    const { mount, window } = setup(t);
+    const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
+    window.CSS = { supports: () => false };
+    const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
+    const dashboard = initDashboard({ state });
+    const shown = [];
+    window.addEventListener('ouro:dashboard-subtab-shown', (event) => shown.push([event.detail.tab, dashboard.page.dataset.sectionView]));
+    const list = dashboard.page.querySelector('.dashboard-tabs');
+    const row = list.querySelector('[data-dashboard-tab="logs"]');
+    await list.fire('click', { target: row, preventDefault() {} });
+    dashboard.pressedAgain();
+    await list.fire('click', { target: row, preventDefault() {} });
+    assert.deepEqual(shown, [['logs', 'page'], ['logs', 'page']], 'each reopening restores the same selected reader while visible');
+    dashboard.destroy();
+});
+
 test('a root font that moves the two panes\' 40rem repaints the Dashboard: the pane and the list are watched beside its box', (t) => {
     const { mount, window } = setup(t);
     const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);

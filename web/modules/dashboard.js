@@ -236,9 +236,13 @@ export function initDashboard({ state, ws, layers = null, openSettings = null, s
     }
 
     function openLevel() {
+        const wasHome = !panes() && !level;
         level = true;
         paint();
         if (!panes()) panelsEl.focus?.({ preventScroll: true });
+        // Selecting the same row does not change the tab, but does reveal its hidden page. Its reader restores
+        // only after that reveal: WebKit loses a hidden scroller's position, even when its tab stayed selected.
+        if (wasHome) window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: state.dashboardActiveSubtab } }));
     }
 
     function closeLevel() {
