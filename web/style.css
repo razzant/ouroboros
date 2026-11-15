@@ -1418,10 +1418,11 @@ html[data-layout="docked"] .app-page-header[data-empty] {
 .app-page-tabs:not(:has(> *)) { display: none; }
 /* The Back slot (page_header.js placePageBack): one control, never part of a lead that scrolls. On a desk it stands
    before the lead in the bar's start; in the stack layout it starts the row under ☰: the page's tab strip when it
-   has one, else a row of the header's own. */
+   has one, else a row of the header's own. Each `:has()` asks for the control itself (`> *`): WebKit does not
+   re-match `:empty` there when Back comes after the header was painted (14.11: Back alone at the window's top edge). */
 .app-page-back { display: flex; flex: none; align-items: center; }
 .app-page-back:empty { display: none; }
-html[data-layout="docked"] .app-page-title-block:has(> .app-page-back:not(:empty)) {
+html[data-layout="docked"] .app-page-title-block:has(> .app-page-back > *) {
     display: flex;
     align-items: center;
     gap: var(--space-2);
@@ -1429,7 +1430,7 @@ html[data-layout="docked"] .app-page-title-block:has(> .app-page-back:not(:empty
 html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) ~ .app-page-lead { flex: 1 1 auto; }
 /* Back takes the header's start inset (a step from the column's edge) and the hidden title takes no place in the row,
    so the tabs or the location after it keep the room they have without Back. */
-html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title-block > .app-page-title-row:has(~ .app-page-back:not(:empty)) {
+html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title-block > .app-page-title-row:has(~ .app-page-back > *) {
     position: absolute;
 }
 html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) {
@@ -1437,13 +1438,13 @@ html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) {
 }
 /* A phone page that leads back (Circles or Skills opened from Settings): Back stands where the places control stood,
    in the header's one row, as on a Settings page (DESIGN "Page header": one leading control, no second header row). */
-html[data-layout="stack"] .app-page-header[data-back]:has(> .app-page-title-block > .app-page-back:not(:empty)) {
+html[data-layout="stack"] .app-page-header[data-back]:has(> .app-page-title-block > .app-page-back > *) {
     grid-template-areas: "back title toolbar";
 }
-html[data-layout="stack"] .app-page-header[data-back] > .app-page-leading:has(~ .app-page-title-block > .app-page-back:not(:empty)) {
+html[data-layout="stack"] .app-page-header[data-back] > .app-page-leading:has(~ .app-page-title-block > .app-page-back > *) {
     display: none;
 }
-html[data-layout="stack"] .app-page-header[data-back] > .app-page-title-block:has(> .app-page-back:not(:empty)) { display: contents; }
+html[data-layout="stack"] .app-page-header[data-back] > .app-page-title-block:has(> .app-page-back > *) { display: contents; }
 html[data-layout="stack"] .app-page-header[data-back] .app-page-title-row { grid-area: title; }
 html[data-layout="stack"] .app-page-header[data-back] .app-page-back { grid-area: back; }
 .app-page-tabs[data-back] { display: flex; align-items: center; gap: var(--space-1); }
@@ -3804,12 +3805,13 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
     padding-block: var(--space-1) var(--space-2);
 }
 
-/* A child with nothing for its foot (no meta, no count, no control) closes on its summary. */
-.chat-live-card.subagent > .chat-live-foot:not(:has(> .chat-live-meta:not(:empty), > .chat-live-foot-end > .chat-live-review-summary:not([hidden]), > .chat-live-foot-end > .chat-live-actions:not(:empty))) {
+/* A child with nothing for its foot (no meta, no count, no control) closes on its summary. Its meta line and its
+   actions hold only elements, asked for as at a root's foot (`> *`): never `:empty` inside `:has()` (WebKit misses it later). */
+.chat-live-card.subagent > .chat-live-foot:not(:has(> .chat-live-meta > *, > .chat-live-foot-end > .chat-live-review-summary:not([hidden]), > .chat-live-foot-end > .chat-live-actions > *)) {
     display: none;
 }
 
-.chat-live-card.subagent > .chat-live-summary-button:not(:has(~ .chat-live-foot > .chat-live-meta:not(:empty), ~ .chat-live-foot > .chat-live-foot-end > .chat-live-review-summary:not([hidden]), ~ .chat-live-foot > .chat-live-foot-end > .chat-live-actions:not(:empty))) {
+.chat-live-card.subagent > .chat-live-summary-button:not(:has(~ .chat-live-foot > .chat-live-meta > *, ~ .chat-live-foot > .chat-live-foot-end > .chat-live-review-summary:not([hidden]), ~ .chat-live-foot > .chat-live-foot-end > .chat-live-actions > *)) {
     padding-bottom: var(--space-2);
 }
 
