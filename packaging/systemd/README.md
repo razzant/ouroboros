@@ -97,11 +97,17 @@ in-flight tool call will finish. It is the upper bound systemd waits before
 escalating to `SIGKILL` while remaining cgroup processes follow their own
 shutdown paths.
 
-This also stops a shared Claudexor daemon if it was spawned inside this unit's
-cgroup, even if it started a separate process session; other clients using that
-daemon lose it too. A daemon already running outside the unit is unaffected.
-Use the ordinary desktop launch path when the daemon must survive an Ouroboros
-service stop.
+The cgroup signal also stops a shared Claudexor daemon spawned inside this unit,
+even in a separate process session; other clients using that daemon lose their
+runs. When the launcher runs in browser mode (no usable display or GUI backend),
+a service stop is a Quit: its accepted stop signal stops this installation's own
+daemon wherever it runs (ARCHITECTURE §9); a daemon of another home is never
+stopped. A windowed launcher (the startup probe found a usable display and GUI
+backend; a set but unusable `DISPLAY` falls back to browser mode) has no such
+handler, so the signal ends it without a Quit, and a daemon running
+outside the unit keeps running, as it does when the signal precedes the handler.
+Ouroboros's own Restart and Update keep the daemon unless the code they start
+pins a different engine that is not older, which then replaces it.
 
 ## Why this is a user unit
 
