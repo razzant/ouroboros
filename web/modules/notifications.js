@@ -55,6 +55,7 @@
 
 import { TERMINAL_TASK_STATUSES } from './chat_activity.js';
 import { getLogTaskGroupId, taskPresentation, taskReasonDetail, taskTerminalPhase } from './log_events.js';
+import { setRowMeta } from './ui_primitives.js';
 import { shellBridgeApi } from './ui_helpers.js';
 import { tr } from './i18n.js';
 
@@ -832,7 +833,7 @@ export function createNotifier({
                 permission: permission(),
                 storageAvailable,
             });
-            if (node.textContent !== next) node.textContent = next;
+            setRowMeta(node, next);  // the line of its Settings row
         }
         for (const node of root.querySelectorAll('[data-notify-attention-status]')) {
             const api = bridge();
@@ -849,7 +850,7 @@ export function createNotifier({
                 status: attentionStatus,
                 bridge: typeof api?.request_attention === 'function',
             });
-            if (node.textContent !== next) node.textContent = next;
+            setRowMeta(node, next);  // the line of its Settings row
         }
         for (const button of root.querySelectorAll('[data-notify-test]')) {
             button.disabled = !prefs.enabled;
