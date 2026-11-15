@@ -299,6 +299,19 @@ test('a field laid out at attach is measured in its first frame, with no observe
         'a later report at the same width writes nothing');
 });
 
+test('a draft measured at attach is not written again by the first frame', async (t) => {
+    // A restored draft is measured by sync() before the microtask: the first frame then finds the same width and cap.
+    const engine = installEngine();
+    t.after(engine.restore);
+    const field = new Field();
+    const sizing = attachChatInputSizing(field);
+    field.type(lines(3));
+    sizing.sync();
+    await null;
+    engine.flush();
+    assert.equal(field.writes.filter(([name]) => name === '--chat-input-height').length, 1, 'one write for the draft');
+});
+
 test('a content-sized field and a hidden one ask no first frame', async (t) => {
     // The first frame is the measured mode's alone: in content mode a measurement would pin a height the engine keeps
     // growing, and a hidden field has no width to wrap at until its reveal reports.
