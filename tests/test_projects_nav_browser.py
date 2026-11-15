@@ -274,7 +274,7 @@ def test_show_more_reaches_every_room_once_read_and_keeps_its_rows(pins_ui, tmp_
     expect()(page.locator('.nav-project-item')).to_have_count(51)  # the pin and the 50 most recent others
     assert reads_of(reads, "/api/projects", all="1") == []  # the complete list is read only when asked for
     more = page.locator('#nav-projects-list > .nav-projects-more')
-    expect()(more).to_have_text("Show more")
+    expect()(more).to_have_text("Show 50 more")
     page.locator('#primary-sidebar').screenshot(path=str(evidence / f"resting-{ui['tag']}.png"), animations="disabled")
     shown = 51
     while more.count():
@@ -917,7 +917,7 @@ def test_keyboard_browse_handoff_finishes_and_never_steals_later_composer_focus(
         refresh(page)
         expect()(page.locator('.nav-project-item')).to_have_count(51)
         control["fail_list"] = True
-        page.locator('.nav-projects-more', has_text="Show more").focus()
+        page.locator('.nav-projects-more', has_text="Show 50 more").focus()
         page.keyboard.press("Enter")
         expect()(page.locator('.nav-projects-more', has_text="Try again")).to_be_focused()
     if ui["width"] < 720:
@@ -939,7 +939,7 @@ def test_a_delayed_browse_read_does_not_reclaim_keyboard_after_owner_moves_it(pi
     refresh(page)
     expect()(page.locator('.nav-project-item')).to_have_count(51)
     control["hold_lists"] = True
-    page.locator('.nav-projects-more', has_text="Show more").focus()
+    page.locator('.nav-projects-more', has_text="Show 50 more").focus()
     page.keyboard.press("Enter")
     until(page, lambda: len(control["held_lists"]) == 1)
     if ui["width"] < 720:

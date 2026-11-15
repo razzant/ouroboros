@@ -1,3 +1,7 @@
+/** What a row brought into a faded scroller's view keeps clear of its edge (style.css `.scroll-fade-y`), so the chosen
+ *  row does not land dimmed under the fade while more waits beyond it (settings.js's rail, page_header.js's list). */
+export const FADE_CLEARANCE = 24;
+
 /** Edge decoration follows actual hidden content, never masks a settled edge. Given a `region` name, a body that
  * scrolls on its axis is also a named region the keyboard can focus and scroll, as a cut table or notice stack is
  * (WebKit gives no other way into a scroller with nothing focusable inside); hidden or short, it is no tab stop. */

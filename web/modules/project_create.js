@@ -254,7 +254,8 @@ export const pinWords = (pinned, pending = false) => (pending ? (pinned ? 'Unpin
 // The menu opens under `anchorEl` (the row's ⋯, or the focused row) or at a pointer's `point` (a right-click or a
 // long press on the row), whose focus returns to `anchorEl`. Only `menuButton`, the ⋯ that opened it, says it has a
 // popup. `status` ({ view, word, text }) is the row's mark and its words, the menu's first line. When the anchor is
-// gone or hidden (a collapse, an Unpin, a delete), the menu closes and the keyboard goes to `fallbackFocus`.
+// gone or hidden (a delete, an archive, a find that no longer lists it), the menu closes and the keyboard goes to
+// `fallbackFocus`.
 // Returns true: the menu is open.
 export function openProjectRowMenu(project, {
     apiClient, anchorEl, point = null, menuButton = null, status = null, fallbackFocus = null,

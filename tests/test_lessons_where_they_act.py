@@ -36,9 +36,9 @@ def _ctx(root, **fields):
     return ToolContext(repo_dir=root, drive_root=root, budget_drive_root=str(root), task_id="t1", **fields)
 
 
-def _write(ctx, topic, body, summary=None, **kwargs):
+def _write(ctx, topic, body, summary=None, mode="overwrite", **kwargs):
     meta = f"summary: {summary}\n" if summary else ""
-    return tools._knowledge_write(ctx, topic=topic, content=f"---\ntype: note\n{meta}---\n{body}\n", **kwargs)
+    return tools._knowledge_write(ctx, topic=topic, content=f"---\ntype: note\n{meta}---\n{body}\n", mode=mode, **kwargs)
 
 
 def _revision(ctx, topic):
@@ -114,7 +114,7 @@ def test_a_write_says_where_the_note_now_sits(tmp_path):
     # window, a helper and a session start with (knowledge.outline_keeps_summary); any other keeps its address and title.
     assert "a tight window and a helper's or session's start show only its address and title" in summarized
     assert "helpers do not load it" not in summarized
-    person = tools._knowledge_write(ctx, topic="people/ada", scope="global",
+    person = tools._knowledge_write(ctx, topic="people/ada", scope="global", mode="overwrite",
                                     content="---\ntype: person\nsummary: Prefers short answers.\n---\nAda.\n")
     assert "summary (22 chars) is shown in the global knowledge index" in person
     assert "and the outline a tight window, a helper and a session start with" in person
@@ -168,11 +168,11 @@ def test_the_residency_fact_fits_inside_the_receipt_bound(tmp_path):
     ctx = _ctx(tmp_path)
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry.set_context(ctx)
-    assert "✅" in registry.execute("knowledge_write", {"topic": "big", "content": body})
+    assert "✅" in registry.execute("knowledge_write", {"topic": "big", "mode": "overwrite", "content": body})
     for title_len in range(1, 60):
         topic = f"big{title_len}"
         assert "✅" in registry.execute("knowledge_write", {
-            "topic": topic, "content": "\n".join(f"## {'Ж' * title_len} {i}\ntext\n" for i in range(40))})
-        rewritten = registry.execute("knowledge_write", {"topic": topic, "content": "short body\n",
+            "topic": topic, "mode": "overwrite", "content": "\n".join(f"## {'Ж' * title_len} {i}\ntext\n" for i in range(40))})
+        rewritten = registry.execute("knowledge_write", {"topic": topic, "mode": "overwrite", "content": "short body\n",
                                                          "expected_revision": _revision(ctx, topic)})
         assert "✅" in rewritten and "knowledge_residency" in rewritten, (title_len, rewritten[:200])

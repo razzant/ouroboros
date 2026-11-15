@@ -360,7 +360,7 @@ def test_send_message_defensively_skips_whitespace_only_chunks(monkeypatch):
     monkeypatch.setattr(
         telegram_api,
         "markdown_to_telegram_chunks",
-        lambda _source: ["first", "<pre>\n</pre>", "second"],
+        lambda _source, limit=4096: ["first", "<pre>\n</pre>", "second"],
     )
 
     async def call(_method, *, data, **_kwargs):
@@ -427,6 +427,9 @@ class _Client:
         self.documents = []
         self.keyboards = []
         self.messages = []
+
+    async def media_caption(self, _chat_id, caption):
+        return caption
 
     async def send_audio(self, chat_id, file_bytes, filename, **kwargs):
         self.audio.append((chat_id, file_bytes, filename, kwargs))

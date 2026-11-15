@@ -37,14 +37,15 @@ export function pagesInZone(zone) {
 }
 
 /** One navigation row: the place's icon and its label. Main's place is this Ouroboros's own card (owner 12.11, the
- * fifth round, "Карточка и тихие разделы"): its picture, its name with the quiet words of the place it opens, Main's
- * count and its room's status mark in the Project rows' mark column, and under them what Main is doing now (app.js
- * paints the count, the mark, its words for readers and that line). */
+ * fifth round, "Карточка и тихие разделы"): its picture with the dot that says the owner's move in Main or a Project
+ * (owner 15.11, 6A), its name with the quiet words of the place it opens, Main's count and its room's status mark in
+ * the Project rows' mark column, and under them what Main is doing now (app.js paints the dot, the count, the mark,
+ * its words for readers and that line). */
 export function renderNavRow(page) {
     const main = page.zone === 'head';
     if (main) {
         return `<button class="nav-row nav-row-main nav-ouro" type="button" data-nav-page="${escapeHtml(page.id)}" title="${escapeHtml(page.hint || page.label)}">`
-            + `<span class="nav-ouro-ava" aria-hidden="true"></span>`
+            + `<span class="nav-ouro-ava" aria-hidden="true">${statusMarkHtml('nav-ava-mark')}</span>`
             + `<span class="nav-ouro-text"><span class="nav-ouro-line1">`
             + `<span class="nav-ouro-name" data-i18n-skip>Ouroboros</span>`
             + `<span class="nav-row-label">${escapeHtml(page.label)}</span>`

@@ -182,7 +182,9 @@ def test_migrated_main_is_a_place_override_until_cleared(tmp_path, monkeypatch):
     places.edit_place(tmp_path, admitted.place.place_id, "set_circle", author="owner", circle_id=circle["circle_id"])
     monkeypatch.setattr("ouroboros.model_slots._main_model", lambda: "main/model")
     inherited = _admit(tmp_path, binding)
-    assert place_view(tmp_path, inherited.place, brief=True)["model_route"] == {"value": "main/model", "layer": "place"}
+    assert place_view(tmp_path, inherited.place, brief=True)["model_route"] == {
+        "value": "main/model", "layer": "place", "local": False}
     places.edit_place(tmp_path, admitted.place.place_id, "set_model", author="owner", model="")
     cleared = _admit(tmp_path, binding)
-    assert place_view(tmp_path, cleared.place, brief=True)["model_route"] == {"value": "circle/model", "layer": "circle"}
+    assert place_view(tmp_path, cleared.place, brief=True)["model_route"] == {
+        "value": "circle/model", "layer": "circle", "local": False}

@@ -58,6 +58,9 @@
 // Polling is a held resource, not a background fact: the store ticks only
 // while it has subscribers, the page is visible, and either some subscriber
 // says its surface is on screen or a caller holds it open (a live login job).
+// A tick (DEFAULT_POLL_MS, 5 s) reads the passive roster/quota view; full status
+// follows every `discoveryMs` (120 s), on each tick of a held login, and once
+// when the two disagree on whether the engine serves (a start, stop or crash).
 // Everything acquired — the timer and the visibilitychange listener — is
 // released by `dispose()` (DEVELOPMENT.md «UI resources carry a disposer»).
 //
@@ -65,7 +68,7 @@
 
 import { apiFetch, createAccountReset, getAccountReset, refreshAccountResources } from './api_client.js';
 import { harnessPresentation } from './harness_presentation.js';
-import { createObservationReads } from './claudexor_observation_reads.js';
+import { createObservationReads, resourceCapabilitiesRead } from './claudexor_observation_reads.js';
 
 export const STATUS_ENDPOINT = '/api/claudexor/status';
 export const WAKE_ENDPOINT = '/api/claudexor/wake';
@@ -122,10 +125,8 @@ function mergeResourceFacet(held, incoming, onTie) {
         last_attempt_at: attempt.last_attempt_at, last_error: attempt.last_error };
 }
 
-export function resourceCapabilitiesRead(payload) {
-    return payload?.resource_capabilities_read
-        ?? (payload?.resource_capabilities ? READ_OK : READ_NOT_READ);
-}
+// Defined with the merge that orders resources by it; the surfaces keep this one import path.
+export { resourceCapabilitiesRead };
 
 export function resetRecoverable(action) {
     return Boolean(action?.request && (!action.receipt || action.receipt.state === 'running'
@@ -138,12 +139,13 @@ const resetReferences = action => [...(action.earlierRequests || []), action];
 const resetReference = ({ request, key, receipt, refreshed }) => ({ request, key, refreshed,
     receipt: receipt ? { ...receipt, resources: null } : undefined });
 
-function refreshReadsReset(envelope, action, automatic) {
+function refreshReadsReset(envelope, action) {
     if (!action.request) return true;
     const receipt = action.receipt;
     if (!receipt || receipt.state !== 'completed') return false;
     const attempt = envelope.refresh_attempt;
-    if (attempt?.reused || (automatic && !attempt)) return false;
+    // A joined attempt began before this request, possibly before the reset settled.
+    if (attempt?.reused) return false;
     const boundary = observationTime([receipt.completed_at, receipt.readback?.attempted_at, receipt.created_at]);
     if (attempt && !(Date.parse(attempt.started_at) >= boundary)) return false;
     const target = action.request.target;
@@ -312,8 +314,8 @@ export function quotaConstraintFact(constraint, nowMs = Date.now()) {
 export function shouldPollStatus({
     hasSubscribers = false, hidden = false, surfaceVisible = false, held = false,
 } = {}) {
-    // The whole polling gate, pure. Each status tick fans out to four
-    // CLI-probing daemon round-trips, so a background timer nobody is looking
+    // The whole polling gate, pure. Each tick reads the engine (and, when due,
+    // the CLI-probing full discovery), so a background timer nobody is looking
     // at is pure waste: it needs a live subscriber, a visible page, and either
     // a surface actually on screen or a caller holding it open (a live login
     // job). An explicit `refresh()` is a request, not a poll, and is never
@@ -617,7 +619,6 @@ export function createClaudexorStatusStore({
     pollMs = DEFAULT_POLL_MS,
     storage = () => globalThis.localStorage,
     discoveryMs = 120000,
-    providerMs = 60000,
 } = {}) {
     const getDoc = typeof doc === 'function' ? doc : () => doc;
     const inner = {
@@ -644,10 +645,19 @@ export function createClaudexorStatusStore({
         visibilityBound: null,
     };
 
-    let lastDiscovery = -Infinity, lastProvider = Date.now();
+    let lastDiscovery = -Infinity;
+    // A passive commit does not settle the first read: only a full status or wake reads the
+    // lifecycle, the catalog and the login policy (see facet()). A passive answer that changes
+    // whether the engine serves, against the held lifecycle, reads that lifecycle at once.
     const observations = createObservationReads({ fetchImpl, getSnapshot: () => inner.snapshot,
-        commit: payload => { inner.snapshot = payload; inner.everSettled = true; },
-        changed: () => { inner.generation += 1; notify(); } });
+        commit: payload => { inner.snapshot = payload; },
+        quotaObserved: retireResourceReads,
+        changed: () => {
+            inner.generation += 1;
+            notify();
+            if (observations.contradiction() === 'passive' && shouldPoll() && !inner.inFlight
+                && !inner.wakeInFlight) void refresh();
+        } });
 
     // Retain the exact request through response loss and closing this client window.
     // Only operation references live here; credentials and provider binding stay host-side.
@@ -670,34 +680,51 @@ export function createClaudexorStatusStore({
         } catch { /* The current page still retains the original request and key. */ }
     }
 
-    function commitStatus(payload) {
+    // A Refresh's or receipt's own reading stands, dated by the ticket of its completion, until a quota
+    // answer begun after it is accepted (any read state: the merge reports it) or a status request begun
+    // after it is lost. An older request's loss says nothing about it; requests and receipts stay.
+    function retireResourceReads(before) {
         for (const action of inner.resourceActions.values()) {
-            for (const request of resetReferences(action)) request.resourceRead = false;
+            for (const request of resetReferences(action)) {
+                if (!(request.resourceStamp > before)) request.resourceRead = false;
+            }
         }
-        if (!payload) return;
+    }
+
+    function commitStatus(payload, stamp) {
+        if (!payload) { retireResourceReads(stamp); return; }
         const held = inner.snapshot;
         if (held && facetReadState(payload, FACET_QUOTA) !== READ_OK) {
             // This client's own last value stands in (it may already carry a foreground refresh
             // the server's memory never saw), dated by this client's own last stamp: a stamp
-            // the server took for a different value must never date it.
+            // the server took for a different value must never date it. Resources keep the
+            // order the merge gave them.
             const facets = payload.facets && { ...payload.facets, [FACET_QUOTA]: { ...payload.facets[FACET_QUOTA],
                 observed_at: held.facets?.[FACET_QUOTA]?.observed_at ?? null, stale: true } };
-            payload = { ...payload, quota: held.quota, quota_absences: held.quota_absences, resources: held.resources,
+            payload = { ...payload, quota: held.quota, quota_absences: held.quota_absences,
                 availability_scope: held.availability_scope,
                 ...(facets ? { facets } : {}) };
         }
-        // Agent discovery (reads.catalog) is independent of the operations catalog.
+        // Agent discovery (reads.catalog) is independent of the operations catalog: an unread one
+        // keeps the held capabilities (the merge kept the resources it could not negotiate).
         if (held && resourceCapabilitiesRead(payload) !== READ_OK) {
             payload = { ...payload, resource_capabilities_read: resourceCapabilitiesRead(payload),
-                resource_capabilities: held.resource_capabilities, resources: payload.resources ?? held.resources };
+                resource_capabilities: held.resource_capabilities };
         }
         inner.snapshot = payload;
     }
 
     function facet(name) {
         // The store adds ONE dimension the wire cannot carry: this client has
-        // not read yet. Everything else is the pure, payload-level answer.
-        if (!inner.everSettled) return READ_UNREAD;
+        // not read yet. Before the first full status settles, a passive answer
+        // establishes only the facets it read; the rest are unread, not "not asked".
+        // Everything else is the pure, payload-level answer.
+        if (!inner.everSettled && inner.snapshot?.reads?.[name] !== READ_OK) return READ_UNREAD;
+        // Raw rows waiting for the login policy speak for the full read that supplies it: its
+        // failure, or while it runs unread; after an answer without one they were not read.
+        if (name === FACET_ACCOUNTS && observations.awaitingPolicy()) {
+            return inner.error ? READ_TRANSPORT : inner.inFlight || inner.wakeInFlight ? READ_UNREAD : READ_FAILED;
+        }
         return facetReadState(inner.snapshot, name, { transportError:
             observations.newer(name, inner.errorStamp) ? '' : inner.error });
     }
@@ -752,20 +779,19 @@ export function createClaudexorStatusStore({
     function armPoll() {
         clearTimer();
         if (!shouldPoll()) return;
-        // A setTimeout CHAIN, never an interval: the next tick is armed only
-        // after the previous read settled, so a read slower than the interval
-        // can never stack a second one behind it.
+        // A setTimeout chain re-armed at each tick: the fast observation and the
+        // full read are each single-flight, so a slow read never stacks behind itself.
         inner.timer = setTimeout(() => {
             inner.timer = 0;
             if (!shouldPoll()) return;
             void observations.observe();
-            // Each duty is single-flight on its own; slow work never holds the fast read.
-            if (Date.now() - lastDiscovery >= discoveryMs && !inner.inFlight && !inner.wakeInFlight) void refresh();
-            if (Date.now() - lastProvider >= providerMs && inner.snapshot?.reads?.accounts === READ_OK
-                && !inner.resourcesInFlight && !inner.wakeInFlight) {
-                lastProvider = Date.now();
-                void refreshResources(null, { automatic: true });
-            }
+            // Slow work never holds the fast read. The engine refreshes ordinary limits itself;
+            // providers are asked only on Refresh. Lifecycle is a full-read fact: a held login job
+            // and a contradicted lifecycle (a start, stop or crash the passive reads saw first, or a
+            // lifecycle read that just changed against them, checked once a tick later) read it now,
+            // everything else at the discovery interval.
+            if ((inner.holds.size || observations.contradiction() || Date.now() - lastDiscovery >= discoveryMs)
+                && !inner.inFlight && !inner.wakeInFlight) void refresh();
             armPoll();
         }, pollMs);
     }
@@ -819,7 +845,7 @@ export function createClaudexorStatusStore({
             inner.loading = false;
             inner.everSettled = true;
             inner.inFlight = null;
-            commitStatus(payload && observations.merge(payload, stamp));
+            commitStatus(payload && observations.merge(payload, stamp), stamp);
             if (payload) {
                 inner.snapshotHasModels = withModels;
                 inner.error = '';
@@ -829,6 +855,7 @@ export function createClaudexorStatusStore({
                 // asked — so no consumer may read absence as discovery.
                 inner.error = error || 'unreachable';
                 inner.errorStamp = stamp;
+                lastDiscovery = -Infinity; // a failed discovery is retried on the next tick
             }
             inner.generation += 1;
             notify();
@@ -839,13 +866,7 @@ export function createClaudexorStatusStore({
         return read;
     }
 
-    /**
-     * Read the status once. Concurrent callers SHARE one HTTP request.
-     * `includeModels` upgrades the store permanently; a caller that needs
-     * models while a model-less read is already in flight is served by ONE
-     * queued follow-up read, shared by every other upgrading caller.
-     * `afterCurrent` requests evidence after an event (e.g. program maintenance).
-     */
+    /** The passive observation at once; full discovery only when due or a models upgrade needs it. */
     function lazyRefresh({ includeModels = false } = {}) {
         if (Date.now() - lastDiscovery >= discoveryMs || (includeModels && !inner.snapshotHasModels)) {
             void refresh({ includeModels });
@@ -853,10 +874,19 @@ export function createClaudexorStatusStore({
         return observations.observe();
     }
 
+    /**
+     * Read the full status once. Concurrent callers SHARE one HTTP request.
+     * `includeModels` upgrades the store permanently; a caller that needs
+     * models while a model-less read is already in flight is served by ONE
+     * queued follow-up read, shared by every other upgrading caller.
+     * `afterCurrent` requests evidence after an event (e.g. program maintenance).
+     */
     function refresh({ includeModels = false, afterCurrent = false } = {}) {
         if (inner.disposed) return Promise.resolve(inner.snapshot);
         if (includeModels) inner.includeModels = true;
-        if (inner.resourcesInFlight) return inner.resourcesInFlight.then(() => refresh({ includeModels }));
+        // A Refresh no longer waits for reads, so an older one may still be in flight when it settles:
+        // the caller keeps its own after-event intent and its own models flag.
+        if (inner.resourcesInFlight) return inner.resourcesInFlight.then(() => refresh({ includeModels, afterCurrent }));
         // A wake OWNS the reading while it runs: it ensures the daemon and then
         // reads, so its answer is the one worth having — and a GET beside it is
         // a second writer whose order against it cannot be established from the
@@ -873,16 +903,17 @@ export function createClaudexorStatusStore({
                 const follow = () => {
                     inner.queued = null;
                     if (inner.disposed) return inner.snapshot;
-                    // The world may have moved while this upgrade waited: a wake
-                    // that started meanwhile owns the view now, so join it (the
-                    // re-entrant refresh keeps the models upgrade sticky).
+                    // The world may have moved while this follow-up waited: a wake or
+                    // resource write that started meanwhile goes first. The re-entrant
+                    // refresh keeps this caller's own models flag (an upgrade is already sticky).
                     if (inner.wakeInFlight) {
-                        return inner.wakeInFlight.then(() => refresh({ includeModels: true }));
+                        return inner.wakeInFlight.then(() => refresh({ includeModels: wantModels }));
                     }
                     if (inner.resourcesInFlight) {
-                        return inner.resourcesInFlight.then(() => refresh({ includeModels: true }));
+                        return inner.resourcesInFlight.then(() => refresh({ includeModels: wantModels }));
                     }
-                    return startRead(wantModels);
+                    // A model caller may have joined after this follow-up was queued.
+                    return startRead(inner.includeModels);
                 };
                 inner.queued = inner.inFlight.then(follow, follow);
             }
@@ -979,7 +1010,7 @@ export function createClaudexorStatusStore({
         return inner.resourceActions.get(target ? accountTargetKey(target) : 'all') || {};
     }
 
-    function refreshResources(target = null, { automatic = false } = {}) {
+    function refreshResources(target = null) {
         const key = target ? accountTargetKey(target) : 'all';
         const entry = inner.resourceActions.get(key) || {};
         if (entry.busy) return Promise.resolve(null);
@@ -990,19 +1021,20 @@ export function createClaudexorStatusStore({
         notify();
         return resourceWrite(async () => {
             try {
-                const envelope = await refreshAccountResources(target, { fetchImpl, automatic });
+                const envelope = await refreshAccountResources(target, { fetchImpl });
                 if (inner.disposed) return null;
                 const replay = envelope.refresh_attempt?.reused === true;
                 const merged = mergeAccountResources(inner.snapshot, envelope, target,
                     { preferPreviousOnTie: replay });
-                if (!replay) observations.fenceQuota();
+                // A joined attempt began before this request: no new reading, and it takes none away.
+                if (!replay) entry.resourceStamp = observations.fenceQuota(Array.isArray(envelope.resources), !target);
                 inner.snapshot = merged;
-                entry.resourceRead = !replay;
+                entry.resourceRead = !replay || entry.resourceRead === true;
                 entry.refreshDone = !replay;
                 if (!replay) {
                     for (const action of target ? [entry] : inner.resourceActions.values()) {
                         for (const request of resetReferences(action)) {
-                            if (refreshReadsReset(envelope, request, automatic)) request.refreshed = true;
+                            if (refreshReadsReset(envelope, request)) request.refreshed = true;
                         }
                         action.earlierRequests = (action.earlierRequests || []).filter(retainResetRequest);
                     }
@@ -1011,8 +1043,9 @@ export function createClaudexorStatusStore({
                 saveResetRequests();
                 return envelope;
             } catch (err) {
+                // Its own failed attempt is a later failure about this account: the reading it could not renew ages.
                 entry.error = String(err?.message || err);
-                entry.refreshDone = false;
+                entry.refreshDone = entry.resourceRead = false;
                 return null;
             } finally { entry.busy = false; }
         }, { readBarrier: false });
@@ -1059,7 +1092,7 @@ export function createClaudexorStatusStore({
                     const merged = mergeAccountResources(inner.snapshot, receipt.resources, target,
                         { preferPreviousOnTie: recover });
                     if (['quota', 'quota_absences', 'resources'].some(name => merged[name] !== inner.snapshot[name])) {
-                        observations.fenceQuota();
+                        entry.resourceStamp = observations.fenceQuota(Array.isArray(receipt.resources.resources));
                         inner.snapshot = merged;
                         entry.resourceRead = true;
                         inner.generation += 1;
@@ -1187,14 +1220,22 @@ export function createClaudexorStatusStore({
             }
             const daemonError = String(inner.snapshot?.daemon?.last_error || '');
             const own = String(inner.snapshot?.facets?.[name]?.error || '');
-            const detail = (observations.newer(name, inner.errorStamp) ? '' : inner.error)
+            const detail = (state === READ_TRANSPORT ? inner.error : '')
                 || (state === READ_FAILED ? own || daemonError : state === READ_INDETERMINATE ? daemonError : '');
             return statusUnavailableNote(state, { error: detail, facet: name, subject });
         },
         refresh,
         lazyRefresh,
         observe: observations.observe,
-        setEnabled: observations.setEnabled,
+        async setEnabled(harness, profile, enabled) {
+            const receipt = await observations.setEnabled(harness, profile, enabled);
+            // Marks and pool routing are full-read facts the write may have changed (confirmed, or an
+            // unknown outcome; a refusal changed nothing): read them anew without holding the switch.
+            const action = observations.action(harness, profile);
+            if (receipt || (action.error && !action.refused)) void refresh({ afterCurrent: true });
+            return receipt;
+        },
+        removeAccount: observations.remove,
         profileAction: observations.action,
         refreshResources,
         resetAccount,

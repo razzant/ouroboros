@@ -66,6 +66,35 @@ function surface() {
 }
 const PAGE = 'accounts/codex';
 
+test('showing an idle provisioned daemon\'s page reads the lifecycle once before the wake, also when discovery is due', async (t) => {
+    const priorDoc = globalThis.document;
+    const priorWin = globalThis.window;
+    const { doc, win } = surface();
+    globalThis.document = doc;
+    globalThis.window = win;
+    const requests = [];
+    t.mock.method(apiClient, 'harnessMaintenanceInventory', async () => ({ harnesses: [] }));
+    // discoveryMs 0: every showing finds the periodic discovery due.
+    const store = createClaudexorStatusStore({ discoveryMs: 0, doc, fetchImpl: async (url, init = {}) => {
+        requests.push(`${init.method || 'GET'} ${url}`);
+        return response(url.includes('?view=quota') ? passive(STALE) : (init.method || 'GET') === 'POST' ? RUNNING : STALE);
+    } });
+    try {
+        await initHarnessAccounts({ store, family: 'codex', path: PAGE });
+        await store.refresh();
+        await store.observe();
+        requests.length = 0;
+        await win.fire('ouro:settings-page-shown');
+        assert.deepEqual(requests.slice(0, 3), ['GET /api/claudexor/status?view=quota', 'GET /api/claudexor/status',
+            'POST /api/claudexor/wake'], 'the showing read the lifecycle twice before its wake');
+    } finally {
+        destroyHarnessAccounts();
+        store.dispose();
+        globalThis.document = priorDoc;
+        globalThis.window = priorWin;
+    }
+});
+
 test('showing the provider\'s page wakes only an already-provisioned idle daemon; no other page of Settings reads or wakes', async (t) => {
     const priorDoc = globalThis.document;
     const priorWin = globalThis.window;
@@ -152,11 +181,6 @@ test('mount reads status only; showing the provider\'s page reads the program in
     const {elements, doc, win} = surface();
     globalThis.document = doc; globalThis.window = win;
     const inventories = [];
-    // The program controller intentionally retains its session observation.
-    // Advance its documented freshness/latest clocks, rather than depending on
-    // whether another test happened to inspect the same whole-inventory slot.
-    const now = Date.now() + 1800001;
-    t.mock.method(Date, 'now', () => now);
     t.mock.method(globalThis, 'fetch', async url => { inventories.push(String(url)); return response({harnesses: []}); });
     const inventoryRead = apiClient.harnessMaintenanceInventory.bind(apiClient);
     const inventoryReads = [];
@@ -178,11 +202,14 @@ test('mount reads status only; showing the provider\'s page reads the program in
         assert.ok(elements['harness-accounts-groups']);
         await win.fire('ouro:settings-page-shown');
         await Promise.all(inventoryReads);
+        for (let i = 0; i < 20; i += 1) await Promise.resolve(); // the controller settles its read
         assert.equal(inventories.length, 1);
         assert.match(inventories[0], /fresh=true/);
         assert.match(inventories[0], /checkLatest=true/);
+        // Each showing is the owner's act and asks again; status ticks never inspect.
         await win.fire('ouro:settings-page-shown');
-        assert.equal(inventories.length, 1, 'a current inspection is reused on reopening');
+        await Promise.all(inventoryReads);
+        assert.equal(inventories.length, 2);
     } finally {
         destroyHarnessAccounts(); store.dispose();
         globalThis.document = before.document; globalThis.window = before.window;
@@ -222,6 +249,32 @@ for (const [daemon, shouldWake] of [
         assert.equal(calls.filter(call => call === 'POST /api/claudexor/wake').length, shouldWake ? 1 : 0);
     } finally {
         finishFull(response(RUNNING));
+        destroyHarnessAccounts(); store.dispose();
+        globalThis.document = before.document; globalThis.window = before.window;
+    }
+});
+
+test('showing the provider page reads current lifecycle even after a recent running read', async (t) => {
+    const before = { document: globalThis.document, window: globalThis.window };
+    const { doc, win } = surface();
+    globalThis.document = doc; globalThis.window = win;
+    t.mock.method(apiClient, 'harnessMaintenanceInventory', async () => ({ harnesses: [] }));
+    let body = RUNNING;
+    const calls = [];
+    const store = createClaudexorStatusStore({ doc, fetchImpl: async (url, init = {}) => {
+        calls.push(`${init.method || 'GET'} ${url}`);
+        if (url.includes('?view=quota')) return response(passive(body));
+        return response((init.method || 'GET') === 'POST' ? RUNNING : body);
+    } });
+    try {
+        await initHarnessAccounts({ store, family: 'codex', path: PAGE });
+        await store.refresh(); await store.observe();
+        body = STALE; // the provisioned daemon went idle after that read
+        calls.length = 0;
+        await win.fire('ouro:settings-page-shown');
+        assert.ok(calls.includes('GET /api/claudexor/status'), "the owner's showing did not read lifecycle");
+        assert.equal(calls.filter(call => call === 'POST /api/claudexor/wake').length, 1);
+    } finally {
         destroyHarnessAccounts(); store.dispose();
         globalThis.document = before.document; globalThis.window = before.window;
     }

@@ -150,3 +150,22 @@ def test_initial_identity_section_addresses_the_bytes_it_loaded(identity):
     current = reg.execute("read_file", recipe)
     assert "identity_source=canonical" in current and "Execution-drive identity" not in current
     assert str(local) not in section
+
+
+def test_the_resident_identity_shows_its_exact_bytes_and_their_revision(tmp_path):
+    """One byte capture: a CRLF identity is shown as stored, and the revision under it is the sha256 of those bytes,
+    the expected_revision update_identity takes without a read."""
+    from ouroboros.context import build_memory_sections
+    from ouroboros.memory import Memory
+    from ouroboros.tools.control_runtime import _update_identity
+
+    raw = "# Я\r\n\r\nOne continuous self.\r\n".encode("utf-8")
+    (tmp_path / "memory").mkdir()
+    (tmp_path / "memory" / "identity.md").write_bytes(raw)
+    section = str(build_memory_sections(Memory(drive_root=tmp_path), partition="stable")[0])
+    revision = hashlib.sha256(raw).hexdigest()
+    assert raw.decode("utf-8") in section and section.endswith(f"\r\n\nRevision of this identity: {revision}.\n")
+    assert "read current bytes" not in section and "update_identity's expected_revision" in section
+    ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path, task_id="t")
+    reply = _update_identity(ctx, mode="edit", old_str="One", content="An unbroken", expected_revision=revision)
+    assert reply.startswith("OK:"), reply

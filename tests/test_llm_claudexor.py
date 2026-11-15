@@ -199,6 +199,11 @@ def setup(tmp_path, monkeypatch):
     root = tmp_path / "data"
     monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
+    # ``config.DATA_DIR`` is bound once per xdist worker (conftest ``_bind_pytest_runtime_roots``), and a request's
+    # runtime section reads the queue snapshot and the reviewer-slot records under it: what earlier tests of the
+    # worker left there is some 530 tokens of every later capture, and a view fitted near a mode's line then starts
+    # in another mode. This test's requests read its own tree.
+    monkeypatch.setattr(transport.config, "DATA_DIR", root)
     monkeypatch.setenv("TOTAL_BUDGET", "100")
     monkeypatch.delenv(MODEL_ACCOUNTS_KEY, raising=False)
     monkeypatch.setattr(transport.config, "CLAUDEXOR_MODEL_POLL_INTERVAL_SEC", 0.001)
@@ -212,6 +217,15 @@ def setup(tmp_path, monkeypatch):
 
 def ledger(root):
     return ledger_rows(root)
+
+
+def test_the_fixture_owns_its_data_root_for_every_reader(setup):
+    """Both spellings of the data root are this test's tree: the environment's, and ``config.DATA_DIR``, which
+    conftest binds once per worker and a request's runtime section reads (razzant/ouroboros#3394)."""
+    import os
+
+    root, _gateway, _client = setup
+    assert str(transport.config.DATA_DIR) == str(root) == os.environ["OUROBOROS_DATA_DIR"]
 
 
 def retained(root, suffix="response", *, raw=False):

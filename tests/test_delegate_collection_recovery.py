@@ -78,24 +78,45 @@ def test_real_directory_producer_recovers_owed_capture_under_each_existing_owner
     assert (entry.run_id in current.runs(ctx.drive_root, "state=?", (current.HELD,))) == (strategy == "copy")
 
 
-def test_actual_terminal_boundary_retries_money_without_an_extra_runtime(tmp_path, monkeypatch):
+@pytest.mark.parametrize("state", sorted(custody.TERMINAL_STATES))
+def test_actual_terminal_boundary_retries_money_without_an_extra_runtime(tmp_path, monkeypatch, state):
+    """A run delegate_wait delivered, its end recorded and its ledger write failed (#3329): the finish door names no
+    open execution and takes no extra round, the forced note says only that its collection/accounting has not settled,
+    and the terminal boundary books its money and never cancels it."""
     from ouroboros import usage_accounting
+    from ouroboros.loop_nudges import _forced_delegation_note, _maybe_inject_finalization_nudges
     entry = started(tmp_path)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id=entry.task_id)
-    calls = []
+    calls, cancels = [], []
     def record(*a, **kw):
         calls.append(True)
         if len(calls) == 1:
             raise OSError("controlled ledger gap")
     monkeypatch.setattr(usage_accounting, "record_subscription_session", record)
-    first = collect_and_deliver_terminal(ctx, entry.run_id, terminal(), body._shape(entry), entry, None)
+    def ended(rid="run-one"):
+        detail = terminal(rid)
+        detail["summary"]["state"] = state
+        return detail
+    first = collect_and_deliver_terminal(ctx, entry.run_id, ended(), body._shape(entry), entry, None)
     assert first["output_delivery"]["complete"] and not first["settlement"]["settled"]
+    owed = current.run(tmp_path, entry.run_id)
+    assert (owed.terminal_state, owed.settled) == (state, False)
+    tools, messages = SimpleNamespace(_ctx=ctx, available_tools=lambda: ["delegate_start", "delegate_wait"]), []
+    assert _maybe_inject_finalization_nudges(tools, tmp_path, entry.task_id, {"reasoning_notes": [], "tool_calls": []},
+                                             "done", messages, lambda *_: None) is False, "no extra round"
+    assert messages == [] and not getattr(ctx, "_completion_hold_cause", "")
+    ctx._nanny_route_dispatched = True
+    note = _forced_delegation_note(ctx, {"tool_calls": []})
+    assert "collection/accounting" in note and "not settled" in note and "1 of 1" in note
+    assert "not in this transcript" not in note, "delegate_wait delivered its output"
     class Gateway:
         def handshake(self): pass
-        def get_run(self, rid): return terminal(rid)
+        def get_run(self, rid): return ended(rid)
+        def cancel_run(self, rid, reason=""): cancels.append((rid, reason))
         def close(self): pass
-    assert custody.release_task_runs(tmp_path, entry.task_id, gateway_factory=Gateway)
-    assert len(calls) == 2 and current.run(tmp_path, entry.run_id).settled
+    assert [row["action"] for row in custody.release_task_runs(tmp_path, entry.task_id, gateway_factory=Gateway)] == [
+        "settle_attempted"]
+    assert len(calls) == 2 and current.run(tmp_path, entry.run_id).settled and cancels == []
     assert body.body_runtime(tmp_path) is None
 
 

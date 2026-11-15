@@ -588,8 +588,8 @@
  */
 
 /**
- * Host transport attempt dates, not provider observation dates. A joined in-flight
- * or replayed completed attempt keeps its original dates and sets reused.
+ * Host transport attempt dates, not provider observation dates. An identical attempt
+ * joined in flight keeps its original dates and sets reused.
  * @typedef {Object} ClaudexorRefreshAttempt
  * @property {string} started_at
  * @property {string} completed_at

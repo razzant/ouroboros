@@ -96,3 +96,24 @@ def test_actual_absorption_or_abandonment_still_closes_a_review_blocked_cycle(tm
     digest = _closed_objectives_digest(tmp_path)
     assert "Shipped objective" in digest
     assert "Abandoned objective" in digest
+
+
+def test_a_running_result_review_holds_closure_only_when_it_seats_a_counted_reviewer(tmp_path):
+    """A task whose own result review still runs is waiting, not closed (``_pending_result_review_tasks``). An
+    advisers-only one (Cyber Pro, #3194: heard, never counted) holds nothing, so its no-op stays a past attempt."""
+    from ouroboros import review_ledger as ledger
+    from tests.test_review_ledger import _facts, _plan, _raw
+
+    for task_id, additional in (("counted", False), ("adviser", True)):
+        running = [_raw("seat", "model-seat", "pending", parts=("result",), operation_state="in_flight",
+                        late_result_pending=True)]
+        plan = [_plan("seat", "model-seat", parts=("result",), additional=additional)]
+        record = ledger.build_wave_record(_facts(running, rows=plan, task_id=task_id, pending=True), surface="result")
+        assert record.state == ledger.STATE_PENDING, "both records are still running"
+        ledger.write_record(tmp_path, record)
+    _write_ledger(tmp_path, [
+        {"task_id": "counted", "kind": "cycle_outcome", "cycle_outcome": "no_op", "campaign_objective": "Counted review runs"},
+        {"task_id": "adviser", "kind": "cycle_outcome", "cycle_outcome": "no_op", "campaign_objective": "Adviser alone runs"},
+    ])
+    digest = _closed_objectives_digest(tmp_path)
+    assert "Counted review runs" not in digest and "[NO_OP] Adviser alone runs" in digest, digest

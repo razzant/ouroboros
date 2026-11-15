@@ -850,6 +850,76 @@ def test_a_helper_closed_with_its_ended_work_is_applied_from_its_retained_captur
     assert result_signature(w.data, HELPER) == signature
 
 
+@pytest.mark.parametrize("drive", ["same", "split"])
+@pytest.mark.parametrize("entered", [False, True], ids=["never_entered", "entered"])
+def test_a_resumed_helpers_retained_capture_is_what_last_ran(closure_world, drive, entered):
+    """#3248 at the #3193 consumer: a parked native helper's capture (taken while unfinished, as a withdrawn closure
+    leaves it) is Resumed and put. A worker lost before consuming the Resume ran nothing: the work's closure still
+    hands the parent that saved edit, ready. An execution that entered owes its own capture; its Stop captures the
+    newer tree as a version and the parent applies that, never the earlier snapshot. On the same drive or a split one."""
+    import time
+
+    from ouroboros.headless import finalize_task_artifacts, prepare_task_drive, reopen_capture_at_entry
+    from supervisor import worker_health, workers
+    from supervisor.ended_work_helpers import close_abandoned_helpers
+    from supervisor.queue_transitions import resume_budget_paused_task
+    from supervisor.task_lifecycle import sweep_cancel_intents
+    from tests._budget_pause_exact_helpers import _parked
+    from tests.worker_pool_support import affirm_ready
+
+    w = closure_world
+    write_task_result(w.data, ROOT, "running", root_task_id=ROOT, chat_id=7, delegation_role="root")
+    write_task_result(w.data, ROOT, "completed", result="the answer")
+    constraint, folder, mode, error = _resolve_subagent_constraint(
+        SimpleNamespace(REPO_DIR=w.system, DRIVE_ROOT=w.data), tid=HELPER,
+        requested_constraint={"mode": "acting_subagent", "surface": "self_worktree"},
+        workspace_root=str(w.project), workspace_mode="external", base_sha="", parent_task_id=ROOT)
+    assert not error, error
+    binding = admitted_copy_metadata(folder)
+    fields = {"parent_task_id": ROOT, "delegation_role": "subagent", "role": "researcher", "chat_id": 7,
+              "workspace_root": folder, "workspace_mode": mode, "task_constraint": constraint,
+              "workspace_copy": binding, "metadata": {"workspace_copy": binding}}
+    if drive == "split":
+        fields.update(drive_root=str(prepare_task_drive(w.data, HELPER, "empty")), budget_drive_root=str(w.data))
+    task, _row = _parked(w.data, w.monkeypatch, task_id=HELPER, root_task_id=ROOT,
+                         extra={**fields, "admitted_dispatch": "possible"})
+    write_task_result(w.data, HELPER, "scheduled", root_task_id=ROOT, **fields)
+    (Path(folder) / "a.txt").write_bytes(b"base\nchild\n")
+    finalize_task_artifacts(w.data, {**task, **fields})  # the capture an unfinished helper keeps
+    earlier = capture_bytes(w, HELPER)
+    assert resume_budget_paused_task(HELPER)["ok"] is True
+    sent = []
+    workers.WORKERS[0] = affirm_ready(SimpleNamespace(wid=0, busy_task_id=None, reaping=False,
+                                                      in_q=SimpleNamespace(put=lambda row: sent.append(dict(row)))))
+    workers.assign_tasks()
+    assert [row["id"] for row in sent] == [HELPER] and capture_bytes(w, HELPER) == earlier
+    meta = workers.RUNNING[HELPER]
+    if entered:
+        reopen_capture_at_entry(Path(meta["task"].get("budget_drive_root") or w.data), HELPER)
+        (Path(folder) / "a.txt").write_bytes(b"base\nchild\nafter the Resume\n")
+        closed = cancel_after_capture(w, meta["task"])  # the running Stop's capture, then its cancelled write
+        expected = b"base\nchild\nafter the Resume\n"
+    else:
+        w.monkeypatch.setattr(worker_health, "_dead_job_is_current", lambda job: True)
+        job = {"worker": workers.WORKERS[0], "task_id": HELPER, "task": dict(meta["task"]), "meta": meta,
+               "worker_id": 0, "exitcode": 1, "drive_root": str(w.data)}
+        assert worker_health._complete_exact_budget_pause_after_death(
+            job, w.data, meta["task"], HELPER, meta["attempt"]) == (True, True)
+        assert capture_bytes(w, HELPER) == earlier, "a put that never ran keeps the capture it had"
+        assert close_abandoned_helpers() == [HELPER]
+        assert sweep_cancel_intents(now=time.time() + 3600) == {HELPER: "cancelled"}
+        closed = load_effective_task_result(w.data, HELPER)
+        expected = b"base\nchild\n"
+    assert (closed["status"], closed["artifact_status"]) == ("cancelled", "ready_with_changes"), closed
+    assert not closed.get("native_capture_pending")
+    assert capture_bytes(w, HELPER)["workspace_patch"] != earlier["workspace_patch"] or not entered
+    ctx = ToolContext(repo_dir=w.system, drive_root=w.data, task_id=ROOT, workspace_root=w.project,
+                      workspace_mode="external")
+    out = invoke(ctx, task_id=HELPER, reason="its retained capture is the finished change")
+    assert f"✅ Integrated subagent patch from {HELPER}" in out, out
+    assert (w.project / "a.txt").read_bytes() == expected
+
+
 # The cancelled child's own direct writer of its shared folder, as current custody shows it, and what blocks.
 LEAF_STATES = {"live": "run leaf", "pending": "start leaf-start", "unknown": "custody is unreadable",
                "terminal": "", "elsewhere": ""}

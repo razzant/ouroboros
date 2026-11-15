@@ -221,12 +221,32 @@ def test_an_open_wave_counts_nothing_yet_and_a_collected_outcome_counts_once(tmp
     assert _fact(ctx.drive_root, "root-1")["count"] == 3 and len(_events(ctx)) == 3, "a left-over attempt silences nothing"
 
 
+def test_replayed_collection_of_one_review_record_does_not_count_twice(tmp_path):
+    """A late collection identifies its one outcome by the durable review record."""
+    ctx = _make_ctx(tmp_path)
+    ctx.task_id = "root-1"
+    seed_result(ctx.drive_root, "root-1", {"status": "running"})
+    ctx._review_reconcile_only = True
+    ctx._pending_review_attempt = SimpleNamespace(
+        review_override_reason="review_late_result_pending", review_record_id="record-1")
+
+    _decide(ctx, "no_counted_reviewers", "the adviser wave settled")
+    _decide(ctx, "no_counted_reviewers", "the adviser wave settled again")
+
+    assert read_json_dict(ctx.drive_root / COUNTER_REL)["count"] == 1
+    assert len(_events(ctx)) == 1
+
+
 def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_says_now(tmp_path, monkeypatch):
     """B and C go over the reason the gate kept on the continued attempt, but a wave it handed back still open stands
     at what its review record holds now (REV6 C1): passed since, it is gone over by nothing; failed since, by its FAIL;
     still open, by no verdict; with no readable record, as open as the gate saw it. A landing names the continued
-    attempt's outcome before this call's own check (REV6 A9)."""
+    attempt's outcome before this call's own check (REV6 A9). An attempt the gate kept no reason on is gone over only
+    when its record dispatched no review (a free replay at the spent paid ceiling, a wave that failed before its send):
+    by that refusal or reason, as no verdict. An outcome the call that met it counted keeps its reason on a row rebuilt
+    from the record too, so going on over it adds the continuation and the landing, never a second outcome."""
     from ouroboros.review_overrides import _went_on_over
+    from ouroboros.tools.review_change_custody import recorded_commit_source
 
     ctx = _make_ctx(tmp_path)
     ctx.task_id = "root-1"
@@ -234,7 +254,10 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
     records = {name: {"verdict": {"aggregate": aggregate, "reason": reason}} for name, aggregate, reason in (
         ("pass", "PASS", "pass"), ("fail", "FAIL", "critical_findings"),
         ("open", "NOT_PERFORMED", "review_late_result_pending"),
-        ("gate", "NOT_PERFORMED", "gate_block:tests_preflight_blocked"))} | {"bare": {}}
+        ("gate", "NOT_PERFORMED", "gate_block:tests_preflight_blocked"),
+        ("undispatched", "NOT_DISPATCHED", "nothing_dispatched"))} | {"bare": {}}
+    records["refused"] = {"verdict": {"aggregate": "NOT_DISPATCHED", "reason": "dispatch_refusal"},
+                          "dispatch_refusal": {"kind": "review_cycles_exhausted", "message": "2 of 2 paid rounds spent"}}
     records["open_fail"] = {"rows": [{"seat_id": "s1"}, {"seat_id": "s2"}, {"seat_id": "adv", "additional": True}],
                             "verdict": {"aggregate": "NOT_PERFORMED", "reason": "review_late_result_pending",
                                         "per_row": {"s1": "FAIL", "s2": "pending", "adv": "PASS"}}}
@@ -258,6 +281,8 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
             (open_wave, "corrupt", open_wave), (open_wave, "bare", open_wave), (open_wave, "", open_wave),
             ("critical_findings", "pass", "critical_findings"), ("preflight", "pass", "preflight"),
             ("review_quorum", "", "review_quorum"), ("", "fail", ""), ("", "", ""),
+            ("", "refused", "review_cycles_exhausted"), ("", "undispatched", "nothing_dispatched"),
+            ("", "pass", ""), ("", "open", ""), ("", "corrupt", ""), ("", "missing", ""),
             (open_wave, "open_fail", "critical_findings"), (open_wave, "open_adviser_fail", open_wave),
             ("preflight", "fail", "critical_findings"), ("preflight", "open_fail", "critical_findings"),
             ("tests_preflight_blocked", "open", "tests_preflight_blocked"), ("preflight", "corrupt", "preflight")):
@@ -292,6 +317,58 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
     note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
     fact = _fact(ctx.drive_root, "root-1")
     assert fact["count"] == 2 and fact["continued"]["latest"]["reason"] == "preflight"
+    # The paid rounds were spent: the gate kept no reason and no call counted it, the author's decision does.
+    ctx._author_commit_source, ctx._review_override_this_call = source("", "refused"), ""
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
+    note_override_landing(ctx, "c" * 40)
+    fact = _fact(ctx.drive_root, "root-1")
+    assert (fact["count"], fact["latest"]["reason"], fact["latest"]["record_id"]) == (3, "review_cycles_exhausted", "refused")
+    assert fact["continued"]["latest"]["reason"] == "review_cycles_exhausted" and fact["landed"]["count"] == 2
+    assert landed_outcome(ctx.drive_root, "c" * 40) == "no review verdict: review cycles exhausted"
+    ctx._author_commit_source = source("", "pass")  # a passed record with no kept reason is gone over by nothing
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
+    note_override_landing(ctx, "d" * 40)
+    assert _fact(ctx.drive_root, "root-1") == fact and landed_outcome(ctx.drive_root, "d" * 40) == ""
+    # Free rows the attempt window dropped are rebuilt from their records: the ceiling's replay with no kept reason,
+    # an outcome its own call counted (the budget fence, a wave that failed before its send or sent nothing) with it.
+    fence = "review_wave_budget_insufficient"
+    bound = {"task_id": "root-1", "surface": "commit_gate", "state": "settled", "fingerprints": {"binding": "bytes"}}
+    for name, kind in (("refused", "review_cycles_exhausted"), ("fenced", fence)):
+        records[name] = {**records["refused"], "dispatch_refusal": {"kind": kind, "message": ""}, **bound}
+    records["sent_nothing"] = {**records["undispatched"], **bound}
+    records["crashed"] = {"verdict": {**records["undispatched"]["verdict"], "degraded_reasons": ["gate_block:infra_failure"]}, **bound}
+
+    def rebuilt(record_id):
+        reference = {"review_record_id": record_id, "task_id": "root-1", "tool_name": "commit_reviewed", "attempt": 0,
+                     "repo_key": "repo", "pre_review_fingerprint": "bytes"}
+        return recorded_commit_source(ctx, reference, SimpleNamespace(attempts=[]))
+
+    assert [rebuilt(name).review_override_reason for name in ("refused", "fenced", "sent_nothing", "crashed")] == [
+        "", fence, "review_quorum", "infra_failure"]
+    _decide(ctx, fence, "the wave's budget fence sent no seat")  # counted when met, with no record yet
+    ctx._author_commit_source, ctx._review_override_this_call = rebuilt("fenced"), ""
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
+    note_override_landing(ctx, "e" * 40)
+    after = _fact(ctx.drive_root, "root-1")
+    assert (after["count"], after["latest"]["reason"]) == (fact["count"] + 1, fence), "counted once, by the call that met it"
+    assert after["continued"]["latest"]["reason"] == fence and after["continued"]["count"] == fact["continued"]["count"] + 1
+    assert after["landed"]["count"] == fact["landed"]["count"] + 1
+    assert landed_outcome(ctx.drive_root, "e" * 40) == "no review verdict: review wave budget insufficient"
+    # A free replay is counted by the first continuation over it, which also leaves its decision on the record (the
+    # gate notes it there first). Retried after Git refused and after another outcome took the card's latest place,
+    # the rebuilt row finds it counted: one more continuation, no second outcome.
+    ctx._author_commit_source = rebuilt("refused")
+    records["refused"]["author_decision"] = {"disposition": "accepted", "rationale": WHY}
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
+    first = _fact(ctx.drive_root, "root-1")
+    assert (first["count"], first["latest"]["reason"]) == (after["count"] + 1, "review_cycles_exhausted")
+    _decide(ctx, "critical_findings", "another task of this work met a FAIL")
+    assert rebuilt("refused").review_override_reason == "review_cycles_exhausted"
+    ctx._author_commit_source = rebuilt("refused")
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
+    retried = _fact(ctx.drive_root, "root-1")
+    assert retried["count"] == first["count"] + 1 and retried["latest"]["reason"] == "critical_findings"
+    assert retried["continued"]["count"] == first["continued"]["count"] + 1
 
 
 def test_an_open_wave_never_overwrites_a_reason_its_attempt_keeps(tmp_path, monkeypatch):
@@ -317,6 +394,19 @@ def test_an_open_wave_never_overwrites_a_reason_its_attempt_keeps(tmp_path, monk
     assert kept() == "preflight"
     _decide(ctx, "critical_findings")
     assert kept() == "critical_findings", "a settled outcome replaces it"
+    # A source rebuilt from an evicted outcome's record may carry a number that names another wave now: only the
+    # attempt of that same record takes its reason.
+    from ouroboros.review_overrides import _keep_on_attempt
+    from ouroboros.review_state import update_state
+
+    number = ctx._current_review_attempt_number
+    update_state(ctx.drive_root, lambda state: setattr(state.latest_attempt_for(attempt=number), "review_record_id", "its-own"))
+    row = load_state(ctx.drive_root).latest_attempt_for(attempt=number)
+    _keep_on_attempt(ctx, "review_cycles_exhausted", row=SimpleNamespace(
+        **{name: getattr(row, name) for name in ("repo_key", "task_id", "tool_name", "attempt")}, review_record_id="evicted"))
+    assert kept() == "critical_findings"
+    _keep_on_attempt(ctx, "review_quorum", row=row)
+    assert kept() == "review_quorum"
 
 
 @pytest.mark.parametrize("case", ["warm", "restarted", "successor", "clean", "fixed", "refused"])
@@ -557,7 +647,8 @@ def _app_lines(facts):
 def test_the_app_line_is_the_python_line_for_every_recorded_part_and_for_none():
     """``card_line`` and ``reviewGateLine`` say the same line for one fact: each part only when recorded (an old field
     with no ``continued`` or ``landed`` shows no zero), the author's reason cut at the same character, a non-ASCII
-    one too, and nothing for an absent or malformed fact."""
+    one too, a skill left on over its review named alone and counted when several, and nothing for an absent or
+    malformed fact."""
     latest = {"at": "2026-11-12T10:00:00+00:00", "reason": "critical_findings", "task_id": "w", "text": "finding"}
     author = {"at": "2026-11-12T10:01:00+00:00", "disposition": "accepted", "rationale": "the lock order is intended",
               "reason": "review_quorum", "record_id": "rec-1"}
@@ -571,6 +662,11 @@ def test_the_app_line_is_the_python_line_for_every_recorded_part_and_for_none():
             "rationale": "why"}}}, {"continued": {"count": 1}}, {"landed": landed},
         None, {}, {"count": 0}, {"count": "3"}, {"count": True}, {"continued": {"count": 0}, "landed": {}}, "fact",
     ]
+    skill = {"skill": "weather", "reason": "review_problems", "door": "turned_on", "at": "2026-11-15T10:00:00+00:00"}
+    facts += [{"skills": {"count": 1, "latest": skill, "seen": ["weather"]}},
+              {"skills": {"count": 1, "latest": {**skill, "reason": "no_review_verdict"}}},
+              {"count": 1, "latest": latest, "skills": {"count": 3, "latest": {**skill, "skill": "calendar"}}},
+              {"skills": {"count": 1}}, {"skills": {"count": 0, "latest": skill}}]
     edges = "\x1c\x85﻿\xa0 \t"  # the cut drops only ASCII space and control space, in both twins (REV6 A3)
     facts += [{"continued": {"count": 1, "latest": {"rationale": "a" * 78 + edge + "b" * 10}}} for edge in edges]
     expected = [
@@ -582,6 +678,9 @@ def test_the_app_line_is_the_python_line_for_every_recorded_part_and_for_none():
         f'Review: author continued 1× over review quorum (latest: accepted — "{chr(0x1f642) * 79}…")',
         "Review: author continued 1× (latest: deferred)", 'Review: author continued 1× (latest: "why")',
         "Review: author continued 1×", "Review: landed over a FAIL or no verdict: 2 commits", *[""] * 7,
+        'Review: skill "weather" left on over review problems', 'Review: skill "weather" left on with no review verdict',
+        'Review: FAIL or no verdict 1× (latest: critical findings) · 3 skills left on over review problems or no verdict '
+        '(latest: "calendar")', 'Review: skill "unknown" left on over review problems or no verdict', "",
         *[f'Review: author continued 1× (latest: "{"a" * 78}{edge}…")' for edge in edges[:4]],
         *['Review: author continued 1× (latest: "' + "a" * 78 + '…")'] * 2,
     ]

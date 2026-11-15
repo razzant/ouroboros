@@ -994,7 +994,9 @@ def scan_data_paths(root: pathlib.Path = REPO) -> frozenset[str]:
 # (``ouroboros/subagent_metrics.py``); their own row.
 # 468 -> 470: the accepted wake transition chain, ``state/consciousness_transitions`` and its
 # ``<sha256>.json`` links (``ouroboros/consciousness_transitions.py``); its own row.
-EXPECTED_SCAN_PATHS = 470
+# 470 -> 471 (T07 part 3): ``projects/*/workpad_history.jsonl``, the workpad's history beside its page
+# (``project_facts.project_workpad_history_path``, written by ``memory_texts``); its own row beside the project rows.
+EXPECTED_SCAN_PATHS = 471
 
 # Scanned paths that must always be present — guards the scanner itself
 # against a silent regression that would shrink coverage while keeping counts

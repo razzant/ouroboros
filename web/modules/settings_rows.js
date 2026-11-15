@@ -85,7 +85,7 @@ export const ROWS = [
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'permissions:reviewers', keys: [], page: 'permissions', fold: false,
         name: 'Reviewers', meta: 'The agents that read finished work.', more: '',
-        control: { kind: 'door', to: 'agents' }, aliases: ['review pool'], writer: '', codec: '', confirm: '', hiddenWhen: '' },
+        control: { kind: 'door', to: 'agents', view: 'reviewers' }, aliases: ['review pool'], writer: '', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_REVIEW_MAX_CYCLES', keys: ['OUROBOROS_REVIEW_MAX_CYCLES'], page: 'permissions', fold: true,
         name: 'Paid review rounds for one change', meta: 'After the last one it may still correct its work.',
         more: 'Counts paid review waves, a failed one included: result review and commit review per task, skill review per task or snapshot. '

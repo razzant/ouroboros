@@ -362,7 +362,8 @@ def compose_review_panel(reviewers: Sequence[str] = (), reason: str = "", *, sur
     Narrowing on them outside Cyber Pro requires a reason; an adviser neither
     satisfies the counted minimum nor acquires authority from its delivery. Optional
     plan follow-ups, preflight, Auto/child result waves and Cyber Pro keep named-row
-    composition. Omission selects the pool, including its disclosed Main fallback.
+    composition; only Cyber Pro may seat advisers alone (a wave with no counted
+    verdict). Omission selects the pool, including its disclosed Main fallback.
     ``chosen_by`` is whatever the caller records (the host floor passes ``host``).
     The caller retains these facts on retries.
     """
@@ -413,7 +414,8 @@ def compose_review_panel(reviewers: Sequence[str] = (), reason: str = "", *, sur
             ignored.append(name)
         else:
             seats.append(PoolSeat(slot, tuple(seat_parts(slot, coupling_only=True)), True))
-    if not any(not seat.additional for seat in seats) and surface not in {"plan", "plan_first"}:
+    counted_seated = any(not seat.additional for seat in seats)
+    if not counted_seated and surface not in {"plan", "plan_first"} and strictness != "cyber_pro":
         raise PanelCompositionError(f"REVIEW_PANEL_EMPTY: {counted_hint}; an added critic never satisfies quorum. No review was dispatched ($0).")
     if len(seats) > MAX_CONFIGURED_SUBAGENTS:
         raise PanelCompositionError(f"REVIEW_PANEL_TOO_LARGE: a wave seats at most {MAX_CONFIGURED_SUBAGENTS} reviewers (this call asks {len(seats)}).")
@@ -422,7 +424,7 @@ def compose_review_panel(reviewers: Sequence[str] = (), reason: str = "", *, sur
         "pool": [{"seat_id": slot.slot_id, "model": slot.model, "effort": slot.effort,
                   "delivery": "retrieving" if slot.retrieves else "packet",
                   "route": str(getattr(slot.route, "value", slot.route))} for slot in configured if not main_alone],
-        "pool_empty": main_alone, "main_self_review": main_alone,
+        "pool_empty": main_alone, "main_self_review": main_alone and counted_seated,
         "chosen_by": chosen_by, "strictness": strictness, "reason": str(reason),
         "composition": "full_pool" if not named else "composed",
         "reason_missing": narrowed and not str(reason).strip(),

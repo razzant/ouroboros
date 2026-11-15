@@ -774,7 +774,7 @@ class ClaudexorQuotaRefreshRequest(TypedDict, total=False):
 
 class ClaudexorRefreshAttempt(TypedDict):
     """Host transport attempt dates, not provider observation dates. ``reused``
-    marks a joined in-flight or replayed completed attempt; its dates stay original."""
+    marks an identical attempt joined in flight; its dates stay original."""
 
     started_at: str
     completed_at: str

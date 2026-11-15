@@ -2,7 +2,7 @@
 
 The view replaces the old dialogue history and chat tail in a request. Block B carries my
 story (``## My story``); block C the live part (this room's ``## Late review feedback (host)``,
-``## Marks I keep in view``, ``## This room (<label>) — head <n>`` and ``## Other conversations``,
+``## Marks I keep in view``, ``## This room (<label> [chat_id=<id>]) — head <n>`` and ``## Other conversations``,
 ``memory_view_conversations``). Which parts a role sees is one ``ViewSpec``: ``ROLE_DEFAULTS`` by role (Main,
 a root and a Project task are the integrator; consciousness; Presence; a delegated child; a nanny), or an
 explicit spec a task carries under ``memory_view``; every focus that integrates holds the same parts, only its
@@ -466,20 +466,25 @@ class _StorySources:
         return self.rows
 
     def helper_route(self) -> str:
-        from ouroboros.model_slots import get_light_model
-
-        self.route = (get_light_model(),)
+        self.route = (_light_route_label(),)
         return self.route[0]
 
     def unchanged(self, label: Callable[..., str]) -> bool:
         """Whether each source, asked again (of the caller's labeler), answers as it did."""
         from ouroboros.memory_sealing import writer_terminal_rows
-        from ouroboros.model_slots import get_light_model
 
         getattr(label, "warm", lambda _rooms: None)(self.labels)
         return (all(label(room) == text for room, text in self.labels.items())
                 and writer_terminal_rows(self.root, self.starts) == self.rows
-                and (self.route is None or self.route == (get_light_model(),)))
+                and (self.route is None or self.route == (_light_route_label(),)))
+
+
+def _light_route_label() -> str:
+    """The route the folding helper runs on, as its lane labels it (``route_choice.following_route``)."""
+    from ouroboros.model_slots import local_lane_label
+    from ouroboros.route_choice import following_route
+
+    return local_lane_label(*following_route("light"))
 
 
 # The last story of each chronicle index with what it read: (journal size, legacy units, sources, story); a few
@@ -1251,20 +1256,15 @@ def _story_key(level: FloorLevel) -> Tuple[Any, ...]:
                  if (shown := tuple(i for i in ids if i.startswith("quote:")) if step == "F7" else ids))
 
 
+def story_is_whole(level: FloorLevel) -> bool:
+    """Whether ``level`` names no story step: its story is then the whole story's text, the same for every focus."""
+    return not _story_key(level)
+
+
 def story_chars(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW) -> int:
     """``json_chars(render_story(snapshot, level))``, read from the snapshot's pieces: what pricing a level costs."""
     key = _story_key(level)
     return snapshot.piece(("story", key), lambda: _story_text(snapshot, dict(key)))
-
-
-def whole_story_at(snapshot: MemoryViewSnapshot, level: FloorLevel) -> bool:
-    """Whether this level's story is the whole story's text. Prices decide unless a level naming story steps prices the
-    same as the whole, and only then are the two texts drawn (two renders of the build's work)."""
-    key, same = _story_key(level), story_chars(snapshot, level) == story_chars(snapshot)
-    if not same or not key:
-        return same
-    counted("view_renders", 2)
-    return _story_text(snapshot, dict(key)) == _story_text(snapshot, {})
 
 
 def _story_text(snapshot: MemoryViewSnapshot, gone: Mapping[str, Tuple[str, ...]]) -> str:
@@ -1380,10 +1380,17 @@ def _marks_text(marks: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _room_heading(room: Mapping[str, Any]) -> str:
+    """``## This room (<label> [chat_id=<id>])``, the id once: every label but Main's ends with it (``RoomLabelResolver``)."""
+    own = f"[chat_id={room['room_id']}]"
+    return f"## This room ({room['label'] if own in room['label'] else room['label'] + ' ' + own})"
+
+
 def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
-    """``## This room (<label>) — head <n>``: the room page, the words that started it, a project root's sealed
-    rows of its human (``project_words``; folded by F7 into dated addresses), notes, two lanes, and last the
-    standing facts that change with every row (so the room's earlier bytes stay a reusable prefix)."""
+    """``## This room (<label> [chat_id=<id>]) — head <n>``: the room page, the words that started it, a project
+    root's sealed rows of its human (``project_words``; folded by F7 into dated addresses), notes, two lanes, and last
+    the standing facts that change with every row (so the room's earlier bytes stay a reusable prefix). The heading
+    names the chat id its rows read in, which a ``row:`` address need not carry (``memory_view_work.row_reader``)."""
     from ouroboros.owner_words import _FRAMES, _HEADINGS
     from ouroboros.memory_view_work import folded_work_rows, task_line, works, task_gist_line, task_gists_before_work_lines, row_reader
 
@@ -1392,7 +1399,7 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
     bare = {ident[5:] for ident in mine | people if ident.startswith("bare:")}
     mine |= {ident[5:] for ident in mine if ident.startswith("bare:")}
     people |= {ident[5:] for ident in people if ident.startswith("bare:")}
-    lines = [f"## This room ({room['label']}) — head {room['head']}"]
+    lines = [f"{_room_heading(room)} — head {room['head']}"]
     if room["legacy"]:
         lines += ["", "### Retold before the update (helper retelling, not lived)"]
         lines += [_retold(item, item["id"] in retold) for item in room["legacy"]]
@@ -1433,14 +1440,12 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
                              if item['address'] in mine else render(item, 'words') if item['address'] in people else item['line'])
     if room["lane2"]:
         early = [item for item in room["lane2"] if item["first"] in facts]
-        gists = task_gists_before_work_lines(room, gone)
-        task_room = ("<room from address>" if any(str(t['gist']['room_id']) != str(room['room_id']) for t in gists)
-                     else f"'{room['room_id']}'")
+        gists = task_gists_before_work_lines(room, gone)  # a telling another room shows names that room's reader
         folded = {key for key, _rows in works(room) if any("work:" + key + suffix in mine for suffix in (":progress", ":final"))}
         lines += ["", "### Task facts of this conversation (host; one line per task; a row:… address reads with "
-                      f"memory_read(room_id={task_room}, rows=true, from=<address>, to=<address>))"]
+                      f"memory_read(room_id='{room['room_id']}', rows=true, from=<address>, to=<address>))"]
         lines += ([_facts_line(room, early)] if early else []) + [
-            task_gist_line(t) for t in gists] + [
+            task_gist_line(t, room['room_id']) for t in gists] + [
             task_line(item, folded=not gone.get("F7a") and item.get("task") in folded)
             for item in room["lane2"] if item["first"] not in facts]
     if len(lines) == 1:
@@ -1454,10 +1459,9 @@ def _room_text(room: Mapping[str, Any], gone: Mapping[str, List[str]]) -> str:
 def render_room(snapshot: MemoryViewSnapshot, level: FloorLevel = FULL_VIEW, *, floor_note: str = "") -> str:
     """Block C's memory middle: a helper's owner words, late reviews, marks, this room, then my other conversations.
 
-    ``level`` is the physical floor's (the empty level renders the full view);
-    ``floor_note`` (``### Physical floor``) closes the block. Before the import has completed
-    the room is one line naming the reason and a reader that works without the chronicle.
-    """
+    ``level`` is the physical floor's (the empty level renders the full view); ``floor_note`` closes the block:
+    ``### Physical floor``, or ``### Memory check`` when it notes only a Nano view's reader path. Before the import
+    has completed the room is its heading and one line naming the reason and a reader working without the chronicle."""
     counted("view_renders", key=("room", id(snapshot), level.addressed, floor_note))
     texts = _room_parts(snapshot, dict(level.addressed), lambda _key, make: make())
     return "\n\n".join(part for part in (*texts, floor_note if snapshot.active else "") if part)
@@ -1491,9 +1495,8 @@ def _room_parts(snapshot: MemoryViewSnapshot, gone: Mapping[str, Tuple[str, ...]
     if not snapshot.active:
         if room:
             parts.append(piece(("inactive_room",), lambda: (
-                f"## This room ({room.get('label')})\n\nOpen conversation unavailable until my memory is "
-                f"activated ({snapshot.store_status.get('reason')}); read it: chat_history(count=100) — every "
-                f"room, newest first; this room is chat_id {room['room_id']}.")))
+                f"{_room_heading(room)}\n\nOpen conversation unavailable until my memory is activated "
+                f"({snapshot.store_status.get('reason')}); read it: chat_history(count=100) — every room, newest first.")))
         return parts
     # A snapshot persisted before other rooms' late reviews left this view (a pointer entry: ``own_room`` False, no
     # words) is re-rendered after an update (``context_fit``); such an entry draws nothing.

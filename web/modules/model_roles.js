@@ -774,8 +774,9 @@ function mountModels(container, { path, ctx }) {
         <section class="ui-card settings-card"><details class="ui-disclosure" data-settings-fold>
             <summary>More: processing, prompt cache, requests at once</summary>
             <div class="settings-rows" data-models-fold></div></details></section>`;
-    // The catalogue's own result (settings_catalog.js writes it by this id) stands in its row's meta line.
-    container.querySelector('[data-setting-row="models:catalogue"]')?.querySelector('.ui-row-meta')
+    // The catalogue's own result (settings_catalog.js writes it by this id) stands under its row's words and door, as
+    // every row's result does (settings.css "A row's result").
+    container.querySelector('[data-setting-row="models:catalogue"]')
         ?.appendChild(Object.assign(container.ownerDocument.createElement('span'), { id: 'settings-model-catalog-status', className: 'ui-result settings-row-result' }));
     const bound = bindSettingRows(container, { rows: doors, ask: ctx.ask, custom, openDoor: (row) => ctx.openSettings(row.control.to) });
     const foldHost = container.querySelector('[data-models-fold]');

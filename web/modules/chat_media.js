@@ -125,6 +125,32 @@ export async function cleanupUploadedAttachments(uploaded) {
     }
 }
 
+/** A delivered file's whole name on one line (its type is read from it) and the part its card shows. Its bubble
+ *  (below) and the room's search (chat_search_words.js) read it. */
+export function fileNames(msg) {
+    const full = String(msg?.filename || 'file').replace(/[\r\n]+/g, ' ');
+    return { full, shown: full.slice(0, 200) };
+}
+
+/** A delivered links row's `.message`: its title and a button per safe address (an address itself is never
+ *  shown), or '' when no button can be drawn. Its bubble (below) and the room's search (chat_search_words.js) read it. */
+export function linksMessageHtml(msg) {
+    const actions = Array.isArray(msg?.actions) ? msg.actions : [];
+    const rows = actions.map((item) => {
+        const url = safeHttpUrl(item?.url);
+        const label = String(item?.label || '').trim().slice(0, 120);
+        return url && label
+            ? `<a class="chat-link-button" href="${escapeHtmlAttr(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}<span aria-hidden="true">↗</span></a>`
+            : '';
+    }).filter(Boolean).slice(0, MAX_LINK_ACTIONS);
+    if (!rows.length) return '';
+    const title = String(msg.title || '').trim();
+    return `<div class="message chat-links-message">
+            ${title ? `<div class="chat-links-title">${escapeHtml(title)}</div>` : ''}
+            <div class="chat-links-list">${rows.join('')}</div>
+        </div>`;
+}
+
 export function safeHttpUrl(value) {
     // safeExternalHrefAttr returns escaped markup; chat needs a raw URL before its own attribute escaping.
     const raw = String(value || '').trim();
@@ -754,8 +780,7 @@ export function createChatMedia({
         const mime = cleanMime(msg.mime, 'application/octet-stream');
         const source = fileSource(msg, mime);
         // The type is read from the whole name; only its display is cut.
-        const fullName = String(msg.filename || 'file').replace(/[\r\n]+/g, ' ');
-        const filename = fullName.slice(0, 200);
+        const { full: fullName, shown: filename } = fileNames(msg);
         const caption = String(msg.caption || '');
         const explicitSize = msg.size_bytes !== null && msg.size_bytes !== undefined
             && msg.size_bytes !== '' && Number.isFinite(Number(msg.size_bytes));
@@ -804,20 +829,8 @@ export function createChatMedia({
 
     function buildLinksMessage(msg) {
         if (destroyed) return null;
-        const actions = Array.isArray(msg.actions) ? msg.actions : [];
-        const rows = actions.map((item) => {
-            const url = safeHttpUrl(item?.url);
-            const label = String(item?.label || '').trim().slice(0, 120);
-            return url && label
-                ? `<a class="chat-link-button" href="${escapeHtmlAttr(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}<span aria-hidden="true">↗</span></a>`
-                : '';
-        }).filter(Boolean).slice(0, MAX_LINK_ACTIONS);
-        if (!rows.length) return null;
-        const title = String(msg.title || '').trim();
-        return bubbleFrame(msg, `<div class="message chat-links-message">
-            ${title ? `<div class="chat-links-title">${escapeHtml(title)}</div>` : ''}
-            <div class="chat-links-list">${rows.join('')}</div>
-        </div>`);
+        const body = linksMessageHtml(msg);
+        return body ? bubbleFrame(msg, body) : null;
     }
 
     function isFeedTailWrapper(wrapper) {

@@ -529,6 +529,7 @@ def test_requested_result_view_classifies_declared_range_parameters():
     page = {"name": "mcp_slack__history", "arguments": {"channel": "c", "limit": 200}}
     assert requested_call_view("call_mcp_tool", page) == (None, None)  # the gateway's inner arguments chose a page
     assert requested_call_view("call_mcp_tool", {**page, "arguments": json.dumps(page["arguments"])}) == (None, None)
+    assert requested_call_view("call_mcp_tool", {**page, "arguments": json.dumps(page["arguments"])[:-1]}) is None  # refused
     assert requested_call_view("call_mcp_tool", {"name": "mcp_slack__history", "arguments": {"channel": "c"}}) is None
     assert requested_call_view("enable_tools", {"tools": "mcp_gmail"}) == (None, None)  # a catalog view the mind asked for
     assert requested_call_view("read_file", {"path": "a"}) is None

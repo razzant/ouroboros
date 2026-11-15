@@ -939,23 +939,33 @@ for (const reason of ['Update the app or connect an engine at version 6.0.0 or n
     controller.dispose();
 });
 
-test('lazy program inspection is spaced, keeps held selections and stops with its view', async t => {
-    let clock = 1000000, visible = true;
+test('a status tick polls pending operations only; inspecting programs is an owner act', async t => {
+    // Owner choice 2026-11-14 (B) and the base contract: a provider's page, an opened chooser,
+    // Check latest, Refresh and an operation's settlement inspect; ticks never do.
+    let clock = 1000000;
     t.mock.method(Date, 'now', () => clock);
-    const calls = [], intents = new Map();
-    const controller = createHarnessMaintenanceController({ intents, visible: () => visible,
-        api: { harnessMaintenanceInventory: async query => { calls.push(query); return { harnesses: [entry()] }; } } });
-    controller.poll(); await flush();
-    assert.deepEqual(calls, [{ harness: '', fresh: true, checkLatest: true }]);
-    for (let n = 0; n < 10; n++) { clock += 5000; controller.poll(); await flush(); }
-    assert.equal(calls.length, 1);
-    assert.equal(controller.view('fixture').entry.selection.version, '2.0.0');
-    clock += 120000; controller.poll(); await flush();
-    assert.equal(calls.length, 2); assert.equal(calls[1].checkLatest, false);
-    visible = false; clock += 1800000; controller.poll(); await flush();
-    assert.equal(calls.length, 2);
-    visible = true; controller.poll(); await flush();
-    assert.equal(calls[2].checkLatest, true);
-    controller.dispose(); clock += 1800000; controller.poll(); await flush();
-    assert.equal(calls.length, 3);
+    const calls = [], answers = [], intents = new Map();
+    const api = {
+        harnessMaintenanceInventory: query => {
+            calls.push(['inventory', query]); answers.push(deferred()); return answers.at(-1).promise;
+        },
+        harnessMaintenanceOperation: async id => { calls.push(['read', id]); return operation({ state: 'running' }); },
+    };
+    const first = createHarnessMaintenanceController({ intents, api });
+    for (let n = 0; n < 30; n++) { clock += 5000; first.poll(); await flush(); }
+    assert.deepEqual(calls, [], 'an idle tick inspected the programs');
+    first.refresh({ fresh: true, checkLatest: true }); await flush(); // the owner showed the page
+    assert.deepEqual(calls, [['inventory', { harness: '', fresh: true, checkLatest: true }]]);
+    first.dispose(); // Settings navigation leaves while that inspection runs
+    const second = createHarnessMaintenanceController({ intents, api });
+    second.refresh({ fresh: true, checkLatest: true }); await flush(); // the owner shows it again
+    assert.equal(calls.length, 2, 'the reopened view relied on an answer its predecessor discards');
+    answers[0].resolve({ harnesses: [entry({ selection: { ...entry().selection, version: '1.0.0' } })] }); await flush();
+    assert.equal(second.view('fixture').entry, undefined, 'a released view applied its late answer');
+    answers[1].resolve({ harnesses: [entry({ operation: operation() })] }); await flush();
+    assert.equal(second.view('fixture').entry.selection.version, '2.0.0');
+    calls.length = 0;
+    clock += 1800000; second.poll(); await flush();
+    assert.deepEqual(calls, [['read', 'operation-1']], 'a tick reads a pending operation and nothing else');
+    second.dispose();
 });

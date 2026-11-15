@@ -553,6 +553,13 @@ test('Logs reads oldest to newest, says why it is empty, and keeps one quiet ton
     const raw = main.querySelector('.log-raw-toggle');
     assert.equal(raw.className, 'btn btn-ghost btn-sm log-raw-toggle');
     assert.equal(entries.children[0].querySelector('.log-actions'), null);
+    // Raw wraps with its headline as one lead, so a narrow pane never leaves it alone on a line under the headline;
+    // the time stays outside the lead, so the lead takes the next line whole when it does not fit beside the time.
+    const lead = raw.parentElement;
+    assert.equal(lead.className, 'log-lead');
+    assert.equal(lead.parentElement, main);
+    assert.equal(lead.querySelector('.log-headline').parentElement, lead);
+    assert.equal(main.querySelector('.log-ts').parentElement, main);
     // Raw is one delegated component (logs_raw.js): the browser's click reaches the list, which opens the record.
     entries.dispatchEvent({ type: 'click', target: raw });
     assert.equal(entries.children[0].querySelector('.log-raw').hidden, false);

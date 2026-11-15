@@ -25,7 +25,7 @@ from ouroboros.deadline_utils import (
 )
 from ouroboros.knowledge import observed_route_stamp
 from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage
-from ouroboros.llm_claudexor import ClaudexorModelNotDispatched, propagate_model_error, presence_refusal_unstarted
+from ouroboros.llm_claudexor import ClaudexorModelNotDispatched, daemon_not_delivered, propagate_model_error, presence_refusal_unstarted
 from ouroboros.llm_substitution import same_route_refusal, stamp_substitutions
 from ouroboros.model_wait import (
     OWNER_WORDS_WAITING, ModelWaitInterrupted, current_model_wait, model_wait_reason, propagate_model_control,
@@ -1035,13 +1035,10 @@ def _stop_after_llm_error(ctx: _LlmErrorContext) -> bool:
     accumulated_usage = ctx.accumulated_usage
     error_kind = str(accumulated_usage.get("_last_llm_error_kind") or "")
     failure = accumulated_usage.get("_last_llm_failure") or {}
-    daemon_not_delivered = (failure.get("not_dispatched_provider") == "claudexor"
-        and failure.get("operation_id") == "" and failure.get("provider_code") in {
-            "daemon_unreachable", "daemon_not_answering", "daemon_starting", "daemon_descriptor_changed"})
     if TIMEOUT_REPEAT_KEY in accumulated_usage:
         return True  # its repeat failed, whatever the class: the no-call terminal reads the record and this row
     if error_kind == "transport_unavailable" and (
-            (failure.get("provider_code") != "transport_not_delivered" and not daemon_not_delivered)
+            (failure.get("provider_code") != "transport_not_delivered" and not daemon_not_delivered(failure))
             or accumulated_usage.get(TRANSPORT_WAIT_REDIAL_KEY) or isinstance(accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict)):
         # One free attempt: configured routes and the round's episode own an unreachable route's recovery, an open episode
         # paces its own redials and a held paid repeat sends nothing more. The engine's not-delivered receipt and a typed

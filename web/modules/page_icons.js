@@ -19,7 +19,8 @@ const regular = (name) => FLUENT[`${name}-20-regular`];
 
 const PAGE_BODIES = {
     chat: filled('chat'),
-    // Projects: "layer" — distinct from the Files folder glyph (the Projects header renders it: pages.js).
+    // Projects: "layer" — distinct from the Files folder glyph (a reference to a Project renders it:
+    // project_reference.js).
     projects: filled('layer'),
     // Circles: the people a circle gathers; its places wear their connectors' marks.
     circles: filled('people-community'),
@@ -85,12 +86,11 @@ export function renderSkillIcon(spec, { size = 16, className = '' } = {}) {
 // (effort_chip.js wraps it in its own 20×20 filled svg).
 export const PIN_BODY = regular('pin');
 
-// The shell's control glyphs, each once: the menu (☰), back (‹), the one close (×), the one more (⋯), the
+// The shell's control glyphs, each once: back (‹), the one close (×), the one more (⋯), the
 // chevron, the magnifier of Find a project, a Project row's Pin and its slashed Unpin, and the move grip (⠿) of a
 // Widgets card. Fluent Regular (actions inside controls); a control's accessible name says what the glyph does.
 export const SHELL_ICONS = {
     search: fillIcon(regular('search'), 18),
-    menu: fillIcon(regular('navigation')),
     back: fillIcon(regular('chevron-left')),
     close: fillIcon(regular('dismiss')),
     more: fillIcon(regular('more-horizontal')),

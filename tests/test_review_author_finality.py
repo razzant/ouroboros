@@ -225,6 +225,10 @@ def test_repeated_skill_finish_preserves_critic_evidence_and_runs_the_current_by
         raw_actor_records=[{"slot_id": "critic", "status": "ok"}],
     ))
     save_enabled(ctx.drive_root, "demo", True)
+    from tests._store_shared import read_result, seed_result
+
+    ctx.task_id = "skill-work"
+    seed_result(ctx.drive_root, "skill-work", {"status": "running"})
     binding = ResolvedResourceBinding(profile="self_modification", root="skill_payload", operation="review",
         base_path=directory, target_path=directory, source="test", skill_name="demo", state_drive_root=ctx.drive_root)
     for revision in (1, 2):
@@ -240,12 +244,25 @@ def test_repeated_skill_finish_preserves_critic_evidence_and_runs_the_current_by
         projected = _review_fields(loaded, github_token_configured=False)
         assert projected["review_stale"] and projected["executable_review"]
         assert projected["reviewed_content_hash"] == original_hash
+        # It was on when its author accepted files no review passed: the work's card names it, once.
+        named = read_result(ctx.drive_root, "skill-work")["review_overrides"]["skills"]
+        assert (named["count"], named["seen"]) == (1, ["demo"])
+        assert (named["latest"]["reason"], named["latest"]["door"]) == ("no_review_verdict", "author_finish")
         if kind == "script":
             actual = json.loads(skill_exec._handle_skill_exec(ctx, skill="demo", script="hello.py"))
             assert actual["exit_code"] == 0
             assert f"author-{revision}" in actual["stdout"]
         else:
             assert _extension_runtime_state(loaded, drive_root=ctx.drive_root, skills=[loaded])["desired_live"]
+    # The same acceptance of a skill that is off names nothing on its work's card.
+    save_enabled(ctx.drive_root, "demo", False)
+    ctx.task_id = "off-work"
+    seed_result(ctx.drive_root, "off-work", {"status": "running"})
+    changed.write_text("print('author-off')\n" if kind == "script" else "def register(api):\n    value = 'off'\n")
+    assert "error" not in skill_exec._author_finish_existing_skill_review(
+        ctx, binding, "demo", disposition="partial", rationale="Accepted while the skill is off.")
+    assert "review_overrides" not in read_result(ctx.drive_root, "off-work")
+    save_enabled(ctx.drive_root, "demo", True)
     loaded = load_skill(directory, ctx.drive_root)
     save_review_state(ctx.drive_root, "demo", SkillReviewState(status="clean", content_hash=loaded.content_hash))
     refreshed = load_skill(directory, ctx.drive_root)

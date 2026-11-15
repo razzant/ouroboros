@@ -584,3 +584,17 @@ test('the newest read and each landed write announce the document to the lists t
     assert.deepEqual(server.posts, [{ TOTAL_BUDGET: 250 }]);
     assert.equal(seen.at(-1), 250, 'a landed write announces the patched document, with no read after it');
 });
+
+test('a wide control is marked to go under its words sooner; a door, a switch, a key and a short number are not', () => {
+    const wide = (row) => / data-wide[ >]/.test(settingsRow(row, {}).split('>')[0] + '>');
+    for (const row of [STRIP, CHECKER, WAKE, testRow('T_LIST', { kind: 'select', options: [option('a', 'A')] }),
+        testRow('T_OWN', { kind: 'custom' }), testRow('T_BOUND', { kind: 'number', noLimit: true })]) assert.ok(wide(row), row.id);
+    for (const row of [SWITCH, SECRET, LADDER, testRow('T_DOOR', { kind: 'door', page: 'models' }), testRow('T_N', { kind: 'number' }),
+        testRow('T_DEVICE', { kind: 'custom', as: 'switch' })]) assert.ok(!wide(row), row.id);
+});
+
+test('a write that waits for a restart says why its line is yellow, with a receipt or without one', () => {
+    assert.deepEqual(outcomeLine(ACCESS, { state: 'saved', effect: 'restart' }), { text: 'Saved · applies after restart', tone: 'warn', undo: false, note: '', details: '' });
+    assert.deepEqual(outcomeLine(ACCESS, { state: 'saved', effect: 'restart', old: 'light' }).text, 'Saved · applies after restart');
+    assert.equal(outcomeLine(CHECKER, { state: 'saved', effect: 'next_call' }).text, 'Saved', 'a quiet effect without a receipt still says nothing more');
+});

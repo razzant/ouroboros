@@ -91,6 +91,10 @@ def engine(monkeypatch, tmp_path):
             return httpx.Response(200, json={"profiles": [{"profile": {
                 "harness_id": "claude", "profile_id": "claude-default", "enabled": False}}],
                 "harnessAccounts": [], "accountPools": []})
+        if request.url.path == "/v2/agent-capabilities" and state.get("hold_catalog"):
+            entered, release = state.pop("hold_catalog")
+            entered.set()
+            assert release.wait(10)
         if request.url.path in {"/v2/harnesses", "/v2/agent-capabilities"}:
             return httpx.Response(200, json={"harnesses": []})
         raise AssertionError(f"Unexpected engine call: {request.method} {request.url.path}")
@@ -269,6 +273,44 @@ def test_unread_operations_catalog_does_not_erase_successful_siblings(engine, fa
     payload = client.get("/api/claudexor/status").json()
     assert payload["resource_capabilities_read"] == "ok"
     assert payload["resources"] == WIRE["quota"]["resources"]
+
+
+def test_an_older_read_keeps_the_resources_a_newer_read_could_not_negotiate(engine):
+    """A plain read held at its agent catalog lands after a models read whose operations catalog failed.
+    This engine serves resources only through the negotiated fallback, so the newer rows came without
+    them: the older read's rows are discarded, its own list is the only one observed."""
+    import threading
+
+    from ouroboros.gateway import claudexor_accounts as accounts
+
+    _, state, calls = engine
+    entered, release, answers = threading.Event(), threading.Event(), []
+    state["hold_catalog"] = (entered, release)
+    older = threading.Thread(target=lambda: answers.append(accounts._status_payload(False)))
+    older.start()
+    try:
+        assert entered.wait(10)
+        for _ in range(1000):  # its quota is read through the negotiated fallback before the catalog fails
+            if any(path == "/v2/quota" and params == {"view": "resources"} for _, path, params, *_ in list(calls)):
+                break
+            threading.Event().wait(0.01)
+        state["catalog_error"] = "http"
+        newer = accounts._status_payload(True)
+    finally:
+        state["catalog_error"] = None
+        release.set()
+        older.join(10)
+    assert (newer["reads"]["quota"], newer["resource_capabilities_read"]) == ("ok", "failed")
+    assert "resources" not in newer
+    answer = answers[0]
+    assert answer["reads"]["quota"] == "not_read" and answer["quota"] == newer["quota"]
+    assert answer["facets"]["quota"]["observed_at"] == newer["facets"]["quota"]["observed_at"]
+    assert answer["resources"] == WIRE["quota"]["resources"]
+    assert answer["resource_capabilities"]["read"] is True
+    assert len([call for call in calls if call[1] == "/v2/quota"]) == 3, "no additional engine request"
+    # A later read that negotiates again owns the list as before.
+    payload = accounts._status_payload(False)
+    assert payload["reads"]["quota"] == "ok" and payload["resources"] == WIRE["quota"]["resources"]
 
 
 @pytest.mark.parametrize(("action", "failure"), [

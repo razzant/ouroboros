@@ -154,10 +154,13 @@ def _format_coupling_advisory_msg(outcome) -> str:
 
 
 def _commit_review_retry_key(
-    ctx, commit_message, *, goal, scope, review_rebuttal, binding_fingerprint="",
+    ctx, commit_message, *, goal, scope, review_rebuttal, binding_fingerprint="", counted=False,
 ):
     """Bind one logical review cycle to canonical staged material and intent (an author-named
-    ``since_review`` included, only when given; host observations never)."""
+    ``since_review`` included, only when given; host observations never). A panel of advisers alone (Cyber
+    Pro) is its own round, apart from the counted one (``counted=True`` names that one)."""
+    panel = {} if counted else dict(getattr(ctx, "_commit_review_panel", None) or {})
+    advisers = sorted(panel.get("additional") or []) if panel.get("seats") == 0 else []
     material = str(binding_fingerprint or "").strip()
     if not material:
         from ouroboros.tools.review_subject import staged_patch
@@ -174,7 +177,15 @@ def _commit_review_retry_key(
         "rebuttal": hashlib.sha256(str(review_rebuttal or "").encode()).hexdigest(),
         "contract": str(getattr(ctx, "_current_review_contract_fingerprint", "") or ""),
         **({"since_review": ctx._review_since} if getattr(ctx, "_review_since", "") else {}),
+        **({"advisers": advisers} if advisers else {}),
     }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def commit_round_keys(ctx, commit_message, *, goal, scope, review_rebuttal, binding_fingerprint=""):
+    """This call's round key and its intent's counted one: a call of advisers alone still names (so collects) the
+    open counted round of its intent; a counted call names that round alone."""
+    return {_commit_review_retry_key(ctx, commit_message, goal=goal, scope=scope, review_rebuttal=review_rebuttal,
+                                     binding_fingerprint=binding_fingerprint, counted=counted) for counted in (False, True)}
 
 
 def _structured_review_result(prepared, *, started_ts, retry_key, wave_refusal, exited, early, subject=None):

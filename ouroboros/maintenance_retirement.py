@@ -16,7 +16,8 @@ to a delegate capture that child's capture pass never had, the rest waiting for 
 What the step newly saved of the engine's answers (``observed``) reaches ``logs/events.jsonl`` once.
 Task trees and service logs retire only behind the recovery gate. A pass that finds it closed (no
 startup recorded, a startup gap, unreadable recovery links) says so on its job row as the typed hold
-``source_recovery_pending``, which Storage and the mind's ``storage`` fact read; an open gate leaves no hold.
+``source_recovery_pending``, its example naming the gap's first error or the first link that could not be
+followed, which Storage and the mind's ``storage`` fact read; an open gate leaves no hold.
 """
 from __future__ import annotations
 
@@ -221,12 +222,13 @@ def run(root, should_stop):
             startup = txn.meta(STARTUP)
         if not should_stop():
             judged, hold = True, _startup_hold(startup)
-            exclusions = None if hold else startup_tree_exclusions(root)
+            exclusions, link = (None, "") if hold else startup_tree_exclusions(root)
             if exclusions is not None:
                 steps[:0] = [("task_trees", lambda root: prune_task_trees(root, exclude_root_ids=exclusions)),
                              ("services", prune_service_logs)]
             elif hold is None:
-                hold = {"class": RECOVERY_HOLD, "count": None, "example": "recovery links unreadable"}
+                hold = {"class": RECOVERY_HOLD, "count": None,
+                        "example": f"recovery links unreadable: {link}"[:maintenance_jobs.HOLD_EXAMPLE_CHARS]}
     for name, retire in steps:
         if should_stop():
             break
@@ -252,8 +254,8 @@ def run(root, should_stop):
                 # An open gate holds nothing. The field goes: Storage reads any ``holds``, an empty
                 # list too, as a retirer pass's report.
                 maintenance_jobs.forget_in(txn, JOB, "holds")
-    if errors or any(report.get(key) for report in reports.values()
-                     for key in ("removed", "swept", "restored", "deleted_dirs", "deleted_files", "observed")):
+    if errors or any(report.get(key) for report in reports.values() for key in (
+            "removed", "pruned", "unlinked", "swept", "restored", "deleted_dirs", "deleted_files", "observed")):
         append_jsonl(pathlib.Path(root) / "logs/events.jsonl",
                      {"ts": utc_now_iso(), "type": "runtime_retirement", "reports": reports, "errors": errors})
     return {"state": state, "items": len(reports)}

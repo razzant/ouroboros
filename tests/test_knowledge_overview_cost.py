@@ -15,7 +15,7 @@ def test_overview_receipt_prices_body_before_after_and_next_capture(tmp_path):
     old = store.write_knowledge_note(address, '---\ntype: note\nsummary: Metadata stays outside the body count.\n---\n'
                                     '# Overview\n\n' + 'Дословное понимание. ' * 4500 + 'x').current
     before = build_knowledge_sections(env)[0]
-    reply = _knowledge_write(ctx, 'overview', content='# Overview\n\nA smaller authored map.',
+    reply = _knowledge_write(ctx, 'overview', content='# Overview\n\nA smaller authored map.', mode='overwrite',
                              expected_revision=old.revision)
     assert reply.startswith('✅')
     receipt = json.loads(reply.split('\n', 1)[1])
@@ -37,18 +37,20 @@ def test_overview_receipt_prices_body_before_after_and_next_capture(tmp_path):
     assert store.overview_residency(old) in before and old.source.text_at(old.source.body_span) in before
     assert after.operative_view is None
     # A stale revision neither changes the page nor issues a successful delta.
-    refused = _knowledge_write(ctx, 'overview', content='Stale overwrite', expected_revision=old.revision)
+    refused = _knowledge_write(ctx, 'overview', content='Stale overwrite', mode='overwrite',
+                               expected_revision=old.revision)
     assert 'revision_conflict' in refused and 'knowledge_residency' not in refused
     assert store.read_knowledge_note(address).revision == current.revision
-    unchanged = _knowledge_write(ctx, 'overview', content=current.text, expected_revision=current.revision)
+    unchanged = _knowledge_write(ctx, 'overview', content=current.text, mode='overwrite',
+                                 expected_revision=current.revision)
     assert 'delta +0.00 tokens' in unchanged
 
 
 def test_ordinary_notes_remain_on_demand_and_overview_creation_prices_zero(tmp_path):
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id='overview-create')
-    ordinary = _knowledge_write(ctx, 'work/report', content='# Report\nDetails.')
+    ordinary = _knowledge_write(ctx, 'work/report', content='# Report\nDetails.', mode='overwrite')
     assert 'read on demand' in ordinary and 'next context build' not in ordinary
-    created = _knowledge_write(ctx, 'overview', content='# Overview\nNew understanding.')
+    created = _knowledge_write(ctx, 'overview', content='# Overview\nNew understanding.', mode='overwrite')
     assert 'Body 0 → ' in created and 'estimate 0.00 → ' in created
 
 

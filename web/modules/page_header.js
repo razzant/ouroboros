@@ -1,5 +1,5 @@
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
-import { bindScrollFade } from './scroll_fade.js';
+import { FADE_CLEARANCE, bindScrollFade } from './scroll_fade.js';
 import { SHELL_ICONS } from './page_icons.js';
 import { pageLabel } from './pages.js';
 import { statusMarkHtml } from './status_mark.js';
@@ -65,7 +65,7 @@ export function renderPageHeader({
     const facts = [
         named ? ' data-sidebar-names' : '',
         named && !toolbar && !trailing && !tabs && !leadHtml ? ' data-empty' : '',
-        leadHtml ? ' data-lead data-lead-written' : '',
+        leadHtml ? ' data-lead' : '',
     ].join('');
     const id = titleId ? ` id="${escapeHtml(titleId)}"` : '';
     return `
@@ -97,31 +97,18 @@ export function renderBackControl({ to = '', attrs = '' } = {}) {
 /**
  * The header's Back slot (renderPageHeader writes it before the lead): `control` stands there, so it never scrolls
  * away with a lead that is a scroller (Dashboard's tabs, Files' location). On a desk the slot stands before the lead;
- * in the stack layout it starts the row under ☰: the page's tab strip when it has one, else a row of the header's own.
- * Returns the disposer, which takes the control away and puts the slot back.
+ * in the stack layout it is the header's one leading control where ☰ stood (style.css, `.app-page-header[data-back]`),
+ * so a page that leads back (Skills opened from Settings) has one leading control in one row, its tabs under it as
+ * they were. Returns the disposer, which takes the control away.
  */
 export function placePageBack(header, control) {
     const slot = header?.querySelector?.('[data-page-back]');
     if (!slot || !control) return () => {};
-    const block = slot.parentElement;
-    const lead = block.querySelector(':scope > .app-page-lead');
-    const tabs = header.nextElementSibling?.classList?.contains('app-page-tabs') ? header.nextElementSibling : null;
     slot.replaceChildren(control);
     header.setAttribute('data-back', '');
-    const place = (layout) => {
-        const stack = (typeof layout === 'string' ? layout : currentLayout()) !== 'docked';
-        if (stack && tabs) tabs.prepend(slot);
-        else if (slot.parentElement !== block) block.insertBefore(slot, lead);
-        tabs?.toggleAttribute('data-back', stack);
-    };
-    place();
-    const offLayout = onLayoutChange(place);
     return () => {
-        offLayout();
         slot.replaceChildren();
-        if (slot.parentElement !== block) block.insertBefore(slot, lead);
         header.removeAttribute('data-back');
-        tabs?.removeAttribute('data-back');
     };
 }
 
@@ -317,10 +304,32 @@ export function bindTabStrip(strip, { dataAttr, activeClass = 'active', onChange
         && !tab.matches('[hidden], [inert]');
     const enabled = (tab) => selectable(tab) && !tab.closest('[hidden], [inert]');
     let selected = null;
+    // A vertical list (the Dashboard's) scrolls in its own box, the list or the rail around it: a chosen row out of
+    // that box's view comes in just past its edge fade (`FADE_CLEARANCE`, as Settings' rail), and nothing beyond the
+    // box moves (never the page). A row already in view never moves.
+    function revealInScroller(tab) {
+        const view = strip.ownerDocument.defaultView;
+        const doc = strip.ownerDocument;
+        let box = strip;
+        while (box && box !== doc.body && box !== doc.documentElement) {
+            const overflow = view.getComputedStyle(box).overflowY;
+            if ((overflow === 'auto' || overflow === 'scroll') && box.scrollHeight > box.clientHeight) break;
+            box = box.parentElement;
+        }
+        if (!box || box === doc.body || box === doc.documentElement) return;
+        const style = view.getComputedStyle(box);
+        const bounds = box.getBoundingClientRect();
+        const rect = tab.getBoundingClientRect();
+        const top = bounds.top + (box.clientTop || 0) + (parseFloat(style.scrollPaddingTop) || 0);
+        const bottom = bounds.top + (box.clientTop || 0) + box.clientHeight - (parseFloat(style.scrollPaddingBottom) || 0);
+        if (rect.top < top) box.scrollTop += rect.top - top - FADE_CLEARANCE;
+        else if (rect.bottom > bottom) box.scrollTop += rect.bottom - bottom + FADE_CLEARANCE;
+    }
     function revealSelected() {
         if (disposed || !strip.clientWidth) return;
         const tab = tabs().find((item) => item.getAttribute(dataAttr) === selected);
         if (!tab) return;
+        if (strip.getAttribute('aria-orientation') === 'vertical') { revealInScroller(tab); return; }
         const bounds = strip.getBoundingClientRect();
         const rect = tab.getBoundingClientRect();
         const style = strip.ownerDocument.defaultView.getComputedStyle(strip);

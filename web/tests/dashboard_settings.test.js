@@ -149,16 +149,23 @@ test('the wake range is one row of two numbers; a first number above the second 
         OUROBOROS_CONSCIOUSNESS_DAILY_USD: 20, OUROBOROS_MODEL_CONSCIOUSNESS: '', OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'light',
         OUROBOROS_POST_TASK_EVOLUTION: 'true', OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'every_n:3' }), {
         OUROBOROS_CONSCIOUSNESS_AUTONOMY: AUTONOMY_LEVELS[1].note, OUROBOROS_BG_WAKEUP: 'It picks a moment between 5 minutes and 2 hours.',
-        'consciousness-allowance': '$20', 'consciousness-model': 'Main model',
+        'consciousness-allowance': '$20', 'consciousness-model': '',
         'consciousness-safety': SAFETY_LEVELS.find((level) => level.value === 'light').label, 'consciousness-evolution': 'Every 3 tasks' });
     assert.deepEqual(words({ OUROBOROS_BG_WAKEUP_MIN: 900, OUROBOROS_BG_WAKEUP_MAX: 900, OUROBOROS_CONSCIOUSNESS_DAILY_USD: '12.5',
         OUROBOROS_MODEL_CONSCIOUSNESS: 'anthropic::claude-test', OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'off',
         OUROBOROS_POST_TASK_EVOLUTION: false, OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'every_n:3' }), {
         OUROBOROS_CONSCIOUSNESS_AUTONOMY: '', OUROBOROS_BG_WAKEUP: 'It wakes every 15 minutes.',
-        'consciousness-allowance': '$12.50', 'consciousness-model': 'claude-test', 'consciousness-safety': 'Off', 'consciousness-evolution': 'Off' });
+        'consciousness-allowance': '$12.50', 'consciousness-model': '', 'consciousness-safety': 'Off', 'consciousness-evolution': 'Off' });
     assert.deepEqual(words({}), { OUROBOROS_CONSCIOUSNESS_AUTONOMY: '', OUROBOROS_BG_WAKEUP: '', 'consciousness-allowance': '',
-        'consciousness-model': 'Main model', 'consciousness-safety': '', 'consciousness-evolution': '' },
+        'consciousness-model': '', 'consciousness-safety': '', 'consciousness-evolution': '' },
     'a value that was not read is not said: no "$0", no level and no "Off" the document did not carry');
+    // The model door says the route the next wake takes, as the consciousness read publishes it and Costs words it:
+    // the slot's text alone does not say its lane (its box checked under a cloud Main is the local runtime).
+    const model = (route, settings = {}) => cardWords(settings, route)['consciousness-model'].value;
+    assert.equal(model({ value: 'claudexor::codex=gpt-6-astra', layer: 'main', local: false }), 'gpt-6-astra (Main model)');
+    assert.equal(model({ value: 'anthropic::claude-test', layer: 'consciousness', local: false }), 'claude-test');
+    assert.equal(model({ value: 'openai/gpt-6', layer: 'consciousness', local: true }, { OUROBOROS_MODEL_CONSCIOUSNESS: '' }), 'Local model');
+    assert.equal(model(null, { OUROBOROS_MODEL_CONSCIOUSNESS: 'anthropic::claude-test' }), '', 'a route that was not read is not guessed from the slot');
     // The Safety door speaks the scale's one list, whatever its words are, and the evolution door the choice's own names.
     for (const level of SAFETY_LEVELS) assert.equal(words({ OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: level.value })['consciousness-safety'], level.label);
     assert.deepEqual([[true, 'llm'], ['1', 'every_n:1'], [true, 'every_n:12'], ['false', 'llm']].map(whenName),
@@ -172,7 +179,8 @@ test('Consciousness: its cards are drawn once beside the summary; a refresh leav
     const opened = [];
     const controller = initConsciousnessDashboard({
         mount: server.mount, state: { activePage: 'dashboard', dashboardActiveSubtab: 'consciousness' },
-        read: async () => ({ ...normalizeConsciousness(FIXTURE.consciousness), recentWakes: [] }),
+        read: async () => ({ ...normalizeConsciousness({ ...FIXTURE.consciousness,
+            model_route: { value: 'openai/gpt-6', layer: 'consciousness', local: true } }), recentWakes: [] }),
         readPlacesFn: async () => ({ places: [] }),
         openSettings: (path, options) => { opened.push(['settings', path, options]); },
         openDashboardTab: (tab, options) => { opened.push(['tab', tab, options]); },
@@ -205,7 +213,8 @@ test('Consciousness: its cards are drawn once beside the summary; a refresh leav
     // One name for one limit: the door carries the name its row has on Costs (a rolling 24 hours), and the sum alone.
     assert.equal(rowNode(card, 'consciousness-allowance').querySelector('.ui-row-title').textContent, rowById('OUROBOROS_CONSCIOUSNESS_DAILY_USD').name);
     assert.equal(rowNode(card, 'consciousness-allowance').querySelector('[data-row-value]').textContent, '$20');
-    assert.equal(rowNode(card, 'consciousness-model').querySelector('[data-row-value]').textContent, 'Main model');
+    assert.equal(rowNode(card, 'consciousness-model').querySelector('[data-row-value]').textContent, 'Local model',
+        'an empty slot whose box is checked under a cloud Main: the published route, not the slot\'s text');
     assert.equal(rowNode(card, 'consciousness-places').querySelector('[data-row-value]'), null, 'a door with nothing to say says nothing');
     assert.deepEqual(['consciousness-safety', 'consciousness-evolution'].map((id) => [rowNode(card, id).querySelector('.ui-row-title').textContent,
         rowNode(card, id).querySelector('[data-row-value]').textContent]),
@@ -485,7 +494,9 @@ test('a card says what its rows add from the last read, and only then: captions 
     const tasks = rowNode(host, 'OUROBOROS_CONSCIOUSNESS_MAX_TASKS');
     const caption = tasks.querySelector('[data-row-caption]');
     assert.equal(caption.textContent, 'first');
-    assert.equal(caption.nextElementSibling, tasks.querySelector('[data-setting-result]'), 'the caption stands before the result line');
+    assert.equal(caption.parentElement.children.at(-1), caption, 'the caption ends the meta line');
+    assert.equal(tasks.querySelector('.ui-row-actions').nextElementSibling, tasks.querySelector('[data-setting-result]'),
+        'the result line stands after the control, never inside the words');
     const door = rowNode(host, 'consciousness-allowance');
     assert.equal(door.querySelector('.ui-row-actions').firstChild, door.querySelector('[data-row-value]'), 'a value stands before the chevron');
     said = { OUROBOROS_CONSCIOUSNESS_MAX_TASKS: { caption: 'second' } };
@@ -572,8 +583,12 @@ test('openDashboardTab: back gives the tab its Back, a row is brought into view 
         + '<div class="ui-row settings-row" data-setting-row="OUROBOROS_MAX_ROUNDS"><input data-setting-control></div></details></div>';
     const row = panel('costs').querySelector('[data-setting-row]');
     let scrolled = null;
-    row.scrollIntoView = (options) => { scrolled = options; };
+    let viewWhenScrolled = '';
+    // One column (the fixture measures no width): the page must be the visible level before its row is revealed,
+    // or the scroll and the focus land in a hidden pane.
+    row.scrollIntoView = (options) => { scrolled = options; viewWhenScrolled = dashboard.page.dataset.sectionView; };
     dashboard.activateTab('costs', { row: 'OUROBOROS_MAX_ROUNDS', back: '' });
+    assert.equal(viewWhenScrolled, 'page', 'the level is shown before its row is scrolled to and focused');
     assert.equal(slot.children.length, 1);
     assert.equal(slot.firstChild.getAttribute('aria-label'), 'Back to Settings');
     assert.equal(panel('costs').querySelector('[data-dashboard-back]'), null);
@@ -600,6 +615,39 @@ test('openDashboardTab: back gives the tab its Back, a row is brought into view 
     assert.equal(slot.firstChild, null, 'leaving the Dashboard drops Back');
     assert.equal(layers.length, 0);
     assert.equal(focusSettingRow(panel('costs'), 'NO_SUCH_ROW'), false);
+    // Two panes: the page stands beside the list as before, no level, its row revealed in it.
+    dashboard.page.getBoundingClientRect = () => ({ width: 1000 });
+    viewWhenScrolled = '';
+    dashboard.activateTab('costs', { row: 'OUROBOROS_MAX_ROUNDS' });
+    assert.deepEqual([viewWhenScrolled, listBack.hidden, layers.length], ['page', true, 0]);
+    assert.equal(document.activeElement, row.querySelector('[data-setting-control]'));
+    dashboard.destroy();
+});
+
+// A Settings row or search result in one column opens a Dashboard page with Back to Settings: the layer stack changes
+// once (the level that Back replaces is never pushed and removed first), so Telegram's Back is not told show, hide,
+// show in one task (layers.js: one snapshot per batch).
+test('openDashboardTab with back changes the layer stack once in one column', (t) => {
+    const { mount } = setup(t);
+    const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
+    const stack = [];
+    const seen = [''];
+    let depth = 0;
+    const commit = () => { if (depth === 0) seen.push(stack.map((layer) => layer.id).join(',')); };
+    const layers = {
+        push(layer) { if (!stack.some((open) => open.id === layer.id)) stack.push(layer); commit(); },
+        remove(id) { stack.splice(0, stack.length, ...stack.filter((layer) => layer.id !== id)); commit(); },
+        batch(fn) { depth += 1; try { return fn(); } finally { depth -= 1; commit(); } },
+    };
+    const state = { dashboardActiveSubtab: 'logs', activePage: 'dashboard' };
+    const dashboard = initDashboard({ state, openSettings() {}, layers });
+    seen.splice(0, seen.length, stack.map((layer) => layer.id).join(','));
+    dashboard.activateTab('costs', { back: 'accounts' });
+    const changes = seen.filter((ids, i) => i > 0 && ids !== seen[i - 1]);
+    assert.deepEqual(changes, ['dashboard-back'], 'one change: Back to Settings, with no level pushed and removed');
+    // Without a Back the page is the level, pushed once as well.
+    dashboard.activateTab('storage');
+    assert.deepEqual(stack.map((layer) => layer.id), ['dashboard-level']);
     dashboard.destroy();
 });
 
@@ -726,4 +774,39 @@ test('in a wide window the Dashboard holds its list beside a page; an engine wit
     assert.equal(old.listBack.hidden, false, 'the page that replaced the list leads back to it');
     assert.equal(old.layers.length, 1, 'as a level a system Back closes');
     old.dashboard.destroy();
+});
+
+test('a root font that moves the two panes\' 40rem repaints the Dashboard: the pane and the list are watched beside its box', (t) => {
+    const { mount, window } = setup(t);
+    const content = new NodeStub(); content.id = 'content'; mount.appendChild(content);
+    NodeStub.prototype.getBoundingClientRect = () => ({ width: 735 });  // the owner's window: the place's box
+    t.after(() => { delete NodeStub.prototype.getBoundingClientRect; });
+    window.CSS = { supports: () => true };
+    let font = 16;
+    window.getComputedStyle = () => ({ fontSize: `${font}px` });
+    const observers = [];
+    const before = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class { constructor(fn) { Object.assign(this, { fn, seen: [] }); observers.push(this); } observe(box) { this.seen.push(box); } disconnect() {} };
+    t.after(() => { globalThis.ResizeObserver = before; });
+    const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
+    const dashboard = initDashboard({ state, openSettings: () => {} });
+    const listBack = dashboard.page.querySelector('[data-dashboard-list-back]');
+    assert.equal(dashboard.page.dataset.sectionView, 'page', '735 px hold the list beside a page at 16 px');
+    // The browser's font grows to 20 px: 40rem is 800 px, so the sheets draw one column while the box keeps its width.
+    // The pane, which loses the list beside it, says so: the list comes back instead of a page with no way to it.
+    font = 20;
+    const pane = dashboard.page.querySelector('.dashboard-panels');
+    const heard = (box) => observers.find((observer) => observer.seen.includes(box));
+    assert.ok(heard(pane), 'the pane is watched');
+    heard(pane).fn([{ target: pane }]);
+    assert.equal(dashboard.page.dataset.sectionView, 'home', 'one column shows the list');
+    dashboard.activateTab('costs');
+    assert.deepEqual([dashboard.page.dataset.sectionView, listBack.hidden], ['page', false], 'a page opened from it leads back');
+    // Back to 16 px: the list's rows shrink (the pane alone may not move while the list stands alone), two panes again.
+    font = 16;
+    const list = dashboard.page.querySelector('.dashboard-tabs');
+    assert.ok(heard(list), 'the list is watched');
+    heard(list).fn([{ target: list }]);
+    assert.deepEqual([dashboard.page.dataset.sectionView, listBack.hidden], ['page', true], 'beside the list again, without Back');
+    dashboard.destroy();
 });

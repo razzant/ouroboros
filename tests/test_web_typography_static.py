@@ -272,9 +272,12 @@ FOCUS_TOKENS = ("var(--focus-accent-border)", "var(--focus-accent-ring)")
 
 # A selector that only REACTS to another element's keyboard focus paints no focus of its own: the ring is on the
 # focused element's own selector, named here beside it. The Pin of a Project row hides the row's time while it has
-# keyboard focus, so the time never shows through the Pin that stands in its place.
+# keyboard focus, so the time never shows through the Pin that stands in its place, and the row's mark, so the Pin's
+# ring never lies on it.
 FOCUS_REACTIONS = {
     "web/style.css: .nav-project-pin:focus-visible ~ .nav-project-row .nav-project-time":
+        "web/style.css: .nav-project-pin:focus-visible",
+    "web/style.css: .nav-project-pin:focus-visible ~ .nav-project-row .nav-mark-slot":
         "web/style.css: .nav-project-pin:focus-visible",
 }
 
@@ -318,6 +321,80 @@ def test_every_focus_visible_selector_gets_the_canonical_ring() -> None:
         "focus there is either invisible or a second colour vocabulary "
         "(docs/DESIGN.md 'Focus'):\n" + "\n".join(f"  {s}" for s in unringed)
     )
+
+
+# The chosen sidebar row is the solid crimson, where the room's focus ring and unread crimson vanish; it restates both
+# tokens as the fill's ink (one vocabulary: the ring still reads --focus-accent-border, the mark --mark-unread).
+CHOSEN_ROW_INKS = {"--focus-accent-border": "var(--tone-crimson-ink)", "--mark-unread": "var(--tone-crimson-ink)"}
+
+
+def _specificity(selector: str) -> tuple[int, int, int]:
+    ids = len(re.findall(r"#[\w-]+", selector))
+    classes = len(re.findall(r"\.[\w-]+|\[[^\]]*\]", selector))
+    pseudo = len(re.findall(r"(?<!:):(?!:|not\(|is\(|where\(|has\()[\w-]+", selector))
+    return ids, classes + pseudo, 0
+
+
+def test_the_chosen_sidebar_row_rings_and_marks_in_its_fills_ink() -> None:
+    """On `.nav-row.active` (solid `--tone-crimson`) the focus ring and an unread mark take `--tone-crimson-ink`, and
+    no rule restates them so for a row that is not chosen. The restatement outranks the card's dark-voice one (it
+    restates the same two tokens for `.nav-ouro`), so the chosen card reads the fill's ink too."""
+    source = _decommented(_read("web/style.css"))
+    chosen: list[tuple[int, str]] = []
+    unchosen: list[str] = []
+    card_voice: list[tuple[int, str]] = []
+    for match in RULE.finditer(source):
+        selector_list, body = match.group(1), match.group(2)
+        decls = {name: value.strip() for name, value in re.findall(r"(--[\w-]+)\s*:\s*([^;]+)", body)}
+        inks = any(decls.get(name) == value for name, value in CHOSEN_ROW_INKS.items())
+        for selector in (" ".join(s.split()) for s in selector_list.split(",")):
+            if selector.endswith(".nav-ouro") and decls.get("--focus-accent-border"):
+                card_voice.append((match.start(), selector))
+            if not inks or not re.search(r"\.nav-(row|ouro|project)", selector):
+                continue
+            if selector.endswith(".nav-row.active") and all(
+                    decls.get(name) == value for name, value in CHOSEN_ROW_INKS.items()):
+                chosen.append((match.start(), selector))
+            elif ".active" not in selector:
+                unchosen.append(selector)
+    assert chosen, "no rule restates the chosen sidebar row's focus ring and unread mark as --tone-crimson-ink"
+    assert not unchosen, f"a row that is not chosen takes the chosen fill's ink for its ring and mark: {unchosen}"
+    assert card_voice, "the card's dark voice no longer restates the focus token; re-read this witness"
+    position, selector = chosen[-1]
+    for card_position, card_selector in card_voice:
+        assert (_specificity(selector), position) > (_specificity(card_selector), card_position), (
+            f"{selector!r} does not outrank {card_selector!r}, so the chosen card keeps the voice's ring")
+
+
+def _declarations(source: str, selector: str) -> dict[str, str]:
+    """Every declaration a sheet gives this exact selector, a later rule over an earlier one."""
+    found: dict[str, str] = {}
+    for selector_list, body in RULE.findall(source):
+        if selector in (" ".join(s.split()) for s in selector_list.split(",")):
+            found.update((name, value.strip()) for name, value in re.findall(r"([\w-]+)\s*:\s*([^;]+)", body))
+    return found
+
+
+def test_the_cards_quiet_label_shows_whole_or_not_at_all() -> None:
+    """`Main Chat` beside Ouroboros's name on the sidebar's card is never cut inside its words (docs/DESIGN.md
+    "Navigation"; the owner's sweep of 14.11 found "Main C…" at the default width, "M…" with Main's count): its box is
+    one line tall and wraps past a zero-wide first item of that height, so words that do not fit go to a second line
+    the box hides. Both heights are lengths: a line token is a unitless factor (`--line-meta: 1.35`), and as a height
+    it is dropped, which lets the box grow to show the wrapped line, cut at its edge."""
+    source = _decommented(_read("web/style.css"))
+    label = _declarations(source, ".nav-ouro-line1 > .nav-row-label")
+    first = _declarations(source, ".nav-ouro-line1 > .nav-row-label::before")
+    assert label.get("display") == "flex" and label.get("flex-wrap") == "wrap", label
+    assert _declarations(source, ".nav-row-label").get("overflow") == "hidden", "the label's box hides what wraps"
+
+    def own(value: str) -> str:  # a custom property the label declares itself, read through once
+        named = re.fullmatch(r"var\((--[\w-]+)\)", value)
+        return label.get(named.group(1), value) if named else value
+
+    height = own(label.get("height", ""))
+    assert first.get("content") in ("''", '""') and own(first.get("height", "")) == height, (first, height)
+    assert not re.fullmatch(r"var\(--line-[\w-]+\)", height), f"{height} is a unitless line factor, not a height"
+    assert re.search(r"--type-[\w-]+|\d(?:px|r?em)\b", height), f"the label's height {height!r} names no length"
 
 
 # ---------------------------------------------------------------------------

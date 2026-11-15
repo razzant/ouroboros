@@ -15,7 +15,6 @@ import asyncio
 import json
 import logging
 import threading
-import time
 import copy
 from concurrent.futures import Future
 from datetime import datetime, timezone
@@ -53,11 +52,10 @@ def _refresh_quota(target: dict | None = None) -> Dict[str, Any]:
 
 _REFRESH_LOCK = threading.Lock()
 _REFRESH_FLIGHTS: dict[tuple, Future] = {}
-_REFRESH_RECENT: dict[tuple, tuple[float, Future]] = {}
 
 
-def _shared_refresh(target=None, *, lazy=False):
-    """Share the same requested scope; only lazy clients reuse a completed attempt.
+def _shared_refresh(target=None):
+    """Join an identical refresh still in flight; never reuse a completed attempt.
 
     Exact-target and all-account POSTs remain separate: neither a legacy full
     envelope nor a targeted refusal proves the other request's result.
@@ -67,13 +65,7 @@ def _shared_refresh(target=None, *, lazy=False):
     target = copy.deepcopy(target)
     key = (str(owned_config_dir()), json.dumps(target, sort_keys=True))
     with _REFRESH_LOCK:
-        now = time.monotonic()
-        for expired in [key for key, (at, _) in _REFRESH_RECENT.items() if now - at >= 60]:
-            del _REFRESH_RECENT[expired]
         call = _REFRESH_FLIGHTS.get(key)
-        recent = _REFRESH_RECENT.get(key)
-        if call is None and lazy and recent:
-            call = recent[1]
         owner = call is None
         if owner:
             call = Future()
@@ -82,19 +74,26 @@ def _shared_refresh(target=None, *, lazy=False):
         started_at = datetime.now(timezone.utc).isoformat()
         try:
             envelope = _refresh_quota(target) if target is not None else _refresh_quota()
-            call.set_result({**envelope, "refresh_attempt": {
+            if not isinstance(envelope, dict):  # the engine's answer, never the owner's request
+                raise ClaudexorUnavailable("malformed_response", "The quota refresh answer is not an object")
+            outcome = {**envelope, "refresh_attempt": {
                 "started_at": started_at,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
-            }})
+            }}
         except BaseException as exc:
-            call.set_exception(exc)
-        finally:
-            with _REFRESH_LOCK:
-                _REFRESH_RECENT[key] = (time.monotonic(), call)
-                _REFRESH_FLIGHTS.pop(key, None)
+            outcome = exc
+        # Retire this flight (never a newer one) before publishing: a request arriving
+        # once the attempt has completed starts its own instead of joining a finished one.
+        with _REFRESH_LOCK:
+            if _REFRESH_FLIGHTS.get(key) is call:
+                del _REFRESH_FLIGHTS[key]
+        if isinstance(outcome, BaseException):
+            call.set_exception(outcome)
+        else:
+            call.set_result(outcome)
     result = copy.deepcopy(call.result())
-    # This is host transport provenance, not a new provider observation. Both a
-    # joined flight and a completed replay began before this HTTP request.
+    # This is host transport provenance, not a new provider observation: a joined
+    # attempt began before this HTTP request, possibly before a reset it should read back.
     result["refresh_attempt"]["reused"] = not owner
     return result
 
@@ -138,10 +137,8 @@ async def api_claudexor_quota_refresh(request: Request) -> JSONResponse:
         if "target" in body:
             if not _target_valid(body["target"]):
                 return json_error("target requires non-empty harness and profile_id strings", 400)
-            return JSONResponse(await asyncio.to_thread(
-                _shared_refresh, body["target"], lazy=request.query_params.get("lazy") == "1"))
-        return JSONResponse(await asyncio.to_thread(
-            _shared_refresh, lazy=request.query_params.get("lazy") == "1"))
+            return JSONResponse(await asyncio.to_thread(_shared_refresh, body["target"]))
+        return JSONResponse(await asyncio.to_thread(_shared_refresh))
     except (ValueError, TypeError):
         return json_error("Invalid JSON request", 400)
     except ClaudexorUnavailable as exc:

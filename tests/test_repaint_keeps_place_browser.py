@@ -144,7 +144,7 @@ def test_an_account_provider_page_keeps_its_place_through_the_status_poll(gate_u
         {**one, 'profile': {**one['profile'], 'profile_id': f'account-{n}'}, 'identity': {'label': f'Account {n}'}}
         for n in range(24)]
     page = seed_page(gate_ui, 1087, 744, touch=False)
-    page.route('**/api/claudexor/status*', lambda route: route.fulfill(json=status))
+    page.route('**/api/claudexor/status*', lambda route: setup_browser.status_answer(route, status))
     try:
         page.goto(gate_ui['url'] + '/')
         page.wait_for_selector('#chat-input', state='attached')

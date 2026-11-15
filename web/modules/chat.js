@@ -3497,6 +3497,7 @@ export function createChatInstance({
         revealQuestion,
         revealSource: replies.reveal,
         drawsSource: replies.draws,
+        search: replies.search,
         cancelHistoryPaint: readReceipt.cancel,
         // app.js offers each room its /api/state snapshots (it polls); a room away takes none, catching up on return.
         hydrateStateSnapshot,
@@ -3516,7 +3517,7 @@ export function createChatInstance({
             catchUp.cancel();  // its return reads, and says so, anew
             roomWork?.leave(); keepPlace(); leaving = true; visit += 1;
             readReceipt.cancel(); historyReadAbort?.abort(); historyPager.suspend(); historyResyncScheduler.cancel();
-            rowSleep.destroy(); chatResizeObserver?.disconnect(); reviewHydrator.suspend();
+            rowSleep.destroy(); chatResizeObserver?.disconnect(); reviewHydrator.suspend(); replies.search.close();
         },
         stay: () => {
             if (!leaving || destroyed) return;

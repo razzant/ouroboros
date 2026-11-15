@@ -11,7 +11,6 @@
 // PER FACET and outranks the aggregate: `daemonAnswered` is the one predicate, and the status line asks the facets
 // before it repeats any runtime claim. Pure helpers up top are node-tested without a DOM.
 
-import { apiFetch } from './api_client.js';
 import { capabilityMarkup, createAccountResourcesController, resourcePanelId, resourceReadGap,
     resourceSummary, targetFor } from './account_resources.js';
 import {
@@ -941,33 +940,6 @@ function serviceReadLine(store, { wakeError = '', wakeBusy = false } = {}) {
         { tone, text: `${sentences.join(' ')}${tail}` }), store.snapshot);
 }
 
-export async function removeAccount(harness, profileId, { fetchImpl = apiFetch } = {}) {
-    // The engine owns the account record, so removal is ITS contract. A failure
-    // is reported as a failure — nothing here pretends an account is gone.
-    const url = `/api/claudexor/credential-profiles/${encodeURIComponent(harness)}`
-        + `/${encodeURIComponent(profileId)}`;
-    const resp = await fetchImpl(url, { method: 'DELETE' });
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(String(data?.error || `HTTP ${resp.status}`));
-    return data;
-}
-
-export async function setAccountEnabled(harness, profileId, enabled, { fetchImpl = apiFetch } = {}) {
-    // The Enabled toggle is the engine's own PATCH contract (the one
-    // user-settable routing control a registry row carries); a refusal is the
-    // answer, and nothing here pretends the pool changed.
-    const url = `/api/claudexor/credential-profiles/${encodeURIComponent(harness)}`
-        + `/${encodeURIComponent(profileId)}`;
-    const resp = await fetchImpl(url, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: Boolean(enabled) }),
-    });
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(String(data?.error || `HTTP ${resp.status}`));
-    return data;
-}
-
 export function removeAccountConfirmBody(name, family) {
     return `The Claudexor binding for ${family} account "${name}" will be removed. `
         + 'Vendor or OS credential storage may remain signed in and is not changed by '
@@ -976,7 +948,7 @@ export function removeAccountConfirmBody(name, family) {
         + 'unavailable until you repoint them.';
 }
 
-// A refused deletion stays an error (removeAccount throws). Only a receipt whose
+// A refused deletion stays an error, an unconfirmed one a notice (the store's removeAccount throws). Only a receipt whose
 // disposition is vendor-owned, left unchanged and scoped to the OS user yields the
 // retained-credential warning; any other receipt yields no notice.
 export function vendorCredentialRetainedNotice(receipt, name, family) {
@@ -1106,8 +1078,9 @@ function rowHtml(row, payload, facets = {}) {
     const pending = facets.store?.profileAction?.(row.harness, row.profile_id);
     const on = pending?.busy ? pending.requestedEnabled : row.enabled !== false;
     // Row ACTIONS follow the engine's own routes: every named registry row has the PATCH Enabled toggle (its place in
-    // rotation, a switch that acts at once) and DELETE Remove. Sign in stands in the row while the account is not
-    // signed in; what is rare (Sign in again, Remove) waits behind More with the account's resources. A login that
+    // rotation, a switch that acts at once) and DELETE Remove. The switch and More keep the row's end at every width;
+    // Sign in stands on a line under the words while the account is not signed in, and what is rare (Sign in again,
+    // Remove) shows on that line with More, whose panel holds the account's resources. A login that
     // is verified is the quiet case and says nothing: the card's first line counts them, and a row speaks of trouble.
     const rare = String(row?.status?.verification || '') === 'passed';
     const login = `<button type="button" class="btn btn-default btn-sm" data-harness-login${rare ? ' data-rare' : ''}>${escapeHtml(loginAction.label)}</button>`;
@@ -1119,11 +1092,11 @@ function rowHtml(row, payload, facets = {}) {
                 ${badge.tone === 'ok' ? '' : `<span class="ui-status" data-tone="${badge.tone}">${escapeHtml(badge.label)}</span>`}
             </div>
             <div class="harness-account-meta muted">${metaParts.map((part) => `<span class="meta-fact"${part.tone ? ` data-tone="${part.tone}"` : ''}>${escapeHtml(part.text)}</span>`).join('')}${capabilityMarkup(row, payload)}</div>
-            <div class="harness-account-actions">${rare ? '' : login}
+            <div class="harness-account-actions">
                 <label class="ui-switch"><input type="checkbox" role="switch" data-harness-toggle data-enabled="${on ? '1' : '0'}" aria-checked="${on}" aria-label="${escapeHtml(`Use ${name} in rotation`)}"${on ? ' checked' : ''}${pending?.busy ? ' disabled aria-busy="true"' : ''}><span class="ui-switch-track" aria-hidden="true"><span class="ui-switch-thumb"></span></span></label>
                 <button type="button" class="settings-disclosure ui-hit-area" data-resources aria-expanded="false" aria-controls="${escapeHtml(resourcePanelId(row))}">More${DISCLOSURE_CARET}</button>
-                ${rare ? login : ''}<button type="button" class="btn btn-danger btn-sm" data-harness-remove data-rare>Remove</button>
             </div>
+            <div class="harness-account-extra">${login}<button type="button" class="btn btn-danger btn-sm" data-harness-remove data-rare>Remove</button></div>
         </div>
     `;
 }
@@ -1288,20 +1261,33 @@ function renderRows() {
     else repaint();
 }
 
+// A host reason that is already a sentence keeps one stop when a row result quotes it.
+const reasonOf = (error) => String(error?.message || error).replace(/\.+$/, '');
+// A row result names the account as its row does, taken before the write (a removed row is gone after it).
+const rowName = (store, harness, profileId) => {
+    const row = accountRows(store.snapshot).find((candidate) =>
+        candidate.harness === harness && candidate.profile_id === profileId);
+    return row ? accountName(row) : profileId;
+};
+
 async function toggleAccountEnabled(harness, profileId, enabled) {
     // No confirm dialog: the toggle is reversible in one click and destroys
     // nothing (the login material stays). Failures ride the same inline error
     // box as removal, and the fresh read repaints the row from engine truth.
     if (!harness || !profileId) return;
+    const name = rowName(state.store, harness, profileId);
     state.removeError = '';
     state.removeNotice = '';
     state.restart?.clear();
     try {
         const receipt = await state.store.setEnabled(harness, profileId, enabled);
-        if (!receipt) throw new Error(state.store.profileAction(harness, profileId).error || 'The change was not confirmed');
+        const action = state.store.profileAction(harness, profileId);
+        if (!receipt && action.refused) throw new Error(action.error);
+        // A lost answer is no refusal: the change may be saved, and the read after it repaints the switch.
+        if (!receipt) state.removeNotice = `${enabled ? 'Enabling' : 'Disabling'} "${name}" is not confirmed`
+            + `${action.error ? `: ${reasonOf(action.error)}` : ''}.`;
     } catch (error) {
-        state.removeError = `Could not ${enabled ? 'enable' : 'disable'} "${profileId}": `
-            + `${error.message || error}.`;
+        state.removeError = `Could not ${enabled ? 'enable' : 'disable'} "${name}": ${reasonOf(error)}.`;
     }
     renderRows();
 }
@@ -1313,17 +1299,19 @@ async function toggleAccountEnabled(harness, profileId, enabled) {
  */
 export async function confirmRemoveAccount(harness, profileId, {
     dialogImpl = openConfirmDialog,
-    removeImpl = removeAccount,
     store = state.store,
+    // The engine owns the account record; the store orders its DELETE like the Enabled toggle.
+    removeImpl = (target, profile) => store.removeAccount(target, profile),
     renderImpl = renderRows,
 } = {}) {
     if (!harness || !profileId) return;
     const family = familyLabel(harness, store.snapshot || {}, {
         catalogKnown: store.catalogKnown,
     });
+    const name = rowName(store, harness, profileId);
     const answer = await dialogImpl({
         title: 'Remove account',
-        body: removeAccountConfirmBody(profileId, family),
+        body: removeAccountConfirmBody(name, family),
         confirmLabel: 'Remove',
         danger: true,
     });
@@ -1331,15 +1319,20 @@ export async function confirmRemoveAccount(harness, profileId, {
     state.removeError = '';
     state.removeNotice = '';
     state.restart?.clear();
+    let refused = false;
     try {
         const receipt = await removeImpl(harness, profileId);
-        state.removeNotice = vendorCredentialRetainedNotice(
-            receipt, profileId, family);
+        state.removeNotice = vendorCredentialRetainedNotice(receipt, name, family);
     } catch (error) {
-        state.removeError = `Could not remove "${profileId}": ${error.message || error}. `
-            + 'The account is unchanged.';
+        // Only a refusal proves the account is unchanged: a lost answer may follow a removal, and the read below shows it.
+        refused = Boolean(error?.refused);
+        if (refused) {
+            state.removeError = `Could not remove "${name}": ${reasonOf(error)}. The account is unchanged.`;
+        } else state.removeNotice = `Removing "${name}" is not confirmed: ${reasonOf(error)}.`;
     }
-    await store.refresh({ afterCurrent: true });
+    // The result is said at once. A removal that happened, or may have, is read again without holding
+    // the list; a refusal changed nothing to read (as for the Enabled switch).
+    if (!refused) void store.refresh({ afterCurrent: true });
     renderImpl();
 }
 
@@ -1427,24 +1420,27 @@ export function refreshHarnessStatus() {
  * foreign ownership and repair remain behind Connect.
  */
 async function refreshHarnessStatusOnActivation() {
-    let snapshot = await (state.store.lazyRefresh?.() || state.store.refresh());
+    // The showing inspects the programs at once: their rows never wait for slow discovery.
+    const inspected = state.maintenance?.refresh({ fresh: true, checkLatest: true });
+    const lifecycle = state.store.snapshot?.daemon?.state;
+    // The passive paint and the owner's ONE lifecycle read start together; the read joins one in
+    // flight. A recent `running` or an earlier failed read is no evidence for or against a wake.
+    void state.store.observe?.();
+    const snapshot = await state.store.refresh({ afterCurrent: lifecycle === 'stale' });
     // The store deliberately retains the last answer after a failed GET so
     // the panel can keep useful context.  That retained snapshot is not fresh
     // evidence for an owner-triggered write: a transient outage must never
     // turn yesterday's `stale + ready` into a wake request.
-    if (state.store.error) return state.maintenance?.poll();
-    const lifecycle = snapshot?.daemon?.state;
-    if ((!lifecycle || lifecycle === 'stale') && state.store.lazyRefresh) {
-        snapshot = await state.store.refresh({ afterCurrent: lifecycle === 'stale' });
-        if (state.store.error) return;
-    }
+    if (state.store.error) return undefined;
     const daemon = snapshot?.daemon || {};
     if (String(daemon.state || '') === 'stale'
         && String(daemon.runtime?.state || '') === 'ready'
         && !daemon.ownership_problem) {
         await wakeDaemon();
+        // A stopped engine could not answer that inspection; the one just started can.
+        if (!(await inspected)) return state.maintenance?.refresh({ fresh: true, checkLatest: true });
     }
-    return state.maintenance?.poll();
+    return undefined;
 }
 
 /**
@@ -1516,9 +1512,14 @@ async function _init(store, restartDeps, page) {
 }
 
 async function refreshAllAccounts() {
+    // The owner's Refresh renews every duty at once, none waiting for another:
+    // programs, full status (lifecycle/catalog) and the providers below.
+    void state.maintenance?.refresh({ fresh: true });
     if (!state.store.refreshResources) return state.store.refresh();
+    void state.store.refresh({ afterCurrent: true });
     if (state.store.resourceAction(null).busy) return;
-    state.removeError = '';
+    // A new owner action ends the line about an earlier row request; that request's outcome stays unknown.
+    state.removeError = state.removeNotice = '';
     state.restart?.clear();
     const result = await state.store.refreshResources();
     if (!result) state.removeError = state.store.resourceAction(null).error || 'Account refresh did not complete';

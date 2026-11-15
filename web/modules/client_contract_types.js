@@ -611,6 +611,95 @@
  * @property {string=} detail  // a 503 history_source_unavailable: the store's cause, when it has one
  */
 
+/**
+ * An owner attachment as its bubble draws it (history's ChatAttachmentView, no address): its file card or player
+ * shows `name`, an available image only its picture; the composer's file-name tail the bubble hides is built from
+ * the names.
+ * @typedef {Object} ChatSearchAttachment
+ * @property {string} name
+ * @property {'image'|'video'|'audio'|'file'} kind
+ * @property {boolean} available
+ */
+
+/**
+ * A link button of a delivered links row: its label is shown, its address only decides whether it is.
+ * @typedef {Object} ChatSearchLink
+ * @property {string} label
+ * @property {string} url
+ */
+
+/**
+ * A question row's card as its words are drawn (the question is the row's `text`): the offered answers' labels and
+ * details (`QuizOption` rows, or a legacy row's labels with `option_details`), the stake and the owner's own words
+ * (`comment`) once the card is settled as answered.
+ * @typedef {Object} ChatSearchQuestion
+ * @property {string} quiz_id
+ * @property {Array<Object|string|null>=} options
+ * @property {string[]=} option_details
+ * @property {string=} stake
+ * @property {string=} comment
+ */
+
+/**
+ * A saved message as the fields the room's renderer draws its words from (chat_search_words.js `candidateBox`): the
+ * text history gives it (`system_type`, `markdown`, `narration`, `source` and the owner's `attachments` names choose
+ * how), a photo, video or file's `caption` and a file's `filename`, a links row's `title` and `actions`, a question's
+ * `quiz` card, a Project lifecycle row's answer and ending. Whether its words contain the query is the client's
+ * reading.
+ * `history_id` and `row_address` are its identity in `GET /api/chat/history` (`around=<row_address>`).
+ * @typedef {Object} ChatSearchCandidate
+ * @property {string} history_id
+ * @property {string} row_address
+ * @property {'user'|'assistant'|'system'} role
+ * @property {string} ts
+ * @property {string} text
+ * @property {string=} system_type
+ * @property {boolean=} markdown
+ * @property {boolean=} narration
+ * @property {string=} source
+ * @property {string=} sender_label
+ * @property {string=} task_id
+ * @property {ChatSearchAttachment[]=} attachments
+ * @property {boolean=} text_placeholder
+ * @property {'photo'|'video'|'document'|'links'|'quiz'=} msg_type
+ * @property {string=} caption
+ * @property {string=} filename
+ * @property {string=} title
+ * @property {ChatSearchLink[]=} actions
+ * @property {ChatSearchQuestion=} quiz
+ * @property {string=} completion_answer
+ * @property {string=} project_id
+ * @property {string=} project_name
+ * @property {string=} task_name
+ * @property {string=} completion_reason
+ * @property {Object=} completion_notice
+ */
+
+/**
+ * What one search read covered: `rows` of the room back to `reached_ts`; `beginning`: the room's first
+ * message was reached; `importing`: older history is not readable yet; `gaps`: lines it could not read.
+ * @typedef {Object} ChatSearchSpan
+ * @property {number} rows
+ * @property {string} reached_ts
+ * @property {boolean} beginning
+ * @property {boolean} importing
+ * @property {string[]} gaps
+ */
+
+/**
+ * `GET /api/chat/search`: one bounded read of the room's saved messages as candidates, newest first; a page may hold
+ * none and still continue (`next_cursor`). The whole room was searched only when a chain reached `beginning` with no
+ * `gaps`. An error answer keeps this shape with no candidates and the cursor that was sent.
+ * @typedef {Object} ChatSearchResponse
+ * @property {string} query
+ * @property {ChatSearchCandidate[]} candidates
+ * @property {boolean} has_more
+ * @property {?string} next_cursor
+ * @property {ChatSearchSpan} searched
+ * @property {string=} error
+ * @property {string=} reason_code
+ */
+
 // --- Journey bodies of routes whose handlers check fields by hand (ProjectEntry: ./api_types.js) ---
 
 /**

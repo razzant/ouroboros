@@ -129,6 +129,55 @@ def test_a_failed_facet_serves_its_last_read_without_refreshing_its_time(monkeyp
         "observed_at": "2026-10-10T10:05:00Z", "stale": True, "error": "malformed_response"}
 
 
+def test_the_catalog_facet_carries_the_time_the_engine_composed_it(monkeypatch, tmp_path):
+    # The engine may answer from a recent composition (dated by generatedAt): through the real
+    # read, the facet keeps that time instead of this read's, and falls back to the read time
+    # when the engine's time has no zone or lies past what UTC can hold.
+    from types import SimpleNamespace
+
+    from ouroboros import claudexor_daemon as owned
+    from ouroboros.gateways import claudexor as wire
+
+    composed = iter(["2026-11-14T17:59:50.250Z", "2026-11-14T17:59:50.250Z", "2026-11-14T18:09:00",
+                     "0001-01-01T00:00:00+14:00"])
+
+    class Gateway:
+        engine_version = "6.1.2"
+
+        def __init__(self, _endpoint): pass
+        def __enter__(self): return self
+        def __exit__(self, *_args): return False
+        def handshake(self, **_kw): return {}
+        def operations(self): raise wire.ClaudexorUnavailable("internal", "catalog unreadable")
+        def agent_capabilities(self): return {"harnesses": [], "generatedAt": next(composed)}
+        def harnesses(self): return []
+        def credential_profiles(self): return {"profiles": [], "accountPools": []}
+        def quota_snapshots(self): return []
+
+    monkeypatch.setattr(owned, "get_owned_daemon", lambda: SimpleNamespace(status_dict=lambda: {"state": "running"}))
+    monkeypatch.setattr(owned, "owned_config_dir", lambda: tmp_path / "cfg")
+    monkeypatch.setattr(wire, "discover_daemon_at", lambda _path: object())
+    monkeypatch.setattr(wire, "ClaudexorGateway", Gateway)
+    clock = {"now": ""}
+    monkeypatch.setattr("ouroboros.utils.utc_now_iso", lambda: clock["now"])
+
+    def read(now):
+        clock["now"] = now
+        return accounts._status_payload(False)
+
+    first = read("2026-11-14T18:00:00+00:00")
+    assert first["reads"]["catalog"] == "ok" and "_facet_observed" not in first
+    assert first["facets"]["catalog"] == {"observed_at": "2026-11-14T17:59:50.250000+00:00", "stale": False,
+                                          "error": None}
+    assert first["reads"]["accounts"] == "ok"
+    assert first["facets"]["accounts"]["observed_at"] == first["facets"]["quota"]["observed_at"] == (
+        "2026-11-14T18:00:00+00:00"), "other facets: the read time"
+    held = read("2026-11-14T18:05:00+00:00")  # the same composition, answered again five minutes later
+    assert held["facets"]["catalog"]["observed_at"] == "2026-11-14T17:59:50.250000+00:00", "never stamped as new"
+    assert read("2026-11-14T18:10:00+00:00")["facets"]["catalog"]["observed_at"] == "2026-11-14T18:10:00+00:00"
+    assert read("2026-11-14T18:15:00+00:00")["facets"]["catalog"]["observed_at"] == "2026-11-14T18:15:00+00:00"
+
+
 def test_a_facet_never_read_stays_empty_and_homes_never_share_memory(monkeypatch):
     script = iter([
         _payload(home="/home-a"),
@@ -254,6 +303,36 @@ def test_an_older_full_variant_does_not_replace_newer_shared_facets(monkeypatch)
     assert "resources" not in answers[0] and "availability_scope" not in answers[0]
 
 
+def test_resources_keep_their_own_order_beside_a_quota_answer_that_never_observed_them():
+    """An answered quota read whose operations catalog was unread could not negotiate resources: it
+    observed none. It neither erases the last observed list nor outranks an older read's own one."""
+    def read(sequence, row, state="ok", **extra):
+        payload = _payload(quota=(row,), reads={"quota": state})
+        payload.update(extra)
+        return accounts._with_facet_memory(payload, read_sequence=sequence)
+
+    blind, seen = {"resource_capabilities_read": "failed"}, {"resource_capabilities_read": "ok"}
+    newer = read(3, "r3", **blind)
+    assert newer["reads"]["quota"] == "ok" and "resources" not in newer, "a client keeps its own list"
+    older = read(2, "r2", resources=[{"id": "two"}], availability_scope={"old": True}, **seen)
+    assert (older["reads"]["quota"], older["quota"]) == ("not_read", [{"id": "r3"}]), "its rows are older"
+    assert older["resources"] == [{"id": "two"}], "its own negotiated list is the newest one observed"
+    assert "availability_scope" not in older, "the scope binds the rows it came with"
+    assert read(1, "r1", resources=[{"id": "one"}], **seen)["resources"] == [{"id": "two"}], "an older list is not"
+    # Beside rows it discards, the host leaves a list only when a read at least as new observed it.
+    assert "resources" not in read(5, "r5", **blind)
+    assert "resources" not in read(4, "r4", **blind), "evidence older than this read is not its own"
+    # A failed read serves the remembered rows and list, stale, whatever their order.
+    failed = read(6, "r6", state="failed")
+    assert (failed["quota"], failed["resources"]) == ([{"id": "r5"}], [{"id": "two"}])
+    assert failed["facets"]["quota"]["stale"] is True
+    # A newer explicit list (an empty one too) or a negotiated absence replaces them.
+    assert read(7, "r7", resources=[], **seen)["resources"] == []
+    assert read(8, "r8", state="failed")["resources"] == []
+    assert "resources" not in read(9, "r9", **seen)
+    assert "resources" not in read(10, "r10", state="failed")
+
+
 def test_full_facets_keep_their_individual_read_times(monkeypatch):
     monkeypatch.setattr("ouroboros.utils.utc_now_iso", lambda: "2026-11-13T19:00:30Z")
     payload = _payload()
@@ -370,6 +449,91 @@ def test_handler_fences_a_confirmation_while_resuming_the_thread_result(monkeypa
     assert not any(row["profile"]["enabled"] for row in payload["profiles"].get("profiles", []))
 
 
+@pytest.mark.parametrize("operation,view,crossed", [
+    ("status", b"", False), ("status", b"view=quota", False), ("wake", b"", False), ("restart", b"", False),
+    ("status", b"", True)])
+def test_the_loop_fence_waits_for_held_facet_memory_only_after_a_crossed_write(
+        monkeypatch, tmp_path, operation, view, crossed):
+    # A models read commits its catalog holding _STATUS_LOCK; a large catalog's deep copy takes tens of ms.
+    # The fence the event loop runs at arrival and at resume never waits for it. Only an answer crossed by
+    # a confirmed write takes the lock, to read the held memory whole.
+    from starlette.requests import Request
+
+    from ouroboros import claudexor_daemon as owned
+
+    monkeypatch.setattr(owned, "owned_config_dir", lambda: tmp_path)
+    loop, order, copying, release = threading.current_thread(), [], threading.Event(), threading.Event()
+
+    class WitnessLock:  # names each thread that found the lock held; a waiter lets the holder finish
+        def __init__(self):
+            self.lock, self.waiters = threading.Lock(), []
+
+        def __enter__(self):
+            if not self.lock.acquire(blocking=False):
+                self.waiters.append(threading.current_thread())
+                release.set()
+                self.lock.acquire()
+
+        def __exit__(self, *_exc):
+            self.lock.release()
+
+    class Catalog:  # per-harness models whose deep copy keeps the committing worker inside the lock
+        def __deepcopy__(self, _memo):
+            order.append("copying")
+            copying.set()
+            assert release.wait(10)
+            order.append("copied")
+            return {}
+
+    def commit_models_read():
+        read = _named_payload(home=str(tmp_path), enabled=not crossed)
+        read["harnesses"] = [{"id": "codex", "models": Catalog()}]
+        accounts._with_facet_memory(read, True, account_revision=accounts.account_read_revision())
+
+    witness, worker = WitnessLock(), threading.Thread(target=commit_models_read)
+    monkeypatch.setattr(accounts, "_STATUS_LOCK", witness)
+
+    async def finished_read(_function, *_args):  # the worker's read is done: only the loop's fence remains
+        if crossed:
+            accounts._account_changed("codex", "work", False)  # another client's confirmed write
+            worker.start()
+            assert copying.wait(10)
+        payload = _named_payload(home=str(tmp_path))
+        if view != b"view=quota":
+            payload["facets"] = {facet: {"observed_at": None, "stale": False, "error": None}
+                                 for facet in accounts._FACET_FIELDS}
+        return {"status": payload, "restart": {"outcome": "restarted"}} if operation == "restart" else payload
+
+    monkeypatch.setattr(accounts.asyncio, "to_thread", finished_read)
+
+    async def receive():
+        return {"type": "http.request", "body": b'{"token":"test-preview"}', "more_body": False}
+
+    if not crossed:
+        worker.start()
+        assert copying.wait(10)
+    try:
+        response = asyncio.run(getattr(accounts, "api_claudexor_" + operation)(Request({
+            "type": "http", "method": "GET" if operation == "status" else "POST",
+            "path": "/api/claudexor/" + operation, "query_string": view, "headers": []}, receive)))
+        order.append("answered")
+    finally:
+        release.set()
+        if worker.ident:
+            worker.join(10)
+    payload = json.loads(response.body)
+    payload = payload["status"] if operation == "restart" else payload
+    enabled = [row["profile"]["enabled"] for row in payload["profiles"].get("profiles", [])]
+    assert response.status_code == 200
+    if crossed:
+        assert (witness.waiters, order) == ([loop], ["copying", "copied", "answered"]), "one coherent snapshot"
+        assert payload["reads"]["accounts"] == "not_read" and payload["facets"]["accounts"]["stale"] is True
+        assert enabled == [False]
+    else:
+        assert (witness.waiters, order) == ([], ["copying", "answered", "copied"]), "the loop never waited"
+        assert payload["reads"]["accounts"] == "ok" and enabled == [True]
+
+
 @pytest.mark.parametrize("transport,code", [
     (httpx.ReadTimeout, "daemon_not_answering"),  # accepted the connection, never answered
     (httpx.ConnectError, "daemon_starting"),  # nothing listening yet: a startup to join
@@ -398,3 +562,24 @@ def test_a_live_daemon_that_accepts_and_stays_silent_is_not_answering(monkeypatc
     assert ("retry joins the same daemon" if code == "daemon_not_answering"
             else "retry joins the same startup") in str(error)
     assert stand.spawned == [], "a live daemon is joined, never respawned"
+
+
+def test_a_discarded_account_answer_carries_no_failure_while_an_unasked_one_keeps_its_cause():
+    # A roster that failed AND crossed a confirmed write is discarded: `not_read` with no failure
+    # attached (the server log keeps it). An unasked facet keeps the error that kept it unasked.
+    revision = accounts.account_read_revision()
+    accounts._account_changed("codex", "work", False, home="/home-a")
+    full = accounts._with_facet_memory(_payload(reads={"accounts": "failed"}, errors={"accounts": "roster_timeout"}),
+                                       account_revision=revision)
+    assert full["reads"]["accounts"] == "not_read"
+    assert full["facets"]["accounts"]["error"] is None
+    passive = {"view": "quota", "profiles": {}, "quota": [], "quota_absences": [], "unified_accounts": False,
+               "reads": {"catalog": "not_read", "accounts": "failed", "quota": "ok"},
+               "read_errors": {"accounts": {"code": "roster_timeout"}}, "timings_ms": {}}
+    fenced = accounts.coherent_accounts(passive, revision)
+    assert fenced["reads"]["accounts"] == "not_read" and "accounts" not in fenced["read_errors"]
+    assert passive["read_errors"] == {"accounts": {"code": "roster_timeout"}}, "the reader's own record is unchanged"
+    unasked = accounts._with_facet_memory(_payload(
+        reads={"catalog": "not_read", "accounts": "not_read", "quota": "not_read"},
+        errors={"catalog": "daemon_unreachable", "accounts": "daemon_unreachable", "quota": "daemon_unreachable"}))
+    assert unasked["facets"]["accounts"]["error"] == "daemon_unreachable"

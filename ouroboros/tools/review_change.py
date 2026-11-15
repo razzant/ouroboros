@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import functools
+import hashlib
 import json
 import logging
 import pathlib
@@ -43,7 +44,7 @@ from ouroboros.config import (
 from ouroboros.preflight_receipts import bind_execution_exhibit
 from ouroboros.review_body_fact import body_fact, layer_for
 from ouroboros.review_ledger import (
-    NOT_PERFORMED_PHRASES, PART_CHANGE, PART_RESULT, PART_SKILL, PARTS, QUESTION_NOT_PERFORMED, build_wave_record, ledger_root,
+    NOT_PERFORMED_PHRASES, PART_CHANGE, PART_RESULT, PART_SKILL, build_wave_record, ledger_root,
     load_record, new_record_id, panel_facts, panel_not_reached, reduce_verdict, retain_text_source, revise_record, row_verdict,
     seat_findings, write_record,
 )
@@ -94,7 +95,7 @@ _ROW_STATED_BLOCKS = frozenset({"", "critical_findings", "review_quorum", "coupl
 # dispatch refusal. Any other block — the host's own (``infra_failure``, ``fixed_overflow``, ``preflight``)
 # or one not named here — keeps its producer's words as the record's wave failure note (#2516).
 _RECORD_STATED_BLOCKS = frozenset({"critical_findings", "parse_failure", "review_quorum", "review_wave_budget_insufficient",
-                                   *NOT_PERFORMED_PHRASES})
+                                   "no_counted_reviewers", *NOT_PERFORMED_PHRASES})
 _GIT_PROBE_TIMEOUT_SEC = 30
 
 
@@ -408,6 +409,11 @@ def _dispatched_execution(ctx: ToolContext, record_id: str, attempt: Any) -> Dic
     return pending_commit_review_evidence(collector, "preflight_execution") or {"status": "unobserved"}
 
 
+def advisers_round_key(retry_key: str, panel: ComposedPanel) -> str:
+    """The custody key of an advisers-only wave: its round under these advisers, apart from the counted round."""
+    return f"{retry_key}:advisers:{hashlib.sha256(json.dumps(sorted(panel.additional)).encode('utf-8')).hexdigest()[:16]}"
+
+
 def _round_sha(request: ReviewChangeRequest, frozen: Any) -> str:
     """Identity (b) of this request over this frozen subject."""
     from ouroboros.tools.commit_gate import compute_rebuttal_sha256
@@ -698,18 +704,16 @@ def subject_facts(frozen: Any, retention: Optional[Dict[str, Any]] = None) -> Di
             "retention": dict(retention or {}), **(dict(extra() or {}) if callable(extra) else {})}
 
 
-def _assigned_verdict(record: Any, rows: List[Dict[str, Any]], outcome: Dict[str, Any]) -> Dict[str, Any]:
+def _assigned_verdict(record: Any, outcome: Dict[str, Any]) -> Dict[str, Any]:
     """The decision over the ASSIGNED seats only; added seats never count. The
     quorum is ``adaptive_quorum`` of the assigned seats — one number, as the gate's."""
     from ouroboros.review_ledger import seat_open
 
-    reason = str(outcome.get("block_reason") or "")
-    verdict = reduce_verdict(
-        rows, quorum_required=adaptive_quorum(len(rows)) if rows else 0,
+    reason, counted = str(outcome.get("block_reason") or ""), [row for row in record.rows if not row["additional"]]
+    return reduce_verdict(
+        record.rows, quorum_required=adaptive_quorum(len(counted)) if counted else 0,
         gate_blocked=bool(outcome.get("blocked")) and reason not in _ROW_STATED_BLOCKS, gate_reason=reason,
-        dispatch_refusal=record.dispatch_refusal, pending=any(seat_open(row) for row in rows))
-    verdict["per_row"] = {**{str(s.get("seat_id") or ""): row_verdict(s) for s in record.rows}, **verdict["per_row"]}
-    return verdict
+        dispatch_refusal=record.dispatch_refusal, pending=any(seat_open(row) for row in counted))
 
 
 def _finish_record(record: Any, wave: _Wave, outcome: Dict[str, Any], *, reuse_key: str,
@@ -734,9 +738,8 @@ def _finish_record(record: Any, wave: _Wave, outcome: Dict[str, Any], *, reuse_k
     if additional and record.rows:
         # The verdict and its quorum are the ASSIGNED seats' alone; the panel block
         # describes everyone who sat (``panel_facts`` counts the added seats apart).
-        verdict = _assigned_verdict(record, [seat for seat in record.rows if not seat["additional"]], outcome)
-        record.verdict = {**dict(record.verdict or {}), **verdict}
-        record.brief["parts"] = [part for part in PARTS if verdict["per_question"].get(part) != QUESTION_NOT_PERFORMED]
+        verdict = _assigned_verdict(record, outcome)
+        record.verdict = {**dict(record.verdict or {}), **verdict}  # ``brief.parts``: the questions seats were asked
         panel = panel_facts(record.rows, composition=str(wave.panel.facts.get("composition") or "full_pool"),
                             reason=str(wave.panel.facts.get("reason") or ""),
                             chosen_by=str(wave.panel.facts.get("chosen_by") or "owner"))
@@ -1108,15 +1111,54 @@ def run_review_change(ctx: ToolContext, **args: Any) -> Dict[str, Any]:
     retention: Dict[str, Any] = {}
     task_id = str(getattr(ctx, "task_id", "") or "")
     unfrozen: List[str] = []
+    # Advisers alone keep their own round (``advisers_round_key``): a counted, omitted or host request never
+    # inherits their roster, and only the same advisers' request joins it. A named panel that cannot be
+    # composed now is composed after the lookup, where a still-open round of it is collected first.
+    early = None
+    if not rejoin_key and (supplied_panel is not None or request.reviewers or request.coupling_only):
+        try:
+            early = (single_question_panel(supplied_panel, request.surface) if supplied_panel is not None else
+                     compose_panel(request, body=layer == "body", required_root=required_root, chosen_by=chosen_by))
+        except ReviewChangeArgumentError:
+            early = None
+    advisers = early is not None and bool(early.seats) and all(seat.additional for seat in early.seats)
+
+    keys: Dict[str, str] = {}
+
+    def round_key_of(identity: Any) -> str:
+        key = review_retry_key(identity, round_sha=_round_sha(request, identity))
+        if advisers and key not in keys:
+            adviser_key = advisers_round_key(key, early)
+            # The identical adviser request collects its own operation before a
+            # same-intent counted round, when both are open.
+            if pending_round_attempt(ctx, root=root, tool_name=wave_tool_name(request), retry_key=adviser_key) is not None:
+                keys[key] = adviser_key
+            elif pending_round_attempt(ctx, root=root, tool_name=wave_tool_name(request), retry_key=key) is not None:
+                keys[key] = key
+            else:
+                keys[key] = adviser_key
+        elif early is None and (request.reviewers or request.coupling_only):
+            # A previously-dispatched adviser may have been disabled after the
+            # call returned. Do not re-compose the mutable catalog before
+            # collecting that recorded operation. The persisted retry key owns
+            # the canonical seat identity; raw selectors may be roster handles.
+            from ouroboros.tools.review_change_custody import pending_round_attempt_prefix
+            adviser_prefix = f"{key}:advisers:"
+            rejoin = pending_round_attempt_prefix(
+                ctx, root=root, tool_name=wave_tool_name(request), retry_key_prefix=adviser_prefix,
+                selectors=[*request.reviewers, *request.coupling_only])
+            if rejoin is not None:
+                keys[key] = str(rejoin.review_retry_key)
+        return keys.get(key, key)
     reading = (contextlib.nullcontext(result) if request.subject in SINGLE_QUESTION
-               else _read_subject(ctx, spec, request, retention, task_id, unfrozen))
+               else _read_subject(ctx, spec, request, retention, task_id, unfrozen, round_key_of))
     with reading as frozen:
         if not str(getattr(frozen, "diff_text", "") or "").strip():
             raise ReviewChangeArgumentError(f"subject={request.subject} of {root} has no change to review")
-        # Locate an already-paid round before consulting mutable pool settings.
-        # An absent or changed row cannot substitute a new operation for this one; a continuation
+        # Locate an already-paid round before consulting mutable pool settings (a named panel only
+        # decided its advisers' round above). An absent or changed row cannot substitute a new operation for this one; a continuation
         # recorded on the round outranks its cached roster (projected first, then rejoined).
-        round_key = rejoin_key or review_retry_key(frozen, round_sha=_round_sha(request, frozen))
+        round_key = rejoin_key or round_key_of(frozen)
         from ouroboros.review_state import make_repo_key
         from ouroboros.tools.review_collection import repair_round
         from ouroboros.tools.review_change_custody import review_state_root
@@ -1129,8 +1171,8 @@ def run_review_change(ctx: ToolContext, **args: Any) -> Dict[str, Any]:
         if rejoin is not None:
             from ouroboros.tools.review_change_custody import recorded_change_panel
             panel = recorded_change_panel(ctx, rejoin)
-        elif supplied_panel is not None:
-            panel = single_question_panel(supplied_panel, request.surface)
+        elif early is not None:
+            panel = early
         else:
             panel = compose_panel(request, body=layer == "body", required_root=required_root, chosen_by=chosen_by)
         if rejoin is None and public_execution:
@@ -1141,11 +1183,11 @@ def run_review_change(ctx: ToolContext, **args: Any) -> Dict[str, Any]:
                                                      rejoin=rejoin),
                                        execution=bind_execution_exhibit(supplied_execution, frozen,
                                                                         public=public_execution))
+            wave = dataclasses.replace(wave, retry_key=round_key)
             if rejoin is not None:
                 record_id = str(rejoin.review_record_id or wave.record_id)
                 wave = dataclasses.replace(wave, rejoin=rejoin, record_id=record_id,
-                                           execution=_dispatched_execution(ctx, record_id, rejoin),
-                                           retry_key=rejoin_key or wave.retry_key)
+                                           execution=_dispatched_execution(ctx, record_id, rejoin))
             else:
                 prior = reuse_or_none(ledger_root(ctx), wave.reuse_key, questions=request.author_questions)
                 if prior is not None:
@@ -1175,7 +1217,7 @@ def run_review_change(ctx: ToolContext, **args: Any) -> Dict[str, Any]:
 
 @contextlib.contextmanager
 def _read_subject(ctx: ToolContext, spec: Any, request: ReviewChangeRequest, retention: Dict[str, Any],
-                  task_id: str, unfrozen: List[str]) -> Iterator[Any]:
+                  task_id: str, unfrozen: List[str], round_key_of: Any) -> Iterator[Any]:
     """Every subject but the gate's own is read in this round's isolated checkout. A
     receptive author (``review_pause``) may leave the wave, so its gate subject is read
     there too; a checkout that cannot be prepared keeps the live synchronous read, disclosed."""
@@ -1183,7 +1225,7 @@ def _read_subject(ctx: ToolContext, spec: Any, request: ReviewChangeRequest, ret
 
     def isolated() -> Any:
         return isolated_checkout(ctx, spec, retain=lambda: retention, token=lambda identity: checkout_token(
-            review_retry_key(identity, round_sha=_round_sha(request, identity)), task_id=task_id))
+            round_key_of(identity), task_id=task_id))
     if not is_gate_subject(spec):
         with isolated() as frozen:
             yield frozen
@@ -1312,7 +1354,7 @@ def _review_change_tool_timeout_sec() -> Optional[float]:
 
 
 _DESCRIPTION = (
-    "Review a change WITHOUT committing it: one paid reviewer wave over a subject in any registered repository, "
+    "Review a change WITHOUT committing it: one paid reviewer wave on a subject in any registered repository, "
     "written to the review ledger. commit_reviewed alone lands in the system repository; other roots use this by "
     "judgment (it never starts itself and runs no tests: tests.policy=NOT_RUN). Subjects: base..head (commits), "
     "index (staged) or worktree (live) against base (default HEAD), frozen in an isolated checkout "
@@ -1321,7 +1363,7 @@ _DESCRIPTION = (
     "original subject at $0 even after edits. The body is read against the body layer, anything else against the universal core "
     "checklist. Panel: outside Cyber Pro an own-body review names ticked reviewers, with a reason when narrowed (else a "
     "typed $0 refusal); Cyber Pro and other repositories compose freely. Omitted means the whole pool; an enabled "
-    "unticked row is an added critic. surface=preflight seats only the ONE enabled row you name (pool member or "
+    "unticked row is an added critic (alone, Cyber Pro only: heard, no verdict, no Required review). surface=preflight seats only the ONE enabled row you name (pool member or "
     "not): an optional early look, never the commit panel. subject=system (surface=system) is /review: one row "
     "(Main by default) reads the whole system against BIBLE.md and reports. subject=result (surface=result) "
     "reviews THIS task's result instead of a change: the reply (answer, default your latest), the files and "
@@ -1334,7 +1376,8 @@ _DESCRIPTION = (
     "own result review composes freely. Under Auto ask when another mind's check could change what you deliver or "
     "your human asks for one. Task review Off refuses it; it counts its own paid cycles. The same subject, "
     "surface, panel and ask return the settled verdict free (reused=true), even after a guide changed; after a "
-    "settled wave formed no verdict they buy a new wave, while a running or unknown one is collected, never "
+    "settled wave formed no verdict they buy a new wave, except a fully answered adviser-only wave is returned "
+    "as NOT_PERFORMED with reused=true, while a running or unknown one is collected, never "
     "resent. A verdict never locks anything. Returns JSON {record_id, "
     "aggregate, per_question, panel, rows, subject, checklist, tests, cost, reused, findings} (+ report for "
     "subject=system)."

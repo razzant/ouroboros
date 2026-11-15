@@ -227,7 +227,7 @@ def _order_b_rows(data_root: Path, task_id: str, monkeypatch) -> tuple:
     settlement row is durable, making the reversed race deterministic."""
     import ouroboros.loop_tool_execution as execution
     from ouroboros.tools.tool_result import ToolResult
-    from tests.test_tool_call_log import _Registry
+    from tests._tool_call_log_shared import _Registry
 
     release = threading.Event()
 

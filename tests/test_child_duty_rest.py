@@ -88,7 +88,7 @@ def test_child_requires_recorded_startup_success_and_keeps_unknown_recovery_link
     assert passed(T4)["holds"] == held("startup recovery report missing", T1)
     obligations.add(tmp_path, "pending_drives", "ghost")
     maintenance_retirement.record_startup(tmp_path, gaps=False)
-    assert passed(T5)["holds"] == held("recovery links unreadable", T1), "no gap, but a recovery link has no record"
+    assert passed(T5)["holds"] == held("recovery links unreadable: ghost: no record", T1), "no gap, but a named link has none"
     assert tree.exists()
     obligations.remove(tmp_path, "pending_drives", "ghost")
     maintenance_retirement.record_startup(tmp_path, gaps=False)

@@ -480,7 +480,7 @@ def test_a_composed_panel_counts_pool_seats_only_and_hears_an_unmarked_row_as_a_
     On a foreign root and on the body in Cyber Pro an enabled row the owner did not
     mark (``scout``) is seated as an added critic beside the named pool seats — its
     findings are additional, the quorum is the pool seats' — and a composition that
-    names NO pool seat has no quorum and is refused before any wave."""
+    names NO pool seat has no quorum: Cyber Pro hears it and forms no verdict, elsewhere it is refused before any wave."""
     pool = _pool()
     h.wave.failing = {"scout"}
     _stage(h.project, "a.py", "a = 1\n")
@@ -499,9 +499,16 @@ def test_a_composed_panel_counts_pool_seats_only_and_hears_an_unmarked_row_as_a_
     assert body["aggregate"] == rl.VERDICT_PASS
 
     _stage(h.system, "more.py", "y = 2\n")
+    alone = h.run(root="system_repo", subject="index", reviewers=["scout"], reason="only the scout")
+    assert (h.wave.calls[-1].triad, h.wave.calls[-1].coupling) == ([], ["scout"]), "Cyber Pro hears the scout alone"
+    assert (alone["aggregate"], alone["quorum"]["assigned"], alone["panel"]["seats"]) == ("NOT_PERFORMED", 0, 0)
+    assert [f["seat_id"] for f in alone["findings"]["additional_findings"]] == ["scout"], "its FAIL is heard, never a verdict"
+
+    monkeypatch.setattr(rc, "get_runtime_mode", lambda: "pro")
+    _stage(h.project, "b.py", "b = 2\n")
     with pytest.raises(rc.ReviewChangeArgumentError, match="from the review pool"):
-        h.run(root="system_repo", subject="index", reviewers=["scout"], reason="only the scout")
-    assert len(h.wave.calls) == 2, "no wave was paid for a composition without a pool seat"
+        h.run(subject="index", reviewers=["scout"], reason="only the scout")
+    assert len(h.wave.calls) == 3, "outside Cyber Pro no wave was paid for a composition without a pool seat"
 
 
 def test_an_added_critic_is_any_enabled_catalog_row_and_a_switched_off_row_is_refused(

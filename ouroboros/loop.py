@@ -18,7 +18,7 @@ from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage  # no
 from ouroboros import task_pacing  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.config import adaptive_quorum, get_context_mode, get_light_model, get_task_review_mode, resolve_effort  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.review_cycles import REASON_REVIEW_CYCLES_EXHAUSTED  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
-from ouroboros.outcomes import REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION, RESULT_INFRA_FAILED, extract_final_answer, latest_unreconciled_failed_verification, reviewable_effect_projection, turn_has_reviewable_effects  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
+from ouroboros.outcomes import REASON_DELIVERY_CONTROL_DEGRADED, REASON_OWNER_REQUESTED_FINALIZATION, RESULT_INFRA_FAILED, extract_final_answer, reviewable_effect_projection, turn_has_reviewable_effects  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.observability import new_execution_id  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
 from ouroboros.observability import task_timing_scope, timed_phase
 from ouroboros.context_timing import measured_sections, section_spans
@@ -457,12 +457,12 @@ def _reset_turn_state(ctx: Any) -> None:
     ctx._primary_view = None  # a return resumes only the view this turn left (primary_route_observation.held_primary_view)
     ctx._accepted_model_route = ctx._left_review_wait = None  # a new turn waits on no left review
     ctx._pending_task_wait = None  # nor owes an earlier turn's native task wait (``native_task_wait``)
-    ctx._pre_delivery_noticed = False  # each turn's answer may be told once (a continuation restores its own)
+    ctx._pre_delivery_noticed = ctx._red_check_noticed = False  # each notice part is told once per turn (a continuation restores its own)
 
 
 def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dict, usage: dict, seen: set,
                          route: tuple, cost_ceiling: Any, budget_remaining_usd: Optional[float]) -> tuple:
-    """Restore whichever saved continuation this start carries (at most one).
+    """Restore whichever saved continuation this start carries (at most one); then the start has entered.
 
     Returns ``(*route, round_idx, cost_ceiling, pending_tool_budget,
     pending_no_tool_budget, free_redial)``: a cold owner wait rejoins its tool
@@ -495,6 +495,8 @@ def _resume_continuation(tools: Any, carriers: tuple, messages: list, trace: dic
             carried.reentered(tools._ctx, messages)
         from ouroboros.subagent_bootstrap import append_startup_receipt
         append_startup_receipt(tools._ctx, messages, getattr(tools._ctx, "_configured_startup_wake", ""), seen)
+        from ouroboros.headless import reopen_capture_at_entry  # entered: an earlier capture becomes history
+        reopen_capture_at_entry(canonical_data_root(tools._ctx), str(getattr(tools._ctx, "task_id", "") or ""))
         tools._ctx._round_prologue = section_spans()
     return resumed
 

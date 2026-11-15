@@ -4,7 +4,7 @@ import { mountVersionList } from './update_versions.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { showToast } from './toast.js';
 import { apiClient, apiFetch } from './api_client.js';
-import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, bindPreflightDescription, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, verifiedUpdatePlan } from './update_status.js';
+import { RECOVERY_RETRY, UPDATE_STAGE_LABELS, afterUpdateRows, assistedUpdatePhase, attemptOutcome, attemptTime, bindPreflightDescription, failureWords, preflightDescription, preflightEvidenceRows, unfinishedRecovery, updateAttemptView, updateOverReview, verifiedUpdatePlan } from './update_status.js';
 import { destroyChatMarkdown, enhanceChatMarkdown, mountChatMarkdown } from './chat_markdown.js';
 import { updateEffectsText } from './update_effects.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
@@ -408,6 +408,9 @@ export function updateLetterView(data = {}, phase = '') {
         ? { ...(letter.checked_key || {}), base_sha: runningBase, target_sha: latestTarget } : null;
     const request = requestView(letter);
     if (!markdown && !offered && !request?.live && state !== 'failed') return noLetterView();
+    // The host's own fact about the update on offer, whatever text is shown and whether or not one exists:
+    // only the check facts of exactly that range speak for it.
+    const over = offered && sameRange(letter.qualification, offered) ? updateOverReview(letter.qualification) : null;
 
     const relation = markdown && LETTER_RELATIONS.has(letter.relation) ? letter.relation : (markdown ? 'other' : '');
     const meta = {
@@ -467,6 +470,8 @@ export function updateLetterView(data = {}, phase = '') {
         covers: markdown ? shortRange(letter.key) : '',
         write,
         request,
+        over: over?.line || '',
+        overDetail: over?.detail || '',
     };
 }
 
@@ -563,6 +568,17 @@ export function bindAppVersionRender({ getStatus, render }) {
     return watchAppVersion(() => { if (getStatus()) render(); });
 }
 
+// A fact's value as HTML. A code with no break of its own (a full commit SHA) offers one at its middle, so a column
+// narrower than the code reads it as two even halves instead of leaving its last character on a line of its own
+// (style.css .dashboard-facts dd); copying it still copies it whole.
+export function factValueHtml(value) {
+    return String(value ?? '').split(/(\s+)/).map((part) => {
+        if (part.length < 24 || /\s/.test(part)) return escapeHtml(part);
+        const middle = Math.ceil(part.length / 2);
+        return `${escapeHtml(part.slice(0, middle))}<wbr>${escapeHtml(part.slice(middle))}`;
+    }).join('');
+}
+
 export function initUpdates({ mount, state, ws }) {
     // The tab's one root and scroller (style.css "The Dashboard tab body"): the state of the channel leads as the
     // tab's headline with its facts and one next action; the last attempt, the record's facts, the description and
@@ -607,11 +623,13 @@ export function initUpdates({ mount, state, ws }) {
                         </div>
                     </div>
                     <div class="updates-letter-note" id="updates-letter-note-line" hidden><span id="updates-letter-note" role="status" aria-live="polite"></span> <span id="updates-letter-task"></span></div>
+                    <p class="ui-status updates-letter-over" id="updates-letter-over" data-tone="warn" hidden></p>
                     <div class="updates-letter-body ui-rich-content" id="updates-letter-body"></div>
                     <button type="button" class="btn btn-ghost btn-sm ui-list-more" id="updates-letter-more" hidden>Read all</button>
                     <details class="ui-disclosure updates-letter-details" id="updates-letter-details">
                         <summary>Details</summary>
                         <p id="updates-letter-provenance"></p>
+                        <p id="updates-letter-over-names" hidden></p>
                         <p id="updates-letter-error" hidden></p>
                         <p id="updates-letter-resources">Check reads the official channel and never writes a description. Writing runs one ordinary Ouroboros task on your Main model, which can read the changes themselves; it may use subscription limits, local resources, or API budget.</p>
                     </details>
@@ -679,6 +697,8 @@ export function initUpdates({ mount, state, ws }) {
     const letterRefresh = page.querySelector('#updates-letter-refresh');
     const letterRefreshLabel = page.querySelector('#updates-letter-refresh-label');
     const letterProvenance = page.querySelector('#updates-letter-provenance');
+    const letterOver = page.querySelector('#updates-letter-over');
+    const letterOverNames = page.querySelector('#updates-letter-over-names');
     const letterError = page.querySelector('#updates-letter-error');
     let letterRefreshing = false;
     let letterRefreshError = null;
@@ -700,7 +720,7 @@ export function initUpdates({ mount, state, ws }) {
     // the card's Details. A group heading spans both columns of a facts list.
     const factLine = (chip) => escapeHtml(chip.label === 'App' ? `App ${chip.value}` : chip.label === 'Channel' ? `${chip.value} channel` : chip.value);
     const factRowHtml = (row) => (row.head ? `<dt class="updates-facts-head">${escapeHtml(row.head)}</dt>`
-        : `<dt>${escapeHtml(row.label)}</dt><dd>${escapeHtml(row.value)}</dd>`);
+        : `<dt>${escapeHtml(row.label)}</dt><dd>${factValueHtml(row.value)}</dd>`);
 
     // The letter body hosts rendered markdown, so its enhancement owns real
     // resources (Chart instances, mermaid timers, a click handler). Release
@@ -725,8 +745,17 @@ export function initUpdates({ mount, state, ws }) {
         root.querySelectorAll('button').forEach((control) => control.remove());
     }
 
-    /** The Apply confirmation's copy of the description: the same pipeline and scrub as the panel. */
-    function mountDescription(container, markdown) {
+    /** The Apply confirmation's copy of the description: the same pipeline and scrub as the panel, under the
+     *  host's line about what the range brings over a review outcome; either may be absent. */
+    function mountDescription(container, markdown, over = '') {
+        if (over) {
+            const line = document.createElement('p');
+            line.className = 'ui-status updates-letter-over';
+            line.dataset.tone = 'warn';
+            line.textContent = over;
+            container.append(line);
+        }
+        if (!markdown) return undefined;
         const heading = document.createElement('h4');
         heading.className = 'updates-letter-label';
         heading.textContent = "What's new";
@@ -792,6 +821,10 @@ export function initUpdates({ mount, state, ws }) {
             ? ` about ${view.meta.targetVersion}` : ''}.${view.covers ? ` Changes ${view.covers}.` : ''}`
             : (view.write ? `The update on offer: changes ${shortRange(view.write.key)}.` : '');
         letterProvenance.hidden = !letterProvenance.textContent;
+        letterOver.textContent = view.over;
+        letterOver.hidden = !view.over;
+        letterOverNames.textContent = view.overDetail;
+        letterOverNames.hidden = !view.overDetail;
         const lastFailure = letterRefreshError?.text || letter.error_text || letter.error_kind || '';
         const failedAt = attemptTime(letterRefreshError?.at || letter.failed_at);
         // Failed-attempt provenance must never borrow the shown
@@ -1110,11 +1143,14 @@ export function initUpdates({ mount, state, ws }) {
             const conflictCount = (plan.code_conflict_paths || []).length + (plan.doc_conflict_paths || []).length;
             const assisted = strategy === 'assisted';
             const description = preflightDescription(preflight);
+            // The host's line reads first, whether or not a description exists, from the facts of exactly these pins.
+            const facts = preflight.qualification;
+            const over = sameRange(facts, plan) ? updateOverReview(facts).line : '';
             // The description reads as rendered prose in its own region; the consequences of
             // applying stay plain text below it, and the per-commit evidence sits in Details.
             const proceed = await openConfirmDialog({
                 title: `Update ${String(plan.base_sha).slice(0, 8)} -> ${String(plan.target_sha).slice(0, 8)}`,
-                content: description ? { label: "What's new", mount: (el) => mountDescription(el, description) } : null,
+                content: description || over ? { label: "What's new", mount: (el) => mountDescription(el, description, over) } : null,
                 body: (description ? '' : 'No description is available for this exact preflight range.\n\n') + (assisted
                     ? `${conflictCount} conflict(s) need resolution. Ouroboros will resolve the merge as a reviewed task (model spend applies); progress lands in chat, and the server restarts after the reviewed commit.`
                     : `Git applies this update directly (${plan.local_dirty_count || 0} uncommitted file(s) are stashed and restored). The server restarts when it lands.`)

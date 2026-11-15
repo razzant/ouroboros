@@ -1674,3 +1674,46 @@ def test_a_reasoned_pending_finish_warns_until_a_late_pass_of_its_exact_subject_
     else:
         assert completion_status_label(stored, {}) == "Done with warnings", "a late FAIL keeps the warning"
         assert stored["outcome_axes"]["review"]["status"] == "awaiting"
+
+
+@pytest.mark.parametrize("runtime", ["cyber_pro", "pro"])
+@pytest.mark.parametrize("adviser", ["running", "settled", "settled_earlier_answer"])
+def test_an_advisers_only_result_review_never_stands_for_the_required_floor(tmp_path, monkeypatch, runtime, adviser):
+    """#3194: a Cyber Pro advisers-only review of the result (running, settled, or of an earlier answer) is heard by
+    its caller and kept, but delivery under a Required root seats the host's counted pool at once: never inherits the
+    adviser's roster, never waits on it, never binds its NOT_PERFORMED in place of a review — in Cyber Pro and after
+    a switch to Pro. The identical adviser call still collects its own running wave."""
+    from ouroboros.tools.review_result import result_review_at_delivery
+    from tests.test_review_change_end_to_end import _adviser_pool, _pending_then_answering_seat
+
+    ctx = _floor_ctx(tmp_path, monkeypatch)
+    _adviser_pool(monkeypatch)
+    _produced_answer_protocol(monkeypatch)
+    sends: list[dict] = []
+    answer, _starts = _pending_then_answering_seat("t2" if adviser == "running" else "-", "invocation-adviser")
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam(sends, answer=answer))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+    delivered = "FINAL ANSWER: 2"
+    ask = dict(subject="result", answer="FINAL ANSWER: 1" if adviser == "settled_earlier_answer" else delivered,
+               reviewers=["t2"], reason="a second look only")
+    heard = run_review_change(ctx, **ask)
+    assert heard["state"] == ("pending" if adviser == "running" else "settled") and heard["aggregate"] == "NOT_PERFORMED"
+    assert [send["slot_id"] for send in sends] == ["t2"]
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", runtime)
+    trace, shown = {"tool_calls": []}, []
+    assert result_review_at_delivery(ctx, delivered, trace, shown.append) is True, "the floor's own PASS is shown first"
+    assert sorted(send["slot_id"] for send in sends[1:]) == ["s1", "t1"] and not any(s["reconcile_only"] for s in sends)
+    [run] = trace["review_runs"]
+    floor = review_ledger.load_record(ctx.drive_root, run["record_id"])
+    assert run["record_id"] != heard["record_id"] and run["aggregate_signal"] == "PASS"
+    assert (floor["panel"]["chosen_by"], floor["panel"]["seats"]) == ("host", 2)
+    assert result_review_at_delivery(ctx, delivered, trace, shown.append) is False and len(sends) == 3
+
+    if adviser == "running":
+        assert review_ledger.load_record(ctx.drive_root, heard["record_id"])["state"] == "pending"
+        monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "cyber_pro")
+        collected = run_review_change(ctx, **ask)
+        assert (collected["record_id"], collected["state"], collected["aggregate"]) == (
+            heard["record_id"], "settled", "NOT_PERFORMED")
+        assert sends[-1]["slot_id"] == "t2" and sends[-1]["reconcile_only"] is True

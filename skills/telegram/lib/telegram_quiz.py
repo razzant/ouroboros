@@ -102,6 +102,8 @@ _LIFECYCLE_RANK = {"open": 0, "expired_terminal": 1, "superseded": 2, "answered"
 _FINAL_STATES = ("answered", "closed")
 # The host's facts about an answer that a card remembers beside its state.
 _ANSWER_FACTS = ("answered_index", "comment", "question_delivery")
+# Every host fact a settled card's edit shows: a card sent again for its question gets the same edit.
+_SETTLED_FACTS = (*_ANSWER_FACTS, "closed_reason")
 _TOAST_MAX = 200  # Telegram's callback answer limit
 
 # The host publishes ``chat.quiz`` and ``chat.quiz_state`` as independent
@@ -266,13 +268,27 @@ def _bot_cards(data: Dict[str, Any], bot: str) -> Tuple[Dict[str, Any], str]:
     return (data["bots"], f"{bot}:") if bot else (data["quizzes"], "")
 
 
+def _forward_only(held: Any, record: Dict[str, Any]) -> Dict[str, Any]:
+    """``record`` as stored over ``held``, the card's remembered record: nothing stored rolls a
+    settled state back, so a card sent again for its question (the outbox repeating its handler
+    after an edit that had to wait, or the question published again) keeps it and its facts."""
+    if not isinstance(held, dict):
+        return dict(record)
+    was, state = str(held.get("state") or "open"), str(record.get("state") or "open")
+    rank, held_rank = _LIFECYCLE_RANK.get(state, 0), _LIFECYCLE_RANK.get(was, 0)
+    if rank > held_rank or (rank == held_rank and (was not in _FINAL_STATES or state == was)):
+        return dict(record)
+    kept = {key: value for key, value in record.items() if key != "state" and key not in _SETTLED_FACTS}
+    return {**kept, "state": was, **{key: held[key] for key in _SETTLED_FACTS if key in held}}
+
+
 def remember_quiz(api, bot: str, token: str, record: Dict[str, Any]) -> None:
-    """Bounded token → card mapping: the newest ``_MAX_REMEMBERED`` cards (``_bot_cards``)."""
+    """Bounded token → card mapping: the newest ``_MAX_REMEMBERED`` cards (``_bot_cards``),
+    whose lifecycle only moves forward (``_forward_only``)."""
     data = _load(api)
     quizzes, prefix = _bot_cards(data, bot)
     key = f"{prefix}{token}"
-    quizzes.pop(key, None)
-    quizzes[key] = dict(record)
+    quizzes[key] = _forward_only(quizzes.pop(key, None), record)
     for stale in list(quizzes)[:-_MAX_REMEMBERED]:
         quizzes.pop(stale, None)
     path = _state_file(api, _QUIZ_STATE_FILE)
@@ -300,10 +316,11 @@ def _tapped_card(api, bot: str, token: str) -> Optional[Dict[str, Any]]:
 def remember_state(api, bot: str, token: str, record: Dict[str, Any], state: str,
                    facts: Optional[Dict[str, Any]] = None) -> None:
     """Persist a settled lifecycle state on the card: the no-rollback evidence. An answer
-    also keeps the host's recorded facts (``merge_answer_facts``) for later partial facts."""
+    also keeps the host's recorded facts (``merge_answer_facts``) for later partial facts,
+    and a closure its stated reason; given ``facts`` replace the earlier ones (``_SETTLED_FACTS``)."""
     if not _LIFECYCLE_RANK.get(state, 0):
         return
-    updated = {key: value for key, value in record.items() if facts is None or key not in _ANSWER_FACTS}
+    updated = {key: value for key, value in record.items() if facts is None or key not in _SETTLED_FACTS}
     updated.update(state=state, **(facts or {}))
     if updated != record:
         remember_quiz(api, bot, token, updated)
@@ -504,8 +521,13 @@ def lifecycle_target(
     edit = lifecycle_edit(record, event, lang) if record and message_id else None
     if record is None or edit is None:
         return None
-    state = str(event.get("state") or "")
-    remember_state(api, bot, token, record, state, merge_answer_facts(record, event) if state == "answered" else None)
+    state, facts = str(event.get("state") or ""), None
+    if state == "answered":
+        facts = merge_answer_facts(record, event)
+    elif state == "closed":  # its stated reason too: a card sent again is closed in the same words
+        reason = str(event.get("closed_reason") or "").strip()
+        facts = {"closed_reason": reason} if reason else {}
+    remember_state(api, bot, token, record, state, facts)
     return int(record.get("chat_id") or 0), message_id, edit[0], edit[1]
 
 
@@ -559,12 +581,26 @@ async def follow_lifecycle(api, event: Dict[str, Any], lang: str, *, client_fact
         await _apply_fact(api, token, event, lang, client_factory)
 
 
+def _settled_fact(record: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The settled state a remembered card holds, as the host fact that settled it (``_SETTLED_FACTS``)."""
+    state = str((record or {}).get("state") or "")
+    if not _LIFECYCLE_RANK.get(state, 0):
+        return None
+    return {"task_id": record.get("task_id"), "quiz_id": record.get("quiz_id"), "state": state,
+            **{key: record[key] for key in _SETTLED_FACTS if key in record}}
+
+
 async def apply_retained_fact(api, token: str, lang: str, *, client_factory, published=None) -> None:
-    """Right after ``remember_quiz``, under the same lock: the fact that outran creation,
-    or the settled state the ``chat.quiz`` event itself carries (a queued ask can land
-    after its question was answered or closed); the higher-ranked of the two applies,
-    and the facts that outran creation count as the newer ones."""
+    """Right after ``remember_quiz``, under the same lock: the settled state the card already
+    held (a card sent again keeps it, ``_forward_only``), the one the ``chat.quiz`` event itself
+    carries (a queued ask can land after its question was answered or closed), or the fact that
+    outran creation; the highest-ranked applies, each later one counting as the newer. So when the
+    outbox repeats this handler for a settling edit that had to wait, the same edit goes out, even
+    after a restart took what this load kept in memory."""
     outran = _RETAINED_FACTS.pop(token, None)
+    held = _settled_fact(quiz_for_token(api, client_factory().bot_id, token))
+    if held is not None:
+        _retain_fact(token, held)
     if published and str(published.get("state") or "open") != "open":
         _retain_fact(token, published)
     if outran is not None:

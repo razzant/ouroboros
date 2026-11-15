@@ -63,6 +63,16 @@ def _owner_answer_routes() -> list[BaseRoute]:
             Route("/api/decisions/secret", endpoint=api_secret_decision, methods=["POST"]), *card_routes()]
 
 
+def _room_reading_routes(data_dir: pathlib.Path) -> list[BaseRoute]:
+    """A room's saved messages as the owner's UI reads them from the dialogue store: its history pages
+    (``/api/chat/history``) and the search of their words (``/api/chat/search``)."""
+    from ouroboros.gateway.chat_search import make_chat_search_endpoint
+    from ouroboros.gateway.history import make_chat_history_endpoint
+
+    return [Route("/api/chat/history", endpoint=make_chat_history_endpoint(data_dir)),
+            Route("/api/chat/search", endpoint=make_chat_search_endpoint(data_dir))]
+
+
 def collect_routes(
     *,
     data_dir: pathlib.Path,
@@ -97,7 +107,7 @@ def collect_routes(
         api_chat_upload_delete,
         file_browser_routes,
     )
-    from ouroboros.gateway.history import make_chat_history_endpoint, make_cost_breakdown_endpoint
+    from ouroboros.gateway.history import make_cost_breakdown_endpoint
     from ouroboros.gateway.logs import api_logs_raw, api_logs_tail
     from ouroboros.gateway.storage import storage_routes
     from ouroboros.gateway.marketplace import (
@@ -308,7 +318,7 @@ def collect_routes(
         Route("/api/cost-breakdown", endpoint=make_cost_breakdown_endpoint(data_dir)),
         *storage_routes(data_dir), *_kept_service_routes(),
         Route("/api/evolution-data", endpoint=api_evolution_data),
-        Route("/api/chat/history", endpoint=make_chat_history_endpoint(data_dir)),
+        *_room_reading_routes(data_dir),
         Route("/api/logs/{name}", endpoint=api_logs_tail, methods=["GET"]),
         Route("/api/logs/{name}/raw", endpoint=api_logs_raw, methods=["GET"]),
         Route("/api/chat/upload", endpoint=api_chat_upload, methods=["POST"]),

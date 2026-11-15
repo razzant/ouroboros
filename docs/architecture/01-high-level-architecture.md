@@ -21,7 +21,7 @@ web/ — Web UI, a SPA of ES modules; chapter 3 owns the pages and the modules n
     welcome_preference.js, host_notice_text.js — Main's empty state from the hidden `welcome` preference; known host sentences without the leading pictograph (DESIGN "Chat authorship and System rows")
     project_answer.js — Main's Project lifecycle rows and folded mirrored answers (§3 Main rows)
     work_portal.js, task_episodes.js, project_handoff.js — one Main card per work: the portal and its binding sources, Continue episodes, the binding receipt's words (§3 Project handoff receipts)
-    chat_reply.js, chat_reply_quote.js, chat_relay_deck.js, chat_row_menu.js, row_menu_gesture.js, message_actions.js, routing_receipt.js, text_fit.js — replies and host-derived quotes, note decks, row menus, saved-row actions, an owner message's routing receipt, word-cut fitting (§3 Chat and Projects; DESIGN "Replies")
+    chat_reply.js, chat_reply_quote.js, chat_search*.js, chat_relay_deck.js, chat_row_menu.js, row_menu_gesture.js, message_actions.js, routing_receipt.js, text_fit.js — replies/host quotes, shown-word search, note decks, row menus/actions, owner routing receipts, word fitting (§3; DESIGN "Replies")
     composer.js, composer_model.js, chat_model_routes.js, composer_subagents.js, capsule_fit.js, swarm_presentation.js — the composer: "+" menu, slots, Send; four capsules, Model first; Swarm's label and receipt (§3)
     chat_cards.js, card_components.js, card_frames.js — living cards in the feed and kept on Widgets; the sandboxed app frame (CLIENT_CONTRACT §5)
     contributions.js, composer_plus.js, composer_chips.js, host_modules.js, holds.js — the contributions store and verbs; skills' "+" items and capsule-row chips; trusted page modules; the start ledger (CLIENT_CONTRACT §11; DESIGN "Skills in the page")
@@ -219,7 +219,7 @@ ouroboros/ — agent core and shared runtime (§6)
   chronicle_import.py, memory_nomination_receipts.py, memory_inventory.py — one model-free import of prior dialogue memory as `legacy` records; nominations imported once as marks; what is open or folded (§6)
   consolidator.py, memory_fallback.py — Light transport, one signed draft per root with wakes OFF; no knowledge writes (§6)
   memory.py — scratchpad, identity, chat history
-  knowledge.py, knowledge_edits.py, knowledge_versions.py, knowledge_rows.py, text_change.py, memory_publication.py — linked-Markdown notes, shelf indexes, version reads; revision-checked writes of notes and per-file identity/world-map/registry: origin-stamped history row, then atomic replacement (§6)
+  knowledge.py, knowledge_edits.py, knowledge_versions.py, knowledge_rows.py, text_change.py, memory_publication.py, memory_texts.py — linked-Markdown notes, shelf indexes, version reads; revision-checked writes of notes and per-file identity/world-map/workpad/registry: origin-stamped history row, then atomic replacement (§6)
   project_facts.py — project_id resolution and per-project knowledge under `projects/<id>/knowledge`, isolated from `memory/knowledge`
   task_tree_ledger.py — append-only `data/task_trees/<root>/blackboard.jsonl`: ephemeral swarm coordination (`tree_note`/`tree_read`), mirrored into the project journal at root completion
   projects_registry.py, project_admission.py, project_closure.py — registry lifecycle, admission and reversible closure (§6 Project registry and lease)
@@ -325,7 +325,7 @@ ouroboros/ — agent core and shared runtime (§6)
   launcher_windows_runtime.py — Windows runtime; pre-import legacy GUI handoff (§2)
   launcher_background.py — Desktop close/quit, consent, second-launch activation (§9); `DesktopApi` supplies `MainApi` alerts, shell facts and Panic (§3)
   panic_source.py, platform_peer.py — Diagnostic Panic source (§9)
-  launcher_appearance.py, launcher_window_chrome.py, launcher_page_zoom.py, launcher_context_menu.py, standalone_page.py — Windows app mode/caption; macOS chrome/appearance; zoom; native menus; inline theme.js/ui.css (§3)
+  launcher_appearance.py, launcher_window_chrome.py, launcher_page_zoom.py, launcher_context_menu.py, standalone_page.py — Windows app mode/caption; macOS chrome/appearance, Windows fit; zoom; native menus; inline theme.js/ui.css (§3)
   launcher_tray.py, launcher_tray_macos.py — Windows notification-area icon; macOS menu-bar item, Dock reopen, quit marking (§9)
   desktop_media.py — GTK display probe and own-loopback audio permission grant; other shells keep native prompts
   desktop_notifications.py — System notifications, one adapter per platform; submitted/unknown/typed refusal, click token back to the page (§3; DESIGN §9)
@@ -338,7 +338,7 @@ ouroboros/ — agent core and shared runtime (§6)
   post_task_evolution.py — Worker's durable promotion signal for the supervisor idle tick (§6 Background consciousness and Evolution)
   repo_remotes.py — Fetch URLs as Git resolves them; `managed` is the read/update-only official source, `origin` the token's personal target
   review_evidence.py — Same-execution commit-review evidence (§6 Commit review evidence) and the durable commit/advisory review record of a task or checkout; execution facts are visibility only
-  review_status_projection.py, review_overrides.py — Commit-review status projection over `review_state` records, re-exported by review_evidence.py; the owner-visible trace of review FAIL or no verdict and what followed (§6 Own-body candidates)
+  review_status_projection.py, review_overrides.py — Commit-review status projection over `review_state` records, re-exported by review_evidence.py; the owner-visible trace of review FAIL or no verdict and what followed, skills left on included (§6 Own-body candidates)
   semantic_dedup.py — LLM-first semantic dedup, fail-open None; fuzzy-entity primitive (DEV 02), no runtime consumer
   betterleaks_runtime.py — Pinned Betterleaks runtime resolver (six platform artifacts, packaged resource first)
   skill_loader.py, skill_catalogue.py — Discovers data buckets and connected folders (`OUROBOROS_SKILLS_REPO_PATH` is My folder), state in `data/state/skills/<name>/`; paged skill records, named diagnostics and manifest addresses, the delegate skill index (§13)
@@ -489,7 +489,7 @@ ouroboros/ — agent core and shared runtime (§6)
     harness_maintenance.py — Owner maintenance HTTP over shared service (§6; routes: §4)
     host_service.py, host_notify.py — Loopback-only Host Service API, /notify `skill_notice` rows (§12)
     history.py, history_deliveries.py — Shared Chat room/quiz/media/review/terminal/receipt projection, cost-breakdown factories; delivery rows' `msg_type`
-    history_paging.py, history_chronology.py — a room's own pages over the dialogue store, frozen room-bound cursors, gaps, the import frontier, a Project's `latest_arrival`; no stored history copy (§3 History reads)
+    history_paging.py, history_chronology.py, chat_search.py — room pages/search of the dialogue store, Project `latest_arrival`; no history copy (§3 History reads)
     cost_breakdown.py, cost_period.py — Ledger-derived dashboard buckets, period view and root-task detail over the same physical-attempt authority
     projects.py — GET/POST /api/projects, /from-task, /update, /delete
     _helpers.py — Shared request-root/coercion, the JSON body (`request_json_or`) and error envelope, `run_sync_to_completion`, the settled worker wait for request-owned blocking work
@@ -504,7 +504,7 @@ ouroboros/ — agent core and shared runtime (§6)
     registry_core.py, registry_guards.py, registry_guard_process.py, tool_context.py — registry load/schema/dispatch, the capability/resource/update/skill guards, process admission, `ToolContext`/`BrowserState` (protocol: contracts/tool_context.py) (§6 Safety and runtime mode)
     git.py, git_plumbing.py, git_repo_edit.py, git_vcs_ops.py, vcs_read.py, git_review_cycle.py, git_managed_postcommit.py, git_evolution.py — Git/write tools with the deterministic, test and one-wave review commit gates and the author's optional preflight; its leaves: plumbing, repo write/edit, VCS inspection and rollback, the reviewed-commit cycle, managed-merge post-commit gates, evolution-campaign authority (§6 Git and commit review)
     search.py — `web_search` legs of the `search_routes.py` route (§6 Web access mechanisms)
-    browser.py — Playwright tools; per-ToolContext lifecycle, thread affinity (§6 MCP)
+    browser.py, browser_session.py — Playwright tools; a loop per session (§6 MCP)
     mcp_sign_in.py — the mind's MCP sign-in (§6 MCP)
     imagegen.py — list_image_models/generate_image/recover_image; explicit routes, artifacts first, separate view/send (docs/IMAGE_GENERATION.md)
     vision.py — Vision LLM tools for browser screenshots and uploaded images

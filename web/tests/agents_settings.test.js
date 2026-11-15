@@ -104,7 +104,7 @@ async function open(t, path = 'agents', options = {}) {
     const opened = [];
     const ctx = { readSettings, openSettings: (to) => { opened.push(to); return true; },
         ask: async (question) => { asked.push(question); return answers.length ? answers.shift() : true; } };
-    const handle = settingsPageFor(path).mount(container, { path, row: '', ctx });
+    const handle = settingsPageFor(path).mount(container, { path, row: '', view: options.view || '', ctx });
     await settle();
     const head = (id) => container.querySelector(`[data-entry-id="${id}"]`);
     return { env, server, container, asked, opened, handle, head,
@@ -164,6 +164,19 @@ test('the list draws one head per agent with its switch, and the roster\'s own s
     await page.head('scout').querySelector('[data-subagent-field="open"]').fire('click', {});
     await page.container.querySelector('[data-subagent-add]').fire('click', {});
     assert.deepEqual(page.opened, ['agents/scout', 'agents/new']);
+});
+
+test('a door\'s view is the list\'s first filter: Reviewers opens the list on its reviewers, any other on all', async (t) => {
+    const chosen = (page) => page.container.querySelectorAll('[data-agents-filter]').filter((chip) => chip.getAttribute('aria-pressed') === 'true')
+        .map((chip) => chip.dataset.agentsFilter);
+    const reviewers = await open(t, 'agents', { view: 'reviewers' });
+    assert.deepEqual(chosen(reviewers), ['reviewers']);
+    assert.deepEqual(reviewers.heads(), ['reviewer'], 'only the agents that read finished work');
+    assert.equal(ROWS.find((row) => row.id === 'permissions:reviewers').control.view, 'reviewers', 'the door names its view');
+    reviewers.handle.unmount();
+    const plain = await open(t, 'agents', { view: 'nothing-such' });
+    assert.deepEqual(chosen(plain), ['all']);
+    assert.deepEqual(plain.heads(), ['reviewer', 'recheck', 'scout']);
 });
 
 test('a plain row\'s switch writes that one entry at once through the checker\'s endpoint, with the read\'s token', async (t) => {

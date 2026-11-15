@@ -14,8 +14,19 @@ import { isStackLayout } from './layout.js';
  * is now the `.resizing-panels` class. A measured width in a narrowly named custom property is the exception
  * DEVELOPMENT "Design System" names.
  */
+/** The narrowest sidebar, in CSS px: the stylesheet's --sidebar-min-width (ui.css), below which Ouroboros's card,
+ *  the search row and the sections at its foot no longer hold whole. The sidebar's contents are drawn in CSS px and
+ *  the Interface size zooms the window (interface_size.js), so the one px value follows every Interface size. */
+export const SIDEBAR_MIN_FALLBACK = 270;
+export function sidebarMinWidth(root = globalThis.document?.documentElement) {
+    let read = NaN;
+    try { read = parseFloat(globalThis.getComputedStyle(root).getPropertyValue('--sidebar-min-width')); } catch {}
+    return read > 0 ? Math.ceil(read) : SIDEBAR_MIN_FALLBACK;
+}
+
 export function setupResizablePanels(prefs) {
     const root = document.documentElement;
+    const sidebarMin = sidebarMinWidth(root);
     let persistTimer = 0;
     const persist = (patch) => {
         clearTimeout(persistTimer);
@@ -25,7 +36,10 @@ export function setupResizablePanels(prefs) {
             }).catch(() => {});
         }, 400);
     };
-    if (Number(prefs?.sidebar_width) > 0) root.style.setProperty('--sidebar-width', `${prefs.sidebar_width}px`);
+    // A width stored before the minimum (or by a smaller handle) is raised to it once, and the raised width is kept.
+    const storedSidebar = Number(prefs?.sidebar_width) || 0;
+    if (storedSidebar > 0) root.style.setProperty('--sidebar-width', `${Math.max(sidebarMin, storedSidebar)}px`);
+    if (storedSidebar > 0 && storedSidebar < sidebarMin) persist({ sidebar_width: sidebarMin });
     if (Number(prefs?.project_panel_width) > 0) root.style.setProperty('--project-panel-width', `${prefs.project_panel_width}px`);
     const makeHandle = (target, cssVar, dir, prefKey, min, max) => {
         if (!target) return;
@@ -69,6 +83,6 @@ export function setupResizablePanels(prefs) {
         handle.addEventListener('pointerup', end);
         handle.addEventListener('pointercancel', end);
     };
-    makeHandle(document.getElementById('primary-sidebar'), '--sidebar-width', 'right', 'sidebar_width', 180, 560);
+    makeHandle(document.getElementById('primary-sidebar'), '--sidebar-width', 'right', 'sidebar_width', sidebarMin, 560);
     makeHandle(document.getElementById('project-panel'), '--project-panel-width', 'left', 'project_panel_width', 320, 1100);
 }

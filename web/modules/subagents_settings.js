@@ -695,7 +695,7 @@ export function createAvailableSubagentsEditor({
         openDisclosures: new Set(),
         // Settings: the list's filter, the Reviewer caption of the saved strictness, the agent this page edits (an
         // unsaved one by `unsavedId`), and the last write's result, which stays through a repaint.
-        filter: 'all', tickCaption: '', entryId: '', unsavedId: '', result: null,
+        filter: FILTERS.some(([key]) => key === page?.filter) ? page.filter : 'all', tickCaption: '', entryId: '', unsavedId: '', result: null,
     };
     const listView = Boolean(page) && !page.entry;
     const current = () => state.setting.items.find((row) => row.subagent_id === state.entryId) || null;
@@ -1419,8 +1419,9 @@ CODECS.helperMutation = { read(settings, row) {
 
 let roots = 0;
 /** Settings › Agents (settings_pages.js): the list (`agents`), or one agent's page (`agents/<id>`, `agents/new`). It
- *  reads when it is opened and whenever the shell says it is shown again; an unsaved form survives each read. */
-function mountAgents(container, { path, ctx }) {
+ *  reads when it is opened and whenever the shell says it is shown again; an unsaved form survives each read. A door's
+ *  `view` is the list's first filter (Permissions' Reviewers: `reviewers`). */
+function mountAgents(container, { path, view = '', ctx }) {
     const entry = path.split('/')[1] || '';
     const hostId = `agents-root-${++roots}`;
     const root = `<div id="${hostId}" class="settings-stack agents-root"></div>`;
@@ -1454,7 +1455,7 @@ function mountAgents(container, { path, ctx }) {
     // One read at a time: opening a page and the shell's "shown" for it are one read.
     const reload = () => (reading ||= read().finally(() => { reading = null; }));
     const editor = createAvailableSubagentsEditor({
-        hostId, page: { entry, ctx, reload },
+        hostId, page: { entry, ctx, reload, filter: view },
         previewGenerated: entry ? null : ({ subscriptionsConnected }) => apiClient.previewOnboardingSubagents({ subscriptionsConnected }),
     });
     delegation?.addEventListener('change', async () => {

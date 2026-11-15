@@ -95,13 +95,17 @@ test('a pinch is read against the layout width, so a smaller Interface size is n
     assert.equal(pinchMagnified({ innerWidth: 390 }), false, 'no visual viewport, no pinch');
 });
 
-test('measurePinnedBars writes the pinned head and foot heights for the rows\' scroll margin', async () => {
+test('measurePinnedBars writes the pinned head and foot heights, and says when they leave no room for a row', async () => {
     const { measurePinnedBars } = await import('../modules/layout.js');
     const props = new Map();
     const box = (height) => ({ getBoundingClientRect: () => ({ height }) });
     const head = box(104), foot = box(60.5);
-    const sidebar = { style: { setProperty: (name, value) => props.set(name, value) },
-        querySelector: (sel) => ({ '.sidebar-head': head, '.sidebar-foot-meta': foot })[sel] ?? null };
+    const row = box(48);
+    const attrs = new Set();
+    // The foot is the whole bar a short window pins: the six sections, the version and the update.
+    const sidebar = { style: { setProperty: (name, value) => props.set(name, value) }, clientHeight: 500,
+        toggleAttribute: (name, on) => { if (on) attrs.add(name); else attrs.delete(name); },
+        querySelector: (sel) => ({ '.sidebar-head': head, '.sidebar-foot': foot, '.nav-project-row': row })[sel] ?? null };
     const observed = [];
     let fire = null;
     let disconnected = false;
@@ -112,12 +116,21 @@ test('measurePinnedBars writes the pinned head and foot heights for the rows\' s
     }
     const dispose = measurePinnedBars(sidebar, { Observer });
     // The border box: a band or a safe area that arrives later changes only the bars' padding.
-    assert.deepEqual(observed, [[head, 'border-box'], [foot, 'border-box']]);
+    // The column too: a window that grows or shrinks changes whether a row still fits between the bars.
+    assert.deepEqual(observed, [[head, 'border-box'], [foot, 'border-box'], [sidebar, 'border-box']]);
     assert.equal(props.get('--sidebar-head-h'), '104px');
     assert.equal(props.get('--sidebar-foot-h'), '60.5px');
-    foot.getBoundingClientRect = () => ({ height: 88 });  // an update capsule wrapped onto a second line
+    assert.equal(attrs.has('data-bars-crowd'), false, 'head, a row and foot fit in 500 px');
+    foot.getBoundingClientRect = () => ({ height: 188 });  // the sections two to a line, the version under them
     fire();
-    assert.equal(props.get('--sidebar-foot-h'), '88px');
+    assert.equal(props.get('--sidebar-foot-h'), '188px');
+    assert.equal(attrs.has('data-bars-crowd'), false, '104 + 48 + 188 = 340 still fit');
+    sidebar.clientHeight = 330;  // a shorter window: no Project row between the two bars
+    fire();
+    assert.equal(attrs.has('data-bars-crowd'), true, 'the head scrolls away with the list there');
+    sidebar.clientHeight = 500;
+    fire();
+    assert.equal(attrs.has('data-bars-crowd'), false, 'and is pinned again when the room returns');
     dispose();
     assert.equal(disconnected, true);
     // A page without the bars, or without ResizeObserver, measures nothing and still returns a disposer.

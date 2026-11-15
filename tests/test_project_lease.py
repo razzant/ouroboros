@@ -456,7 +456,8 @@ def test_journal_and_workpad_roundtrip(tmp_path, monkeypatch):
 @pytest.mark.parametrize("failure", ["torn_temp_write", "failed_replace"])
 def test_a_failed_workpad_replacement_keeps_the_whole_previous_page(tmp_path, monkeypatch, failure):
     """#1854: a replacement that dies mid-write or at the swap leaves the complete
-    previous page and says so; it never exposes an empty or torn page or a stray temp."""
+    previous page and says so; it never exposes an empty or torn page or a stray temp.
+    Beside the page only its lock and its history journal (whose row names the version that did not land)."""
     import errno
     import os
     import types
@@ -483,13 +484,15 @@ def test_a_failed_workpad_replacement_keeps_the_whole_previous_page(tmp_path, mo
         else:
             patched.setattr(os, "replace", failed_replace)
         failed = pj._workpad_write(ctx, "## new plan\n- engine\n")
-    assert failed.startswith("⚠️ TOOL_ERROR (workpad_write)")
-    assert pj._workpad_read(ctx) == "## old plan\n- wheels\n"
-    assert [p.name for p in project_workpad_path("racer").parent.iterdir()] == ["workpad.md"]
+    assert failed.startswith("⚠️ TOOL_ERROR: replace_failed") and "keeps its previous bytes" in failed, failed
+    assert project_workpad_path("racer").read_bytes() == b"## old plan\n- wheels\n"
+    assert pj._workpad_read(ctx).endswith("\n\n## old plan\n- wheels\n")
+    beside = ["workpad.md", "workpad.md.lock", "workpad_history.jsonl"]
+    assert sorted(p.name for p in project_workpad_path("racer").parent.iterdir()) == beside
 
     assert pj._workpad_write(ctx, "## new plan\n- engine\n").startswith("OK:")
-    assert pj._workpad_read(ctx) == "## new plan\n- engine\n"
-    assert [p.name for p in project_workpad_path("racer").parent.iterdir()] == ["workpad.md"]
+    assert project_workpad_path("racer").read_bytes() == b"## new plan\n- engine\n"
+    assert sorted(p.name for p in project_workpad_path("racer").parent.iterdir()) == beside
 
 
 def test_stale_tombstone_marker_is_swept_by_the_next_reconcile_tick(tmp_path, monkeypatch):

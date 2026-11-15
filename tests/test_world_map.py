@@ -207,7 +207,7 @@ def test_update_world_warns_above_the_context_budget_without_refusing(tmp_path, 
     big = f"{wprof.TITLE}\n\n{_measured('host')}\n\n" + "x" * (WORLD_SECTION_BUDGET_CHARS + 10)
     result = _update_world(ctx, big)
     assert result.startswith("OK:") and "WORLD_SIZE_NOTICE" in result
-    assert _update_world(ctx, "   ").startswith("⚠️ REJECTED")
+    assert _update_world(ctx, "   ").startswith("⚠️ TOOL_ARG_ERROR: content is empty or whitespace only")
     # Edits inside the measured block are dropped, and the result says so.
     revision = hashlib.sha256((canonical / "memory" / "WORLD.md").read_bytes()).hexdigest()
     edited = _update_world(ctx, f"{wprof.TITLE}\n\n{_measured('forged')}\n\n- note\n", expected_revision=revision)
@@ -382,3 +382,330 @@ def test_startup_verification_refreshes_the_measured_block_in_place(tmp_path, mo
     checks_module.verify_system_state(env, "a" * 40)
     text = world.read_text(encoding="utf-8")
     assert "measured at startup, fresh" in text and "stale" not in text and "- my note" in text
+
+
+def _map_with_block(tmp_path, stamp="host", tail="## What lives here\n- old note\n"):
+    canonical = tmp_path / "canonical"
+    (canonical / "memory").mkdir(parents=True)
+    world = canonical / "memory" / "WORLD.md"
+    # Bytes, not text mode: write_text would store CRLF on Windows, and the edits' multi-line anchors are LF.
+    world.write_bytes(f"{wprof.TITLE}\n\n{_measured(stamp)}\n\n{tail}".encode("utf-8"))
+    return canonical, world
+
+
+def _rev(path: pathlib.Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_an_edit_of_the_map_outside_the_block_keeps_the_block_byte_for_byte(tmp_path, monkeypatch):
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")  # a probe here would mean the host's block was regenerated
+    canonical, world = _map_with_block(tmp_path)
+    ctx = _world_ctx(canonical, canonical)
+    block = _measured("host")
+    for edits in ([{"old_str": "- old note", "new_str": "- a service on :8080 (seen today)"}],  # outside the block
+                  [{"old_str": f"{wprof.MEASURED_END}\n\n## What lives here",  # the unchanged block as anchor context
+                    "new_str": f"{wprof.MEASURED_END}\n\n## What lives here (mine)"}],
+                  [{"old_str": "(seen today)", "new_str": f"(its notes mention the {wprof.MEASURED_START} fence inline)"}]):
+        reply = _update_world(ctx, mode="edit", edits=edits, expected_revision=_rev(world))
+        assert reply.startswith("OK: world map updated (edit"), reply
+        assert world.read_text(encoding="utf-8").count(block) == 1
+    assert "## What lives here (mine)\n- a service on :8080 (its notes mention" in world.read_text(encoding="utf-8")
+    rows = [json.loads(line) for line in (canonical / "memory" / "world_journal.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["mode"] for row in rows] == ["edit"] * 3 and all(row["old_content"] and row["new_content"] for row in rows)
+
+
+def test_an_edit_that_touches_the_hosts_block_or_brings_a_marker_is_refused_whole(tmp_path, monkeypatch):
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")
+    canonical, world = _map_with_block(tmp_path)
+    ctx = _world_ctx(canonical, canonical)
+    before = world.read_bytes()
+    for edits, said in (
+            ([{"old_str": "- **OS**: test", "new_str": "- **OS**: mine"}], "item 1 overlaps it"),  # inside the block
+            ([{"old_str": "- old note", "new_str": "- fine"},  # cuts the closing marker
+              {"old_str": f"{wprof.MEASURED_END}\n\n##", "new_str": "##"}], "item 2 overlaps it"),
+            ([{"old_str": "- old note", "new_str": f"- old note\n{wprof.MEASURED_START}\n- hijack\n{wprof.MEASURED_END}"}],
+             "item 1's new_str brings a marker; the result has a marker line outside it at line 10, 12"),
+            ([{"old_str": "- old note", "new_str": f"- old note\n{wprof.MEASURED_END}"}],  # a lone marker: no complete pair
+             "the result has a marker line outside it at line 10")):
+        reply = _update_world(ctx, mode="edit", edits=edits, expected_revision=_rev(world))
+        assert reply.startswith("⚠️ TOOL_ERROR: host_block: the host's measured block (lines 3-6 of the current map)")
+        assert said in reply, reply
+        assert world.read_bytes() == before
+    assert not (canonical / "memory" / "world_journal.jsonl").exists()
+
+
+def test_an_edit_of_an_unfenced_legacy_map_gets_the_block_as_an_overwrite_does(tmp_path, monkeypatch):
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")
+    canonical = tmp_path / "canonical"
+    (canonical / "memory").mkdir(parents=True)
+    world = canonical / "memory" / "WORLD.md"
+    world.write_text("# My map\n\n- a note\n", encoding="utf-8")
+    ctx = _world_ctx(canonical, canonical)
+    reply = _update_world(ctx, mode="edit", old_str="- a note", content="- a revised note", expected_revision=_rev(world))
+    assert reply.startswith("OK:"), reply
+    assert world.read_text(encoding="utf-8") == f"# My map\n\n{_measured('fresh')}\n\n- a revised note\n"
+    marker = _update_world(ctx, mode="edit", old_str="- a revised note", expected_revision=_rev(world),
+                           content=f"{wprof.MEASURED_START}\n- mine\n{wprof.MEASURED_END}")
+    assert "host_block" in marker and "marker line outside it" in marker
+
+
+def test_revert_takes_the_versions_own_part_with_the_hosts_current_block(tmp_path, monkeypatch):
+    from ouroboros.tools.control_runtime import _update_world
+
+    canonical, world = _map_with_block(tmp_path, "monday")
+    ctx = _world_ctx(canonical, tmp_path / "fork")
+    (tmp_path / "fork" / "memory").mkdir(parents=True)
+    (tmp_path / "fork" / "memory" / "WORLD.md").write_text("an older copy", encoding="utf-8")
+    first = _rev(world)
+    assert _update_world(ctx, mode="edit", old_str="- old note", content="- replaced note",
+                         expected_revision=first).startswith("OK:")
+    _fake_measured(monkeypatch, "tuesday")  # the host refreshes its block at the next start: no row
+    assert wprof.refresh_world_profile(str(world)) is True
+    refreshed = _rev(world)
+    reply = _update_world(ctx, mode="revert", version=first, expected_revision=refreshed, reason="the note was right")
+    text = world.read_text(encoding="utf-8")
+    assert text == f"{wprof.TITLE}\n\n{_measured('tuesday')}\n\n## What lives here\n- old note\n"
+    assert _rev(world) != first and "so the new revision is not that version's" in reply, reply
+    assert f"Replaced {refreshed}: no history row wrote it (a change outside the writer, such as the host's refresh" in reply
+    row = json.loads((canonical / "memory" / "world_journal.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert (row["mode"], row["reverted_from"], row["new_sha256"]) == ("revert", first, _rev(world))
+    assert (tmp_path / "fork" / "memory" / "WORLD.md").read_text(encoding="utf-8") == text  # the fork copy follows
+    again = _update_world(ctx, mode="revert", version=first, expected_revision=_rev(world))
+    assert again.startswith("OK: world map unchanged (revert)"), again  # judged after the splice
+
+
+def test_revert_to_a_stock_legacy_profile_drops_its_generated_lines(tmp_path, monkeypatch):
+    from ouroboros.tools.control_runtime import _update_world
+
+    stock = ("# WORLD.md — Environment Profile\n\n## System\n- **OS**: old\n\n"
+             "*(Generated automatically on first boot)*\n\n## My notes\n- kept\n")
+    canonical, world = _map_with_block(tmp_path)
+    ctx = _world_ctx(canonical, canonical)
+    journal = canonical / "memory" / "world_journal.jsonl"
+    journal.write_text(json.dumps({"ts": "2026-01-01T00:00:00Z", "focus": {"role": "host"}, "old_sha256": "",
+                                   "new_sha256": hashlib.sha256(stock.encode()).hexdigest(), "new_content": stock,
+                                   "old_content": ""}) + "\n", encoding="utf-8")
+    reply = _update_world(ctx, mode="revert", version=hashlib.sha256(stock.encode()).hexdigest(),
+                          expected_revision=_rev(world))
+    text = world.read_text(encoding="utf-8")
+    assert reply.startswith("OK:") and "- **OS**: old" not in text and "Generated automatically" not in text, reply
+    assert text.count(wprof.MEASURED_START) == 1 and _measured("host") in text and "## My notes\n- kept" in text
+
+
+def test_the_resident_map_shows_its_exact_bytes_and_their_revision_and_its_fold_says_it_is_partial(tmp_path):
+    from ouroboros.context import build_memory_sections
+    from ouroboros.memory import Memory
+
+    raw = f"{wprof.TITLE}\r\n\r\n{_measured('host')}\r\n\r\n## What lives here\r\n- a note\r\n\r\n".encode()
+    (tmp_path / "memory").mkdir()
+    (tmp_path / "memory" / "WORLD.md").write_bytes(raw)
+    world = next(section for section in build_memory_sections(Memory(drive_root=tmp_path), partition="stable")
+                 if str(section).startswith("## My World"))
+    revision = hashlib.sha256(raw).hexdigest()
+    assert str(world).endswith(raw.decode() + f"\nRevision of this map: {revision}.\n")  # not stripped: these bytes
+    folded = world.operative_view
+    assert "a partial view: its headings only" in folded and f"memory_read(source='world', version='{revision}')" in folded
+    assert "Revision of this map" not in folded  # a fold proves no reading of the whole
+
+
+def test_an_unchanged_answer_still_brings_a_stale_fork_copy_to_the_canonical_map(tmp_path, monkeypatch):
+    """K12 (SPEC §3: the fork copy follows every successful publication): an overwrite or a revert whose result is the
+    current map writes no row and no canonical byte, yet a forked drive's stale copy takes the canonical bytes; a refused
+    write leaves the copy as it was."""
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")
+    canonical, world = _map_with_block(tmp_path)
+    copy = tmp_path / "fork" / "memory" / "WORLD.md"
+    copy.parent.mkdir(parents=True)
+    ctx, current = _world_ctx(canonical, tmp_path / "fork"), world.read_bytes()
+
+    def written(**arguments):
+        copy.write_bytes(b"a stale copy")
+        return _update_world(ctx, **arguments)
+
+    for refused in ({"content": current.decode("utf-8"), "expected_revision": "0" * 64},
+                    {"mode": "edit", "old_str": "- **OS**: test", "content": "- **OS**: mine", "expected_revision": _rev(world)}):
+        reply = written(**refused)
+        assert reply.startswith("⚠️") and copy.read_bytes() == b"a stale copy", reply
+    for same in ({"content": current.decode("utf-8"), "expected_revision": _rev(world)},
+                 {"mode": "revert", "version": _rev(world), "expected_revision": _rev(world)}):
+        reply = written(**same)
+        assert reply.startswith("OK: world map unchanged ("), reply
+        assert copy.read_bytes() == current and world.read_bytes() == current, (same, copy.read_bytes())
+    assert not (canonical / "memory" / "world_journal.jsonl").exists()
+
+
+def test_a_stray_marker_line_an_overwrite_leaves_is_named_with_the_way_to_remove_it(tmp_path, monkeypatch):
+    """K14: an overwrite may leave a lone marker line outside the host's block (the mind's text, kept as sent); its
+    receipt says so and how it goes, since every edit is refused while it stays. The edit refusal names the line the
+    map already holds and the way to remove it; that way (an edit item with a line beside it) lands, and an ordinary
+    edit works again. An overwrite that leaves none says nothing of it."""
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")
+    canonical, world = _map_with_block(tmp_path)
+    ctx = _world_ctx(canonical, canonical)
+    mine = f"{wprof.TITLE}\n\n{_measured('host')}\n\n## What lives here\n- a note\n"
+    clean = _update_world(ctx, mine, expected_revision=_rev(world))
+    assert clean.startswith("OK: world map updated (overwrite") and "marker line" not in clean, clean
+    left = _update_world(ctx, mine + f"{wprof.MEASURED_END}\n", expected_revision=_rev(world))
+    assert left.startswith("OK: world map updated (overwrite") and world.read_text(encoding="utf-8").endswith(
+        f"- a note\n{wprof.MEASURED_END}\n"), left
+    assert ("The map now holds a marker line outside the host's measured block at line 10: every edit is refused while "
+            "it stays. An overwrite without that line, or an edit item that replaces it together with a line beside "
+            "it (the marker alone also matches the block's own), removes it.") in left, left
+    refused = _update_world(ctx, mode="edit", old_str="- a note", content="- a newer note", expected_revision=_rev(world))
+    assert refused.startswith("⚠️ TOOL_ERROR: host_block: ") and ("the result has a marker line outside it at line 10 "
+                                                                  "(the current map already holds one, at line 10)") in refused
+    assert refused.rstrip(".").endswith("together with a line beside it (the marker alone also matches the block's "
+                                        "own), removes it. Nothing was written; current_revision=" + repr(_rev(world))), refused
+    removed = _update_world(ctx, mode="edit", old_str=f"- a note\n{wprof.MEASURED_END}\n", content="- a note\n",
+                            expected_revision=_rev(world))
+    assert removed.startswith("OK: world map updated (edit") and "marker line" not in removed, removed
+    again = _update_world(ctx, mode="edit", old_str="- a note", content="- a newer note", expected_revision=_rev(world))
+    assert again.startswith("OK: world map updated (edit") and world.read_text(encoding="utf-8") == mine.replace(
+        "- a note", "- a newer note"), again
+
+
+def test_an_empty_map_is_refused_in_every_mode_before_a_block_could_fill_it(tmp_path, monkeypatch):
+    """K17 (A2): the map is never empty. Blank content, a revert to an empty version and an edit that deletes the whole
+    of an unfenced legacy map are argument errors that write nothing, judged before the host's generated block could
+    fill the empty text; a result with words in the same modes lands, with the block."""
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")
+    canonical = tmp_path / "canonical"
+    (canonical / "memory").mkdir(parents=True)
+    world, journal = canonical / "memory" / "WORLD.md", canonical / "memory" / "world_journal.jsonl"
+    ctx = _world_ctx(canonical, canonical)
+
+    def rows():
+        return journal.read_text(encoding="utf-8").splitlines() if journal.exists() else []
+
+    world.write_bytes(b"")  # an empty map an outside write left: the version sha256(b"")
+    empty = _rev(world)
+    assert _update_world(ctx, "# My map\n\n- a note\n", expected_revision=empty).startswith("OK:")
+    fenced, written = world.read_bytes(), len(rows())
+    for reply in (_update_world(ctx, "  \n", expected_revision=_rev(world)),
+                  _update_world(ctx, mode="revert", version=empty, expected_revision=_rev(world))):
+        assert reply.startswith("⚠️ TOOL_ARG_ERROR: ") and "world map" in reply and "empty" in reply, reply
+        assert world.read_bytes() == fenced and len(rows()) == written
+    legacy = b"# My map\n\n- a note\n"
+    world.write_bytes(legacy)  # unfenced: an edit of it gets the block, as an overwrite does
+    emptied = _update_world(ctx, mode="edit", old_str=legacy.decode("utf-8"), content="", expected_revision=_rev(world))
+    assert emptied.startswith("⚠️ TOOL_ARG_ERROR: the edit leaves the world map empty or whitespace only"), emptied
+    assert world.read_bytes() == legacy and len(rows()) == written
+    kept = _update_world(ctx, mode="edit", old_str="- a note", content="- a kept note", expected_revision=_rev(world))
+    assert kept.startswith("OK: world map updated (edit") and world.read_text(encoding="utf-8") == \
+        f"# My map\n\n{_measured('fresh')}\n\n- a kept note\n", kept
+    back = _update_world(ctx, mode="revert", version=hashlib.sha256(fenced).hexdigest(), expected_revision=_rev(world))
+    assert back.startswith("OK: world map updated (revert") and world.read_bytes() == fenced, back
+
+
+def test_a_revert_to_an_authored_or_modified_legacy_map_keeps_its_text_beside_the_current_block(tmp_path):
+    """K17 (A7): only a STOCK first-boot profile's generated lines leave on revert; a legacy map the mind wrote, or a
+    stock one it edited (no fence either), comes back whole with the host's current block after its title."""
+    from ouroboros.tools.control_runtime import _update_world
+
+    footer = "*(Generated automatically on first boot)*\n"
+    authored = "# My own map\n\n- the Pi answers on ssh\n"
+    modified = f"# WORLD.md — Environment Profile\n\n## System\n- **OS**: old\n- the Pi answers on ssh\n\n{footer}"
+    stock = f"# WORLD.md — Environment Profile\n\n## System\n- **OS**: old\n\n{footer}\n## My notes\n- kept\n"
+    block = _measured("host")
+    for number, legacy in enumerate((authored, modified, stock)):
+        canonical, world = _map_with_block(tmp_path / f"case-{number}")
+        version = hashlib.sha256(legacy.encode("utf-8")).hexdigest()
+        (canonical / "memory" / "world_journal.jsonl").write_text(json.dumps({
+            "ts": "2026-01-01T00:00:00Z", "focus": {"role": "host"}, "old_sha256": "", "new_sha256": version,
+            "new_content": legacy, "old_content": ""}) + "\n", encoding="utf-8")
+        reply = _update_world(_world_ctx(canonical, canonical), mode="revert", version=version,
+                              expected_revision=_rev(world))
+        text = world.read_text(encoding="utf-8")
+        assert reply.startswith("OK: world map updated (revert") and text.count(block) == 1, reply
+        if legacy is stock:  # the other half: generated lines leave, the mind's notes stay
+            assert "- **OS**: old" not in text and footer not in text and "## My notes\n- kept" in text, text
+        else:
+            title, _newline, rest = legacy.partition("\n")
+            assert text == f"{title}\n\n{block}\n\n{rest.lstrip()}", text  # every line of it, the block after its title
+
+
+def test_a_map_whose_bytes_are_not_text_takes_an_overwrite_with_the_block_and_refuses_an_edit(tmp_path, monkeypatch):
+    """C1 (K11's publisher serves the map too): a map an outside write left in bytes that are not UTF-8: an edit or a
+    revert is refused typed and the door's read of the current version says it is not text, nothing written; an
+    overwrite checked against its sha256 replaces it with the host's block, its row recording that the previous bytes
+    were not text."""
+    from ouroboros.tools.chronicle import _memory_read
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")
+    canonical = tmp_path / "canonical"
+    (canonical / "memory").mkdir(parents=True)
+    world, journal = canonical / "memory" / "WORLD.md", canonical / "memory" / "world_journal.jsonl"
+    bad = "# My map\n\n- caf\xe9\n".encode("latin-1")
+    world.write_bytes(bad)
+    ctx, revision = _world_ctx(canonical, canonical), _rev(world)
+    said = f"is {len(bad)} bytes that are not UTF-8 text, so it is not shown"
+    for mode, extra in (("edit", {"old_str": "- caf", "content": "- tea"}), ("revert", {"version": "1" * 64})):
+        refused = _update_world(ctx, mode=mode, expected_revision=revision, **extra)
+        assert refused.startswith(f"⚠️ TOOL_ERROR: not_text: there is no text to {mode}.") and said in refused, refused
+    door = _memory_read(ctx, source="world", version=revision)
+    assert door.startswith("⚠️ TOOL_ERROR: not_text: The current world map") and said in door, door
+    assert world.read_bytes() == bad and not journal.exists()
+    written = _update_world(ctx, "# My map\n\n- café\n", expected_revision=revision)
+    assert written.startswith("OK: world map updated (overwrite") and world.read_text(encoding="utf-8") == \
+        f"# My map\n\n{_measured('fresh')}\n\n- café\n", written
+    row = json.loads(journal.read_text(encoding="utf-8").splitlines()[-1])
+    assert (row["old_sha256"], row["old_not_text"], row["old_bytes"]) == (revision, True, len(bad)), row
+    assert "old_content" not in row and row["new_content"] == world.read_text(encoding="utf-8")
+
+
+def test_the_maps_refusal_names_only_the_items_at_fault(tmp_path, monkeypatch):
+    """C5: an item anchored on the measured block's unchanged edge keeps the block byte for byte, and a marker mentioned
+    inside a sentence is no marker line: neither is named when another item of the same edit changes the block or
+    brings a marker line, and that item is. Without the faulty item the same two items land."""
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")
+    canonical, world = _map_with_block(tmp_path)
+    ctx = _world_ctx(canonical, canonical)
+    edge = {"old_str": f"{wprof.MEASURED_END}\n\n## What lives here",
+            "new_str": f"{wprof.MEASURED_END}\n\n## What lives here (mine)"}
+    mention = {"old_str": "- old note", "new_str": f"- old note (it mentions {wprof.MEASURED_START} inline)"}
+    before = world.read_bytes()
+    for bad, named in (({"old_str": "- **OS**: test", "new_str": "- **OS**: mine"}, "item 3 overlaps it"),
+                       ({"old_str": wprof.TITLE, "new_str": f"{wprof.TITLE}\n{wprof.MEASURED_END}"},
+                        "item 3's new_str brings a marker")):
+        reply = _update_world(ctx, mode="edit", edits=[edge, mention, bad], expected_revision=_rev(world))
+        assert reply.startswith("⚠️ TOOL_ERROR: host_block: ") and named in reply, reply
+        assert "item 1" not in reply and "item 2" not in reply, reply
+        assert world.read_bytes() == before
+    landed = _update_world(ctx, mode="edit", edits=[edge, mention], expected_revision=_rev(world))
+    assert landed.startswith("OK: world map updated (edit") and world.read_text(encoding="utf-8").count(
+        _measured("host")) == 1, landed
+
+
+def test_a_stray_marker_on_the_first_line_goes_with_the_line_after_it(tmp_path, monkeypatch):
+    """R6: a stray marker line can stand on line 1, where no line precedes it, so the remedy names a line beside it; an
+    edit item taking the marker with the line after it removes it, and the map is the mind's text with its block."""
+    from ouroboros.tools.control_runtime import _update_world
+
+    _fake_measured(monkeypatch, "fresh")
+    canonical = tmp_path / "canonical"
+    (canonical / "memory").mkdir(parents=True)
+    world, block = canonical / "memory" / "WORLD.md", _measured("host")
+    mine = f"# My map\n\n{block}\n\n- a note\n"
+    world.write_bytes(mine.encode("utf-8"))  # bytes exactly: the anchors below span line ends
+    ctx = _world_ctx(canonical, canonical)
+    left = _update_world(ctx, f"{wprof.MEASURED_END}\n{mine}", expected_revision=_rev(world))
+    assert left.startswith("OK: world map updated (overwrite") and "block at line 1: every edit is refused" in left, left
+    assert "together with a line beside it" in left and "the line before it" not in left, left
+    removed = _update_world(ctx, mode="edit", old_str=f"{wprof.MEASURED_END}\n# My map", content="# My map",
+                            expected_revision=_rev(world))
+    assert removed.startswith("OK: world map updated (edit") and world.read_bytes() == mine.encode("utf-8"), removed

@@ -199,11 +199,12 @@ export function secretRowHtml(row) {
     const id = `setting-${row.id}`;
     return `<div class="ui-row settings-row accounts-secret" data-setting-row="${escapeHtml(row.id)}" data-kind="secret" data-secret-row>
         <label class="ui-row-title" for="${id}"${row.verbatim ? ' data-i18n-skip' : ''}>${escapeHtml(row.name)}</label>
-        <div class="ui-row-meta"><span id="${id}-meta" data-setting-meta>${escapeHtml(row.meta || '')}</span><span class="ui-result settings-row-result" id="${id}-result" data-setting-result role="status" aria-live="polite"></span></div>
+        <div class="ui-row-meta"><span id="${id}-meta" data-setting-meta>${escapeHtml(row.meta || '')}</span></div>
         <div class="ui-row-actions">
             <span class="settings-row-value" data-secret-state></span>
             <button type="button" class="btn btn-default btn-sm" data-secret-open aria-expanded="false" aria-controls="${id}-field">Add</button>
         </div>
+        <span class="ui-result settings-row-result" id="${id}-result" data-setting-result role="status" aria-live="polite"></span>
         <div class="secret-input-row accounts-secret-field" id="${id}-field" data-secret-field hidden>
             <input id="${id}" class="ui-control secret-input" data-setting-control type="password" autocomplete="off" spellcheck="false" placeholder="New value" aria-describedby="${id}-meta ${id}-result">
             <button type="button" class="btn btn-default btn-sm" data-secret-show>Show</button>

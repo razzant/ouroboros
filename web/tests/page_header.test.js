@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { bindHeaderControlPlacement, bindPageHeader, renderMobileNavToggle, renderPageHeader } from '../modules/page_header.js';
+import { bindHeaderControlPlacement, bindPageHeader, placePageBack, renderMobileNavToggle, renderPageHeader } from '../modules/page_header.js';
 import { createRoomHeader } from '../modules/chat_header.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
@@ -259,4 +259,33 @@ test('the optional toolbar class cannot create an HTML attribute or node', () =>
     assert.doesNotMatch(html, /<img/);
     assert.match(html, /&quot;/);
     assert.match(html, /&lt;img/);
+});
+
+test('a page that leads back keeps Back in its header\'s slot in every layout: one leading control, its tabs as they were', () => {
+    const listeners = new Map();
+    const before = { window: globalThis.window, document: globalThis.document };
+    globalThis.window = { ouroLayout: { layout: 'stack' }, addEventListener: (type, fn) => listeners.set(type, fn),
+        removeEventListener: (type) => listeners.delete(type) };
+    globalThis.document = { documentElement: { dataset: { layout: 'stack' } } };
+    try {
+        // Skills opened from Settings on a phone: its header (☰, the name, the Back slot before the lead) and its tabs under it.
+        const attrs = new Set();
+        const lead = { name: 'lead' };
+        const block = { querySelector: () => lead, insertBefore() {} };
+        const slot = { parentElement: block, children: [], replaceChildren(...nodes) { this.children = nodes; } };
+        const tabs = { prepended: [], marks: new Set(), classList: { contains: (name) => name === 'app-page-tabs' },
+            prepend(node) { this.prepended.push(node); }, toggleAttribute(name, on) { if (on) this.marks.add(name); else this.marks.delete(name); },
+            removeAttribute(name) { this.marks.delete(name); } };
+        const header = { nextElementSibling: tabs, querySelector: (selector) => (selector === '[data-page-back]' ? slot : null),
+            setAttribute: (name) => attrs.add(name), removeAttribute: (name) => attrs.delete(name) };
+        const control = { name: 'Back to Settings' };
+        const dispose = placePageBack(header, control);
+        // The sheet puts a header's Back where ☰ stood and hides ☰ (style.css `.app-page-header[data-back]`): Back stays.
+        assert.deepEqual([slot.children, attrs.has('data-back'), tabs.prepended, [...tabs.marks]], [[control], true, [], []],
+            'the stack layout: Back in the header\'s slot, never a second leading control in the tabs row');
+        dispose();
+        assert.deepEqual([slot.children, attrs.has('data-back'), listeners.size], [[], false, 0]);
+    } finally {
+        Object.assign(globalThis, before);
+    }
 });

@@ -18,6 +18,7 @@ from starlette.testclient import TestClient
 
 from ouroboros import claudexor_daemon as owned
 from ouroboros import claudexor_runtime as runtime
+from ouroboros.gateway import claudexor_passive
 from ouroboros.gateway.claudexor_accounts import api_claudexor_status
 from ouroboros.gateways import claudexor as wire
 
@@ -60,6 +61,7 @@ def passive_engine(monkeypatch, tmp_path):
     monkeypatch.setattr(claudexor_accounts, "_STATUS_IN_FLIGHT", {})
     monkeypatch.setattr(claudexor_accounts, "_FACET_MEMORY", {})
     monkeypatch.setattr(claudexor_accounts, "_ACCOUNTS_REVISION", 0)
+    monkeypatch.setattr(claudexor_passive, "_last_sample", None, raising=False)
     monkeypatch.setattr(owned, "owned_config_dir", lambda: config_dir)
     calls = []
     clients = []
@@ -343,6 +345,37 @@ def test_quota_view_errors_are_bounded_and_preserve_successful_sibling(
     assert len(records) == 1
     assert records[0].args == (payload["reads"], payload["read_errors"], payload["timings_ms"])
     assert all(client.is_closed for client in engine.clients)
+
+
+def test_the_passive_record_is_a_dated_sample_on_change_or_once_a_minute_not_one_per_poll(passive_engine, caplog):
+    """The visible views poll every 5 s; engine_facts reads the newest INFO record. Between a change of
+    verdict or error and the next minute the same format logs at DEBUG, which server.log does not keep."""
+    engine = passive_engine
+    engine.provision()
+    caplog.set_level(logging.DEBUG, logger="ouroboros.gateway.claudexor_passive")
+
+    def levels():
+        found = [record.levelno for record in caplog.records if record.name == "ouroboros.gateway.claudexor_passive"]
+        caplog.clear()
+        return found
+
+    with TestClient(_app()) as client:
+        payloads = [_read(client) for _ in range(3)]
+        assert levels() == [logging.INFO, logging.DEBUG, logging.DEBUG]
+        # A minute later the steady state is sampled again.
+        sampled_at, verdict = claudexor_passive._last_sample
+        claudexor_passive._last_sample = (sampled_at - 61, verdict)
+        _read(client)
+        _read(client)
+        assert levels() == [logging.INFO, logging.DEBUG]
+        # A changed verdict or error code is news at once, in both directions.
+        engine.state["errors"]["/v2/quota"] = (503, {"code": "daemon_recovery_only", "message": "busy"})
+        failed = _read(client)
+        _read(client)
+        del engine.state["errors"]["/v2/quota"]
+        _read(client)
+        assert levels() == [logging.INFO, logging.DEBUG, logging.INFO]
+    assert failed["reads"]["quota"] == "failed" and payloads[0]["reads"]["quota"] == "ok"
 
 
 def test_quota_consumer_returns_while_full_status_catalog_is_still_blocked(passive_engine, monkeypatch):
@@ -688,3 +721,23 @@ def test_a_unified_roster_is_not_downgraded_by_the_operations_catalog(passive_en
     # The catalog keeps its own job: resource capabilities say what happened to THAT read.
     expected_capabilities = "ok" if isinstance(operations, list) else "failed"
     assert full["resource_capabilities_read"] == expected_capabilities
+
+
+def test_the_passive_reader_does_not_load_the_http_accounts_module(tmp_path):
+    """The HTTP handler fences each passive answer; the reader (also the agent worker's) stays independent."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    code = (
+        "import pathlib, sys\n"
+        "from ouroboros import claudexor_daemon\n"
+        "from ouroboros.gateway import claudexor_passive\n"
+        "claudexor_daemon.owned_config_dir = lambda: pathlib.Path(sys.argv[1])\n"
+        "payload = claudexor_passive._quota_payload()\n"
+        "assert payload['read_errors'].get('discovery'), payload\n"
+        "print('ouroboros.gateway.claudexor_accounts' in sys.modules)\n")
+    result = subprocess.run([sys.executable, "-c", code, str(tmp_path / "no-daemon")], capture_output=True,
+                            text=True, cwd=Path(__file__).resolve().parents[1], timeout=120)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().splitlines()[-1] == "False"

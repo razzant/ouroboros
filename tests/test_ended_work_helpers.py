@@ -1254,3 +1254,242 @@ def test_one_custody_read_serves_every_ended_work_with_a_parked_helper(env, monk
     write_task_result(env.root, "work-root-2", "completed", result="the answer")
     assert sorted(close_abandoned_helpers()) == sorted([CHILD, SIBLING, "work-2-child"])
     assert sorted(reads) == ["open_held_runs", "pending"]
+
+
+def _helper_workspace(env, tmp_path_factory, *, carrier="copy"):
+    """A real repository holding the paused helper's saved edit and evidence, and that helper parked with it.
+    ``native``: its own registered self_worktree copy; ``split``: it runs on its own child drive under the canonical
+    budget root its scheduling names (``control_scheduling``)."""
+    import subprocess
+
+    from ouroboros.headless import prepare_task_drive
+
+    workspace = tmp_path_factory.mktemp("helper-workspace")
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(workspace), "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                              check=True, capture_output=True, text=True).stdout.strip()
+
+    git("init", "-q")
+    (workspace / "note.txt").write_text("base\n", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    base = git("rev-parse", "HEAD")
+    (workspace / "note.txt").write_text("base\nfirst edit\n", encoding="utf-8")
+    (workspace / ".review-evidence").mkdir()
+    (workspace / ".review-evidence" / "probe.txt").write_text("first probe\n", encoding="utf-8")
+    meta = {"workspace_root": str(workspace), "workspace_mode": "self_worktree", "workspace_base_sha": base}
+    fields = {"workspace_root": str(workspace), "workspace_mode": "self_worktree", "workspace_base_sha": base, "metadata": meta}
+    if carrier == "native":
+        fields["task_constraint"] = {"mode": "acting_subagent", "surface": "self_worktree", "write_root": str(workspace),
+                                     "return_kind": "workspace_patch", "base_sha": base}
+    if carrier == "split":
+        fields.update(drive_root=str(prepare_task_drive(env.root, CHILD, "empty")), budget_drive_root=str(env.root))
+    _work_root(env.root)
+    task = _paused_helper(env.root, env.monkeypatch, extra={**fields, "admitted_dispatch": "possible"})
+    write_task_result(env.root, CHILD, "scheduled", **fields)
+    return workspace, task
+
+
+def _withdrawn_after_capture(env, monkeypatch):
+    """The closure captures, then a retry of the root lands before its write: the closure is withdrawn.
+    Returns the capture it left: each current capture row's path and the sha256 of its bytes."""
+    assert close_abandoned_helpers() == [CHILD]
+
+    def publish_retry():
+        write_task_result(env.root, ROOT, "completed", superseded_by="work-retry", retry_task_id="work-retry")
+        write_task_result(env.root, "work-retry", "running", root_task_id=ROOT, parent_task_id="", delegation_role="root",
+                          supersedes_task_id=ROOT, original_task_id=ROOT, timeout_retry_from=ROOT)
+
+    fired = _fire_before_write(env, monkeypatch, "before_write", publish_retry)
+    assert sweep_cancel_intents(now=time.time() + 3600) == {CHILD: "not_found"} and fired
+    _withdrawn(env)
+    row = load_task_result(env.root, CHILD)
+    assert row["artifact_status"] == "ready_with_changes" and "first edit" in _current(row, "workspace_patch")
+    return _bytes(row)
+
+
+def _bytes(row):
+    """``{path: sha256}`` of the row's current capture files, read from disk now."""
+    import hashlib
+    import pathlib
+
+    return {item["path"]: hashlib.sha256(pathlib.Path(item["path"]).read_bytes()).hexdigest() for item in row["artifacts"]
+            if item.get("kind") in {"workspace_patch", "workspace_patch_manifest"}}
+
+
+def _kept(first):
+    """The first capture's files are still at their addresses with their bytes."""
+    import hashlib
+    import pathlib
+
+    assert {path: hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest() for path in first} == first
+
+
+def _current(row, kind):
+    import pathlib
+
+    [item] = [item for item in row["artifacts"] if item.get("kind") == kind]
+    return pathlib.Path(item["path"]).read_text(encoding="utf-8")
+
+
+def _history(row, kind):
+    import pathlib
+
+    return [pathlib.Path(item["path"]).read_text(encoding="utf-8") for item in row["artifacts"]
+            if item.get("kind") == "workspace_capture_history" and item.get("capture_kind") == kind]
+
+
+def _worker(env, put=None):
+    from tests.worker_pool_support import affirm_ready
+
+    sent = []
+    env.workers.WORKERS[0] = affirm_ready(SimpleNamespace(wid=0, busy_task_id=None, reaping=False,
+                                                          in_q=SimpleNamespace(put=put or (lambda t: sent.append(dict(t))))))
+    return sent
+
+
+def _resumed(env):
+    from supervisor.queue_transitions import resume_budget_paused_task
+
+    assert resume_budget_paused_task(CHILD)["ok"] is True
+
+
+def _stop_queued(env):
+    ci.request_cancel(env.root, CHILD, reason="the owner pressed Stop", source="http_single", requested_by="owner")
+    assert sweep_cancel_intents(now=time.time() + 3600) == {CHILD: "cancelled"}
+    return load_task_result(env.root, CHILD)
+
+
+def _closures_capture_stands(row, first):
+    """No execution entered since the withdrawn closure: its capture is still the row's own, bytes and addresses."""
+    assert row["artifact_status"] == "ready_with_changes" and row["artifact_bundle"]["status"] == "ready_with_changes"
+    assert _bytes(row) == first and "first edit" in _current(row, "workspace_patch")
+    _kept(first)
+
+
+def _entered(env, task):
+    """The resumed worker's entry, as ``loop._resume_continuation`` makes it once the continuation is consumed and
+    before any effect (that order, through the real handover, is pinned in test_resume_handover): on the canonical
+    row the loop names, its budget root, else its own drive."""
+    import pathlib
+
+    from ouroboros.headless import reopen_capture_at_entry
+
+    reopen_capture_at_entry(pathlib.Path(task.get("budget_drive_root") or task.get("drive_root") or env.root), CHILD)
+
+
+@pytest.mark.parametrize("carrier,ending", [("copy", "changes"), ("native", "changes"), ("split", "changes"),
+                                            ("copy", "no_changes"), ("copy", "failed")])
+def test_a_resumed_helper_hands_in_its_new_work_not_the_withdrawn_closures_capture(env, monkeypatch, tmp_path_factory,
+                                                                                  carrier, ending):
+    """#3248: the withdrawn closure's capture stays the helper's snapshot through its Resume's dispatch, since nothing
+    has run; the worker's entry makes it history and owes a new one, and the finish captures the new tree beside
+    the earlier bytes."""
+    import subprocess
+
+    import ouroboros.headless as headless
+
+    workspace, task = _helper_workspace(env, tmp_path_factory, carrier=carrier)
+    first = _withdrawn_after_capture(env, monkeypatch)
+    _resumed(env)
+    sent = _worker(env)
+    env.workers.assign_tasks()
+    assert [launched["id"] for launched in sent] == [CHILD]
+    _closures_capture_stands(load_task_result(env.root, CHILD), first)  # put: nothing reopened before the worker
+    _entered(env, task)
+    entered = load_task_result(env.root, CHILD)
+    assert entered["artifact_status"] == entered["artifact_bundle"]["status"] == "pending"  # the new execution owes one
+    assert set(first) <= {item["path"] for item in entered["artifacts"] if item.get("kind") == "workspace_capture_history"}
+    with pytest.raises(FileNotFoundError):  # no current pointer names the closure's capture while one is owed
+        headless.current_workspace_manifest(env.root, CHILD, entered)
+    if ending == "no_changes":
+        subprocess.run(["git", "-C", str(workspace), "checkout", "-q", "--", "note.txt"], check=True)
+    else:
+        (workspace / "note.txt").write_text("base\nfirst edit\nsecond edit after Resume\n", encoding="utf-8")
+    (workspace / ".review-evidence" / "probe.txt").write_text("second probe\n", encoding="utf-8")
+    if ending == "failed":
+        monkeypatch.setattr(headless, "write_workspace_patch_artifacts", lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")))
+    write_task_result(task.get("drive_root") or env.root, CHILD, "completed", result="done after Resume")
+    assert headless.prepare_terminal_task_files(env.root, task)["error"] == ""
+    row = load_task_result(env.root, CHILD)
+    assert row["status"] == "completed"
+    assert row["artifact_status"] == {"changes": "ready_with_changes", "no_changes": "ready_no_changes", "failed": "failed"}[ending]
+    if ending == "changes":
+        assert "second edit after Resume" in _current(row, "workspace_patch")
+        assert "second probe" in "".join(path.read_text() for path in headless.task_artifacts_dir(env.root, CHILD).rglob("probe.txt"))
+    if ending == "failed":
+        assert not [item for item in row["artifacts"] if item.get("kind") == "workspace_patch"]  # no old patch passes as current
+    if carrier == "native":
+        assert row["native_capture_pending"] == {}
+    if carrier == "split":  # a Continue reads this capture's memory export, never the closure's earlier one
+        import pathlib
+
+        from ouroboros.owner_continue import owner_sources
+
+        [export] = [item for item in row["artifacts"] if item.get("kind") == "memory_export"]
+        assert pathlib.Path(export["path"]).parent.parent.name == "captures"
+        assert owner_sources(env.root, row, CHILD)["memory_export"] == export["path"]
+    # The earlier capture, its patch and its evidence, are still there to read; nothing was rewritten in place.
+    _kept(first)
+    assert set(first) <= {item["path"] for item in row["artifacts"] if item.get("kind") == "workspace_capture_history"}
+    assert any("first edit" in old and "second edit" not in old for old in _history(row, "workspace_patch")), row["artifacts"]
+    assert "first probe" in "".join(path.read_text() for path in headless.task_artifacts_dir(env.root, CHILD).rglob("probe.txt"))
+
+
+def test_a_withdrawn_closure_alone_keeps_the_ready_snapshot_for_a_later_stop(env, monkeypatch, tmp_path_factory):
+    """No new execution, no reopen: a queued Stop after the withdrawal settles with the closure's capture."""
+    _helper_workspace(env, tmp_path_factory)
+    first = _withdrawn_after_capture(env, monkeypatch)
+    _resumed(env)
+    row = _stop_queued(env)
+    assert row["status"] == "cancelled"
+    _closures_capture_stands(row, first)
+
+
+@pytest.mark.parametrize("before", ["no_put", "worker_lost_before_consumption"])
+def test_a_resume_that_never_entered_leaves_the_closures_capture_to_its_stop(env, monkeypatch, tmp_path_factory, before):
+    """A dispatch that put nothing, or a put whose worker died before it consumed the Resume (the real dead-worker
+    recovery parks the same task on its exact pause), ran nothing: the row keeps the closure's capture, and a queued
+    Stop settles with it, its bytes at their addresses (the r3 launch reopen left ``missing`` here)."""
+    import supervisor.worker_assignment as assignment
+    from supervisor import worker_health
+
+    _helper_workspace(env, tmp_path_factory)
+    first = _withdrawn_after_capture(env, monkeypatch)
+    _resumed(env)
+    if before == "no_put":
+        monkeypatch.setattr(assignment, "_mark_launch_row",
+                            lambda *a: (_ for _ in ()).throw(OSError("occurrence row unwritable")))
+    sent = _worker(env)
+    env.workers.assign_tasks()
+    if before == "no_put":
+        assert sent == [] and _pending(env) is not None
+    else:
+        assert [launched["id"] for launched in sent] == [CHILD]
+        meta = env.workers.RUNNING[CHILD]
+        monkeypatch.setattr(worker_health, "_dead_job_is_current", lambda job: True)
+        job = {"worker": env.workers.WORKERS[0], "task_id": CHILD, "task": dict(meta["task"]), "meta": meta,
+               "worker_id": 0, "exitcode": 1, "drive_root": str(env.root)}
+        assert worker_health._complete_exact_budget_pause_after_death(
+            job, env.root, meta["task"], CHILD, meta["attempt"]) == (True, True)
+        assert CHILD not in env.workers.RUNNING and _pending(env) is not None
+        assert budget_pause_row(env.root, CHILD)["grant"]["revoke_reason"] == "worker_death_before_consumption"
+    _closures_capture_stands(load_task_result(env.root, CHILD), first)
+    row = _stop_queued(env)
+    assert row["status"] == "cancelled"
+    _closures_capture_stands(row, first)
+
+
+def test_a_second_closure_versions_its_capture_and_keeps_the_first_ones_bytes(env, monkeypatch, tmp_path_factory):
+    """An unfinished row's published capture is never rewritten in place: the closure that finally wins captures
+    again as a version, and the withdrawn one's files keep their bytes at their addresses."""
+    workspace, _task = _helper_workspace(env, tmp_path_factory)
+    first = _withdrawn_after_capture(env, monkeypatch)
+    (workspace / "note.txt").write_text("base\nfirst edit\nedited while parked\n", encoding="utf-8")
+    write_task_result(env.root, "work-retry", "completed", result="the retry's answer")
+    assert _sweep(env) == ([CHILD], {CHILD: "cancelled"})
+    row = _closed(env)
+    assert row["artifact_status"] == "ready_with_changes" and "edited while parked" in _current(row, "workspace_patch")
+    _kept(first)
+    assert set(first) <= {item["path"] for item in row["artifacts"] if item.get("kind") == "workspace_capture_history"}

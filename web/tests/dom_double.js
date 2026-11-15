@@ -102,6 +102,7 @@ class Node extends Events {
     }
     hasAttribute(key) { return this.getAttribute(key) !== null; }
     removeAttribute(key) { this.attrs.delete(key); }
+    toggleAttribute(key, force = !this.hasAttribute(key)) { if (force) this.attrs.set(key, ''); else this.attrs.delete(key); return force; }
     matchesCompound(c) {
         if (c.tag && c.tag !== this.tagName.toLowerCase()) return false;
         if (c.disabled && !this.disabled) return false;
@@ -171,6 +172,7 @@ class Node extends Events {
     get offsetWidth() { return this.rect?.width ?? 0; }
     get offsetHeight() { return this.rect?.height ?? 0; }
     focus() { if (this.isConnected) this.ownerDocument.activeElement = this; }
+    select() { this.selected = true; }
     click() { if (!this.disabled) this.emit('click', { target: this }); }
     dispatchEvent(event) { return !this.emit(event.type, { native: event }).defaultPrevented; }
 }
@@ -200,6 +202,8 @@ export function domDouble() {
     doc.createElement = (tag) => new Node(doc, tag);
     doc.body = new Node(doc, 'body');
     doc.getElementById = (id) => doc.body.descendants().find((node) => node.id === id) || null;
+    doc.querySelectorAll = (selector) => doc.body.querySelectorAll(selector);
+    doc.createTextNode = (text) => Object.assign(new Node(doc, '#text'), { textContent: text });
     doc.activeElement = doc.body;
     return { doc, el: (tag = 'div', { className = '', attrs = {}, dataset = {}, text = '' } = {}, ...children) => {
         const node = new Node(doc, tag, attrs);

@@ -389,7 +389,7 @@ def test_every_reader_keeps_real_reactions_as_labelled_context(chain, provider):
     from ouroboros.dialogue_evidence import read_room_source
     from ouroboros.gateway.history import make_chat_history_endpoint
     from ouroboros.memory import Memory
-    from ouroboros.place_arrivals import account_candidates, activity
+    from ouroboros.place_arrivals import account_candidates, place_facts
     from ouroboros.tools.chronicle import check_quotes
     from ouroboros.tools.plan_dialogue import dialogue_view
 
@@ -423,7 +423,7 @@ def test_every_reader_keeps_real_reactions_as_labelled_context(chain, provider):
     assert "[Reaction, not speech:" in conversation and "[Reaction action, not speech:" in conversation
     observed = observe_wake(world.data, boundary=None, since=0.0, now=time.time(), reason="timer").full_text()
     assert "Presence reaction in" in observed and "Reaction, not speech" in observed
-    assert activity(world.data, world.place)["unanswered"] == 0
+    assert place_facts(world.data, [world.place])[world.place.place_id]["unanswered"] == 0
     assert "-77" not in [row["platform_actor_id"] for row in account_candidates(world.data, world.place.place_id)]
     address = chat_chain.format_address(chat_chain.row_address(reaction))
     for speaker in ("human", "ouroboros", "host", "unattributed"):

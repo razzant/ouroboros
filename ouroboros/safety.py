@@ -786,8 +786,8 @@ def _resolve_safety_routing() -> Tuple[bool, bool, Optional[str]]:
     selected = get_safety_model()
     explicit = bool(str(runtime_setting("OUROBOROS_MODEL_SAFETY", "") or "").strip())
     local_light = str(runtime_setting("USE_LOCAL_LIGHT", "") or "").lower() in ("true", "1")
-    # The lane is the one the resolved model names (``get_safety_model`` labels it): a blank Light follows
-    # Main and Main's lane, so a leftover USE_LOCAL_LIGHT never sends an inherited remote Main locally (#2969).
+    # The lane is the one the resolved model names (``get_safety_model`` labels it): an empty Light follows
+    # route_choice's rule, so its own ticked local box means the local runtime (owner 2026-11-15, #3292).
     if selected.endswith(" (local)"):
         inherited_main = not explicit and not local_light and not str(runtime_setting("OUROBOROS_MODEL_LIGHT", "") or "").strip()
         return True, inherited_main, None

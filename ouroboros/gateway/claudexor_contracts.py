@@ -18,7 +18,8 @@ ClaudexorReadState = Literal["ok", "not_read", "failed"]
 class ClaudexorStatusReads(TypedDict):
     """Independent status facets: harnesses/catalog, profiles/accounts and quota.
     ok means authoritative (including empty); not_read means never asked, including
-    a discovery failure before fan-out; failed means no usable answer to a read.
+    a discovery failure before fan-out, or an answer discarded as older than a confirmed
+    account write or a newer held read; failed means no usable answer to a read.
     The login-capability manifest filter fails open and is not a reported facet."""
 
     catalog: ClaudexorReadState

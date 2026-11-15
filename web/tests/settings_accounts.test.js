@@ -220,8 +220,12 @@ test('the glance is one bar per account from windows that were read; the account
     assert.equal([...stale.matchAll(/data-profile="([^"]+)"/g)][0][1], 'studio-01');
     // A row's place in rotation is a switch; what is rare waits behind More; the program's row stands above.
     assert.equal((html.match(/role="switch" data-harness-toggle/g) || []).length, 18);
-    assert.match(html, /data-harness-login>Sign in<\/button>\s*<label class="ui-switch">/, 'Sign in stands in the row of the account that needs it');
+    assert.match(html, /data-harness-login>Sign in<\/button><button[^>]*data-harness-remove data-rare>/, 'Sign in stands on the line under the words of the account that needs it, the switch keeps the row\'s end');
     assert.equal((html.match(/data-harness-login data-rare>Sign in again</g) || []).length, 17);
+    const actionsOf = [...html.matchAll(/<div class="harness-account-actions">([\s\S]*?)<\/div>/g)].map((hit) => hit[1]);
+    assert.equal(actionsOf.length, 18);
+    assert.ok(actionsOf.every((part) => /data-harness-toggle/.test(part) && /data-resources/.test(part) && !/data-harness-login|data-harness-remove/.test(part)),
+        'every row keeps only its switch and More at its end, whether or not it needs sign-in');
     assert.equal((html.match(/data-harness-remove data-rare>Remove</g) || []).length, 18);
     assert.doesNotMatch(html, /title="/, 'no fact lives in a hover title');
 });
@@ -245,11 +249,11 @@ test('showing the list reads no status, starts no daemon and calls no provider; 
     list.unmount();
 
     // The provider's page starts one full discovery and one independent passive observation.
-    // The passive envelope carries no lifecycle: activation rechecks stale lifecycle before waking once.
+    // The passive envelope carries no lifecycle: activation joins that full read and wakes the stale home once.
     world.state.calls.length = 0;
     const page = await world.mount('accounts/codex');
     assert.deepEqual(starts(world).filter((line) => line.includes('status')), [
-        'GET /api/claudexor/status', 'GET /api/claudexor/status?view=quota', 'GET /api/claudexor/status']);
+        'GET /api/claudexor/status', 'GET /api/claudexor/status?view=quota']);
     assert.deepEqual(starts(world).filter((line) => line.includes('wake')), ['POST /api/claudexor/wake']);
     assert.deepEqual(starts(world).filter((line) => !/\/claudexor\/(status|wake|maintenance\/harnesses)(\?|$)/.test(line)), [],
         'opening the provider starts no provider refresh, login, model catalog or review-pool read');

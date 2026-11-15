@@ -5,11 +5,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createClaudexorStatusStore } from '../modules/claudexor_status_store.js';
+import { renderPageHeader } from '../modules/page_header.js';
 import { initSettings } from '../modules/settings.js';
 import { readSettings } from '../modules/settings_controls.js';
 import { askOuroboros, beingState, homeAnswers, mountSettingsHome, needRows } from '../modules/settings_home.js';
 import { settingsPageFor } from '../modules/settings_pages.js';
-import { ANSWERS, STARTS, settle, world } from './helpers/settings_dom.js';
+import { ANSWERS, STARTS, Stub, settle, world } from './helpers/settings_dom.js';
 
 const account = (harness, id, verification, enabled = true) => ({
     harness, profile_id: id, display_name: `${id}@example.com`, enabled, identity: {}, status: { verification, verification_source: 'vendor' },
@@ -41,7 +42,7 @@ test('accounts that need sign-in again are one row per harness, only over an acc
     assert.deepEqual(needRows({}), [], 'nothing read yet says nothing');
 });
 
-test('a tool server that needs sign-in is a row; a status that could not be read is a neutral row with its Check', () => {
+test('a tool server that needs sign-in is a row; a status that could not be read is no row, and its MCP servers row says Not checked', () => {
     const servers = [
         { id: 'slack', name: 'Slack', enabled: true, sign_in: { state: 'needed', reason: 'expired' } },
         { id: 'docs', name: 'Docs', enabled: true, sign_in: { state: 'signed_in', reason: 'insufficient_scope', required_scope: 'write' } },
@@ -157,6 +158,11 @@ test('This computer and Updates answer on every host: who can open it where the 
     assert.equal(updates({ state: {} }), undefined, 'no version, no claim');
     assert.equal(updates({ state: { version: '7.10.2' }, update: { managed: true, check_ok: true, current_version: '7.10.2' } }), 'Up to date · 7.10.2');
     assert.equal(updates({ state: { version: '7.10.2' }, update: null }), 'Not checked', 'a status read that failed says so');
+    // An update that waits says what it brings, in the owner's colour: the row's name already says Updates, and the
+    // list's one line keeps the number whole ("Update available: 163 ne…" lost it).
+    const waiting = { managed: true, check_ok: true, available: true, safe_to_apply: true, current_version: '7.10.2' };
+    assert.deepEqual(homeAnswers({ update: { ...waiting, latest_version: '7.10.2', behind: 163 } })['dashboard:updates'], { text: '163 new changes', owner: true });
+    assert.equal(updates({ update: { ...waiting, latest_version: '7.11.0' } }), '7.10.2 → 7.11.0');
 });
 
 test('the card says who it is and its state, never that nothing waits', () => {
@@ -175,7 +181,8 @@ test('showing the home reads only what is passive: no catalogue, no review pool,
     await home.refresh();
     await settle();
     assert.deepEqual([...new Set(env.calls)].sort(), Object.keys(ANSWERS).sort(), 'the home\'s own reads, each a GET that starts nothing');
-    for (const url of STARTS) assert.ok(!env.calls.some((call) => String(call).startsWith(url)), url);
+    // A start is any read under these addresses but the passive ones the home reads, which ANSWERS lists exactly.
+    for (const url of STARTS) assert.ok(!env.calls.some((call) => String(call).startsWith(url) && !Object.hasOwn(ANSWERS, String(call))), url);
     assert.deepEqual(statusReads, [], 'the accounts store is read as it stands, never asked');
     assert.equal(store.subscriberCount, 1);
     assert.equal(store.polling, false, 'the home is no visible surface of the store: it arms no poll');
@@ -203,7 +210,7 @@ test('a page reads when it is shown, not when Settings is', async (t) => {
     await controls.open('');
     await settle();
     const atHome = reads.length;
-    assert.ok(atHome >= 1 && !env.calls.some((call) => STARTS.some((url) => String(call).startsWith(url))));
+    assert.ok(atHome >= 1 && !env.calls.some((call) => STARTS.some((url) => String(call).startsWith(url) && !Object.hasOwn(ANSWERS, String(call)))));
     assert.equal(content.querySelectorAll('.settings-page').length, 0);
     // The skill sources page (settings_extension_forms.js): its own read fires for its own path only.
     assert.ok(settingsPageFor('skill-sources'));
@@ -237,56 +244,91 @@ test('the Context door shows Main and nothing else: with a project room open it 
     assert.deepEqual(dashboard, [['costs', { row: 'TOTAL_BUDGET' }]]);
 });
 
-test('a door pressed inside Settings leads back to it: a Dashboard tab by its path, a page of its own by the same first row', async (t) => {
+// The fixture's element, also reading `:scope > X` (a child) as a browser does: a door's way back finds the page's own
+// header so (dashboard.js settingsReturn). Children an innerHTML builds are made of the same element.
+class ScopeStub extends Stub {
+    querySelectorAll(selector) {
+        const scoped = selector.match(/^:scope > (\S+)$/);
+        if (scoped) return this.children.filter((child) => child.matches(scoped[1]));
+        return super.querySelectorAll(selector);
+    }
+    set innerHTML(html) {
+        super.innerHTML = html;
+        const upgrade = (node) => { Object.setPrototypeOf(node, ScopeStub.prototype); node.children.forEach(upgrade); };
+        this.children.forEach(upgrade);
+    }
+    get innerHTML() { return super.innerHTML; }
+    toggleAttribute(name, force) {
+        const on = force ?? !this.hasAttribute(name);
+        if (on) this.setAttribute(name, ''); else this.removeAttribute(name);
+        return on;
+    }
+}
+
+test('a door pressed inside Settings leads back to it: a Dashboard tab by its path, a page of its own by its header Back', async (t) => {
     const { env, content, state, shown, showPage } = world(t);
+    env.document.createElement = (tag) => new ScopeStub(tag);
     const dashboard = [];
     const layered = [];
     const layers = { push: (layer) => layered.push(`push ${layer.id}`), remove: (id) => layered.push(`remove ${id}`), batch: (fn) => fn() };
-    // Circles keeps the Dashboard's shell; Skills has its tabs and its own parts under the header.
+    // The two pages as their modules draw them: the shared header (renderPageHeader), Circles with its action and the
+    // Dashboard's shell, Skills with its tabs and its own parts under the header.
     const pageOf = (id, html) => {
         const page = env.document.createElement('div');
         page.id = id;
+        page.className = 'page app-page-glass';
         page.innerHTML = html;
         content.appendChild(page);
         return page;
     };
-    const circles = pageOf('page-circles', '<div class="app-page-header"></div><div class="dashboard-shell"><div class="dashboard-body"></div></div>');
-    const skills = pageOf('page-skills', '<div class="app-page-header"></div><div class="app-page-tabs"></div><div class="skills-search-chrome"></div><div class="skills-scroll"></div>');
+    const circles = pageOf('page-circles', `${renderPageHeader({ page: 'circles', actionsHtml: '<button type="button">New circle</button>' })}
+        <div class="dashboard-shell"><div class="dashboard-body"></div></div>`);
+    const skills = pageOf('page-skills', `${renderPageHeader({ page: 'skills', tabsHtml: '<div class="skills-tabs"></div>' })}
+        <div class="skills-search-chrome"></div><div class="skills-scroll"></div>`);
+    const partsOf = (page) => page.children.map((part) => part.className);
+    const skillsParts = partsOf(skills);
     const controls = initSettings({ state, ws: env.ws, showPage, layers, openDashboardTab: (...args) => dashboard.push(args), setBeforePageLeave() {} });
     await controls.open('');
     await settle();
     const homeEl = content.querySelector('[data-settings-home]');
     const press = async (to) => { await homeEl.fire('click', { target: homeEl.querySelector(`[data-settings-open="${to}"]`) }); await settle(); };
-    const backOf = (page) => page.querySelector('.dashboard-back');
+    const headerOf = (page) => page.querySelector(':scope > .app-page-header');
+    // What stands in the header's Back slot, and whether the header says it holds one.
+    const backOf = (page) => {
+        const slot = headerOf(page).querySelector('[data-page-back]');
+        return { inSlot: slot.children.map((node) => node.getAttribute('aria-label')),
+            marked: headerOf(page).hasAttribute('data-back'), rows: page.querySelectorAll('.dashboard-back').length };
+    };
+    const none = { inSlot: [], marked: false, rows: 0 };
+    const back = { inSlot: ['Back to Settings'], marked: true, rows: 0 };
 
     // A Dashboard tab: the path the door was pressed on travels with it, and the tab draws the row.
     await press('dashboard:costs');
     assert.deepEqual(dashboard, [['costs', { row: '', back: '' }]]);
 
-    // Circles: the row is the first thing in the Dashboard's shell, above what scrolls, with its one layer.
+    // Circles: Back stands in its header's Back slot, never as a row of its own, with its one layer.
     await press('page:circles');
     assert.deepEqual(shown.at(-1), ['circles']);
-    assert.equal(circles.querySelector('.dashboard-shell').children[0], backOf(circles));
-    assert.equal(backOf(circles).querySelector('[data-dashboard-back]').getAttribute('aria-label'), 'Back to Settings');
+    assert.deepEqual(backOf(circles), back);
     assert.equal(layered.at(-1), 'push settings-door-back', 'Escape and the system\'s Back return to Settings too');
-    // Its press returns to Settings, and the row and its layer are gone.
-    await backOf(circles).querySelector('[data-dashboard-back]').fire('click', {});
+    // Its press returns to Settings, and the slot is emptied and its layer gone.
+    await headerOf(circles).querySelector('[data-dashboard-back]').fire('click', {});
     await settle();
-    assert.deepEqual([shown.at(-1), backOf(circles)], [['settings'], null]);
+    assert.deepEqual([shown.at(-1), backOf(circles)], [['settings'], none]);
     assert.ok(layered.includes('remove settings-door-back'));
 
-    // Skills: under the header and its tabs, above the page's own first part.
+    // Skills: in its header's slot as well; the page's own parts stay as they were.
     await press('page:skills');
-    assert.deepEqual(skills.children.map((part) => part.className),
-        ['app-page-header', 'app-page-tabs', 'dashboard-back', 'skills-search-chrome', 'skills-scroll']);
-    // Leaving that page any other way drops the row.
+    assert.deepEqual(backOf(skills), back);
+    assert.deepEqual(partsOf(skills), skillsParts);
+    // Leaving that page any other way empties the slot.
     env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'files' } }));
-    assert.equal(backOf(skills), null);
+    assert.deepEqual(backOf(skills), none);
 
     // The same door asked for from outside Settings shows the page and no way back.
     await controls.open('page:circles');
     await settle();
-    assert.deepEqual([shown.at(-1), backOf(circles)], [['circles'], null]);
+    assert.deepEqual([shown.at(-1), backOf(circles)], [['circles'], none]);
 });
 
 test('Ask Ouroboros puts the words into Main as an unsent draft and replaces no draft that is there', async () => {
@@ -300,4 +342,91 @@ test('Ask Ouroboros puts the words into Main as an unsent draft and replaces no 
     await askOuroboros('quiet', { showPage: async () => true, doc });
     assert.deepEqual([input.value, events], ['half a thought', ['input']], 'a draft already there stays, and nothing is written');
     assert.equal(await askOuroboros('x', { showPage: async () => false, doc }), false, 'a vetoed leave shows nothing');
+});
+
+test('a choice of this device made beside the list is its row\'s answer at once, read after its own module stored it', async (t) => {
+    const { env, content } = world(t);
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    const kept = new Map();
+    const before = globalThis.localStorage;
+    globalThis.localStorage = { getItem: (key) => kept.get(key) ?? null, setItem: (key, value) => { kept.set(key, String(value)); } };
+    t.after(() => { globalThis.localStorage = before; });
+    env.window.ouroTheme = { choice: 'dark' };
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws: { isConnected: () => true }, stateSnapshots: { latest: () => ({}) } } });
+    t.after(() => home.dispose());
+    await home.refresh();
+    await settle();
+    const answer = (to) => content.querySelector(`[data-settings-open="${to}"]`).querySelector('[data-settings-answer]').textContent;
+    assert.deepEqual([answer('appearance'), answer('notifications')], ['Dark', 'Off on this device']);
+    const inside = (attr, value = '') => { const control = new Stub('div'); control.setAttribute(attr, value); const hit = new Stub('button'); control.appendChild(hit); return hit; };
+    // The theme's strip: theme.js stored the choice from the document's handler, and the window hears the press after it.
+    env.window.ouroTheme.choice = 'light';
+    env.window.dispatchEvent({ type: 'click', target: inside('data-theme-control') });
+    assert.equal(answer('appearance'), 'Light');
+    env.window.ouroTheme.choice = 'system';
+    env.window.dispatchEvent({ type: 'keydown', target: inside('data-theme-control') });
+    assert.equal(answer('appearance'), 'System', 'an arrow in the strip chooses too');
+    // A notification switch: the notifier stored its prefs on the change.
+    kept.set('ouroboros.notifications', JSON.stringify({ enabled: true, sound: false }));
+    env.window.dispatchEvent({ type: 'change', target: inside('data-notify-pref', 'enabled') });
+    assert.equal(answer('notifications'), 'On, silent');
+    // A press anywhere else reads nothing again.
+    env.window.ouroTheme.choice = 'dark';
+    env.window.dispatchEvent({ type: 'click', target: inside('data-other') });
+    assert.equal(answer('appearance'), 'System');
+    home.dispose();
+    env.window.dispatchEvent({ type: 'click', target: inside('data-theme-control') });
+    assert.equal(answer('appearance'), 'System', 'a disposed home hears nothing');
+});
+
+test('the list marks the page that is open: the top level\'s own row, else the nearest level under it that has one', async (t) => {
+    const { content } = world(t);
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws: { isConnected: () => true }, stateSnapshots: { latest: () => ({}) } } });
+    t.after(() => home.dispose());
+    const chosen = () => content.querySelectorAll('[data-settings-open]').filter((row) => row.getAttribute('aria-current') === 'page')
+        .map((row) => row.dataset.settingsOpen);
+    home.mark(['agents', 'permissions']);
+    assert.deepEqual(chosen(), ['agents'], 'Permissions\' Reviewers door opened Agents over it');
+    home.mark(['agents/reviewer', 'agents', 'permissions']);
+    assert.deepEqual(chosen(), ['agents'], 'an agent\'s page is Agents\'');
+    home.mark(['skill/voice-form', 'voice']);
+    assert.deepEqual(chosen(), ['voice'], 'a skill\'s form has no row: the page under it keeps its own');
+    home.mark('models');
+    assert.deepEqual(chosen(), ['models']);
+    home.mark([]);
+    assert.deepEqual(chosen(), []);
+});
+
+test('the Accounts row counts the accounts beside every page: the home\'s passive roster until a page read them', async (t) => {
+    const { env, content } = world(t);
+    const roster = (n) => ({ profiles: Array.from({ length: n }, (_, i) => ({ profile: { harness_id: 'codex', profile_id: `p${i}`,
+        display_name: `p${i}`, enabled: true }, status: { verification: 'passed' }, identity: {} })) });
+    env.routes.set('/api/settings', async () => ({ ok: true, status: 200,
+        json: async () => ({ ...ANSWERS['/api/settings'], _meta: { connections: [{ configured: true }, { configured: true }] } }) }));
+    env.routes.set('/api/claudexor/status?view=quota', async () => ({ ok: true, status: 200,
+        json: async () => ({ view: 'quota', profiles: roster(3), quota: [], reads: { catalog: 'not_read', accounts: 'ok', quota: 'ok' } }) }));
+    const statusReads = [];
+    const store = createClaudexorStatusStore({ fetchImpl: async (url) => { statusReads.push(url); return { ok: true, status: 200,
+        json: async () => ({ daemon: { state: 'running' }, harnesses: [], profiles: roster(4), quota: [], reads: { catalog: 'ok', accounts: 'ok', quota: 'ok' } }) }; } });
+    t.after(() => store.dispose());
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws: { isConnected: () => true }, stateSnapshots: { latest: () => ({}) } } });
+    t.after(() => home.dispose());
+    await home.refresh();
+    await settle();
+    const answer = () => content.querySelector('[data-settings-open="accounts"]').querySelector('[data-settings-answer]').textContent;
+    const passive = () => env.calls.filter((call) => call === '/api/claudexor/status?view=quota').length;
+    // Beside Models, before any page read the shared store: the roster the home read itself, never the store asked.
+    assert.deepEqual([answer(), statusReads], ['3 accounts, 2 API keys', []]);
+    // A page that shows the accounts read the store (Agents, a provider's page): its roster answers, and the home stops
+    // reading its own.
+    await store.refresh();
+    await settle();
+    assert.equal(answer(), '4 accounts, 2 API keys');
+    const before = passive();
+    await home.refresh();
+    await settle();
+    assert.deepEqual([answer(), passive()], ['4 accounts, 2 API keys', before]);
 });

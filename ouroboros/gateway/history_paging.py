@@ -260,11 +260,12 @@ class RoomLens(NamedTuple):
     chrono: bool = False
 
 
-def _descendants(data_dir: pathlib.Path, tasks: list) -> list:
+def _descendants(data_dir: pathlib.Path, tasks: list, strict: bool = False) -> list:
     """The task ids the store's lineage places under ``tasks``: the whole tree of a bound root by
     ``root_task_id``, and the children of a bound mid-tree task generation by generation by
     ``parent_task_id`` (one indexed read per generation, 500 ids per statement). An unavailable store
-    names none (their rows then stay where they were written, as the room rule itself would leave them)."""
+    names none (their rows then stay where they were written, as the room rule itself would leave them);
+    ``strict`` (a search's "no match", ``chat_search``) raises it."""
     from ouroboros.task_store import task_facts
 
     known, found, frontier = set(tasks), set(), sorted(tasks)
@@ -277,6 +278,8 @@ def _descendants(data_dir: pathlib.Path, tasks: list) -> list:
                 facts = task_facts(data_dir, where=f"root_task_id IN ({marks}) OR parent_task_id IN ({marks})",
                                    params=(*chunk, *chunk))
             except StoreError:
+                if strict:
+                    raise
                 log.debug("task lineage unavailable for the room lens", exc_info=True)
                 return sorted(found)
             generation.update(task for task in facts if task not in known)
@@ -287,7 +290,7 @@ def _descendants(data_dir: pathlib.Path, tasks: list) -> list:
 
 
 def room_lens(data_dir: pathlib.Path, thread_id: int, project_chat_ids: set, source_refs: list,
-               bindings_by_task: Dict[str, int]) -> Dict[str, RoomLens]:
+               bindings_by_task: Dict[str, int], *, strict: bool = False) -> Dict[str, RoomLens]:
     """How the room's rows are addressed in the store, per stream (``room_membership`` decides each
     candidate; the lens is its superset). A Project reads its own chat, the lineage columns of the
     tasks bound to it, the task ids of their descendants (the store's lineage: a child's row the
@@ -304,7 +307,7 @@ def room_lens(data_dir: pathlib.Path, thread_id: int, project_chat_ids: set, sou
         keys: list = [("chat_id", thread_id)]
         for task in bound:
             keys.extend((("task_id", task), ("parent_task_id", task), ("root_task_id", task)))
-        descendants = _descendants(data_dir, bound)
+        descendants = _descendants(data_dir, bound, strict)
         keys.extend(("task_id", task) for task in descendants)
         # Rows written elsewhere that this room also shows (``room_membership.appearance_keys``).
         shown = (("appearance", f"room:{thread_id}"), *(("appearance", f"task:{task}") for task in (*bound, *descendants)))
@@ -394,15 +397,16 @@ class HistorySource:
                               "history_position": {"source": self.source, "offset": row.seq},
                               "_history_end": row.end} for row in rows])
 
-    def _candidates(self, lower: int, before: int, *, newest_first: bool = True):
+    def _candidates(self, lower: int, before: int, *, newest_first: bool = True, max_bytes=None):
         """One probe page of the room's rows in ``[lower, before)`` plus the named owner rows the
-        page's range covers (a short page covers the whole range)."""
+        page's range covers (a short page covers the whole range). ``max_bytes`` ends the probe page
+        at the row whose stored lengths reach it: a reader ends its page there or before."""
         rows = ds.probe_rows(self.root, self.source, self.lens.keys, before=before, lower=lower,
-                             limit=_PROBE_ROWS, newest_first=newest_first)
+                             limit=_PROBE_ROWS, newest_first=newest_first, max_bytes=max_bytes)
         if not self.lens.seqs:
             return rows
         found = {row.seq: row for row in rows}
-        if len(rows) < _PROBE_ROWS:
+        if len(rows) < _PROBE_ROWS and (max_bytes is None or sum(row.length for row in rows) < max_bytes):
             covered = (lower, before)
         else:
             covered = (rows[-1].seq, before) if newest_first else (lower, rows[-1].seq + 1)
@@ -431,20 +435,24 @@ class HistorySource:
         (``_RECENT_WINDOW_ROWS`` rows or ``_RECENT_WINDOW_BYTES``), the import frontier or the read ceiling."""
         return self._page(self.upper, want, counts, _READ_CEILING_ROWS, window=True)
 
-    def older(self, before, want, counts, ceiling=None):
+    def older(self, before, want, counts, ceiling=None, *, byte_ceiling=None):
         """Consume one backward page of ``want`` counted rows below ``before``; the read ceiling
-        ends it early. At the import frontier nothing older is readable yet: the page is empty and
-        stays at the frontier (the request's caller answers "still importing")."""
+        ends it early, as ``byte_ceiling`` does once the stored rows read reach that many bytes (a soft
+        bound: the row crossing it is read whole, never split, and none past it decoded; ``chat_search``'s
+        page). At the import
+        frontier nothing older is readable yet: the page is empty and stays at the frontier (the
+        request's caller answers "still importing")."""
         if want <= 0:
             return [], before, set()
         if 0 < self.floor >= before:
             return [], self.floor, set()
-        return self._page(before, want, counts, _READ_CEILING_ROWS if ceiling is None else ceiling)
+        return self._page(before, want, counts, _READ_CEILING_ROWS if ceiling is None else ceiling,
+                          byte_ceiling=byte_ceiling)
 
-    def _page(self, before, want, counts, ceiling, window=False):
+    def _page(self, before, want, counts, ceiling, window=False, *, byte_ceiling=None):
         top, selected, counted, read, seen = before, [], 0, 0, 0
         while True:
-            rows = self._candidates(self.floor, before)
+            rows = self._candidates(self.floor, before, max_bytes=None if byte_ceiling is None else byte_ceiling - seen)
             for entry in self._entries(rows):  # newest first
                 selected.append(entry)
                 before = entry["history_position"]["offset"]
@@ -452,7 +460,7 @@ class HistorySource:
                 read += 1
                 seen += entry["_history_end"] - before  # the stored row's exact length
                 windowed = not window or read >= _RECENT_WINDOW_ROWS or seen >= _RECENT_WINDOW_BYTES
-                if (counted >= want and windowed) or read >= ceiling:
+                if (counted >= want and windowed) or read >= ceiling or (byte_ceiling is not None and seen >= byte_ceiling):
                     return list(reversed(selected)), before, self.gaps(before, top)
             if len(rows) < _PROBE_ROWS:  # the room's rows above the frontier are exhausted
                 return list(reversed(selected)), self.floor, self.gaps(self.floor, top)
@@ -829,6 +837,16 @@ def _skipped_row_after(root, after, upper):
     return bool(skipped_between(root, "chat", after, upper))
 
 
+def message_elsewhere(row, row_matches_thread) -> bool:
+    """Main draws a Project's question only as a copy of that room's (it never counted here), and a started or
+    handed-over Project as its work's portal (work_portal.js ``row``): no message of their own to read (unread) or
+    find (``chat_search``). Both are Main's rows alone (room_membership pins the one; ``question_project_chat`` names
+    nothing off Main). ``row`` is a stored chat row or its projection."""
+    kind = str(row.get("system_type") or row.get("type") or "")
+    return kind == "project_question_pointer" or bool(getattr(row_matches_thread, "question_project_chat", lambda _row: 0)(
+        row)) or (kind in ("project_started", "project_handoff") and bool(row.get("task_id") and row.get("project_id")))
+
+
 def _stored_message(row_matches_thread, stored_chat_id, child):
     """A stored chat row the history projection turns into a standalone message."""
     def message(entry):
@@ -912,16 +930,7 @@ def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, pro
     offset = lambda row: row["history_position"]["offset"]  # noqa: E731
     words = lambda row: _card_content(row, str(row.get("system_type") or ""), child)  # noqa: E731
     arrived = _arrived_unread(data_dir, page["chat_id"])
-    question_chat = getattr(row_matches_thread, "question_project_chat", lambda _row: 0)
-
-    def elsewhere(row):
-        # Main draws a Project's question only as a copy of that room's (it never counted here), and a started or
-        # handed-over Project as its work's portal (work_portal.js ``row``): no message of their own to read. Both are
-        # Main's rows alone (room_membership pins the one; ``question_project_chat`` names nothing off Main).
-        kind = str(row.get("system_type") or row.get("type") or "")
-        return kind == "project_question_pointer" or bool(question_chat(row)) or (
-            kind in ("project_started", "project_handoff") and bool(row.get("task_id") and row.get("project_id")))
-    feed = [row for row in rows if _feed_message(row) and not elsewhere(row)]
+    feed = [row for row in rows if _feed_message(row) and not message_elsewhere(row, row_matches_thread)]
     spoken = sorted((row for row in feed if row.get("role") != "user" and arrived(row) and (
         str(row.get("text") or "").strip() not in ("", "\u200b") or row.get("msg_type"))), key=offset)
     latest = next((row for row in reversed(spoken) if not words(row)), None)
@@ -945,7 +954,8 @@ def latest_arrival(rows, page, data_dir, row_matches_thread, stored_chat_id, pro
         return {"latest_absent": True} if start == 0 and not gaps else {}
     if latest is None and start > 0:
         stored = _stored_message(row_matches_thread, stored_chat_id, child)
-        message = lambda entry: stored(entry) and arrived(entry) and not elsewhere(entry)  # noqa: E731
+        message = lambda entry: (stored(entry) and arrived(entry)  # noqa: E731
+                                 and not message_elsewhere(entry, row_matches_thread))
         entries, before, gaps = HistorySource(data_dir, "chat", page["lens"]["chat"], end).older(
             start, 1, message, min(_ARRIVAL_SEARCH_ROWS, _READ_CEILING_ROWS))
         found = next(filter(message, entries), None)  # ``older`` stops at the newest one

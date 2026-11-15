@@ -58,7 +58,8 @@ function rowHtml({ value, label }, active) {
  * when the tab is shown, painted after a save on any page and read again after one of their own. `custom(row)` draws a
  * custom control, `openDoor(row)` takes a door's press, `onSaved(rowId)` hears this tab's own saves, and
  * `words(settings)` says what a row adds from the last read: `{ [rowId]: { caption, value } }`, the caption in its meta
- * line and a door's value before its chevron. Answers `{ dispose }`.
+ * line and a door's value before its chevron. Answers `{ paint, dispose }`: `paint` says the words again from the
+ * last settings read (a tab whose words also draw on its own read calls it after that read).
  */
 export function mountTabSettings(host, tab, { state, cards = null, custom = null, openDoor = null, words = null, onPaint = null, onSaved = null } = {}) {
     const page = `dashboard:${tab}`;
@@ -87,7 +88,7 @@ export function mountTabSettings(host, tab, { state, cards = null, custom = null
             span.className = `settings-row-${kind}`;
             span.setAttribute(`data-row-${kind}`, '');
             const box = node.querySelector(kind === 'caption' ? '.ui-row-meta' : '.ui-row-actions');
-            box.insertBefore(span, kind === 'caption' ? node.querySelector('[data-setting-result]') : box.firstChild);
+            box.insertBefore(span, kind === 'caption' ? null : box.firstChild);  // a caption ends the meta line
         }
         if (span && span.textContent !== (text || '')) span.textContent = text || '';
     };
@@ -122,6 +123,7 @@ export function mountTabSettings(host, tab, { state, cards = null, custom = null
     paint();
     if (shown()) void read();
     return {
+        paint,
         dispose() {
             rows.dispose();
             window.removeEventListener('ouro:dashboard-subtab-shown', onShown);
@@ -337,33 +339,47 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     // The answers follow the state the app already reads (every 20 s, faster while a room shows): no read of their own.
     const answerTimer = setInterval(() => { if (state.activePage === 'dashboard' && !document.hidden) paintAnswers(); }, 5000);
     answerTimer?.unref?.();  // a test runner's clock is never kept alive by it
-    const resize = typeof ResizeObserver === 'function' ? new ResizeObserver(() => paint()) : null;
-    resize?.observe(page);
+    // The place's box repaints at once. A change of the root font moves the two panes' 40rem while the box keeps its
+    // width: the pane gains or loses the list beside it and the list's rows resize, and those repaint at the next frame
+    // (the repaint resizes them again, a loop the observer would refuse).
+    let frame = 0;
+    const resize = typeof ResizeObserver === 'function' ? new ResizeObserver((entries) => {
+        if (entries.some((entry) => entry.target === page)) paint();
+        else frame ||= requestAnimationFrame(() => { frame = 0; paint(); });
+    }) : null;
+    [page, panelsEl, list].forEach((box) => resize?.observe(box));
 
     /** Show a tab's page. `back`, a Settings path ('' is its home), gives the page a Back there before its name;
-     *  without it there is none. `row` brings that row into view and focuses its control. */
-    function showTab(tabName, { row = '', back: path } = {}) {
+     *  without it there is none. `row` brings that row into view and focuses its control. `asLevel`: in one column
+     *  the page is shown as a level, made visible before its row is revealed (a hidden pane scrolls and focuses
+     *  nothing). */
+    function showTab(tabName, { row = '', back: path, asLevel = false } = {}) {
         const name = tabName || 'logs';
         if (!tabStrip.select(name)) return false;
-        back.clear();
-        panels.forEach((panel) => {
-            const on = panel.dataset.dashboardPanel === name;
-            panel.classList.toggle('active', on);
-            panel.hidden = !on;
-        });
-        state.dashboardActiveSubtab = name;
-        paint();
-        window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: name } }));
         const panel = panels.find((candidate) => candidate.dataset.dashboardPanel === name);
-        if (typeof path === 'string') back.show(panel, path);
+        // One change of the layer stack: a level that Back to Settings replaces at once is never pushed and removed
+        // first (Telegram's Back would show, hide and show again).
+        const steps = () => {
+            back.clear();
+            panels.forEach((each) => {
+                const on = each.dataset.dashboardPanel === name;
+                each.classList.toggle('active', on);
+                each.hidden = !on;
+            });
+            state.dashboardActiveSubtab = name;
+            if (asLevel && !panes()) level = true;
+            paint();
+            window.dispatchEvent(new CustomEvent('ouro:dashboard-subtab-shown', { detail: { tab: name } }));
+            if (typeof path === 'string') back.show(panel, path);
+        };
+        if (layers?.batch) layers.batch(steps); else steps();
         if (row) focusSettingRow(panel, row);
         return true;
     }
 
     /** From outside the list (a deep link, a Settings row): the page is shown, as a level in one column. */
     function activateTab(tabName, options = {}) {
-        if (!showTab(tabName, options)) return;
-        if (!panes()) { level = true; paint(); }
+        showTab(tabName, { ...options, asLevel: true });
     }
 
     showTab(active);
@@ -376,6 +392,7 @@ export function initDashboard({ state, layers = null, openSettings = null, state
             disposeFade();
             back.clear();
             resize?.disconnect();
+            if (frame) cancelAnimationFrame(frame);
             clearInterval(answerTimer);
             if (layered) layers?.remove(LEVEL_LAYER);
             window.removeEventListener('ouro:page-shown', onPageShown);

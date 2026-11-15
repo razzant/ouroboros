@@ -4,7 +4,7 @@ import test from 'node:test';
 import { accountResourcesMarkup, confirmAccountReset, resourceAmount, resourceFacetNote,
     resourceReadGap, resetOutcome, resourceSummary } from '../modules/account_resources.js';
 import { createClaudexorStatusStore, mergeAccountResources } from '../modules/claudexor_status_store.js';
-import { quotaSummary } from '../modules/harness_accounts.js';
+import { accountRowFacts, quotaSummary } from '../modules/harness_accounts.js';
 import { sessionRouteVerdict } from '../modules/subagent_status_primitives.js';
 
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/account_resources.json', import.meta.url)));
@@ -560,6 +560,152 @@ test('provider refresh proceeds beside held discovery; its quota survives the ol
     store.dispose();
 });
 
+test('a Refresh queued behind discovery keeps the Accounts status read model-free; a Models caller keeps models', async () => {
+    for (const includeModels of [false, true]) {
+        const first = deferred(), post = deferred();
+        const urls = [];
+        const store = createClaudexorStatusStore({ storage: () => null, doc: null, fetchImpl: async url => {
+            urls.push(url);
+            if (url.includes('/refresh')) return post.promise;
+            return urls.length === 1 ? first.promise : response(snapshot());
+        } });
+        const discovery = store.refresh();
+        const follow = store.refresh({ afterCurrent: true, includeModels }); // the owner's Refresh, or a Models view
+        const refresh = store.refreshResources();
+        first.resolve(response(snapshot())); await discovery;
+        post.resolve(response(fixture.quota)); await refresh; await follow;
+        assert.deepEqual(urls, ['/api/claudexor/status', '/api/claudexor/quota/refresh',
+            includeModels ? '/api/claudexor/status?include=models' : '/api/claudexor/status']);
+        assert.equal(store.includesModels, includeModels);
+        store.dispose();
+    }
+});
+
+test('evidence asked for after an event waits out a provider Refresh and still begins after the older read', async () => {
+    const older = deferred(), post = deferred();
+    const urls = [];
+    const store = createClaudexorStatusStore({ storage: () => null, doc: null, fetchImpl: async url => {
+        urls.push(url);
+        if (url.includes('/refresh')) return post.promise;
+        return urls.length === 2 ? older.promise : response(snapshot());
+    } });
+    await store.refresh();
+    const read = store.refresh(); // an older discovery stays in flight across the Refresh
+    const refresh = store.refreshResources(target);
+    const after = store.refresh({ afterCurrent: true }); // a switch confirmed now asks for a read begun after it
+    const joined = store.refresh(); // an ordinary caller still shares what is in flight
+    post.resolve(response(fixture.quota)); await refresh;
+    older.resolve(response(snapshot())); await read; await after; await joined;
+    assert.deepEqual(urls, ['/api/claudexor/status', '/api/claudexor/status', '/api/claudexor/quota/refresh',
+        '/api/claudexor/status'], 'the caller joined a read begun before its event, or an ordinary one read twice');
+    assert.equal(store.includesModels, false);
+    store.dispose();
+});
+
+test('a later accepted passive quota failure retires a Refresh reading; an older passive answer does not', async () => {
+    const passive = quota => ({ view: 'quota', profiles: {}, quota: quota === 'ok' ? snapshot().quota : [],
+        quota_absences: [], reads: { catalog: 'not_read', accounts: 'ok', quota }, read_errors: {}, timings_ms: {} });
+    for (const order of ['later', 'older']) {
+        const observation = deferred();
+        const store = createClaudexorStatusStore({ storage: () => null, doc: null, fetchImpl: async url => {
+            if (url.includes('/quota/refresh')) return response(fixture.quota);
+            if (url.includes('view=quota')) return order === 'older' ? observation.promise : response(passive('failed'));
+            return response(snapshot());
+        } });
+        await store.refresh();
+        const older = order === 'older' ? store.observe() : null; // dispatched before the Refresh
+        await store.refreshResources(target);
+        assert.equal(store.resourceAction(target).resourceRead, true);
+        if (older) { observation.resolve(response(passive('failed'))); await older; } else await store.observe();
+        const action = store.resourceAction(target);
+        assert.equal(action.resourceRead, order === 'older', order);
+        assert.equal(action.refreshDone, true, 'the Refresh outcome itself stays');
+        assert.equal(store.facet('quota'), order === 'older' ? 'ok' : 'failed');
+        store.dispose();
+    }
+});
+
+// Evidence order: a reading is superseded only by a later event about the same thing, and an event dates only what it read.
+const lostStatus = { ok: false, status: 503, json: async () => ({ error: 'discovery timed out' }) };
+const sibling = { harness: target.harness, profile_id: 'sibling' };
+const withSibling = envelope => ({ ...envelope, snapshots: [...envelope.snapshots,
+    { ...envelope.snapshots[0], subject: { ...envelope.snapshots[0].subject, subject_id: 'sibling' } }] });
+const limits = (store, who) => accountRowFacts({ ...row, ...who }, store.snapshot,
+    { quotaRead: store.facet('quota'), action: store.resourceAction(who) }).quota.label;
+
+test('a lost status request retires a Refresh reading only when it began after that reading', async () => {
+    for (const order of ['older', 'later']) {
+        const held = deferred();
+        let lose = false;
+        const store = createClaudexorStatusStore({ storage: () => null, doc: null, fetchImpl: async url => {
+            if (url.includes('/quota/refresh')) return response(fixture.quota);
+            if (!lose) return response({ ...snapshot(), reads: { catalog: 'ok', accounts: 'ok', quota: 'failed' } });
+            return order === 'older' ? held.promise : lostStatus;
+        } });
+        await store.refresh(); // an earlier failed quota facet
+        lose = true;
+        const older = order === 'older' ? store.refresh() : null; // dispatched before the Refresh, lost after it
+        await store.refreshResources(target);
+        assert.match(limits(store, target), /^Limit reached/);
+        if (older) { held.resolve(lostStatus); await older; } else await store.refresh();
+        assert.equal(store.error, 'discovery timed out');
+        assert.equal(store.resourceAction(target).resourceRead, order === 'older', order);
+        assert.match(limits(store, target), order === 'older' ? /^Limit reached/ : /^Limits not checked/, order);
+        assert.equal(limits(store, sibling), 'Limits not checked', 'one account\'s reading never spoke for another');
+        store.dispose();
+    }
+});
+
+test('one account\'s Refresh dates neither a sibling nor the facet after a lost status request; every account\'s dates the facet', async () => {
+    for (const scope of [target, null]) {
+        let lose = false;
+        const payload = snapshot();
+        payload.quota = withSibling({ snapshots: payload.quota }).snapshots;
+        const store = createClaudexorStatusStore({ storage: () => null, doc: null, fetchImpl: async url =>
+            url.includes('/quota/refresh') ? response(scope ? fixture.quota : withSibling(fixture.quota))
+                : lose ? lostStatus : response(payload) });
+        await store.refresh();
+        lose = true;
+        await store.refresh();
+        assert.deepEqual([limits(store, target), limits(store, sibling)], ['Limits not checked', 'Limits not checked']);
+        await store.refreshResources(scope);
+        assert.equal(store.facet('quota'), scope ? 'transport' : 'ok',
+            scope ? 'one account\'s Refresh was taken for a read of the quota facet' : 'a provider read of every account is a quota read');
+        assert.match(limits(store, target), /^Limit reached/);
+        assert.match(limits(store, sibling), scope ? /^Limits not checked$/ : /^Limit reached/,
+            'the untouched sibling was dated by another account\'s Refresh');
+        assert.equal(store.facet('accounts'), 'transport', 'no quota Refresh reads the roster');
+        // A status request lost after it still ages every reading it covers.
+        await store.refresh();
+        assert.deepEqual([limits(store, target), limits(store, sibling)], ['Limits not checked', 'Limits not checked']);
+        store.dispose();
+    }
+});
+
+test('a joined Refresh attempt is no new reading and takes none away; a failed one retires the reading', async () => {
+    let mode = 'joined';
+    const store = createClaudexorStatusStore({ storage: () => null, doc: null, fetchImpl: async url => {
+        if (!url.includes('/quota/refresh')) return response({ ...snapshot(), reads: { catalog: 'ok', accounts: 'ok', quota: 'failed' } });
+        return mode === 'failed' ? { ok: false, status: 503, json: async () => ({ error: 'engine restarting' }) }
+            : response(attempt(fixture.quota, mode === 'joined'));
+    } });
+    const refresh = async next => { mode = next; return store.refreshResources(target); };
+    await store.refresh();
+    await refresh('joined');
+    assert.equal(store.resourceAction(target).resourceRead, false, 'an attempt begun before this request proves nothing new');
+    assert.equal(limits(store, target), 'Limits not checked');
+    await refresh('own');
+    await refresh('joined'); // another window's identical attempt was still in flight
+    assert.equal(store.resourceAction(target).resourceRead, true, 'nothing newer failed: the own reading stands');
+    assert.match(limits(store, target), /^Limit reached/);
+    assert.equal(await refresh('failed'), null);
+    assert.equal(store.resourceAction(target).resourceRead, false, 'its own failed attempt is a later failure about this account');
+    await refresh('joined'); // clears the error line, proves nothing
+    assert.equal(store.resourceAction(target).error, '');
+    assert.equal(limits(store, target), 'Limits not checked', 'the failed attempt was forgotten with its error line');
+    store.dispose();
+});
+
 test('failed status quota read retains resource facts with failed provenance', async () => {
     let payload = snapshot();
     const store = createClaudexorStatusStore({ storage: () => null, doc: null,
@@ -626,7 +772,7 @@ const attempt = (envelope, reused = false) => ({ ...envelope, refresh_attempt: {
     started_at: '2026-10-09T11:00:00Z', completed_at: '2026-10-09T11:01:00Z', reused,
 } });
 
-test('cached full automatic refresh cannot retire failed reset readback, including remount', async () => {
+test('a joined full refresh attempt cannot retire failed reset readback, including remount', async () => {
     const values = new Map();
     const storage = () => ({ getItem: key => values.get(key), setItem: (key, value) => values.set(key, value) });
     const old = atTime('2026-10-09T11:00:00Z', 1, 1);
@@ -641,20 +787,20 @@ test('cached full automatic refresh cannot retire failed reset readback, includi
         await store.refreshResources();
         await store.resetAccount(fixture.receipt.request, { key: 'post-refresh-reset' });
         assert.equal(resourceReadGap(store.resourceAction(target)), true);
-        await store.refreshResources(null, { automatic: true });
-        assert.equal(resourceReadGap(store.resourceAction(target)), true, 'replay is not a new provider read');
+        await store.refreshResources();
+        assert.equal(resourceReadGap(store.resourceAction(target)), true, 'a joined attempt is not a new provider read');
         assert.equal(JSON.parse(values.get('ouroboros.account-reset-requests'))[0].key, 'post-refresh-reset');
         store.dispose();
         store = createClaudexorStatusStore({ storage, doc: null, fetchImpl: async url =>
             response(url.includes('/status') ? snapshot() : attempt(old, true)) });
         await store.refresh();
-        await store.refreshResources(null, { automatic: true });
+        await store.refreshResources();
         assert.equal(resourceReadGap(store.resourceAction(target)), true, 'saved readback duty survives a fresh client');
     } finally { store.dispose(); }
 });
 
 for (const absent of [false, true]) {
-    test(`cached full refresh retains newer exact-account observations and scope (${absent})`, async () => {
+    test(`a joined full refresh retains newer exact-account observations and scope (${absent})`, async () => {
         const old = atTime('2026-10-09T11:00:00Z', 1, 1);
         const newer = atTime('2026-10-09T12:00:00Z', 0.2, 0);
         const scope = { model: 'new-model', requestKind: 'text', basis: 'quota_block' };
@@ -669,20 +815,20 @@ for (const absent of [false, true]) {
             await store.refresh();
             await store.refreshResources(target);
             const held = structuredClone(store.snapshot);
-            await store.refreshResources(null, { automatic: true });
+            await store.refreshResources();
             assert.deepEqual(store.snapshot, held);
         } finally { store.dispose(); }
     });
 }
 
-test('cached refresh does not fence a passive observation already in flight', async () => {
+test('a joined refresh does not fence a passive observation already in flight', async () => {
     const held = deferred();
     const store = createClaudexorStatusStore({ doc: null, storage: () => null, fetchImpl: async url =>
         url.includes('view=quota') ? held.promise : response(url.includes('/status') ? snapshot() : attempt(fixture.quota, true)) });
     try {
         await store.refresh();
         const reading = store.observe();
-        await store.refreshResources(null, { automatic: true });
+        await store.refreshResources();
         const incoming = { ...snapshot(), view: 'quota' };
         incoming.quota[0].observed_at = '2026-10-09T13:00:00Z';
         incoming.quota[0].constraints[0].used_ratio = 0.1;
@@ -705,17 +851,17 @@ test('a new full attempt acknowledges only post-reset fresh observations for the
             { ...attempt(atTime('2026-10-09T13:00:00Z', 0.1, 0)), snapshots: [] },
         ]) {
             envelope = candidate;
-            await store.refreshResources(null, { automatic: true });
+            await store.refreshResources();
             assert.equal(resourceReadGap(store.resourceAction(target)), true);
         }
         envelope = attempt(atTime('2026-10-09T13:00:00Z', 0.1, 0));
         envelope.refresh_attempt.started_at = '2026-10-09T12:30:00Z';
         envelope.refresh_attempt.completed_at = '2026-10-09T13:00:00Z';
         envelope.resources[0].resets.freshness = 'stale';
-        await store.refreshResources(null, { automatic: true });
+        await store.refreshResources();
         assert.equal(resourceReadGap(store.resourceAction(target)), true, 'quota success does not refresh remaining resets');
         envelope.resources[0].resets.freshness = 'fresh';
-        await store.refreshResources(null, { automatic: true });
+        await store.refreshResources();
         assert.equal(resourceReadGap(store.resourceAction(target)), false);
         assert.equal(store.resourceAction(target).key, 'clocked-readback');
         assert.equal(store.resourceAction(target).receipt.outcome, 'reset');

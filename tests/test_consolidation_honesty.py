@@ -32,7 +32,7 @@ def test_an_authored_note_with_a_summary_becomes_resident_in_the_index(tmp_path)
 
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, budget_drive_root=str(tmp_path), task_id="t")
     content = "---\ntype: understanding\nsummary: Alex asks for brevity; an interpretation to test.\n---\nEvidence."
-    assert _knowledge_write(ctx, "people/alex", content, scope="global").startswith("✅")
+    assert _knowledge_write(ctx, "people/alex", content, mode="overwrite", scope="global").startswith("✅")
     rendered = render_knowledge_index(inventory_knowledge(resolve_knowledge_address(tmp_path, "overview", "global")))
     assert "Alex asks for brevity" in rendered
 

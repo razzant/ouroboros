@@ -81,7 +81,8 @@ function rowsPage(path, { ids, draw, tune = null, bind = null, paint = null, sho
             unbind?.();
             container.innerHTML = draw(row, ctx);
             unbind = bind?.(container, ctx) || null;
-            handle = bindSettingRows(container, { rows, ask: ctx.ask, openDoor: (door) => ctx.openSettings?.(door.control.to) });
+            // A door may name what its page shows first (`view`: Reviewers opens Agents on its reviewers).
+            handle = bindSettingRows(container, { rows, ask: ctx.ask, openDoor: (door) => ctx.openSettings?.(door.control.to, { view: door.control.view || '' }) });
             shape = shapeOf(rows);
         };
         const apply = (settings) => {
@@ -437,14 +438,15 @@ const mountAdvanced = rowsPage('computer/advanced', {
     ids: () => rowsOf('computer/advanced').map((row) => row.id),
     draw: (row) => lead('Most installations never change these.')
         + card({ rows: rowsOf('computer/advanced').map((each) => settingsRow(row(each.id))).join('') }),
-    // What is served now stands in the Interface folder row, after its one line: a fact of the running core, in the
-    // warning's tone when it refused the saved folder.
+    // What is served now stands in the Interface folder row, under its words and control as a row's result does: a
+    // fact of the running core, in the warning's tone when it refused the saved folder.
     bind: (container) => {
         const fact = globalThis.document.createElement('span');
         fact.className = 'ui-result settings-row-result';
         fact.setAttribute('data-served-ui', '');
         fact.setAttribute('role', 'status');
-        rowNode(container, 'OUROBOROS_UI_DIR')?.querySelector('.ui-row-meta')?.append(fact);
+        const row = rowNode(container, 'OUROBOROS_UI_DIR');
+        row?.insertBefore(fact, row.querySelector('.settings-row-more') || null);  // before its More, as a result stands
         return null;
     },
     paint: (container) => setResult(container.querySelector('[data-served-ui]'), servedUiStatus(servedUi) || {}),

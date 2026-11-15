@@ -375,13 +375,35 @@ def _direct_named_evidence(root: Path, task: dict, retain_dir: Path, previous: d
     return _held_named_evidence(root, "", changed, baseline, retain_dir, previous)[1]
 
 
+def _held_outputs(outputs: list[dict], artifact_dir: Path) -> list[dict]:
+    """This capture's own copies of the registered outputs it names (``registered_outputs/``, measured as copied).
+    Their store files stay mutable (a later write replaces them) and a later capture is a version beside this one, so
+    neither changes the bytes this capture published (#3248). An output that cannot be copied stays named, unheld,
+    and fails the capture (``_directory_direct_artifacts``): its bytes remain only in the mutable store."""
+    from ouroboros.artifacts import copy_artifact_file
+
+    held, names = [], set()
+    for item in outputs:
+        name = str(item.get("name") or Path(str(item["path"])).name)
+        name = name if name not in names else f"{sha256(str(item['path']).encode('utf-8')).hexdigest()[:8]}-{name}"
+        names.add(name)
+        try:
+            measured = copy_artifact_file(Path(str(item["path"])), artifact_dir / "registered_outputs" / name)
+        except OSError as exc:
+            held.append({**item, "status": "missing", "errors": [f"not retained: {type(exc).__name__}: {exc}"]})
+            continue
+        held.append({**item, "name": name, "path": str(artifact_dir / "registered_outputs" / name), **measured})
+    return held
+
+
 def _directory_direct_artifacts(
-    root: Path, artifact_dir: Path, task: dict, existing: dict, *,
+    root: Path, artifact_dir: Path, task: dict, existing: dict, *, drive_root: Path,
     retain_evidence_dir: Path | None = None, retained_evidence: dict | None = None,
 ) -> tuple[list[dict], dict] | None:
-    """Record direct folder effects without inventing a before-image or scanning the tree; given
-    ``retain_evidence_dir``, its new ``.review-evidence/`` is retained once there (``_direct_named_evidence``)."""
-    from ouroboros.headless_status import ARTIFACT_STATUS_MISSING, ARTIFACT_STATUS_READY
+    """Record direct folder effects without inventing a before-image or scanning the tree; its registered outputs
+    are held in this capture (``_held_outputs``). Given ``retain_evidence_dir``, its new ``.review-evidence/`` is
+    retained once there (``_direct_named_evidence``). ``drive_root`` owns the task's store (a version nests deeper)."""
+    from ouroboros.headless_status import ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_MISSING, ARTIFACT_STATUS_READY
     from ouroboros.workspace_patch_capture import _acting_constraint_from_task, _preflight_head_from_task
     from ouroboros.utils import atomic_write_json, utc_now_iso
     from ouroboros.workspace_admission import has_git_metadata
@@ -402,21 +424,25 @@ def _directory_direct_artifacts(
         collect_task_artifact_records, merge_artifact_records, artifact_record, registered_task_artifact,
     )
 
-    drive = artifact_dir.parents[2]
-    captured = collect_task_artifact_records(drive, str(task["id"]))
+    # A registration names a top-level store file and carries its own facts: a nested file (an earlier capture's
+    # version, held copies or evidence) is never an output, so no capture is hashed or looked up again here.
+    drive = Path(drive_root)
+    captured = [item for item in collect_task_artifact_records(drive, str(task["id"]), measure=False)
+                if "relpath" not in item]
     records = merge_artifact_records(existing.get("artifacts") or [], [
         registered_task_artifact(drive, str(task["id"]), item["name"]) or item for item in captured
     ])
     outputs = []
-    for item in records:
+    for item in records:  # a capture's own copies (held, or history now) are no outputs of the folder
         source = str(item.get("source_path") or "")
-        if source and work_domain.settle(source).is_relative_to(root):
+        if (source and item.get("kind") not in {"workspace_registered_output", "workspace_capture_history"}
+                and work_domain.settle(source).is_relative_to(root)):
             outputs.append(dict(item))
     manifest = {
         "schema_version": 1, "workspace_root": str(root), "status": ARTIFACT_STATUS_READY,
         "capture_kind": "directory_direct", "apply_state": "already_applied",
         "before": "unknown", "complete": False, "evidence_extent": "registered_outputs_only",
-        "registered_outputs": outputs, "created_at": utc_now_iso(),
+        "registered_outputs": (held := _held_outputs(outputs, artifact_dir)), "created_at": utc_now_iso(),
         "note": "Direct effects remain in the selected folder. Registered outputs retain their captured "
                 "bytes; other shell, GUI or external effects and the full changed-file set are unknown. "
                 "No full rollback is available.",
@@ -432,9 +458,14 @@ def _directory_direct_artifacts(
         evidence = _direct_named_evidence(root, task, retain_evidence_dir, retained_evidence)
         if evidence is not None:
             manifest["named_evidence"] = _evidence_summary(evidence)
+    if unheld := [item for item in held if item.get("status") == "missing"]:  # as a Git capture's file failure does
+        manifest.update(status=ARTIFACT_STATUS_FAILED, errors=[{"type": "file_capture_failed", "message": (
+            f"registered output {item.get('name')} ({item.get('source_path')}) {'; '.join(item['errors'])}")}
+            for item in unheld])
     path = artifact_dir / "workspace_patch.json"
     atomic_write_json(path, manifest, trailing_newline=True)
-    return [*outputs, artifact_record(path, kind="workspace_patch_manifest")], manifest
+    copies = [{**item, "kind": "workspace_registered_output"} for item in held if item.get("status") != "missing"]
+    return [*outputs, *copies, artifact_record(path, kind="workspace_patch_manifest")], manifest
 
 
 def capture_known_workspace_outputs(ctx, workspace_root, paths, *, source_tool, include_preamble=True):

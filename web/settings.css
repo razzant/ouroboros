@@ -39,18 +39,12 @@ html[data-layout="stack"] .settings-page { padding-inline: 12px; }
    over the home alone, stands its search field; over a page, `(‹) <page>` in the header's one title style. */
 .settings-lead .settings-search { flex: 1 1 auto; min-width: 0; }
 
-/* Two panes: the home is the rail beside the page. Its card says only who and how many; the count opens the list.
-   Until a row is pressed the home stands alone, its column in the middle of the box and as wide as at a desk (no page
-   is opened for it: a page reads when it is shown), so the window has no empty half; the field over it stands over
-   that column. */
+/* Two panes: the home is the rail beside the page, and a page is always open (settings.js: the last one opened, Models
+   the first time; the list's Ouroboros row opens Ouroboros's card in the page's pane). */
 @container sectionplace (min-width: 40rem) {
-    .settings-shell[data-section-view="home"] .settings-home-column { margin-inline: auto; }
     .settings-shell[data-section-view="page"] .settings-page { padding-inline-start: var(--space-4); }
-    .settings-shell[data-section-view="page"] > .settings-home .settings-needs:not([data-all]) { display: none; }
-    .settings-shell[data-section-view="page"] > .settings-home .settings-being-count { color: var(--text-primary); font-weight: 600; }
     .settings-shell[data-section-view="page"] > .settings-home .settings-overview { margin-block-end: var(--space-3); }
     .settings-shell[data-section-view="page"] .settings-door-glyph.settings-overview-glyph { width: 20px; height: 20px; margin-inline-end: var(--space-2); }
-    #page-settings[data-section-view="home"] .settings-lead { justify-content: center; }
 }
 
 /* A phone: the band is `☰ Settings`, and the row under it holds the field over the home, or `(‹) <page>` over a page,
@@ -523,7 +517,7 @@ html[data-layout="stack"] .settings-search { height: 44px; }
    under a finger their controls take the touch minimum as their own height through the control tokens (the lock
    writes the box), so no reach covers a neighbour (DESIGN "Touch and containment"). */
 @media (pointer: coarse) {
-    :is(.settings-toolbar, .secret-input-row, .harness-account-actions, .account-resource-panel,
+    :is(.settings-toolbar, .secret-input-row, .harness-account-actions, .harness-account-extra, .account-resource-panel,
         .settings-extension-actions, .harness-maintenance-actions),
     .settings-shell .ui-action-row:has(> .btn ~ .btn ~ .btn) {
         --control-h: var(--touch-target-min);
@@ -1301,19 +1295,11 @@ html[data-layout="stack"] .settings-search { height: 44px; }
    body, so the light theme's unset warning word would leave it unmarked). */
 #page-settings :is(.ui-row-meta, .models-main-meta, [data-setting-meta])[data-tone="warn"] { color: var(--status-warn-fg); }
 .settings-row-result { min-height: 0; }
-/* A narrow row stacks its words over its control, and "Saved" wrapped onto a line of its own there, pushing the control
-   down as it arrived (bible, principle 6: a state change never changes a height). In such a row a good result stands
-   at the end of the title's line instead, where nothing else is; a refusal or a warning keeps its place in the text,
-   where it has room for its words. */
-.settings-row { position: relative; }
-@container (max-width: 28rem) {
-    .settings-row > .ui-row-meta > .settings-row-result[data-tone="ok"] {
-        position: absolute;
-        inset-block-start: var(--space-3);
-        inset-inline-end: var(--space-3);
-    }
-    .settings-row > .ui-row-title:has(~ .ui-row-meta > .settings-row-result[data-tone="ok"]) { padding-inline-end: 6rem; }
-}
+/* A row's result stands on a line of its own under the row's words and control, the full width of the row (the rows
+   draw it after their control). It never lies over the title, the words or the control, and the control does not move
+   when it arrives (bible, principle 6): beside the words the control is centred on the title and meta lines alone;
+   under them, the result comes after it. */
+.settings-row > .settings-row-result { grid-column: 1 / -1; }
 .settings-row [data-setting-meta]:empty,
 .settings-row-result:empty,
 .settings-row-fact:empty { display: none; }
@@ -1361,19 +1347,37 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
     -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 17 17 7'/%3E%3Cpath d='M7 7h10v10'/%3E%3C/svg%3E");
     mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 17 17 7'/%3E%3Cpath d='M7 7h10v10'/%3E%3C/svg%3E");
 }
-/* A row that leads with a mark (Costs' kinds of account): the mark stands beside both lines. */
+/* A row that leads with a mark (Costs' kinds of account): the mark stands beside both lines. Its value is a short
+   phrase said on one line: at the end of a wide row, under the words in a narrow one (below). The narrow rules of a
+   door keep their hands off it (:not([data-lead])), so the mark keeps its own column. */
 .settings-row[data-lead] { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "mark words actions" "mark meta actions"; }
+.settings-row[data-lead] .settings-row-value { white-space: nowrap; }
+/* A door's value is a fact said at the row's end, flush against its sign: the two sides share a narrow row up to what
+   each actually holds, so a short name ("Model") gives a long route the open middle while longer words beside a long
+   value still split the row evenly, and the sign never drops under the value. */
+.settings-row[data-kind="door"]:not([data-lead]) { grid-template-columns: auto auto; justify-content: space-between; }
+.settings-row[data-kind="door"]:not([data-lead]) > .ui-row-actions { flex-wrap: nowrap; }
+.settings-row[data-kind="door"]:not([data-lead]) .settings-row-value { text-align: end; }
+/* A wide control (settings_controls.js marks it `data-wide`) goes under the words below 36rem, while beside it the
+   words would keep only a narrow column (ui.css moves every row's actions only below 28rem). */
+@container (max-width: 36rem) {
+    .settings-row[data-wide] > :is(.ui-row-title, .ui-row-meta, .ui-row-actions) { grid-column: 1 / -1; }
+    .settings-row[data-wide] > .ui-row-actions { grid-row: 3; justify-content: flex-start; }
+}
 /* In a narrow row a door, a switch, a stored key's state and a short number keep their place at the row's end
    (ui.css moves a narrow row's actions under its words; a strip, a list, a longer field and a number with "No limit"
    do go there). A row that leads with a mark says its value as a third line and keeps its sign at the end. */
 @container (max-width: 28rem) {
-    .settings-row:is([data-kind="door"], [data-kind="switch"], [data-kind="secret"], [data-kind="number"]:not([data-no-limit])) > :is(.ui-row-title, .ui-row-meta) { grid-column: 1; }
-    .settings-row:is([data-kind="door"], [data-kind="switch"], [data-kind="secret"], [data-kind="number"]:not([data-no-limit])) > .ui-row-actions { grid-column: 2; grid-row: 1 / span 2; flex-wrap: nowrap; justify-content: flex-end; }
+    .settings-row:is([data-kind="door"], [data-kind="switch"], [data-kind="secret"], [data-kind="number"]:not([data-no-limit])):not([data-lead]) > :is(.ui-row-title, .ui-row-meta) { grid-column: 1; }
+    .settings-row:is([data-kind="door"], [data-kind="switch"], [data-kind="secret"], [data-kind="number"]:not([data-no-limit])):not([data-lead]) > .ui-row-actions { grid-column: 2; grid-row: 1 / span 2; flex-wrap: nowrap; justify-content: flex-end; }
     .settings-row[data-lead] > :is(.ui-row-title, .ui-row-meta) { grid-column: 2; }
     .settings-row[data-lead] > .ui-row-actions { display: contents; }
     .settings-row[data-lead] .settings-row-value { grid-column: 2; grid-row: 3; }
-    .settings-row[data-lead] .settings-row-chevron { grid-column: 3; grid-row: 1 / span 3; align-self: center; }
-    .settings-row[data-lead] > .settings-head-glyph { grid-row: 1 / span 3; align-self: start; }
+    /* The mark and the sign span the lines there are: a third line only when a value says it (a span into an empty
+       third row would add a gap under the words). */
+    .settings-row[data-lead] .settings-row-chevron { grid-column: 3; grid-row: 1 / span 2; align-self: center; }
+    .settings-row[data-lead] .settings-row-value + .settings-row-chevron { grid-row: 1 / span 3; }
+    .settings-row[data-lead] > .settings-head-glyph { grid-row: 1 / span 2; align-self: start; }
 }
 
 /* A head: one entry of a list (an agent, a tool server, a provider, a key, a fallback). Its mark, its name with one
@@ -1435,6 +1439,7 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
     background: none;
 }
 .settings-row[data-kind="choices"] > .ui-row-actions { display: block; margin-top: var(--space-2); }
+.settings-row[data-kind="choices"] > .settings-row-result { grid-row: 4; }  /* under the options, as every row's */
 .settings-rows > .settings-row[data-kind="choices"]:only-child > .ui-row-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .settings-rows > .settings-row[data-kind="choices"]:only-child > .ui-row-meta { margin-top: calc(-1 * var(--space-3)); font-size: var(--type-body); line-height: var(--line-body); }
 .settings-choices { display: flex; flex-direction: column; gap: var(--space-2); width: 100%; min-width: 0; }
@@ -1612,8 +1617,10 @@ textarea.ui-control.settings-rules-text {
 .accounts-bar[data-state="need"] > b { min-height: 6px; background: var(--mark-owner); }
 .accounts-bar[data-state="off"] { align-self: flex-end; height: 22%; }
 /* An account: its mark (the owner's dot while it needs sign-in, else what is left of its window), its name and login
-   state, its facts, then Sign in while it is needed, its place in rotation as a switch, and More. What is rare (Sign
-   in again, Remove) shows with More, whose panel holds the account's resources. A row that needs sign-in is tinted. */
+   state, its facts, and at the row's end, at every width, its place in rotation as a switch and More, as a key's or
+   a server's switch stands. Sign in, while it is needed, stands on a line under the words; what is rare (Sign in
+   again, Remove) shows on that line with More, whose panel holds the account's resources. A row that needs sign-in
+   is tinted. */
 .agent-family-accounts .harness-account-row {
     grid-template-columns: auto minmax(0, 1fr) auto;
     grid-template-areas: "mark main actions" "mark meta actions";
@@ -1626,14 +1633,16 @@ textarea.ui-control.settings-rules-text {
 }
 .agent-family-accounts .harness-account-row[data-tone="warn"] { background: var(--status-warn-bg); }
 .harness-account-mark { grid-area: mark; display: grid; place-items: center; min-width: 22px; color: var(--text-secondary); }
-.agent-family-accounts .harness-account-actions { align-items: center; justify-content: flex-end; gap: var(--space-2); }
+.agent-family-accounts .harness-account-actions { flex-wrap: nowrap; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 .harness-account-actions > [data-resources] { margin: 0; }
-.harness-account-actions > [data-resources][aria-expanded="false"] ~ [data-rare] { display: none; }
+.harness-account-extra { grid-column: 2 / -1; grid-row: 3; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-1); }
+/* What is rare shows while More is open: the row holds the :has() in its own compound and lends the line its display;
+   closed, the fallback hides it, and a line of nothing else takes no room. */
+.harness-account-row:has([data-resources][aria-expanded="true"]) {
+    --account-rare: flex;
+}
+.harness-account-extra > [data-rare],
+.harness-account-extra:not(:has(> :not([data-rare]))) { display: var(--account-rare, none); }
 .agent-family-accounts .account-resource-panel { margin-top: var(--space-2); }
 .agent-family-accounts .account-resource-head { flex-wrap: wrap; }
 .agent-family-accounts .account-resource-head > h5 { overflow-wrap: normal; }
-@container (max-width: 28rem) {
-    .agent-family-accounts .harness-account-row > :is(.harness-account-main, .harness-account-meta, .harness-account-actions) { grid-column: 2 / -1; }
-    .agent-family-accounts .harness-account-row > .harness-account-actions { grid-row: 3; justify-content: flex-start; margin-top: var(--space-1); }
-    .agent-family-accounts .harness-account-row > .account-resource-panel { grid-row: 4; }
-}

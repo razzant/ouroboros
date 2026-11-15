@@ -75,7 +75,7 @@ def test_the_start_text_is_written_as_the_mind_reads_it_and_a_declared_density_p
     dump.parent.mkdir()
     plain = measure_core(core, scale.tools(), root=tmp_path, window=1_000_000, reserve=10000, dump=dump)
     text = dump.read_text(encoding='utf-8')
-    assert text.startswith(core.base_prompt) and '## My story' in text and '## This room (Main)' in text
+    assert text.startswith(core.base_prompt) and '## My story' in text and '## This room (Main [chat_id=1])' in text
     assert (plain['density'], plain['view']['work_room_tokens']) == (1.0, plain['margin_tokens'])
     dense = measure_core(core, scale.tools(), root=tmp_path, window=1_000_000, reserve=10000, ratio=1.6)
     assert dense['density'] == dense['fit']['measurement']['measurement_density'] == 1.6
