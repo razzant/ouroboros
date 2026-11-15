@@ -353,9 +353,10 @@ def resolve_vision_caption_model(ctx: Any, llm: Any, *, use_local: bool = False,
                          bool(getattr(ctx, "active_use_local", False))),
     ]
     try:
-        from ouroboros.config import get_light_model, parse_fallback_chain
+        from ouroboros.config import parse_fallback_chain
+        from ouroboros.route_choice import following_route
 
-        automatic.append(slot_lane_label("light", get_light_model()))
+        automatic.append(local_lane_label(*following_route("light")))
         automatic.extend(slot_lane_label("fallback", model) for model in parse_fallback_chain())
     except Exception:
         pass

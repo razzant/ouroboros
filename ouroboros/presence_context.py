@@ -868,14 +868,11 @@ def focus_metadata(admission: Any, event: Any, task_id: str, chat_id: int, drive
         metadata["root_cost_ceiling_usd"] = min(cap, float(remaining)) if cap > 0 else float(remaining)
     model, layer = place_model_route(place, admission.circle)
     if model:
-        from ouroboros.config import get_light_model
-        from ouroboros.model_slots import _main_model
-        metadata["lead"] = {
-            "source": layer,
-            "model": get_light_model() if model == "light" else _main_model() if model == "main" else model,
-            "use_local": model in {"main", "light"} and runtime_setting(
-                f"USE_LOCAL_{model.upper()}", "").lower() in {"true", "1"},
-        }
+        from ouroboros.route_choice import following_route
+
+        # The aliases are roles: each resolves by the one rule of its slot; a model of its own runs as named.
+        routed, local = following_route(model) if model in {"main", "light"} else (model, False)
+        metadata["lead"] = {"source": layer, "model": routed, "use_local": local}
     return metadata
 
 

@@ -81,8 +81,9 @@ def resolve_model(model: str, *, model_as_typed: bool = False) -> tuple[dict, st
     if model.lower() in {"main", "light"}:
         from ouroboros.route_choice import following_route
 
-        routes = [f"{role.title()}: {route}{' (local)' if local else ''}"
-                  for role in ("main", "light") for route, local in [following_route(role)]]
+        from ouroboros.model_slots import local_lane_label
+
+        routes = [f"{role.title()}: {local_lane_label(*following_route(role))}" for role in ("main", "light")]
         raise ValueError("Main and Light are roles, not model ids. " + "; ".join(routes)
                          + ". Moving this task between their current routes needs no cite: pass the route to switch_model without owner_words.")
     choice = normalize_model_choice({"kind": "model", "model": model})

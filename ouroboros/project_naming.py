@@ -35,15 +35,11 @@ CONTINUE_TITLE_PREFIX = "Continue: "
 
 
 def _light_use_local(explicit: Optional[bool]) -> bool:
-    """Resolve the light-lane local route for naming. Honor an explicit caller value;
-    otherwise follow the runtime ``USE_LOCAL_LIGHT`` flag — naming runs on the LIGHT model,
-    so it must route local/remote like every other light-lane caller (e.g. the safety
-    check at ``ouroboros/safety.py::_resolve_safety_routing``) instead of hardcoding remote."""
-    from ouroboros.config import runtime_setting
+    """The Light route's lane for naming: an explicit caller value, else the one rule of the Light slot
+    (``route_choice.following_route``), as every Light call asks it."""
+    from ouroboros.route_choice import following_route
 
-    if explicit is not None:
-        return bool(explicit)
-    return str(runtime_setting("USE_LOCAL_LIGHT", "") or "").lower() in ("true", "1")
+    return bool(explicit) if explicit is not None else following_route("light")[1]
 
 # Mirror gateway ``_MAX_DERIVED_NAME`` so heuristic and LLM names share one cap.
 MAX_PROJECT_NAME = 60
@@ -182,7 +178,7 @@ def llm_project_name(
     """SYNC bounded LLM-first project title. On ANY failure returns the heuristic
     fallback over ``fallback_candidates`` then ``owner_text``. Never raises.
 
-    ``use_local=None`` (the default) routes via the runtime ``USE_LOCAL_LIGHT`` flag so a
+    ``use_local=None`` (the default) takes the Light slot's lane (``route_choice.following_route``) so a
     local-only / local-light deployment names with its configured local model instead of a
     remote provider. The provider call is wrapped in the #4 per-model concurrency slot so a
     flurry of namers cannot storm one model's rate limit. One absolute deadline covers
@@ -256,7 +252,7 @@ async def llm_project_name_async(
     """ASYNC variant for the gateway (Starlette) path: runs the bounded sync call off
     the event loop with a HARD timeout. ``timeout_sec=None`` (default) uses the config SSOT
     ``OUROBOROS_PROJECT_NAMING_ASYNC_TIMEOUT_SEC``. On timeout/failure returns the heuristic
-    fallback. ``use_local=None`` defers to ``USE_LOCAL_LIGHT`` inside the sync helper.
+    fallback. ``use_local=None`` defers to the Light slot's lane inside the sync helper.
     Never raises."""
     import asyncio
 

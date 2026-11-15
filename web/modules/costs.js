@@ -6,14 +6,13 @@ import { rowsOf } from './settings_rows.js';
 import { statusMarkHtml } from './status_mark.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { readConsciousness, readConsciousnessFromState } from './consciousness_api.js';
-import { allowanceHold, allowanceText } from './consciousness_words.js';
+import { allowanceHold, allowanceText, modelRouteWords } from './consciousness_words.js';
 import { openTaskReference, taskReferenceHtml } from './task_reference.js';
 import { mountCostPeriod } from './cost_period.js';
 import { READ_OK, accountRows, facetReadState } from './claudexor_status_store.js';
 import { humanizeResetAt, quotaSummary } from './harness_accounts.js';
 import { controlIcon, fluentIcon } from './page_icons.js';
 import { fmt, translateString } from './i18n.js';
-import { parseModelSource } from './route_editor_primitives.js';
 
 // The limits card is rows of settings_rows.js (their home is this tab), drawn and written by settings_controls.js: each
 // saves itself and says what happened. The consciousness allowance has its one editor here (owner, 10 Nov 2026: moved
@@ -195,11 +194,8 @@ export function allowancePresentation(snapshot, { now = Date.now(), timeZone } =
     } else if (snapshot.liveWakeHeld && snapshot.holdCause === 'owner') {
         lines.push({ wake, tone: 'muted', text: 'The consciousness wake-up is on an explicit pause; its card shows who paused it and how to continue.' });
     }
-    const route = snapshot.modelRoute;
-    if (route) {  // the words of the Consciousness tab's row and the Models page: "Main model", "Local model"
-        const name = route.local ? 'Local model' : parseModelSource(route.value).model || route.value;
-        lines.push({ tone: 'muted', text: `Model: ${name}${route.layer === 'main' ? ' (Main model)' : ''}.` });
-    }
+    const model = modelRouteWords(snapshot.modelRoute);  // the words of the Consciousness tab's Model row
+    if (model) lines.push({ tone: 'muted', text: `Model: ${model}.` });
     return { spend, lines, meter };
 }
 

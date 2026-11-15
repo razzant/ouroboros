@@ -360,9 +360,12 @@ def get_light_model() -> str:
 
 
 def get_safety_model() -> str:
-    """Safety Supervisor inherits Light, including its local route, then Main."""
-    return (str(runtime_setting("OUROBOROS_MODEL_SAFETY", "") or "").strip()
-            or slot_lane_label("light", get_light_model()))
+    """The Safety Supervisor's model labelled with its lane: its own slot, else Light's route by the one rule of
+    a role's slot (``route_choice.following_route``: an empty Light is Main's route unless its own box, checked
+    under a cloud Main, sends it to the local runtime)."""
+    from ouroboros.route_choice import following_route
+
+    return local_lane_label(*following_route("safety"))
 
 
 def get_heavy_model() -> str:
@@ -376,7 +379,7 @@ def get_vision_model() -> str:
     return str(runtime_setting("OUROBOROS_MODEL_VISION", "") or "").strip() or _main_model()
 
 
-_SLOT_LOCAL_FLAGS = {"main": "USE_LOCAL_MAIN", "light": "USE_LOCAL_LIGHT", "fallback": "USE_LOCAL_FALLBACK"}
+_SLOT_LOCAL_FLAGS = {"main": "USE_LOCAL_MAIN", "fallback": "USE_LOCAL_FALLBACK"}
 
 
 def local_lane_label(model: object, use_local: bool) -> str:
@@ -389,11 +392,11 @@ def slot_lane_label(role: str, model: object) -> str:
     """A configured slot's model as it routes: labelled local when that slot runs on our local lane.
 
     The local flag is a separate setting, so a bare id alone does not say which lane
-    carries it. An empty vision or light slot inherits Main and Main's flag; a vision
-    slot set to a local model is stored with its label already.
+    carries it. An empty vision slot inherits Main and Main's flag; a vision slot set
+    to a local model is stored with its label already. The Light slot is asked through
+    its one rule instead (``route_choice.following_route``).
     """
-    inherits = {"vision": "OUROBOROS_MODEL_VISION", "light": "OUROBOROS_MODEL_LIGHT"}.get(role, "")
-    if inherits and not str(runtime_setting(inherits, "") or "").strip():
+    if role == "vision" and not str(runtime_setting("OUROBOROS_MODEL_VISION", "") or "").strip():
         role = "main"
     flag = str(runtime_setting(_SLOT_LOCAL_FLAGS.get(role, ""), "") or "") if role in _SLOT_LOCAL_FLAGS else ""
     return local_lane_label(model, flag.strip().lower() in {"1", "true", "yes", "on"})

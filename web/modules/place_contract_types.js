@@ -105,10 +105,12 @@
 
 /**
  * The model a place thinks with now, and the scope that chose it: its own, its circle's, or the consciousness
- * model. A stored alias (`main`, `light`) reads here as the model it resolves to now.
+ * model. A stored alias (`main`, `light`) reads here as the model it resolves to now; `local` says that route is
+ * the local runtime (an inherited or alias route by its slot's rule; a model of its own is never local here).
  * @typedef {Object} PlaceModelRoute
  * @property {string} value
  * @property {'place'|'circle'|'consciousness'} layer
+ * @property {boolean} local
  */
 
 /**
