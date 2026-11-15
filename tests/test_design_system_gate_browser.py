@@ -303,6 +303,10 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
                     facts[key] = page.evaluate(MEASURE, root)
                     if any(facts[key].values()):
                         failures[key] = facts[key]
+                    if view != 'home':
+                        label = page.locator(root + ' [data-settings-lead-name]').text_content().strip()
+                        if label and not page.locator(root + ' > .app-page-header').get_by_role('heading', name=label, exact=True).count():
+                            failures[key + '/heading'] = 'the level heading left the accessibility tree'
                     # One leading slot: a deeper level owns Back even when its list still fits beside it.
                     if width < 720:
                         host_back = page.locator('html').get_attribute('data-telegram-back') == 'back'
@@ -342,6 +346,10 @@ def test_every_page_and_settings_tab_meets_shell_contract(gate_ui, tmp_path, wid
                 facts[key] = page.evaluate(MEASURE, root)
                 if any(facts[key].values()):
                     failures[key] = facts[key]
+                if name == 'dashboard':
+                    label = page.locator(root + ' [data-dashboard-lead-name]').text_content().strip()
+                    if label and not page.locator(root + ' > .app-page-header').get_by_role('heading', name=label, exact=True).count():
+                        failures[key + '/heading'] = 'the page heading left the accessibility tree'
         facts['sidebar'] = sidebar_metrics(page)
         if len(facts['sidebar']) != 1:
             failures['sidebar'] = facts['sidebar']

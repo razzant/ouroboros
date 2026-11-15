@@ -148,5 +148,11 @@ def test_a_touch_sections_controls_can_follow_its_row_but_an_empty_lead_draws_no
     assert ('html[data-layout="stack"] .section-place[data-section-view="page"] .section-lead '
             "{ margin-inline-start: calc(var(--section-rail-start) - var(--space-3)); }") in two
     assert "padding: var(--chrome-inset) var(--space-3);" in _read("web/style.css"), "the stack header's inset the lead counts"
-    assert '#page-dashboard > .app-page-header[data-empty]:not([data-return]) .app-page-lead { display: none; }' in _read('web/style.css')
-    assert '#page-settings > .app-page-header[data-return] .app-page-lead { display: flex; }' in _read('web/settings.css')
+    css = _read('web/style.css')
+    for selector in ['html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {',
+                     'html[data-layout="stack"] #page-settings > .app-page-header:not([data-return]) .app-page-lead {']:
+        hidden = _block(css, selector)
+        assert 'display: none' not in hidden and 'visibility: hidden' not in hidden
+        assert 'position: absolute;' in hidden and 'clip-path: inset(50%);' in hidden, 'the heading remains accessible'
+    assert '#page-dashboard > .app-page-header[data-empty]:not([data-return]) .app-page-lead,' in css
+    assert '#page-settings > .app-page-header .app-page-lead { display: flex;' in _read('web/settings.css')

@@ -54,10 +54,9 @@ html[data-layout="stack"] #page-settings > .app-page-header {
 }
 html[data-layout="stack"] #page-settings > .app-page-header > .app-page-title-block { display: contents; }
 html[data-layout="stack"] #page-settings > .app-page-header .app-page-title-row { grid-area: title; }
-html[data-layout="stack"] #page-settings > .app-page-header .app-page-lead { display: none; grid-area: lead; min-height: var(--touch-target-min); }
+html[data-layout="stack"] #page-settings > .app-page-header .app-page-lead { display: flex; grid-area: lead; min-height: var(--touch-target-min); }
 html[data-layout="stack"] #page-settings > .app-page-header[data-return] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
 html[data-layout="stack"] #page-settings > .app-page-header[data-return] .app-page-title-row { display: none; }
-html[data-layout="stack"] #page-settings > .app-page-header[data-return] .app-page-lead { display: flex; }
 html[data-layout="stack"] #page-settings .settings-lead-col { gap: var(--space-2); }
 /* A page's or a level's screen is one row: Back and the name, where the places control and "Settings" stood (one
    leading control on a screen). Only a page that replaced the list gives the places control up: with the list beside

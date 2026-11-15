@@ -1349,7 +1349,13 @@ html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title 
     white-space: nowrap;
 }
 html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
 }
 /* In the macOS desktop window the band under the transparent title bar is the window's handle
    (launcher_window_chrome.py: a plain press there moves the window, a press on a control stays the page's). The band
@@ -1362,6 +1368,10 @@ html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
     inset: 0 6px auto 0;
     z-index: 2;
     height: var(--window-chrome-top);
+    width: auto;
+    margin: 0;
+    overflow: visible;
+    clip-path: none;
     padding: 0;
 }
 :root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-empty]:not([data-return]) ~ .widgets-scroll {
@@ -6776,7 +6786,16 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
    to the shell's switch) has no Back, so there ☰ stays the way to every other destination. */
 html[data-layout="stack"] #page-dashboard[data-section-view="home"] > .app-page-header .app-page-lead { display: none; }
 html[data-layout="stack"] #page-dashboard > .app-page-header[data-empty]:not([data-return]) { grid-template-areas: "leading title toolbar"; }
-html[data-layout="stack"] #page-dashboard > .app-page-header[data-empty]:not([data-return]) .app-page-lead { display: none; }
+html[data-layout="stack"] #page-dashboard > .app-page-header[data-empty]:not([data-return]) .app-page-lead,
+html[data-layout="stack"] #page-settings > .app-page-header:not([data-return]) .app-page-lead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    min-height: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+}
 @container sectionplace (max-width: calc(40rem - 0.02px)) {
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header > .app-page-leading,
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
