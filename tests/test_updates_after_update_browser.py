@@ -329,8 +329,13 @@ def test_samples_are_rows_of_their_last_attempt_and_survive_refreshes(updates_ui
 
     # A refresh, a tab switch and a changed record repaint in place; both disclosures stay as the owner left them.
     refresh(page, transport, reads)
+    # DESIGN.md:3289–3295: on a phone a section's page stands under Back; return to its list to choose another.
+    if not page.locator('[data-dashboard-tab="logs"]').is_visible():
+        page.locator('#page-dashboard').get_by_role('button', name='Back to Dashboard', exact=True).click()
     page.click('[data-dashboard-tab="logs"]')
     count = len(reads)
+    if not page.locator('[data-dashboard-tab="updates"]').is_visible():
+        page.locator('#page-dashboard').get_by_role('button', name='Back to Dashboard', exact=True).click()
     page.click('[data-dashboard-tab="updates"]')
     wait_reads(page, reads, count + 1)
     kept = facts(page)
