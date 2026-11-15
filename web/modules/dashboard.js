@@ -2,11 +2,11 @@ import { bindTabStrip, placePageBack, renderBackControl, renderPageHeader } from
 import { sectionHoldsTwoPanes } from './layout.js';
 import { fluentIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
-import { bindSettingRows, readSettings, setRowMeta, settingsRow, settingsSnapshot } from './settings_controls.js';
+import { bindSettingRows, readSettings, settingsRow, settingsSnapshot } from './settings_controls.js';
 import { homeAnswers, homeFactsSeen } from './settings_home.js';
 import { rowsOf } from './settings_rows.js';
 import { paintStatusMark, statusMarkHtml } from './status_mark.js';
-import { escapeHtmlAttr as escape } from './ui_primitives.js';
+import { escapeHtmlAttr as escape, setRowMeta } from './ui_primitives.js';
 
 // By importance and expected use (docs/DESIGN.md §5): the log first and by default, then what
 // runs now, what Ouroboros does on its own (consciousness and its places) and what it costs, then

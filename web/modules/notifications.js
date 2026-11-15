@@ -55,7 +55,7 @@
 
 import { TERMINAL_TASK_STATUSES } from './chat_activity.js';
 import { getLogTaskGroupId, taskPresentation, taskReasonDetail, taskTerminalPhase } from './log_events.js';
-import { setRowMeta } from './settings_controls.js';
+import { setRowMeta } from './ui_primitives.js';
 import { shellBridgeApi } from './ui_helpers.js';
 import { tr } from './i18n.js';
 

@@ -3,7 +3,7 @@ import { openConfirmDialog } from './confirm_dialog.js';
 import { saveCheckerSettings, saveSafetyLevel, saveSafetyRules } from './consciousness_api.js';
 import { isDoorId } from './settings_pages.js';
 import { rowById } from './settings_rows.js';
-import { errorWords, escapeHtmlAttr, setResult } from './ui_primitives.js';
+import { errorWords, escapeHtmlAttr, setResult, setRowMeta } from './ui_primitives.js';
 import { API_CHOICE_PREFIX, connectionParts, parseModelSource, routeChoiceGroups, selectHtml } from './route_editor_primitives.js';
 
 /** Read the complete custom-key draft, including blank and removed rows. No paint. */
@@ -708,11 +708,6 @@ export function settingsRow(row, ctx = {}) {
         ${row.more ? `<details class="ui-disclosure settings-row-more"><summary>More</summary><p class="settings-row-copy">${escapeHtmlAttr(row.more)}</p></details>` : ''}
     </div>`;
 }
-/** Every writer of a row's meta words (`part`) comes here: the row says when its line has none (`data-no-meta`). */
-export function setRowMeta(part, text) {
-    if (part && part.textContent !== text) part.textContent = text;
-    part?.closest?.('.settings-row')?.toggleAttribute('data-no-meta', !part.closest('.ui-row-meta')?.textContent);
-}
 
 // The row's result line: the sentence, then Undo as a link inside it, then a warning the server sent. No timer ends it.
 function paintResult(result, line) {
@@ -812,7 +807,8 @@ function paintRow(node, row) {
     // `custom` control draw each option's line themselves).
     const noted = ['strip', 'select'].includes(control.kind)
         && (control.options || []).find((option) => String(option.value) === String(shown ?? ''))?.note;
-    setRowMeta(node.querySelector('[data-setting-meta]'), unread || (waits ? `Running: ${valueWords(row, running)} · after restart: ${valueWords(row, stored)}` : noted || row.meta || ''));
+    const meta = unread || (waits ? `Running: ${valueWords(row, running)} · after restart: ${valueWords(row, stored)}` : noted || row.meta || '');
+    setRowMeta(node.querySelector('[data-setting-meta]'), meta);
     paintResult(node.querySelector('[data-setting-result]'), outcomeLine(row, state.outcome));
     if (state.outcome) state.seen = true;
 }

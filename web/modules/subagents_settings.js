@@ -25,11 +25,11 @@ import {
     sessionRouteVerdict,
 } from './subagent_status_primitives.js';
 import { bindRecheckMarks, recheckMarkHtml, syncRecheckState } from './safety_recheck.js';
-import { CODECS, CONFIRMS, bindSettingRows, doorSign, outcomeLine, paintWithRow, setButtonBusy, setRowMeta, settingsReadMessage, settingsRow, settingsSnapshot, writeEntry } from './settings_controls.js';
+import { CODECS, CONFIRMS, bindSettingRows, doorSign, outcomeLine, paintWithRow, setButtonBusy, settingsReadMessage, settingsRow, settingsSnapshot, writeEntry } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { rowById, rowsOf } from './settings_rows.js';
 import { revealNewRow } from './ui_helpers.js';
-import { setResult } from './ui_primitives.js';
+import { setResult, setRowMeta } from './ui_primitives.js';
 import { effortLabel } from './effort_levels.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { currentLanguage } from './i18n.js';

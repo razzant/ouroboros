@@ -4,7 +4,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { bindSettingRows, commitSetting, forgetSettingRows, outcomeLine, readSettings, setRowMeta, settingsRow, writeEntry } from '../modules/settings_controls.js';
+import { bindSettingRows, commitSetting, forgetSettingRows, outcomeLine, readSettings, settingsRow, writeEntry } from '../modules/settings_controls.js';
+import { setRowMeta } from '../modules/ui_primitives.js';
 import { HAND_WRITTEN, HOME_ROWS, ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 
