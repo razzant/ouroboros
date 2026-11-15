@@ -23,6 +23,7 @@
             "default_headers": {
               "HTTP-Referer": "https://ouroboros-agent.ai/",
               "X-OpenRouter-Title": "Ouroboros",
+              "X-OpenRouter-Categories": "personal-agent,programming-app",
               "X-OpenRouter-Metadata": "enabled"
             },
             "supports_openrouter_extensions": true,
@@ -30,7 +31,7 @@
             "provider_routing": null,
             "connection": ""
           },
-          "value_sha256": "c094917113e484809d20eaddcb8f56e41492912cd4bb9fb415628979685dae7d"
+          "value_sha256": "c704d48626bc10023edd112325618e682b8699245cd867ec161c5c6d3e0665c5"
         },
         "sends": [],
         "unused_script_steps": 0
@@ -59,6 +60,7 @@
             "default_headers": {
               "HTTP-Referer": "https://ouroboros-agent.ai/",
               "X-OpenRouter-Title": "Ouroboros",
+              "X-OpenRouter-Categories": "personal-agent,programming-app",
               "X-OpenRouter-Metadata": "enabled"
             },
             "supports_openrouter_extensions": true,
@@ -66,7 +68,7 @@
             "provider_routing": null,
             "connection": ""
           },
-          "value_sha256": "ef5f33b84c208352d7307b899332e342ef2200e8591875ee4bdf9a75f06e0648"
+          "value_sha256": "fc9f1690de8df18672a0e20302a35df4b9c884999a198acf73c673f40a8a5c97"
         },
         "sends": [],
         "unused_script_steps": 0
@@ -99,6 +101,7 @@
             "default_headers": {
               "HTTP-Referer": "https://ouroboros-agent.ai/",
               "X-OpenRouter-Title": "Ouroboros",
+              "X-OpenRouter-Categories": "personal-agent,programming-app",
               "X-OpenRouter-Metadata": "enabled"
             },
             "supports_openrouter_extensions": true,
@@ -106,7 +109,7 @@
             "provider_routing": null,
             "connection": ""
           },
-          "value_sha256": "cd2c4a3d53f6e2f616a79af29984d6aade47ac01a1f01bd024088caccd1c6de0"
+          "value_sha256": "3093fd56ef8df932c478ef6fe4f32c64ec7c97ad11d352756f2ee7caf6dce984"
         },
         "sends": [],
         "unused_script_steps": 0
