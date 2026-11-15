@@ -105,7 +105,7 @@ def test_three_versions_recover_sources_and_author_facts_in_every_delivery(stage
         shown = _task_authority_projection(env, {"id": TASK})["commit_review_authority"]
         assert [r["review_record_id"] for r in shown[0]["dispute_history"]["rounds"]] == records
         updates, identities = review_context_updates(ctx, families={"commit": str(root)})
-        assert updates and identities["commit"]
+        assert identities["commit"] and all(rid in json.dumps(updates) for rid in records)
         assert review_note_options(ctx)["entries"]
 
     # The newest exact link carries predecessors even without their hot attempt rows.

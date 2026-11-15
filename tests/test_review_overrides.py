@@ -242,8 +242,11 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
     at what its review record holds now (REV6 C1): passed since, it is gone over by nothing; failed since, by its FAIL;
     still open, by no verdict; with no readable record, as open as the gate saw it. A landing names the continued
     attempt's outcome before this call's own check (REV6 A9). An attempt the gate kept no reason on is gone over only
-    when its record dispatched no review (a free replay at the spent paid ceiling): by that refusal, as no verdict."""
+    when its record dispatched no review (a free replay at the spent paid ceiling, a wave that failed before its send):
+    by that refusal or reason, as no verdict. An outcome the call that met it counted keeps its reason on a row rebuilt
+    from the record too, so going on over it adds the continuation and the landing, never a second outcome."""
     from ouroboros.review_overrides import _went_on_over
+    from ouroboros.tools.review_change_custody import recorded_commit_source
 
     ctx = _make_ctx(tmp_path)
     ctx.task_id = "root-1"
@@ -326,6 +329,31 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
     note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
     note_override_landing(ctx, "d" * 40)
     assert _fact(ctx.drive_root, "root-1") == fact and landed_outcome(ctx.drive_root, "d" * 40) == ""
+    # Free rows the attempt window dropped are rebuilt from their records: the ceiling's replay with no kept reason,
+    # an outcome its own call counted (the budget fence, a wave that failed before its send or sent nothing) with it.
+    fence = "review_wave_budget_insufficient"
+    bound = {"task_id": "root-1", "surface": "commit_gate", "state": "settled", "fingerprints": {"binding": "bytes"}}
+    for name, kind in (("refused", "review_cycles_exhausted"), ("fenced", fence)):
+        records[name] = {**records["refused"], "dispatch_refusal": {"kind": kind, "message": ""}, **bound}
+    records["sent_nothing"] = {**records["undispatched"], **bound}
+    records["crashed"] = {"verdict": {**records["undispatched"]["verdict"], "degraded_reasons": ["gate_block:infra_failure"]}, **bound}
+
+    def rebuilt(record_id):
+        reference = {"review_record_id": record_id, "task_id": "root-1", "tool_name": "commit_reviewed", "attempt": 0,
+                     "repo_key": "repo", "pre_review_fingerprint": "bytes"}
+        return recorded_commit_source(ctx, reference, SimpleNamespace(attempts=[]))
+
+    assert [rebuilt(name).review_override_reason for name in ("refused", "fenced", "sent_nothing", "crashed")] == [
+        "", fence, "review_quorum", "infra_failure"]
+    _decide(ctx, fence, "the wave's budget fence sent no seat")  # counted when met, with no record yet
+    ctx._author_commit_source, ctx._review_override_this_call = rebuilt("fenced"), ""
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
+    note_override_landing(ctx, "e" * 40)
+    after = _fact(ctx.drive_root, "root-1")
+    assert (after["count"], after["latest"]["reason"]) == (fact["count"] + 1, fence), "counted once, by the call that met it"
+    assert after["continued"]["latest"]["reason"] == fence and after["continued"]["count"] == fact["continued"]["count"] + 1
+    assert after["landed"]["count"] == fact["landed"]["count"] + 1
+    assert landed_outcome(ctx.drive_root, "e" * 40) == "no review verdict: review wave budget insufficient"
 
 
 def test_an_open_wave_never_overwrites_a_reason_its_attempt_keeps(tmp_path, monkeypatch):
@@ -351,6 +379,19 @@ def test_an_open_wave_never_overwrites_a_reason_its_attempt_keeps(tmp_path, monk
     assert kept() == "preflight"
     _decide(ctx, "critical_findings")
     assert kept() == "critical_findings", "a settled outcome replaces it"
+    # A source rebuilt from an evicted outcome's record may carry a number that names another wave now: only the
+    # attempt of that same record takes its reason.
+    from ouroboros.review_overrides import _keep_on_attempt
+    from ouroboros.review_state import update_state
+
+    number = ctx._current_review_attempt_number
+    update_state(ctx.drive_root, lambda state: setattr(state.latest_attempt_for(attempt=number), "review_record_id", "its-own"))
+    row = load_state(ctx.drive_root).latest_attempt_for(attempt=number)
+    _keep_on_attempt(ctx, "review_cycles_exhausted", row=SimpleNamespace(
+        **{name: getattr(row, name) for name in ("repo_key", "task_id", "tool_name", "attempt")}, review_record_id="evicted"))
+    assert kept() == "critical_findings"
+    _keep_on_attempt(ctx, "review_quorum", row=row)
+    assert kept() == "review_quorum"
 
 
 @pytest.mark.parametrize("case", ["warm", "restarted", "successor", "clean", "fixed", "refused"])

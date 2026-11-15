@@ -45,7 +45,7 @@ def paid_repo_key(ctx: Any, root: Any) -> str:
 
     Follow actual copy provenance only: neither a directory name nor a shared
     remote proves ownership. Pin this address on the paid row before copy GC:
-    a deleted legacy drive or repository is not reconstructed.
+    a deleted repository is not reconstructed.
     """
     from ouroboros.review_ledger import ledger_root
     from ouroboros.subagent_worktrees import list_worktrees
@@ -73,6 +73,7 @@ def review_state_root(ctx: Any) -> pathlib.Path:
     A crash after the canonical save can leave the old row: the next move only
     removes that duplicate, never overwrites a newer canonical settlement. Both
     locks cover the move; new dispatch/checkpoint/settlement writes only canonical.
+    A deleted legacy drive is not reconstructed.
     """
     from ouroboros.review_ledger import ledger_root
     from ouroboros.review_state import _STATE_RELPATH, ReviewStateMutation, update_state
@@ -899,8 +900,10 @@ def recorded_commit_source(ctx, reference, state):
     the reference's task and staged binding, settled (a running or UNKNOWN wave is no terminal outcome). A paid wave keeps
     its attempt row, which is then the source under its own attempt number, unchanged and never copied; otherwise only
     a record that dispatched nothing (``NOT_DISPATCHED``, the ceiling's or another pre-send refusal) stands, as a
-    seatless ``review_only`` outcome with the record's own verdict facts. Missing paid evidence is never read as a free
-    refusal, and nothing here is written. ``None`` otherwise."""
+    seatless ``review_only`` outcome with the record's own verdict facts and the reason its row kept when the call that
+    met it counted it: the budget fence's kind, the gate's own reason for a wave that failed before its send, the missed
+    quorum of a wave that sent nothing; a free replay (the ceiling, a pending wave) kept none, and a continuation over
+    it counts it. Missing paid evidence is never read as a free refusal, and nothing here is written. ``None`` otherwise."""
     from ouroboros.review_ledger import VERDICT_NOT_DISPATCHED, ledger_root, load_record
     from ouroboros.review_state import CommitAttemptRecord, make_repo_key
 
@@ -920,9 +923,13 @@ def recorded_commit_source(ctx, reference, state):
     if paid is not None or verdict.get("aggregate") != VERDICT_NOT_DISPATCHED:
         return paid
     refusal = record.get("dispatch_refusal") if isinstance(record.get("dispatch_refusal"), dict) else {}
+    kind = str(refusal.get("kind") or "")
+    gate = next((str(mark)[len("gate_block:"):] for mark in verdict.get("degraded_reasons") or []
+                 if str(mark).startswith("gate_block:")), "")
+    kept = (kind if kind == "review_wave_budget_insufficient" else "") if refusal else gate or "review_quorum"
     return CommitAttemptRecord(
         ts=str(record.get("ts") or ""), commit_message="", status="reviewed", phase="review_only",  # no record keeps the message
-        block_reason=str(refusal.get("kind") or VERDICT_NOT_DISPATCHED), task_id=str(record["task_id"]),
+        block_reason=kind or VERDICT_NOT_DISPATCHED, task_id=str(record["task_id"]), review_override_reason=kept,
         root_task_id=str(record.get("root_task_id") or ""), repo_key=str(reference.get("repo_key") or ""),
         tool_name=str(reference.get("tool_name") or ""), attempt=int(reference.get("attempt") or 0),
         pre_review_fingerprint=str(reference.get("pre_review_fingerprint") or ""), review_record_id=record_id,
