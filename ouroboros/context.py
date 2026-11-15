@@ -330,7 +330,7 @@ def _task_authority_projection(env: Any, task: Dict[str, Any]) -> Dict[str, Any]
     from ouroboros.review_history import review_dispute_history
 
     for repo in dict.fromkeys(str(p) for p in (task.get("workspace_root"), getattr(env, "repo_dir", None)) if p):
-        history = review_dispute_history(drive_root=canonical_root, repo_root=repo, task_id=task_id)
+        history = review_dispute_history(drive_root=canonical_root, repo_root=repo, task_id=task_id, attempts_root=env.drive_root)
         if history.get("rounds") or history.get("gaps"):
             projection.setdefault("commit_review_authority", []).append({"repo_root": repo, "dispute_history": history})
     return projection

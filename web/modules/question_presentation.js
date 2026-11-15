@@ -63,6 +63,17 @@ export function vouchedBy(data) {
 }
 
 const listed = value => (Array.isArray(value) ? value : []);
+
+/**
+ * A question's opening words as one plain line, for a place that names the question instead of showing it (a work
+ * list's row, a Project's line in the sidebar and that row's name): the emphasis and code markers dropped, then the
+ * spaces folded (markers around nothing leave no words), at most `max` characters with an ellipsis that says the cut.
+ * The question's card holds the whole text.
+ */
+export function questionWords(text, max = Infinity) {
+    const plain = String(text ?? '').replace(/\*\*|__|`/g, '').replace(/\s+/g, ' ').trim();
+    return plain.length > max ? `${plain.slice(0, max - 1).trimEnd()}…` : plain;
+}
 // One question's exact address: a bare wait without a quiz never stands for an addressed question (as on the server).
 const sameAddress = (one, other) => String(one?.task_id) === String(other?.task_id)
     && String(one?.quiz_id || '') === String(other?.quiz_id || '');

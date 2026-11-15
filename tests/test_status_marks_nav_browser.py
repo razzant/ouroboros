@@ -44,20 +44,33 @@ def expect():
     return pytest.importorskip('playwright.sync_api').expect
 
 
-def snapshot(work=(), asking=(), unread=(), pins=(), main='', main_revision=None):
-    """An /api/state body: work running in the ``work`` Projects, a question waiting for the owner in ``asking``, three
-    new messages in each ``unread`` Project, ``pins`` pinned, Main's own work in ``main`` (a census phase) and Main's
-    room revision ``main_revision`` (its read cursor starts at 0, see ``open_app``); the work fields are the server's
-    own projection of those rows."""
+def snapshot(work=(), asking=(), unread=(), pins=(), main='', main_revision=None, main_asking=False, question=''):
+    """An /api/state body: work running in the ``work`` Projects, a question waiting for the owner in ``asking`` (with
+    ``question``, an addressed one whose words the body's ``current_questions`` carry), three new messages in each
+    ``unread`` Project, ``pins`` pinned, Main's own work in ``main`` (a census phase), a question of Main's own waiting
+    for the owner (``main_asking``) and Main's room revision ``main_revision`` (its read cursor starts at 0, see
+    ``open_app``); the work fields are the server's own projection of those rows."""
     rows = [dict(activity_id=f'work-{pid}', root_task_id=f'work-{pid}', project_id=pid, chat_id=CHATS[pid],
                  kind='managed_task', phase='working') for pid in work]
     rows += [dict(activity_id=f'ask-{pid}', root_task_id=f'ask-{pid}', project_id=pid, chat_id=CHATS[pid],
                   kind='managed_task', phase='working',
-                  required_question=dict(wait_for_answer=True, owner_wait_state='waiting')) for pid in asking]
+                  required_question=dict(wait_for_answer=True, owner_wait_state='waiting',
+                                         **({'quiz_id': f'quiz-{pid}'} if question else {}))) for pid in asking]
     if main:
         rows.append(dict(activity_id='main-work', root_task_id='main-work', chat_id=1, kind='direct_chat', phase=main))
+    if main_asking:
+        rows.append(dict(activity_id='main-ask', root_task_id='main-ask', chat_id=1, kind='managed_task', phase='working',
+                         required_question=dict(wait_for_answer=True, owner_wait_state='waiting')))
     projects = [dict(p, pinned=p['id'] in pins, visible_revision=3 if p['id'] in unread else 0) for p in PROJECTS]
     main_unread = {} if main_revision is None else {'main_visible_revision': main_revision}
+    if question:
+        names = {p['id']: p for p in PROJECTS}
+        main_unread['current_questions_complete'] = True
+        main_unread['current_questions'] = [dict(
+            role='system', system_type='project_question_pointer', task_id=f'ask-{pid}', quiz_id=f'quiz-{pid}',
+            quiz_state='open', wait_for_answer=True, project_id=pid, project_name=names[pid]['name'],
+            project_chat_id=CHATS[pid], chat_id=1, ts='2026-11-15T00:00:00+00:00', question=question, options=[],
+            text=f'Waiting for your answer in {names[pid]["name"]}') for pid in asking]
     return {'supervisor_ready': True, 'projects': projects, 'project_chat_ids': list(CHATS.values()),
             'active_chat_activities_complete': True, 'active_chat_activities': rows, **work_fields(rows), **main_unread}
 
@@ -100,6 +113,19 @@ def mark_of(page, selector):
         return {shape: m.dataset.shape, hue: m.dataset.hue, drawn: getComputedStyle(m).display !== 'none',
                 fill: s.backgroundColor, ring: s.boxShadow, size: [r.width, r.height],
                 box: (({left, right, top, bottom}) => ({left, right, top, bottom}))(m.getBoundingClientRect())};
+    }""")
+
+
+def picture_dot(page):
+    """The dot on the picture of Ouroboros's card: its mark, the ring the sheet cuts it out with, the card's fill and
+    the picture's box."""
+    return page.locator('.nav-row-main').evaluate("""card => {
+        const picture = card.querySelector('.nav-ouro-ava'), m = picture.querySelector('.status-mark');
+        const i = m.querySelector('i'), r = i.getBoundingClientRect();
+        const box = (el) => (({left, right, top, bottom}) => ({left, right, top, bottom}))(el.getBoundingClientRect());
+        return {shape: m.dataset.shape, hue: m.dataset.hue, drawn: getComputedStyle(m).display !== 'none',
+                fill: getComputedStyle(i).backgroundColor, ring: getComputedStyle(m).boxShadow, size: [r.width, r.height],
+                card: getComputedStyle(card).backgroundColor, box: box(m), picture: box(picture)};
     }""")
 
 
@@ -239,7 +265,7 @@ def test_mains_unread_count_sits_beside_its_mark_never_on_it(nav_ui, tmp_path):
                 page.wait_for_timeout(300)
             read = """() => { const row = document.querySelector('.nav-row-main'), badge = row.querySelector('.unread-badge');
                 const box = (el) => (({left, right, top, bottom}) => ({left, right, top, bottom}))(el.getBoundingClientRect());
-                const mark = row.querySelector('.status-mark');
+                const mark = row.querySelector('.nav-mark');
                 return {text: badge.textContent, badge: box(badge), label: box(row.querySelector('.nav-row-label')),
                         mark: mark.hidden ? null : box(mark)}; }"""
             facts[case] = page.evaluate(read)
@@ -266,7 +292,7 @@ def test_mains_unread_count_sits_beside_its_mark_never_on_it(nav_ui, tmp_path):
 COLUMNS = """work => {
     const box = (selector) => { const el = document.querySelector(selector); if (!el) return null;
         const r = el.getBoundingClientRect(); return {left: r.left, right: r.right, text: el.textContent.trim()}; };
-    return {main_count: box('[data-nav-page="chat"] .unread-badge'), main_mark: box('[data-nav-page="chat"] .status-mark'),
+    return {main_count: box('[data-nav-page="chat"] .unread-badge'), main_mark: box('[data-nav-page="chat"] .nav-mark'),
             count: box('#nav-projects-count'), header_mark: box('.nav-projects-facts .status-mark'),
             row_mark: box(`[data-project-id="${work}"] .status-mark`), kebab: box(`[data-project-id="${work}"] ~ .nav-project-kebab`),
             add: box('#nav-projects-add'), chevron: box('#nav-projects-toggle .nav-chevron')};
@@ -316,6 +342,91 @@ def test_main_and_the_projects_header_share_the_rows_columns(nav_ui, tmp_path):
     assert facts['touch']['add'] and facts['touch']['chevron'] is None, facts
 
 
+QUESTION = '**The line is up.**\n\nOne step is `yours`: switch the local test on in Circles, then I run the trial and finish the merge.'
+QUESTION_WORDS = 'The line is up. One step is yours: switch the local test on in Circles, then I run the trial and finish the merge.'
+
+
+def test_the_picture_on_ouroboross_card_says_the_owners_move_for_main_and_the_projects(nav_ui, tmp_path):
+    """Ouroboros's picture on his card stands for the rooms the list may hold out of sight (owner 15.11, 6A): while a
+    Project asks, the 7px amber fact dot stands on the picture's top-right rim, ringed in the card's own fill, and the
+    card's words for readers say a Project waits and its tooltip that something does; work or new messages alone
+    never light it; Main's own question lights it beside Main's own mark. The waiting Project's row says its
+    question in the question's own opening words. Docked and in the phone's open drawer alike."""
+    ui = nav_ui
+    facts = {'engine': ui['engine']}
+    asking = PROJECTS[2]['id']
+    for width, touch in ((1280, False), (390, True)):
+        page, sync = open_app(ui, width, 844, snapshot(work=[asking], main='thinking'), touch=touch)
+        try:
+            if width < 720:
+                page.locator('#page-chat [data-mobile-nav-toggle]').click()
+                page.wait_for_function("() => window.__ouroLayers.top() === 'drawer'")
+                page.wait_for_timeout(300)
+            main = page.locator('.nav-row-main')
+            words = page.locator('.nav-row-main .nav-row-words')
+            picture, own = '.nav-row-main .nav-ava-mark', '.nav-row-main .nav-mark'
+            facts[width] = {'amber': token(page, '--mark-owner'), 'work': mark_of(page, picture)}
+            sync(snapshot(asking=[asking]))
+            facts[width]['asks'] = picture_dot(page)
+            facts[width]['asksMain'] = mark_of(page, own)
+            facts[width]['asksWords'] = words.text_content()
+            facts[width]['asksTitle'] = main.get_attribute('title')
+            expect()(main).to_have_accessible_name(
+                re.compile(r'^Ouroboros Main Chat\s*·\s*Something in a project waits for you$'))
+            # The waiting Project's own line: the sentence of its state while the read carries no words of the
+            # question, the question's opening words once it does (one line, cut by the row's width, the room's
+            # primary ink), and the row's name ends with the same words.
+            row = page.locator(f'[data-project-id="{asking}"]')
+            line = """el => ({text: el.textContent, kind: el.dataset.kind, ink: getComputedStyle(el).color,
+                           oneLine: el.getBoundingClientRect().height <= parseFloat(getComputedStyle(el).lineHeight) + 1,
+                           inside: el.getBoundingClientRect().right <= el.closest('.nav-project-row').getBoundingClientRect().right})"""
+            facts[width]['sentence'] = row.locator('.nav-project-says').evaluate(line)
+            sync(snapshot(asking=[asking], question=QUESTION))
+            facts[width]['asked'] = row.locator('.nav-project-says').evaluate(line)
+            facts[width]['askedName'] = row.get_attribute('aria-label')
+            facts[width]['ink'] = token(page, '--text-primary')
+            # A read that vouches for its questions drops the one it no longer lists (a read that does not keeps it).
+            answered = dict(current_questions=[], current_questions_complete=True)
+            sync({**snapshot(unread=[asking]), **answered})
+            facts[width]['answeredLine'] = row.locator('.nav-project-says').text_content()
+            facts[width]['unread'] = mark_of(page, picture)
+            facts[width]['unreadWords'] = words.text_content()
+            facts[width]['unreadTitle'] = main.get_attribute('title')
+            expect()(main).to_have_accessible_name('Ouroboros Main Chat')
+            sync({**snapshot(main_asking=True), **answered})
+            facts[width]['mainAsks'] = {'picture': mark_of(page, picture), 'main': mark_of(page, own),
+                                        'words': words.text_content(), 'title': main.get_attribute('title')}
+            sync({**snapshot(), **answered})
+            facts[width]['rest'] = {'picture': mark_of(page, picture), 'title': main.get_attribute('title')}
+        finally:
+            save_evidence(tmp_path, f'nav-card-picture-{ui["engine"]}', facts)
+            page.close()
+    for width in (1280, 390):
+        seen = facts[width]
+        assert not seen['work']['drawn'], facts
+        asks = seen['asks']
+        assert (asks['shape'], asks['hue'], asks['drawn'], asks['size']) == ('dot', 'owner', True, [7, 7]), facts
+        assert asks['fill'] == seen['amber'] and asks['ring'] == f"{asks['card']} 0px 0px 0px 2px", facts
+        assert abs(asks['box']['right'] - asks['picture']['right'] - 1) <= 0.5, facts
+        assert abs(asks['picture']['top'] - asks['box']['top'] - 1) <= 0.5, facts
+        assert not seen['asksMain']['drawn'], facts
+        assert seen['asksWords'].strip() == '· Something in a project waits for you', facts
+        assert seen['asksTitle'] == 'Main Ouroboros chat · something waits for you', facts
+        assert (seen['sentence']['text'], seen['sentence']['kind']) == ('Waiting for your answer', 'ask'), facts
+        asked = seen['asked']
+        assert (asked['text'], asked['kind']) == (QUESTION_WORDS, 'ask'), facts
+        assert asked['oneLine'] and asked['inside'] and asked['ink'] == seen['ink'], facts
+        assert seen['askedName'].endswith(f' · {QUESTION_WORDS}'), facts
+        assert seen['answeredLine'] == '', facts
+        assert not seen['unread']['drawn'] and seen['unreadWords'] == '', facts
+        assert seen['unreadTitle'] == 'Main Ouroboros chat', facts
+        mine = seen['mainAsks']
+        assert (mine['picture']['shape'], mine['picture']['hue'], mine['picture']['drawn']) == ('dot', 'owner', True), facts
+        assert mine['main']['hue'] == 'owner' and mine['main']['drawn'], facts
+        assert 'in a project' not in mine['words'] and mine['title'] == 'Main Ouroboros chat · something waits for you', facts
+        assert not seen['rest']['picture']['drawn'] and seen['rest']['title'] == 'Main Ouroboros chat', facts
+
+
 def test_mains_row_carries_its_rooms_mark_in_the_project_rows_column(nav_ui, tmp_path):
     ui = nav_ui
     facts = {'engine': ui['engine']}
@@ -332,12 +443,13 @@ def test_mains_row_carries_its_rooms_mark_in_the_project_rows_column(nav_ui, tmp
             # both once the row's own transition has finished.
             page.wait_for_function("() => { const row = document.querySelector('.nav-row-main');"
                                    " return row && row.getAnimations().length === 0; }")
-            facts[width] = {'main': mark_of(page, '.nav-row-main'), 'project': mark_of(page, project),
+            facts[width] = {'main': mark_of(page, '.nav-row-main .nav-mark'), 'project': mark_of(page, project),
                             'mainInk': main.evaluate('el => getComputedStyle(el).color'),
                             'words': page.locator('.nav-row-main .nav-row-words').text_content()}
             expect()(main).to_have_accessible_name(re.compile(r'^Ouroboros\s+Main Chat\s*·\s*Thinking'))
+            # Main's own mark rests while only a Project asks (the picture's dot says that wait: the test above).
             sync(snapshot(asking=[PROJECTS[2]['id']]))
-            facts[width]['rest'] = mark_of(page, '.nav-row-main')
+            facts[width]['rest'] = mark_of(page, '.nav-row-main .nav-mark')
             facts[width]['restWords'] = page.locator('.nav-row-main .nav-row-words').text_content()
             expect()(main).to_have_accessible_name('Ouroboros Main Chat')
         finally:
@@ -352,7 +464,7 @@ def test_mains_row_carries_its_rooms_mark_in_the_project_rows_column(nav_ui, tmp
         assert abs(main['box']['right'] - project['box']['right']) <= 0.5, facts
         assert abs(main['box']['left'] - project['box']['left']) <= 0.5, facts
         assert facts[width]['words'].strip() == '· Thinking', facts
-        assert not facts[width]['rest']['drawn'] and facts[width]['restWords'] == '', facts
+        assert not facts[width]['rest']['drawn'], facts
 
 
 def test_the_collapse_is_remembered_on_this_device_and_only_there(nav_ui, tmp_path):

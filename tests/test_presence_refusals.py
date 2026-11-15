@@ -499,7 +499,7 @@ def test_required_jsonl_boundary_read_error_refuses_append(tmp_path, monkeypatch
         assert append_jsonl(path, {"new": 2}, ensure_record_boundary=True, require_lock=True) is False
     assert path.read_bytes() == original_bytes
     assert append_jsonl(path, {"new": 2}, ensure_record_boundary=True, require_lock=True) is True
-    assert path.read_bytes().splitlines()[1] == b'{"new": 2}'
+    assert json.loads(path.read_bytes().splitlines()[1]) == {"new": 2}
 
 
 def test_ambiguous_start_write_never_regenerates_after_error(tmp_path, monkeypatch):

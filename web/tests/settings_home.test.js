@@ -5,11 +5,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createClaudexorStatusStore } from '../modules/claudexor_status_store.js';
+import { getContributions } from '../modules/contributions.js';
 import { renderPageHeader } from '../modules/page_header.js';
 import { initSettings } from '../modules/settings.js';
-import { readSettings } from '../modules/settings_controls.js';
+import { readSettings, writeEntry } from '../modules/settings_controls.js';
 import { askOuroboros, beingState, homeAnswers, mountSettingsHome, needRows } from '../modules/settings_home.js';
-import { settingsPageFor } from '../modules/settings_pages.js';
+import { registerSettingsPage, settingsPageFor } from '../modules/settings_pages.js';
+import { createStateSnapshotSequencer } from '../modules/state_snapshots.js';
 import { ANSWERS, STARTS, Stub, settle, world } from './helpers/settings_dom.js';
 
 const account = (harness, id, verification, enabled = true) => ({
@@ -483,4 +485,289 @@ test('a Settings door keeps one history entry from the list or a page, and a ref
             assert.equal(state.activePage, allowed ? (door === 'page:skills' ? 'skills' : 'dashboard') : 'settings');
         });
     }
+});
+
+// The list's reads (settings.js shows it, settings_home.js reads): its sources are read when it comes on screen, one
+// read of a source at a time, dropped when it leaves the screen, and again for the row of a page that is left.
+const reply = (data, status = 200) => ({ ok: status < 400, status, json: async () => structuredClone(data) });
+const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
+const LIST = ['/api/mcp/status', '/api/extensions', '/api/places', '/api/update/status', '/api/storage', '/api/desktop/autostart',
+    '/api/claudexor/status?view=quota'];
+function listHome(t, content, ctx = {}) {
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws: { isConnected: () => true }, stateSnapshots: { latest: () => ({}) }, ...ctx } });
+    t.after(() => home.dispose());
+    return { home, answer: (to) => content.querySelector(`[data-settings-open="${to}"]`).querySelector('[data-settings-answer]').textContent };
+}
+
+test('the list reads when it comes on screen: never at a press beside it, again once Settings was left, as one column returns to it', async (t) => {
+    const { env, content, state, showPage } = world(t);
+    let pageCtx = null;
+    registerSettingsPage('test-list-a', { title: 'A', mount(body, { ctx }) { pageCtx = ctx; } });
+    registerSettingsPage('test-list-b', { title: 'B', mount() {} });
+    const observers = [];
+    const kept = { observer: globalThis.ResizeObserver };
+    globalThis.ResizeObserver = class { constructor(fn) { this.fn = fn; observers.push(this); } observe() {} disconnect() {} };
+    const proto = Object.getPrototypeOf(Stub.prototype);
+    Object.assign(kept, { box: proto.getBoundingClientRect, prepend: proto.prepend });
+    proto.getBoundingClientRect = () => ({ top: 0, bottom: 10, width: 0 });
+    proto.prepend = function prepend(node) { this.insertBefore(node, this.children[0] || null); };
+    t.after(() => { globalThis.ResizeObserver = kept.observer; Object.assign(proto, { getBoundingClientRect: kept.box, prepend: kept.prepend }); });
+    const controls = initSettings({ state, ws: env.ws, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    t.after(() => {
+        const previousWindow = globalThis.window;
+        const previousDocument = globalThis.document;
+        globalThis.window = env.window;
+        globalThis.document = env.document;
+        env.window.dispatchEvent({ type: 'pagehide', persisted: false });
+        globalThis.window = previousWindow;
+        globalThis.document = previousDocument;
+    });
+    // The sheets: two panes show the list beside the page; one column shows the list alone, or a page alone.
+    const wide = { on: true };
+    const shell = content.querySelector('.settings-shell');
+    controls.page.getBoundingClientRect = () => ({ top: 0, bottom: 10, width: wide.on ? 1000 : 300 });
+    content.querySelector('[data-settings-home]').getClientRects = () => (wide.on || shell.dataset.settingsView === 'home' ? [{ width: 1, height: 1 }] : []);
+    const reads = () => env.calls.filter((call) => LIST.includes(call)).length;
+    const resized = async () => { observers.forEach((observer) => observer.fn([{ target: shell }])); await settle(); };
+    await controls.open('test-list-a');
+    await settle();
+    assert.equal(reads(), LIST.length, 'Settings shown: each of the list\'s sources read once');
+    pageCtx.openSettings('test-list-b');
+    await settle();
+    assert.equal(reads(), LIST.length, 'a page pressed beside the list reads none of them');
+    // The socket's first open changes nothing (it waits for the app's first state read); a reconnect may follow a restart.
+    env.ws.emit('open', { previouslyConnected: false });
+    await settle();
+    assert.equal(reads(), LIST.length, 'the socket\'s first open reads nothing again');
+    env.ws.emit('open', { previouslyConnected: true });
+    await settle();
+    assert.equal(reads(), 2 * LIST.length, 'a reconnect reads again');
+    // Leaving Settings takes the list off screen; shown again, it reads again.
+    state.activePage = 'chat';
+    env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'chat' } }));
+    await controls.open('test-list-b');
+    await settle();
+    assert.equal(reads(), 3 * LIST.length, 'Settings shown again: read again');
+    // One column: the page hides the list, which reads when the column returns to it.
+    wide.on = false;
+    await resized();
+    assert.equal(reads(), 3 * LIST.length, 'a width that takes the list away reads nothing');
+    controls.pressedAgain();
+    await settle();
+    assert.equal(reads(), 4 * LIST.length, 'one column back on the list: read');
+    // A width that brings the list beside an open page reads it as it comes.
+    await controls.open('test-list-a');
+    await settle();
+    assert.equal(reads(), 4 * LIST.length, 'one column, a page over the list: nothing');
+    wide.on = true;
+    await resized();
+    assert.equal(reads(), 5 * LIST.length, 'the list beside the page again: read');
+});
+
+test('the Settings shell drops held list reads off screen, keeps a press beside it, and renews only its live sources', async (t) => {
+    const { env, content, state, showPage } = world(t);
+    const held = new Map();
+    const hold = (url) => {
+        const request = { signal: null, ...deferred() };
+        const previous = held.get(url) || [];
+        held.set(url, [...previous, request]);
+        return request;
+    };
+    for (const url of ['/api/extensions', '/api/update/status', '/api/desktop/autostart']) {
+        env.routes.set(url, async (_url, init = {}) => {
+            const request = hold(url);
+            request.signal = init.signal;
+            return request.promise;
+        });
+    }
+    const controls = initSettings({ state, ws: env.ws, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const proto = Object.getPrototypeOf(Stub.prototype);
+    const beforeRects = Stub.prototype.getClientRects;
+    Stub.prototype.getClientRects = () => [];
+    t.after(() => { Stub.prototype.getClientRects = beforeRects; });
+    const beforeRect = proto.getBoundingClientRect;
+    proto.getBoundingClientRect = () => ({ top: 0, bottom: 10, width: 300 });
+    t.after(() => { proto.getBoundingClientRect = beforeRect; });
+    controls.page.getBoundingClientRect = () => ({ top: 0, bottom: 10, width: 1000 });
+    const homeRoot = content.querySelector('[data-settings-home]');
+    homeRoot.getClientRects = () => [{ width: 1, height: 1 }];
+    homeRoot.getBoundingClientRect = () => ({ top: 0, bottom: 10, width: 300 });
+    await controls.open('models');
+    await settle();
+    for (const url of ['/api/extensions', '/api/update/status', '/api/desktop/autostart']) {
+        assert.equal(held.get(url)?.length, 1, `${url} was held by the shell's list read`);
+        assert.equal(held.get(url)[0].signal?.aborted, false, `${url} is live while the list is shown`);
+    }
+
+    // A Settings page beside the list is a press inside the same screen: it must leave the held sources alone.
+    await controls.open('agents');
+    await settle();
+    for (const [url, requests] of held) assert.equal(requests[0].signal.aborted, false, `${url} stays live beside a page`);
+
+    // The shell's own page path hides the list, and therefore aborts every source it started for that screen.
+    state.activePage = 'chat';
+    env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'chat' } }));
+    await settle();
+    for (const [url, requests] of held) assert.equal(requests[0].signal.aborted, true, `${url} is aborted when Settings is left`);
+    for (const requests of held.values()) requests[0].resolve(reply({}));
+    await settle();
+
+    // Back on the list, each live source has one subscription and each subscription is quiet after the list leaves.
+    const counts = new Map();
+    const live = (url, body) => {
+        env.routes.set(url, async () => { counts.set(url, (counts.get(url) || 0) + 1); return reply(body); });
+    };
+    live('/api/extensions', ANSWERS['/api/extensions']);
+    live('/api/places', ANSWERS['/api/places']);
+    live('/api/update/status', ANSWERS['/api/update/status']);
+    env.routes.set('/api/ui/contributions', async () => reply({}));
+    state.activePage = 'settings';
+    env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'settings' } }));
+    await settle();
+    const detach = getContributions().attach({ ws: env.ws, target: env.window });
+    t.after(detach);
+    await settle();
+    const count = (url) => counts.get(url) || 0;
+    const renews = [['/api/extensions', () => env.ws.emit('extension_lifecycle')],
+        ['/api/places', () => env.window.dispatchEvent(new CustomEvent('ouro:places-changed'))],
+        ['/api/update/status', () => env.ws.emit('update_status_ready')]];
+    for (const [url, signal] of renews) {
+        const before = count(url);
+        signal();
+        await settle();
+        assert.ok(count(url) > before, `${url} renews while the list is on screen`);
+    }
+    state.activePage = 'chat';
+    env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'chat' } }));
+    await settle();
+    await settle(); // finish the source refreshes requested just before the list left the screen
+    const quiet = new Map([...counts].map(([url, value]) => [url, value]));
+    env.ws.emit('extension_lifecycle');
+    env.window.dispatchEvent(new CustomEvent('ouro:places-changed'));
+    env.ws.emit('update_status_ready');
+    await settle();
+    assert.deepEqual([...counts], [...quiet], 'live-source subscriptions are quiet when the list is hidden');
+    env.window.dispatchEvent({ type: 'pagehide', persisted: false });
+});
+
+test('one read of a source at a time: asked again in flight it starts no second request and runs once more after; off screen it is dropped', async (t) => {
+    const { env, content } = world(t);
+    const signals = [];
+    const gates = [deferred(), deferred(), deferred()];
+    env.routes.set('/api/places', async (_url, init = {}) => { signals.push(init.signal); return gates[signals.length - 1].promise; });
+    const { home, answer } = listHome(t, content);
+    const first = home.refresh(['places']);
+    void home.refresh(['places']);
+    void home.refresh(['places']);
+    await settle();
+    assert.equal(signals.length, 1, 'asked twice more while it runs: no second request');
+    gates[0].resolve(reply({ places: [{}] }));
+    await settle();
+    assert.deepEqual([signals.length, answer('page:circles')], [2, '1 place'], 'its answer is painted, then one more read for the asks it heard');
+    gates[1].resolve(reply({ places: [{}, {}] }));
+    await first;
+    assert.deepEqual([signals.length, answer('page:circles')], [2, '2 places']);
+    // Off screen: the read in flight is aborted, freeing its connection, and its late answer paints nothing.
+    void home.refresh(['places']);
+    await settle();
+    home.hide();
+    assert.equal(signals[2].aborted, true);
+    gates[2].resolve(reply({ places: [] }));
+    await settle();
+    assert.equal(answer('page:circles'), '2 places');
+});
+
+test('the Tools status writer updates the list beside another page without reading; off screen it paints and reads nothing', async (t) => {
+    const { env, content } = world(t);
+    const status = (enabled) => ({ sdk_available: true, enabled: true, servers: [{ id: 'docs', enabled, tool_count: 3 }] });
+    env.routes.set('/api/mcp/status', () => reply(status(false)));
+    const { home, answer } = listHome(t, content);
+    await home.refresh();
+    home.mark('rules');
+    assert.equal(answer('tools'), '0 of 1 server on');
+    const pending = deferred();
+    env.routes.set('/api/mcp/status', () => pending.promise);
+    const tools = await settingsPageFor('tools').mount(new Stub(), { path: 'tools', ctx: { readSettings } });
+    t.after(() => tools.unmount());
+    await settle();
+    const before = [...env.calls];
+    pending.resolve(reply(status(true)));  // the page's completed status is stored by refreshStatus
+    await settle();
+    assert.equal(answer('tools'), '1 of 1 server on');
+    assert.deepEqual(env.calls, before, 'adopting the completed status starts no request');
+    const late = deferred();
+    env.routes.set('/api/mcp/status', () => late.promise);
+    env.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'tools' } }));
+    await settle();
+    home.hide();
+    const hiddenReads = [...env.calls];
+    const hiddenText = content.textContent;
+    late.resolve(reply(status(false)));
+    await settle();
+    assert.equal(content.textContent, hiddenText, 'a completed status paints nothing off screen');
+    assert.deepEqual(env.calls, hiddenReads, 'a completed status reads nothing off screen');
+    await home.refresh(['tools']);
+    assert.equal(answer('tools'), '0 of 1 server on', 'showing the list reads its current answer');
+});
+
+test('an answer is painted though another source was read meanwhile: a slow source, and the state snapshot by its sequencer', async (t) => {
+    const { env, content } = world(t);
+    const places = deferred();
+    const state = deferred();
+    env.routes.set('/api/places', async () => places.promise);
+    env.routes.set('/api/state', async () => state.promise);
+    const snapshots = createStateSnapshotSequencer(() => {});
+    snapshots.apply(snapshots.begin(), { evolution_enabled: false });
+    const { home, answer } = listHome(t, content, { stateSnapshots: snapshots });
+    const held = home.refresh(['places', 'state']);
+    await home.refresh(['settings']);
+    assert.deepEqual([answer('page:circles'), answer('dashboard:evolution'), answer('models')], ['', 'Off', 'glm-5.3']);
+    places.resolve(reply({ places: [{}, {}] }));
+    state.resolve(reply({ evolution_enabled: true }));
+    await held;
+    await settle();
+    assert.deepEqual([answer('page:circles'), answer('dashboard:evolution')], ['2 places', 'On']);
+});
+
+test('the row of a page that is left reads its sources again, a setting\'s row and one that is not; a save reads its page\'s row', async (t) => {
+    const { env, content } = world(t);
+    const now = { model: 'openrouter::z-ai/glm-5.3', places: [], servers: [] };
+    env.routes.set('/api/settings', async () => reply({ ...ANSWERS['/api/settings'], OUROBOROS_MODEL: now.model }));
+    env.routes.set('/api/places', async () => reply({ places: now.places }));
+    env.routes.set('/api/mcp/status', async () => reply({ enabled: true, servers: now.servers }));
+    const { home, answer } = listHome(t, content);
+    await home.refresh();
+    const go = async (type, detail) => { env.window.dispatchEvent(new CustomEvent(type, { detail })); await settle(); };
+    const count = (url) => env.calls.filter((call) => call === url).length;
+    await go('ouro:settings-page-shown', { path: 'models' });
+    const before = Object.fromEntries([...LIST, '/api/settings'].map((url) => [url, count(url)]));
+    const since = () => Object.entries(before).filter(([url, n]) => count(url) > n).map(([url, n]) => `${url} ${count(url) - n}`);
+    now.model = 'openrouter::openai/gpt-5';
+    await go('ouro:settings-page-shown', { path: 'models/role/main' });
+    assert.deepEqual([answer('models'), since()], ['glm-5.3', []], 'a page of the same row: nothing is left, nothing read');
+    await go('ouro:settings-page-shown', { path: 'agents' });
+    assert.deepEqual([answer('models'), since()], ['gpt-5', ['/api/settings 1']], 'Models left: its one source, nothing else of the list');
+    const beforeAgents = count('/api/settings');
+    await go('ouro:settings-page-shown', { path: 'rules' });
+    assert.equal(count('/api/settings'), beforeAgents + 1, 'Agents left: its settings source is read once');
+    // A door leaves Settings before its destination is shown, so the home does not own that page's read.
+    // A server switched on the Tools page is one entry of MCP_SERVERS written; its event names the row, not the page.
+    // The document and the servers' status are read again: the row's two sources.
+    env.routes.set('/api/settings', async (_url, init = {}) => (init.method === 'POST'
+        ? reply({ status: 'saved', changes: { MCP_SERVERS: { withheld: 'structure', token: 'servers@2' } } })
+        : reply({ ...ANSWERS['/api/settings'], MCP_SERVERS: [{ id: 'docs', enabled: false }], _meta: { tokens: { MCP_SERVERS: 'servers@1' } } })));
+    now.servers = [{ id: 'docs', enabled: true, tool_count: 2 }];
+    assert.equal((await writeEntry('MCP_SERVERS', 'docs', (before) => ({ ...before, enabled: true }))).state, 'saved');
+    await settle();
+    assert.equal(answer('tools'), '1 of 1 server on');
+    // A width change covers the list and brings it back beside the same page, without announcing a new path.
+    home.hide();
+    await home.refresh();
+    const afterWidth = count('/api/settings');
+    await go('ouro:settings-page-shown', { path: 'models' });
+    assert.equal(count('/api/settings'), afterWidth + 1, 'the first press after resizing still leaves Rules');
+    await go('ouro:settings-page-shown', { path: 'models/role/main' });
+    assert.equal(count('/api/settings'), afterWidth + 1, 'a level of the same page still reads nothing');
 });

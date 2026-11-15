@@ -937,8 +937,6 @@ def _build_task(
     physical_task_id: str = "",
     retained_manifest: list | None = None,
 ) -> dict[str, Any]:
-    from ouroboros.config import runtime_setting
-
     task_id = physical_task_id or _task_id(admission, event)
     chat_id = presence_chat_id(event.conversation_key)
     actor_id = _stable_numeric_id(
@@ -988,10 +986,9 @@ def _build_task(
         "presence": presence_context,
     }
     if admission.place is None and admission.model_slot == "light":
-        from ouroboros.config import get_light_model
+        from ouroboros.route_choice import following_route
 
-        metadata["model"] = get_light_model()
-        metadata["use_local_model"] = runtime_setting("USE_LOCAL_LIGHT", "").lower() in {"true", "1"}
+        metadata["model"], metadata["use_local_model"] = following_route("light")
     task: dict[str, Any] = {
         "id": task_id,
         "type": "presence",

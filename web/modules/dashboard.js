@@ -58,7 +58,8 @@ function rowHtml({ value, label }, active) {
  * when the tab is shown, painted after a save on any page and read again after one of their own. `custom(row)` draws a
  * custom control, `openDoor(row)` takes a door's press, `onSaved(rowId)` hears this tab's own saves, and
  * `words(settings)` says what a row adds from the last read: `{ [rowId]: { caption, value } }`, the caption in its meta
- * line and a door's value before its chevron. Answers `{ dispose }`.
+ * line and a door's value before its chevron. Answers `{ paint, dispose }`: `paint` says the words again from the
+ * last settings read (a tab whose words also draw on its own read calls it after that read).
  */
 export function mountTabSettings(host, tab, { state, cards = null, custom = null, openDoor = null, words = null, onPaint = null, onSaved = null } = {}) {
     const page = `dashboard:${tab}`;
@@ -74,10 +75,7 @@ export function mountTabSettings(host, tab, { state, cards = null, custom = null
     };
     host.innerHTML = cards ? cards.map((card) => `<section class="ui-card dashboard-settings"${card.solo ? ' data-solo' : ''}`
         + ` aria-label="${escape(card.label || card.title)}">${body(card)}</section>`).join('') : body({});
-    const rows = bindSettingRows(host, ctx);
-    const nodes = Array.from(host.querySelectorAll('[data-setting-row]'));
     const shown = () => !document.hidden && state?.activePage === 'dashboard' && state?.dashboardActiveSubtab === tab;
-    let settings = null;
     let reads = 0;
     // A row's own words from the last read: made once, then only their text changes.
     const say = (node, kind, text) => {
@@ -91,22 +89,22 @@ export function mountTabSettings(host, tab, { state, cards = null, custom = null
         }
         if (span && span.textContent !== (text || '')) span.textContent = text || '';
     };
+    const rows = bindSettingRows(host, { ...ctx, onPaint: (settings, row, node) => {
+        if (row.control?.kind === 'custom') onPaint?.(settings);
+        const said = settings && words?.(settings)?.[row.id];
+        say(node, 'caption', said?.caption);
+        say(node, 'value', said?.value);
+    } });
     const paint = () => {
         rows.paint();
-        const said = (settings && words?.(settings)) || {};
-        nodes.forEach((node) => {
-            say(node, 'caption', said[node.dataset.settingRow]?.caption);
-            say(node, 'value', said[node.dataset.settingRow]?.value);
-        });
         // A card whose every row is left out (a managed deployment's channel) takes no room.
         (cards ? Array.from(host.children) : [host]).forEach((card) => {
             card.hidden = !Array.from(card.querySelectorAll('[data-setting-row]')).some((node) => !node.hidden);
         });
-        onPaint?.(settings);
     };
     const read = async () => {
         const mine = ++reads;
-        try { settings = await readSettings(); } catch { /* each row keeps what it showed */ }
+        try { await readSettings(); } catch { /* each row keeps what it showed */ }
         if (mine === reads) paint();
     };
     const onShown = () => (shown() ? void read() : rows.leave());
@@ -122,6 +120,7 @@ export function mountTabSettings(host, tab, { state, cards = null, custom = null
     paint();
     if (shown()) void read();
     return {
+        paint,
         dispose() {
             rows.dispose();
             window.removeEventListener('ouro:dashboard-subtab-shown', onShown);
@@ -211,7 +210,7 @@ export function settingsReturn({ layers = null, openSettings = null, id = BACK_L
  * Settings row (`activateTab(name, { back })`) gets "Back to Settings" before its name instead. Each row says its
  * page's current answer where the Settings home already knows it (settings_home.js homeAnswers): no read starts here.
  */
-export function initDashboard({ state, layers = null, openSettings = null, stateSnapshots = null }) {
+export function initDashboard({ state, ws, layers = null, openSettings = null, stateSnapshots = null }) {
     const active = DASHBOARD_TABS.some((tab) => tab.value === state.dashboardActiveSubtab) ? state.dashboardActiveSubtab : 'logs';
     const page = document.createElement('div');
     page.id = 'page-dashboard';
@@ -336,6 +335,10 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     window.addEventListener('ouro:page-shown', onPageShown);
     window.addEventListener('ouro:dashboard-subtab-shown', onShownTab);
     window.addEventListener('ouro:settings-page-shown', onShownTab);
+    const offReconnect = ws?.on?.('open', (event) => {
+        if (event?.previouslyConnected && state.activePage === 'dashboard' && !document.hidden
+            && rowsOf(`dashboard:${state.dashboardActiveSubtab}`).some((row) => row.keys.length)) void readSettings().catch(() => {});
+    });
     // The answers follow the state the app already reads (every 20 s, faster while a room shows): no read of their own.
     const answerTimer = setInterval(() => { if (state.activePage === 'dashboard' && !document.hidden) paintAnswers(); }, 5000);
     answerTimer?.unref?.();  // a test runner's clock is never kept alive by it
@@ -388,6 +391,7 @@ export function initDashboard({ state, layers = null, openSettings = null, state
         page,
         activateTab,
         destroy() {
+            offReconnect?.();
             tabStrip.destroy();
             disposeFade();
             back.clear();

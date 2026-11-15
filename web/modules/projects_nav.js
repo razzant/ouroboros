@@ -64,9 +64,10 @@ export function whenOf(at, now = Date.now()) {
     return t.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 }
 
-/** The one line a row says under its name: what waits for the owner, else what its work is doing, else nothing. */
+/** The one line a row says under its name: what waits for the owner (the waiting question's own opening words when the
+ *  room has them, else the sentence that says what waits), else what its work is doing, else nothing. */
 export function rowLine(summary = IDLE_SUMMARY) {
-    if (summary.owner) return { kind: 'ask', text: summary.note || summary.word || '' };
+    if (summary.owner) return { kind: 'ask', text: summary.ask?.words || summary.note || summary.word || '' };
     if (!['moving', 'still', 'pause'].includes(summary.mark)) return { kind: 'rest', text: '' };
     const doing = summary.focus || summary.name || summary.line || '';
     if (summary.mark === 'pause') return { kind: 'rest', text: [summary.word, doing].filter(Boolean).join(' · ') };
@@ -534,8 +535,10 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
             button.toggleAttribute('data-solo', !said?.text);
             // The pin is said in the row's full name (its tooltip and accessible name); at rest nothing draws it.
             const name = `${row.name || row.id}${row.pinned === true ? ' · Pinned' : ''}`;
+            // A waiting question's words follow the state's in the row's name, as they stand in its line.
+            const asked = !deleting && summary.owner ? summary.ask?.words || '' : '';
             setActivityOwnerName(button, deleting ? `${name} — Deleting…${row.delete_error ? ` ${row.delete_error}` : ''}` : name,
-                markWords(summary, unreadRow));
+                [markWords(summary, unreadRow), asked].filter(Boolean).join(' · '));
         }
     }
 

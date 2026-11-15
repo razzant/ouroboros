@@ -14,7 +14,7 @@ test('the owner move outranks everything: it tints moving work and stands alone 
     for (const mark of ['still', 'pause', 'ring', 'none']) {
         assert.deepEqual(markView({ mark, owner: true, unread: true, outcome: 'done' }), { shape: 'dot', hue: 'owner' });
     }
-    // An aggregate (the Projects header, the ☰) passes no shape while the owner's move stands: the lone dot.
+    // An aggregate (Ouroboros's picture) passes no shape while the owner's move stands: the lone dot.
     assert.deepEqual(markView({ mark: 'none', owner: true }), { shape: 'dot', hue: 'owner' });
     assert.deepEqual(markView({ owner: true, unread: true }), { shape: 'dot', hue: 'owner' });
     // No owner's move: the marks are as before.
@@ -107,7 +107,12 @@ const MARK_PAINT = /(?:^|;|\{)\s*(color|background(?:-color|-image)?|border-colo
 // page's own background cuts the dot out of the picture (79fac1cf4/aa7528dcd, style.css
 // "html[data-layout=stack] .mobile-nav-toggle > .status-mark"). Only that exact declaration, only on that exact rule:
 // another shadow there, any other property it sets, or a ring elsewhere is still a paint.
-const CUTOUTS = { 'style.css': { 'html[data-layout="stack"] .mobile-nav-toggle > .status-mark': '0 0 0 2px var(--bg-primary)' } };
+// The same dot on the picture of Ouroboros's card is ringed in the card's own fill (owner 15.11, 6A).
+const CUTOUTS = { 'style.css': {
+    'html[data-layout="stack"] .mobile-nav-toggle > .status-mark': '0 0 0 2px var(--bg-primary)',
+    '.nav-ouro-ava > .nav-ava-mark': '0 0 0 2px var(--nav-ouro-fill)',
+    '.nav-ouro:not(.active):hover .nav-ouro-ava > .nav-ava-mark': '0 0 0 2px var(--tone-quiet-hover), 0 0 0 2px var(--nav-ouro-fill)',
+} };
 
 /** The source without its comments, which may name what was retired and why. */
 function code(source) {

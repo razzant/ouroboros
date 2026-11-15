@@ -2,7 +2,8 @@
 
 The bridge's state is the poller's record for the exact token generation in force (lib/telegram_token.py), so a
 saved token is configuration, never "ready" or "refused", until the poller tried that token in this load; the
-saved file is the record's copy and proves nothing alone. The Mini App's status is its companion's own heartbeat.
+saved file is the record's copy and proves nothing alone. The Mini App's status is its companion's own heartbeat;
+delivery is the outbound journal's own count of what waits and what recently did not arrive (lib/telegram_outbox.py).
 """
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from starlette.responses import JSONResponse
 
 from ..scripts.telegram_settings import TelegramSettingsError
 from .miniapp_registration import _read_status
+from .telegram_outbox import outbox_for
 from .telegram_state import _load_settings, _state_file
 from .telegram_token import accepted_token, binding_for
 
@@ -200,11 +202,40 @@ def connection_components() -> list[dict[str, Any]]:
                 {"name": "token_status", "label": "Bot token", "type": "textarea", "disabled": True},
                 {"name": "bridge_status", "label": "Text bridge", "type": "textarea", "disabled": True},
                 {"name": "miniapp_status", "label": "Mini App", "type": "textarea", "disabled": True},
+                {"name": "delivery_status", "label": "Delivery", "type": "textarea", "disabled": True},
             ],
             "submit_label": "Refresh status",
             "busy_label": "Checking…",
         },
     ]
+
+
+# Why the oldest waiting message waits, by the cause its operation recorded; any other cause is the network's.
+_WAIT_WORDS = {"HTTP 429": "Telegram asked to slow down", "token_changed": "switching to the saved bot token"}
+_OUTCOME_WORDS = (("unknown", "may not have arrived (no clear answer from Telegram; not sent again)"),
+                  ("refused", "refused by Telegram"), ("failed", "stopped before sending"))
+
+
+def _delivery_words(summary: Dict[str, Any]) -> str:
+    """The outbound journal in the owner's words: whether it can save, what waits and why, what did not arrive."""
+    words = []
+    if summary.get("fault"):  # it fails closed: nothing is sent without a saved record
+        words.append(f"Degraded: the outbox can't save ({summary['fault']}), so nothing new is sent")
+    if not_sent := int(summary.get("not_sent") or 0):
+        words.append(f"{not_sent} not sent because the outbox couldn't hold them")
+    if not summary.get("loaded"):
+        return ". ".join(words + ["Starting"])
+    waiting = int(summary.get("waiting") or 0)
+    if waiting:
+        cause = str(summary.get("cause") or "")
+        why = _WAIT_WORDS.get(cause, "can't reach Telegram" if cause else "")
+        retry = int(summary.get("retry_in_sec") or 0)
+        words.append(f"{waiting} waiting to be sent" + (f" ({why})" if why else "")
+                     + (f"; next try in {retry} s" if retry else ""))
+    outcomes = [f"{count} {label}" for key, label in _OUTCOME_WORDS if (count := int(summary.get(key) or 0))]
+    if outcomes:
+        words.append("Recently: " + "; ".join(outcomes))
+    return ". ".join(words) or "Nothing waits to be sent"
 
 
 def _connection_fields(api) -> Dict[str, Any]:
@@ -228,13 +259,15 @@ def _connection_fields(api) -> Dict[str, Any]:
     token_words = _TOKEN_WORDS.get(bridge.get("token", ""), "Unknown")
     if bridge.get("token") == "unknown" and binding.snapshot()[0]:
         token_words += _KEPT_TOKEN  # only when a token was accepted before: a cold start has none to keep
+    delivery = outbox_for(api).summary()
     fields = {
         "token_status": token_words,
         "bridge_status": bridge_words,
         "miniapp_status": mini_words,
+        "delivery_status": _delivery_words(delivery),
     }
-    # The three fields are the status; the form shows them in place, so the result line only confirms the check.
-    return {**fields, "message": "Status checked.", "bridge": bridge, "mini_app": mini_app}
+    # The fields are the status; the form shows them in place, so the result line only confirms the check.
+    return {**fields, "message": "Status checked.", "bridge": bridge, "mini_app": mini_app, "delivery": delivery}
 
 
 def _make_connection(api):

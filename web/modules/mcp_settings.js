@@ -4,7 +4,7 @@
  *  write one entry of MCP_SERVERS from a fresh read (settings_controls.js writeEntry); a list that changed meanwhile
  *  is refused and shown again. A saved credential stays masked and kept until the owner edits it. The status is read
  *  when a page is shown; only Test, Refresh and Sign in start anything. */
-import { apiFetch, jsonPost } from './api_client.js';
+import { fetchJson, jsonPost } from './api_client.js';
 import { absoluteTime, escapeHtmlAttr as escapeHtml, safeExternalUrl } from './utils.js';
 import { formatRelativeAge, openExternalViaHostBridge, revealNewRow } from './ui_helpers.js';
 import { resetSecretReveals } from './settings_secrets.js';
@@ -789,10 +789,10 @@ function paintList() {
 
 async function refreshStatus() {
     try {
-        const resp = await apiFetch('/api/mcp/status', { cache: 'no-store' });
-        if (!resp.ok) return;
-        mcpStatusEnvelope = await resp.json();
+        mcpStatusEnvelope = await fetchJson('/api/mcp/status', { cache: 'no-store' });
         mcpStatusByServer = Object.fromEntries((mcpStatusEnvelope.servers || []).filter((entry) => entry?.id).map((entry) => [entry.id, entry]));
+        globalThis.window?.dispatchEvent?.(new CustomEvent('ouro:mcp-status-updated',
+            { detail: mcpStatusEnvelope }));
         paintStatus();
     } catch { /* the pages keep the status they show */ }
 }

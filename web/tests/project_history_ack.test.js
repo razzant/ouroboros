@@ -117,10 +117,10 @@ function lift(name) {
     return source.slice(source.lastIndexOf('\n', from) + 1, until + 2);
 }
 
-function cursorHarness({ seen = {}, rows = [], answer = () => ({}) } = {}) {
+function cursorHarness({ seen = {}, rows = [], answer = () => ({}), view = readAhead } = {}) {
     const posts = [], paints = [];
     const context = vm.createContext({
-        ...readAhead,  // app.js imports these (DESIGN "Unread": a message read in another room)
+        ...view,  // app.js imports these (DESIGN "Unread": a message read in another room, the observer mode)
         state: { projectSeenRevision: { ...seen } },
         lastProjectRows: rows,
         paintProjectsNav: () => paints.push(rows.map((row) => [row.id, row._unread])),
@@ -141,6 +141,16 @@ test('an ACK keeps the server-confirmed cursor, not the requested revision', asy
     assert.equal(await h.api.markProjectViewed('p1', 7), true);
     assert.equal(h.context.state.projectSeenRevision.p1, 6);
     assert.equal(rows[0]._unread, true, 'revision 7 stays unread until a read covers it');
+});
+
+test('an observer view acknowledges no Project; its room stays unread', async () => {
+    const view = await import('../modules/read_ahead.js?observer-project');
+    view.captureObserverMode({ href: 'http://127.0.0.1:8765/?observer=1' }, { state: null, replaceState() {} });
+    const rows = [{ id: 'p1', visible_revision: 3, _unread: true }];
+    const h = cursorHarness({ seen: { p1: 1 }, rows, view, answer: () => ({ project_seen_revision: { p1: 3 } }) });
+    assert.equal(await h.api.markProjectViewed('p1', 3), false);
+    assert.deepEqual(h.posts, []);
+    assert.deepEqual([h.context.state.projectSeenRevision, rows[0]._unread], [{ p1: 1 }, true]);
 });
 
 test('shared cursors from another client clear a stale dot and never revive a read one', async () => {

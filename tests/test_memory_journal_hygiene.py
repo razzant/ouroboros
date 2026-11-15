@@ -9,6 +9,7 @@ backlog has no history writer of its own either.
 from __future__ import annotations
 
 import inspect
+import json
 
 
 def test_knowledge_module_has_no_raw_journal_appends():
@@ -40,4 +41,4 @@ def test_knowledge_history_rows_land_via_locked_seam(tmp_path, monkeypatch):
 
     assert calls == ["knowledge_history.jsonl"]
     line = (tmp_path / "memory" / "knowledge_history.jsonl").read_text(encoding="utf-8")
-    assert '"topic": "improvement-backlog"' in line and line.endswith("\n")
+    assert json.loads(line)["topic"] == "improvement-backlog" and line.endswith("\n")

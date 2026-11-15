@@ -22,6 +22,7 @@ from ouroboros.loop_tool_execution import StatefulToolExecutor, handle_tool_call
 from ouroboros.tool_result_delivery import FULL_SOURCE_MARKER, FULL_SOURCE_UNAVAILABLE, RESULT_VIEW_MARKER
 from ouroboros.tools import browser
 from ouroboros.tools.registry import ToolContext, ToolRegistry
+from tests._browser_fakes import close_generations
 from tests._tool_result_delivery_shared import measured_fit
 
 HEAD, MIDDLE, TAIL = "HEAD_MARKER_41d2", "MIDDLE_MARKER_7f3a", "TAIL_MARKER_9c1d"
@@ -166,19 +167,19 @@ class _LargePage:
     def set_default_timeout(self, ms):
         self.default_ms = ms
 
-    def goto(self, *_args, **_kwargs):
+    async def goto(self, *_args, **_kwargs):
         return None
 
-    def inner_text(self, _selector):
+    async def inner_text(self, _selector):
         return self.text
 
-    def content(self):
+    async def content(self):
         return self.html
 
-    def title(self):
+    async def title(self):
         return "large page"
 
-    def evaluate(self, _expression):
+    async def evaluate(self, _expression):
         return self.evaluated  # the markdown extractor and a caller's expression both come through here
 
 
@@ -190,6 +191,14 @@ def _browser_ctx(tmp_path):
 def _bind_page(monkeypatch, page):
     monkeypatch.setattr(browser, "_ensure_browser", lambda ctx, *a, **k: (page, ctx.browser_state))
     monkeypatch.setattr(browser, "_readonly_subagent", lambda ctx: False)
+
+
+@pytest.fixture
+def _browser_ctx_closing(tmp_path):
+    """The browser context of one test; the session loop its page ran on closes with the test."""
+    ctx = _browser_ctx(tmp_path)
+    yield ctx
+    close_generations(ctx.browser_state)
 
 
 def _deliver_text(tmp_path, ctx, text, *, window=WINDOW):
@@ -205,8 +214,8 @@ def _deliver_text(tmp_path, ctx, text, *, window=WINDOW):
 
 
 @pytest.mark.parametrize(("output", "total"), [("text", 120_000), ("markdown", 120_000), ("html", 60_000)])
-def test_browse_page_output_is_whole_and_its_middle_and_tail_are_readable(tmp_path, monkeypatch, output, total):
-    ctx = _browser_ctx(tmp_path)
+def test_browse_page_output_is_whole_and_its_middle_and_tail_are_readable(tmp_path, monkeypatch, _browser_ctx_closing, output, total):
+    ctx = _browser_ctx_closing
     text = _large(total)
     _bind_page(monkeypatch, _LargePage(text=text, html=text, evaluated=text))
     produced = browser._browse_page(ctx, "http://example.test/", output=output)
@@ -219,8 +228,8 @@ def test_browse_page_output_is_whole_and_its_middle_and_tail_are_readable(tmp_pa
     assert MIDDLE in _read_omitted(reader, view)
 
 
-def test_browser_evaluate_output_is_whole_and_retained(tmp_path, monkeypatch):
-    ctx = _browser_ctx(tmp_path)
+def test_browser_evaluate_output_is_whole_and_retained(tmp_path, monkeypatch, _browser_ctx_closing):
+    ctx = _browser_ctx_closing
     text = _large(25_000)
     _bind_page(monkeypatch, _LargePage(evaluated=text))
     produced = browser._browser_action(ctx, "evaluate", value="document.body.innerText")
@@ -232,8 +241,8 @@ def test_browser_evaluate_output_is_whole_and_retained(tmp_path, monkeypatch):
     assert MIDDLE in _read_omitted(reader, view)
 
 
-def test_small_browser_output_is_delivered_whole_and_unchanged(tmp_path, monkeypatch):
-    ctx = _browser_ctx(tmp_path)
+def test_small_browser_output_is_delivered_whole_and_unchanged(tmp_path, monkeypatch, _browser_ctx_closing):
+    ctx = _browser_ctx_closing
     _bind_page(monkeypatch, _LargePage(text="small page text", html="<p>small</p>", evaluated="# small"))
     for output, expected in (("text", "small page text"), ("html", "<p>small</p>"), ("markdown", "# small")):
         produced = browser._browse_page(ctx, "http://example.test/", output=output)
@@ -242,11 +251,11 @@ def test_small_browser_output_is_delivered_whole_and_unchanged(tmp_path, monkeyp
         assert view == produced and "result_partial" not in row
 
 
-def test_an_unwritable_browser_source_is_disclosed_as_unavailable(tmp_path, monkeypatch):
+def test_an_unwritable_browser_source_is_disclosed_as_unavailable(tmp_path, monkeypatch, _browser_ctx_closing):
     def refuse(*_args, **_kwargs):
         raise OSError("disk refused the source")
 
-    ctx = _browser_ctx(tmp_path)
+    ctx = _browser_ctx_closing
     _bind_page(monkeypatch, _LargePage(text=_large(120_000)))
     produced = browser._browse_page(ctx, "http://example.test/", output="text")
     monkeypatch.setattr(artifacts, "store_actor_source_bytes", refuse)

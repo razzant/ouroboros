@@ -17,6 +17,11 @@ from ouroboros.task_results import write_task_result
 from ouroboros.tools import browser, vision
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
+from tests._browser_fakes import run_on
+
+
+async def _url(page):
+    return page.url
 
 
 def test_wait_schema_preserves_evaluate_and_exposes_selector_states():
@@ -52,7 +57,7 @@ def test_real_current_page_waits_and_timeout_observations(tmp_path, engine):
     executor = ThreadPoolExecutor(max_workers=1)
 
     def call(name, args):
-        # Preserve Playwright/greenlet affinity through the registry handoff.
+        # The production registry handoff to one sticky worker.
         return owner_pause.submit_tool(ctx, name, executor.submit, tools.execute_result,
                                        name, args).result()
 
@@ -76,7 +81,7 @@ def test_real_current_page_waits_and_timeout_observations(tmp_path, engine):
             "action": "wait", "selector": "#ready", "state": "visible", "timeout": 3000}).text)
         assert reached["status"] == "reached" and reached["first_visible"] is True
         assert ctx.browser_state.page is original
-        assert executor.submit(lambda: original.url).result() == page.as_uri()
+        assert run_on(ctx.browser_state, _url(original)) == page.as_uri()  # read on the page's own loop
         assert "Screenshot captured" in call("browser_action", {"action": "screenshot"}).text
         png = base64.b64decode(ctx.browser_state.last_screenshot_b64)
         assert png.startswith(b"\x89PNG\r\n\x1a\n")

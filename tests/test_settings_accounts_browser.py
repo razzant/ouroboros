@@ -113,6 +113,7 @@ def test_accounts_is_passive_and_provider_activation_is_explicit(accounts_ui):
     expect(provider.locator(".harness-account-row").first).to_have_attribute("data-profile", "studio-03")
     expect(provider.locator("[data-family-maintenance]")).to_contain_text("3.0.0")
     assert len(ui["facts"]["program_reads"]) == 1
+    # One full status read; the independent passive roster/quota reads (`?view=quota`) are separate.
     assert [urlsplit(url).query for url in ui["reads"] if "/claudexor/status" in url and urlsplit(url).query != "view=quota"] == [""]
     go_back(page)
     expect(listing.locator('[data-entry-id="codex"]')).to_have_count(1)

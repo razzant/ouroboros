@@ -3150,8 +3150,9 @@ def test_ui_smoke_superseded_input_dialog_resolves_object_result(direct_server_w
 def _open_login_provider(page, url):
     """Mount the provider that owns login; keep unrelated discovery inside the test."""
     from tests.settings_browser_helpers import open_settings
+    from tests.test_subscription_setup_browser import status_answer
 
-    page.route("**/api/claudexor/status*", lambda route: route.fulfill(json={
+    page.route("**/api/claudexor/status*", lambda route: status_answer(route, {
         "daemon": {"state": "running"}, "harnesses": [{"id": "codex", "display_name": "Codex"}],
         "profiles": {"profiles": []}, "quota": [],
         "reads": {"catalog": "ok", "accounts": "ok", "quota": "ok"},
