@@ -51,6 +51,45 @@ def owner_text(row) -> str:
     return "" if row.get("text_placeholder") else str(row.get("text") or "")
 
 
+def _own_held_state(ctx) -> dict | None:
+    """This work's own durable maps on its canonical record: a present field is this work's state, an empty map
+    included; an absent one leaves the inherited sources alone. ``None``: the record could not be read."""
+    task_id = str(getattr(ctx, "task_id", "") or "")
+    if not (task_id and getattr(ctx, "drive_root", None)):
+        return {}
+    from ouroboros.store import StoreError
+    from ouroboros.task_store import read_document
+    from ouroboros.tool_access import canonical_data_root
+    try:
+        record = read_document(canonical_data_root(ctx), task_id) or {}
+    except StoreError:  # a busy or unreadable store: the turn goes on, the record keeps what it holds
+        logging.getLogger(__name__).warning("Held owner rows: record of %s unreadable", task_id, exc_info=True)
+        return None
+    return {key: record[key] for key in ("held_owner_messages", "open_relays") if isinstance(record.get(key), dict)}
+
+
+def _settle_seed(ctx) -> bool:
+    """A first build that could not read the record left a partial view: no write replaces the record until a read
+    lands. It then keeps the record's rows and those of its open relays that were not inherited, or still open here:
+    one the inherited view reopened, or this work answered since, stays closed."""
+    seed = getattr(ctx, "_held_state_seed", None)
+    if seed is None:
+        return True
+    own = _own_held_state(ctx)
+    if own is None:
+        return False
+    for key, row in (own.get("held_owner_messages") or {}).items():
+        ctx._held_owner_messages.setdefault(key, copy.deepcopy(row))
+    if "open_relays" in own:
+        mine, relays = own["open_relays"], ctx._open_relays
+        keep = (mine.keys() & relays.keys()) | (mine.keys() - seed) | (relays.keys() - seed)
+        settled = {key: relays[key] if key in relays else copy.deepcopy(mine[key]) for key in keep}
+        relays.clear()
+        relays.update(settled)
+    ctx._held_state_seed = None
+    return True
+
+
 def held_owner_messages(ctx) -> dict:
     held = getattr(ctx, "_held_owner_messages", None)
     if not isinstance(held, dict):
@@ -59,8 +98,13 @@ def held_owner_messages(ctx) -> dict:
         metadata = getattr(ctx, "task_metadata", None) or {}
         # Continue carries host-retained rows; it does not acquire arbitrary history.
         inherited = (metadata.get("continuation") or {}).get("owner_sources") or {}
+        # A new dispatch of the same work (cold resume, restart) starts from what it already holds, which the write
+        # below replaces: its own rows over the inherited ones, and its own open relays instead of them (an answered
+        # one stays closed). An unreadable record is not replaced from this partial view (``_settle_seed``).
+        own = _own_held_state(ctx)
         if not hasattr(ctx, "_open_relays"):
-            ctx._open_relays = copy.deepcopy(inherited.get("open_relays") or {})
+            ctx._open_relays = copy.deepcopy(own["open_relays"] if own and "open_relays" in own
+                                             else inherited.get("open_relays") or {})
         held.update(copy.deepcopy(inherited.get("held_owner_messages") or metadata.get("held_owner_messages") or {}))
         from ouroboros.project_dialogue import resolve_owner_message_source
         from ouroboros.tool_access import canonical_data_root
@@ -72,6 +116,8 @@ def held_owner_messages(ctx) -> dict:
                 row = None
             if quotable_owner_row(row, canonical_data_root(ctx)):
                 held[owner_row_address(row)] = {**row, "_owner_source_root": str(canonical_data_root(ctx))}
+        held.update(copy.deepcopy((own or {}).get("held_owner_messages") or {}))
+        ctx._held_state_seed = set(ctx._open_relays) if own is None else None
         persist_held_state(ctx)
     return held
 
@@ -119,6 +165,9 @@ def persist_held_state(ctx) -> None:
     store errors still raise.
     """
     if not (getattr(ctx, "task_id", "") and getattr(ctx, "drive_root", None)):
+        return
+    if not _settle_seed(ctx):  # the record stays as it is; the next persist or the terminal save reads it again
+        ctx._held_state_dirty = True
         return
     from ouroboros.store import StoreBusy
     from ouroboros.task_store import patch_document
