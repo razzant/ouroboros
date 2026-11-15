@@ -247,9 +247,9 @@ Running and queued roots with a durable record offer `{action: "model", target: 
 only `set` takes model/locality, only `processing` takes `processing` (`""` Default, `standard`, `fast`, `economy`, `ultrafast`).
 The response is `200 {ok: true, task_id, applied: "next_step"|"at_start", lead}` (`processing` instead of `lead` for a tier act).
 A tier act is its own decision (`owner_processing`, `metadata.processing`): it applies from the next logical call and to
-new helpers without a tier of their own, which take the work's tier, Default's (Main's) included; started ones keep
+new subagents without a tier of their own, which take the work's tier, Default's (Main's) included; started ones keep
 theirs. It never resets the primary, a fallback, a wait, an
-account or a window, and a model act never changes it. `ultrafast` is a room's, a work's or a helper's tier only,
+account or a window, and a model act never changes it. `ultrafast` is a room's, a work's or a subagent's tier only,
 never a Settings value (Main's included: `400:chat_processing_invalid`); it reaches only a source advertising it, and a
 direct OpenAI, OpenRouter or Anthropic route gets no native field (`processing_not_submitted`).
 Set/keep make an owner primary and record a recent model; follow returns to Main. Return/wait/keep require a fallback.
