@@ -167,8 +167,8 @@ _START_CHOICE_PARAMS = {
 }
 
 
-# The direct-OpenAI custom projection drops parameter prose and keeps this lead only as far as it fits
-# beside the compact schema; tests/test_openai_chat_custom_contract.py holds every actual profile whole.
+# Too large for the direct-OpenAI custom description bound, this tool goes there as its lead beside the bare
+# structure of its schema; tests/test_openai_chat_custom_contract.py holds the lead whole on every actual profile.
 _SCHEDULE_SUBAGENT_DESCRIPTION = (
     # SYSTEM also says start_task is separate work, an evidence-only copy owes no apply, and shared-tree work is
     # verified, not reapplied (integrate_subagent_patch's lead too): this lead pays the typed input_files schema.
@@ -182,7 +182,7 @@ _SCHEDULE_SUBAGENT_DESCRIPTION = (
     "the selected/inherited workspace_root, else one new Git tree for such descendants); genesis gives EACH an empty "
     "Git repo in the durable projects root that IS the deliverable; acting harness work uses a private snapshot and "
     "integrate_delegated_patch. "
-    # Custom-tool projection strips parameter prose; this choice must survive in the tool lead.
+    # Where the custom projection sends this tool without parameter prose, this choice must survive in the tool lead.
     "A non-acting Agent session keeps configured access in an evidence-only private checking copy; "
     "access='readonly' selects read-only session execution. Runtime data (installed skill payloads too) is "
     "never a write_surface. Cyber-effective children inherit "

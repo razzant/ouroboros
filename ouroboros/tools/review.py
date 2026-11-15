@@ -526,7 +526,7 @@ def _review_history_brief(ctx: ToolContext, frozen: Any, rebuttal: str = "") -> 
     from ouroboros.tools.review_helpers import review_history_brief
 
     return review_history_brief(
-        prepare_history(ctx, frozen, rebuttal), drive_root=getattr(ctx, "drive_root", None),
+        prepare_history(ctx, frozen, rebuttal), drive_root=getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None),
         repo_root=frozen.spec.root if frozen is not None else getattr(ctx, "repo_dir", None), task_id=str(ctx.task_id or ""))
 
 

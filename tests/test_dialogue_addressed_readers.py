@@ -1,5 +1,6 @@
 """Addressed readers use SQL truth, preserve owner bytes, and disclose incomplete import."""
 from contextlib import contextmanager
+import json
 import pathlib
 
 import pytest
@@ -21,11 +22,12 @@ def owner(client_id="owner-one", *, chat_id=1, **extra):
 @contextmanager
 def metered(monkeypatch):
     """Measure actual SQL instructions, including short-lived composite transactions."""
-    counts = {"statements": 0, "steps": 0}
+    counts = {"statements": 0, "steps": 0, "transactions": 0}
     transaction = ds.transaction
 
     @contextmanager
     def traced(*args, **kwargs):
+        counts["transactions"] += 1
         with transaction(*args, **kwargs) as conn:
             conn.set_trace_callback(lambda _: counts.__setitem__("statements", counts["statements"] + 1))
             conn.set_progress_handler(lambda: counts.__setitem__("steps", counts["steps"] + 1) or 0, 1)
@@ -230,6 +232,36 @@ def test_annotation_compaction_over_a_torn_line_keeps_every_source_and_the_newes
     assert latest_chat_annotations(tmp_path)["unreadable-source"]["status"] == "delivered"
     sidecar = tmp_path / "logs" / "chat_annotations.jsonl"
     assert len(sidecar.read_text(encoding="utf-8").splitlines()) == 1, "compacted to the newest act"
+
+
+def test_annotation_compaction_asks_the_store_once_however_many_messages_it_keeps(tmp_path, monkeypatch):
+    """Past the threshold every append compacts. A transaction per annotated message cost the owner's busy server
+    seconds an append (each releases the GIL; 823 messages, 14.11); one statement asks for every source, and the
+    rows kept stay the per-message answer: each source's newest act, none of an absent source."""
+    from ouroboros import project_dialogue as pd
+
+    counts = []
+    for messages in (1, 30):
+        root = tmp_path / str(messages)
+        ids = [f"owner-{number}" for number in range(messages)]
+        # Another room's row first: a root caches its cutover fact from its second store access on, so neither
+        # measured compaction pays that one-time read.
+        ds.append(root, "chat", owner("foreign", chat_id=22))
+        for message_id in ids:
+            ds.append(root, "chat", owner(message_id))
+            append_chat_annotation(root, message_id, action="steer_task", status="queued", routing_token="act")
+        quoted = 'ответ "в" \\22'  # carried only by another room's outbound row: any chat row keeps a source
+        ds.append(root, "chat", {**owner(quoted, chat_id=22), "direction": "out"})
+        append_chat_annotation(root, quoted, action="steer_task", status="queued", routing_token="act")
+        append_chat_annotation(root, "absent", action="steer_task", status="delivered", routing_token="act")
+        with monkeypatch.context() as patched, metered(monkeypatch) as measured:
+            patched.setattr(pd, "_COMPACT_AT_BYTES", 1)
+            append_chat_annotation(root, ids[-1], action="steer_task", status="delivered", routing_token="act")
+        counts.append((measured["transactions"], measured["statements"]))
+        sidecar = (root / "logs" / "chat_annotations.jsonl").read_text(encoding="utf-8")
+        kept = [(row["client_message_id"], row["status"]) for row in map(json.loads, sidecar.splitlines())]
+        assert kept == [*((name, "queued") for name in ids[:-1]), (quoted, "queued"), (ids[-1], "delivered")]
+    assert counts[0] == counts[1], counts
 
 
 def test_continuation_narrative_is_addressed_to_its_task_and_checks_result_identity(tmp_path):

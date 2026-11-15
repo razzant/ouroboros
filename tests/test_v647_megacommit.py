@@ -380,7 +380,11 @@ def test_verify_and_record_handler_artifact_and_declared(tmp_path):
     # a relative artifact path resolves under the active workspace (the repo dir here)
     (Path(ctx.repo_dir) / "deliv.txt").write_text("x")
     assert "OBSERVED" in _verify_and_record(ctx, contract_kind="artifact_observation", artifact_paths=["deliv.txt"])
-    assert "FAIL" in _verify_and_record(ctx, contract_kind="artifact_observation", artifact_paths=["missing.txt"])
+    # a missing relative name says where the host looked; an absolute one already does
+    gone = Path(ctx.repo_dir).resolve() / "missing.txt"
+    failed = _verify_and_record(ctx, contract_kind="artifact_observation", artifact_paths=["missing.txt"])
+    assert "FAIL" in failed and f"missing: missing.txt (resolved as {gone})" in failed
+    assert f"missing: {gone}." in _verify_and_record(ctx, contract_kind="artifact_observation", artifact_paths=[str(gone)])
     # triad #A: a RELATIVE path that escapes the workspace cannot probe arbitrary host
     # files (no `../../../etc/passwd` existence oracle) — confined post-resolution. The
     # security invariant is that the traversal target is NEVER OBSERVED. v6.57.0: an

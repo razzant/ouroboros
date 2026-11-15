@@ -42,7 +42,6 @@ def test_finish_gist_rule_reaches_every_real_tool_projection(tmp_path, dialect):
         projected = LLMClient._sanitize_chat_completion_tools([schema])[0]["function"]
     elif dialect == "openai_custom":
         projected = project_function_tools_to_openai_custom([schema]).wire_tools()[0]["custom"]
-        assert field["description"] not in projected["description"]  # parameter prose really is stripped
     elif dialect == "anthropic":
         projected = LLMClient._build_anthropic_tools([schema])[0]
     elif dialect == "gigachat":
@@ -80,8 +79,8 @@ def test_schedule_readonly_choice_survives_custom_projection(tmp_path, constrain
     registry._ctx.task_constraint = constraint
     schema = next(tool for tool in registry.schemas() if tool["function"]["name"] == "schedule_subagent")
     function = schema["function"]
-    # Normal/pruned function schemas carry parameter prose; the custom codec
-    # strips it and keeps the tool prose only as far as its description bound allows.
+    # Normal/pruned function schemas carry parameter prose; the custom codec sends a tool this large
+    # without it and keeps the tool prose only as far as its description bound allows.
     assert "Select readonly for read-only session execution" in function["parameters"]["properties"]["access"]["description"]
     catalog = project_function_tools_to_openai_custom([schema])
     description = catalog.wire_tools()[0]["custom"]["description"]
@@ -168,7 +167,7 @@ def test_prose_edits_keep_structure_and_deliver_conditions_in_every_profile(tmp_
         assert hashlib.sha256(structure.encode()).hexdigest()[:16] == _STRUCTURE[name][profile], name
         catalog = project_function_tools_to_openai_custom([schemas[name]])
         custom = catalog.wire_tools()[0]["custom"]["description"]
-        # The whole tool text survives the codec's bound; only parameter prose and defaults are dropped.
+        # The whole tool text survives the codec's bound, beside the whole schema or its bare structure.
         assert custom.startswith(" ".join(function["description"].split()) + "\n"), name
         assert catalog.schema_binding(name).schema() == function["parameters"]
         if name == "query_data":
