@@ -292,7 +292,7 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                                           budget_hold_fact, hold_budget_row, hold_restored_budget_pause)
     from supervisor.restart_retention import (fresh_return_transaction, hold_after_stop, hold_for_owner_restart,
                                               hold_stopped_queue, never_started, park_saved_pause, pause_ids,
-                                              recover_saved_running, returned_before_body,
+                                              continues_saved_step, recover_saved_running, returned_before_body,
                                               retained_pending, HOLD_SAVED_SLEEP_RECOVERY, unseen_pause)
     from supervisor.schedule_occurrence import first_attempt, first_dispatch_unsent, restore_verdict
     from supervisor.task_admission import SEED_RETURN
@@ -493,8 +493,9 @@ def _retain_snapshot_pending(snapshot_pending: list, running_rows: list, *, stal
                                          persist_result=returned is not None)
             elif kept:
                 row = task
-            elif str(task.get("id") or "") in returning_queue and (saved_or_accepted and schedule_replay or recheck):
-                row = task  # the fresh Restart returns it: ordinary admission, at any age
+            elif str(task.get("id") or "") in returning_queue and (saved_or_accepted and (schedule_replay or (
+                    verdict == "possible" and continues_saved_step(task, _queue().DRIVE_ROOT))) or recheck):
+                row = task  # the fresh Restart returns it, or its own saved step past a schedule's ``possible`` (#3192)
             elif owner_restart and (returned or returned is None):
                 row = hold_stopped_queue(dict(task), _queue().DRIVE_ROOT, stop_door, proof=returned,
                                          persist_result=returned is not None)
