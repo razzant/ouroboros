@@ -60,9 +60,12 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
     let cancelInflight = null;  // aborts the signal of the read in flight
     let settled = null;
     let followUp = null;
-    // Told after `latest()` changed; a watcher that throws neither skips another nor fails the read that changed it.
+    // Told after `latest()` changed; a watcher that throws neither skips another nor fails the read that changed it,
+    // and says so in the console (as ws.js does for a message handler).
     const watchers = new Set();
-    const tell = () => watchers.forEach((watcher) => { try { watcher(); } catch { /* that reader's own fault */ } });
+    const tell = () => watchers.forEach((watcher) => {
+        try { watcher(); } catch (error) { console.error('A state snapshot watcher failed:', error); }
+    });
     const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
     const begin = () => ({ generation: ++requestedGeneration, requestedAt: now(),
         path: held ? `/api/state?bindings_since=${encodeURIComponent(held.revision)}` : '/api/state' });

@@ -264,6 +264,8 @@ test('the card keeps the header\'s readiness rule over the page\'s sequencer: a 
     assert.deepEqual(words(), said('Online'), 'a failed read states nothing: the card keeps the last word, as the header does');
     await apply({ version: '7.10.2' });
     assert.deepEqual(words(), said('Online'), 'neither does a body without supervisor_ready');
+    await apply({ supervisor_ready: true });
+    await home.refresh([]);  // the home comes on screen while ready: its own copy now holds that Online body
     connected = false;
     emit('close');
     assert.deepEqual(words(), said('Reconnecting…'));
