@@ -1390,7 +1390,7 @@ setInterval(function pollShownRoomState() { if (state.activePage === 'chat' && !
 setInterval(() => refreshProjectsNav(false), 20000);
 settingsControls = initSettings({ ...ctx, layers });
 dashboardControls = initDashboard({ ...ctx, layers });
-initLogs({ ...ctx, mount: document.getElementById('dashboard-panel-logs') });
+initLogs({ ...ctx, mount: document.getElementById('dashboard-panel-logs'), setControls: dashboardControls.setControls });
 evolution = initEvolution({ ...ctx, mount: document.getElementById('dashboard-panel-evolution') });
 initUpdates({ ...ctx, mount: document.getElementById('dashboard-panel-updates') });
 initActivity({ ...ctx, mount: document.getElementById('dashboard-panel-activity') });

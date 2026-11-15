@@ -1473,23 +1473,18 @@ html[data-layout="docked"] .app-page-header[data-lead] > .app-page-toolbar butto
     min-height: var(--control-h-float);
     padding-block: 0;
 }
-/* In the bar the tabs wrap and never scroll (DESIGN "Page header"): a strip longer than the bar's start takes a second
-   line of tabs, which grows the bar, instead of hiding tabs behind a fade. */
+/* The band keeps one sideways rail. Its existing strip reveals the chosen control. */
 html[data-layout="docked"] .app-page-lead .app-tab-strip {
     flex: 1 1 auto;
-    flex-wrap: wrap;
-    row-gap: var(--space-1);
-    overflow-x: visible;
-    padding: 10px var(--space-1) 26px;
-    margin: 0 0 -16px calc(-1 * var(--space-1));
-    scroll-padding-inline: var(--space-1);
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding: 10px var(--space-4) 26px;
+    margin: 0 0 -16px;
+    scroll-padding-inline: var(--space-4);
     pointer-events: none;
 }
 html[data-layout="docked"] .app-page-lead { --control-h: var(--control-h-float); }
-html[data-layout="docked"] .app-page-lead .app-tab { pointer-events: auto; }
-/* A pane too narrow for the bar keeps the strip under the row (page_header.js bindPageHeader): there too it wraps and
-   never scrolls; only the phone's strip, at the top of its page, scrolls. */
-html[data-layout="docked"] .app-page-tabs > .app-tab-strip { flex-wrap: wrap; row-gap: var(--space-1); overflow-x: visible; }
+html[data-layout="docked"] .app-page-lead .app-tab-strip > button { pointer-events: auto; flex: none; }
 /* Files: the folder's location starts the bar at reading size, each folder by its name, the one you are in in primary
    ink. A location longer than the bar's start scrolls inside it as a tab strip does, fading where folders hide: it
    rests at its end (files.js), so the folders above give way first, and no folder is wider than the strip less one
@@ -6078,34 +6073,26 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     padding: 0;
 }
 
-/* Logs (U026-U035, U140): the tab body scrolls; its strip stays at its top on the room's colour (the stream lives at its
-   newest end, the strip must stay in reach) while the list, one card whose events are trays, scrolls under it. Every
-   event is one shared fold (logs.js createEvent) whose summary is its head: the fold's caret, the name with its task, a
-   failure's chip and its count, and the time in Main's clock at the line's end, as a sidebar row ends in its time; then
-   the words from the name's edge, at most three lines; opened, the words are whole and its facts and record, or a
-   task's timeline, follow. Only a failure is coloured: the shared outcome chip
-   (.chat-live-phase). The system face reads it all; monospace keeps only the raw record. */
-/* The body's top inset rides on the strip, so the strip sticks flush at the scroller's edge (a sticky box keeps clear
-   of its scroller's padding, which let rows show above it). */
-#page-logs {
-    padding-top: 0;
-    overflow-anchor: none; /* logs.js owns the entry anchor while chunks are inserted or moved */
+/* Logs keeps its one list scroller plain. The shared filter rail and Clear stand in the page column's band. */
+#page-logs { overflow-anchor: none; }
+.logs-filters { display: flex; align-items: center; flex: 1; min-width: 0; gap: var(--space-2); }
+.logs-filters[hidden] { display: none; }
+.logs-kinds { flex: 1; }
+.logs-clear-list { flex: none; color: var(--text-secondary); }
+@container sectionplace (max-width: calc(40rem - 0.02px)) {
+    #page-dashboard .app-page-header[data-controls] .section-lead-page {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        column-gap: var(--space-2);
+    }
+    #page-dashboard .section-lead-page > .app-page-return { grid-area: 1 / 1; max-width: 36vw; }
+    #page-dashboard .section-lead-page > [data-dashboard-lead-name] { grid-area: 1 / 2; }
+    #page-dashboard .logs-filters:not([hidden]) { display: contents; }
+    #page-dashboard .logs-kinds { grid-area: 2 / 1 / auto / -1; padding-block: var(--space-2); margin: 0; }
+    #page-dashboard .logs-clear-list { grid-area: 1 / 3; }
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-lead { grid-area: lead; }
 }
-/* The strip: Skills' filter strip whole (its chips, their counts and its layout, .skills-filter-strip below: they wrap,
-   and on a phone they are one line that scrolls sideways), the first word on the list's edge; at its end the list's own
-   action, quiet: an unchosen filter's ink, not the strip's brightest word. */
-.logs-filters {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-2);
-    padding: var(--space-4) 0 var(--space-2);
-    background: var(--bg-primary);
-}
-.logs-kinds { flex: 1 1 0; margin-left: calc(-1 * var(--space-2)); }
-.logs-clear-list { color: var(--text-secondary); }
 
 .logs-card { display: grid; gap: var(--space-2); min-width: 0; }
 .logs-empty { margin: 0; color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
@@ -6803,7 +6790,8 @@ html[data-layout="stack"] #page-dashboard[data-section-view="home"] > .app-page-
 @container sectionplace (max-width: calc(40rem - 0.02px)) {
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header > .app-page-leading,
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
-    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title toolbar"; }
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-lead { grid-area: lead; }
 }
 
 .dashboard-panels,
@@ -7442,13 +7430,12 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .skills-search-chrome .skills-search { flex: 1 1 260px; min-width: min(200px, 100%); }
 .skills-search-chrome[data-chrome-pane="installed"]:not([hidden]) { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .skills-filter-strip,
-.skills-category-strip,
-.logs-kinds { display: flex; flex-wrap: wrap; gap: 2px var(--space-1); min-width: 0; }
+.skills-category-strip { display: flex; flex-wrap: wrap; gap: 2px var(--space-1); min-width: 0; }
 /* On a phone the filters and the categories are one line that scrolls sideways ([data-scroll-x]: the drawer's swipe
    leaves it to the strip), never a lone chip wrapped onto a second row. Like a tab strip it fades on each side that
    still hides chips (scroll_fade.js sets the edges), and under a finger its chips take the touch minimum as their own
    height, since the strip clips a reach. */
-html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip, .logs-kinds) {
+html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip) {
     flex-wrap: nowrap;
     overflow-x: auto;
     overscroll-behavior-x: contain;
@@ -7460,11 +7447,11 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip, .log
     mask-image: linear-gradient(to right, transparent, black var(--strip-fade-start),
         black calc(100% - var(--strip-fade-end)), transparent);
 }
-html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip, .logs-kinds)[data-scroll-start] { --strip-fade-start: var(--space-4); }
-html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip, .logs-kinds)[data-scroll-end] { --strip-fade-end: var(--space-4); }
-html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip, .logs-kinds)::-webkit-scrollbar { display: none; }
+html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)[data-scroll-start] { --strip-fade-start: var(--space-4); }
+html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)[data-scroll-end] { --strip-fade-end: var(--space-4); }
+html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-webkit-scrollbar { display: none; }
 @media (pointer: coarse) {
-    html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip, .logs-kinds) { --control-h: var(--touch-target-min); }
+    html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip) { --control-h: var(--touch-target-min); }
 }
 .skills-filter-strip { flex-basis: 100%; margin-left: calc(-1 * var(--space-2)); }
 .skills-category-strip { margin: 0 0 var(--space-3) calc(-1 * var(--space-2)); }
@@ -8671,7 +8658,6 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip, .log
     .widget-table th[scope="row"] { display: block; padding: 6px 0; }
 
     .dashboard-body { padding: var(--space-3); }
-    .logs-filters { padding-top: var(--space-3); }
 
 }
 

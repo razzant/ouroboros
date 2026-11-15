@@ -17,6 +17,7 @@ import {
 } from './log_events.js';
 import { markView, statusMarkHtml } from './status_mark.js';
 import { bindScrollFade } from './scroll_fade.js';
+import { revealStripChoice } from './page_header.js';
 import { createLogRaw, LOG_RAW_HTML } from './logs_raw.js';
 
 /** Dashboard › Logs (docs/ARCHITECTURE.md §3 "Dashboard"). The panel's entries are data first: every live frame and
@@ -52,7 +53,7 @@ function omittedNote(evt) {
     return `Left out of this view: ${left}. The record below reads the whole row.`;
 }
 
-export function initLogs({ ws, state, mount }) {
+export function initLogs({ ws, state, mount, setControls }) {
     const MAX_LOGS = 500;
     const MAX_TASK_EVENTS = 30;
     // Entries placed per frame while a shown panel catches up with what changed while it was hidden.
@@ -88,16 +89,15 @@ export function initLogs({ ws, state, mount }) {
     const narrowed = () => KINDS.some((key) => state.activeFilters[key]);
     const shows = (category) => !narrowed() || Boolean(state.activeFilters[category]);
 
-    // One Dashboard tab body is the tab's root and its one scroller; the strip stays at its top while the list, one card
-    // of trays, scrolls under it. The strip is Skills' filter strip whole (style.css .skills-category), then the list's
-    // own quiet action at its end; the history line and the empty line live in the card.
+    // The list is one plain scroller. Its filter rail and Clear belong to the section's header; moving the nodes
+    // keeps their handlers and counts. The history line and empty line belong to the card.
     const page = document.createElement('div');
     page.id = 'page-logs';
     page.className = 'dashboard-body settings-logs-panel';
     page.innerHTML = `
-        <div class="logs-filters"><div class="logs-kinds" id="log-filters" role="group" aria-label="Show" data-scroll-x>${
+        <div class="logs-filters"><div class="logs-kinds app-tab-strip" id="log-filters" role="group" aria-label="Show" data-scroll-x>${
             Object.entries({ '': 'All', ...LOG_CATEGORIES }).map(([key, label]) => `<button type="button" class="filter-chip skills-category" data-log-kind="${key}">${label}<span class="skills-category-count"></span></button>`).join('')
-        }</div><button type="button" class="btn btn-ghost btn-sm logs-clear-list" id="btn-clear-logs">Clear list</button></div>
+        }</div><button type="button" class="btn btn-ghost btn-sm logs-clear-list" id="btn-clear-logs">Clear</button></div>
         <section class="ui-card logs-card">
             <div class="ui-status logs-history-status" role="status"></div>
             <p class="logs-empty" data-log-empty hidden></p>
@@ -216,6 +216,7 @@ export function initLogs({ ws, state, mount }) {
         entries.forEach(updateVisibility);
         updateEmptyState();
         follow();
+        revealStripChoice(filtersDiv, chips.get(key));
     }
 
     chips.forEach((chip, key) => chip.addEventListener('click', () => choose(key)));
@@ -786,5 +787,6 @@ export function initLogs({ ws, state, mount }) {
     // place is set again, the newest entry or the one being read.
     window.addEventListener('ouro:page-shown', show);
     document.addEventListener('visibilitychange', show);
+    setControls?.('logs', page.querySelector('.logs-filters'));
     show();
 }

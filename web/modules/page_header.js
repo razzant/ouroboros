@@ -301,6 +301,16 @@ export function renderTabStrip({
  * select(value) synchronizes an external navigation without calling onChange;
  * user activation calls it once, only when the selection actually changes.
  */
+export function revealStripChoice(strip, tab) {
+    if (!tab || !strip.clientWidth) return;
+    const bounds = strip.getBoundingClientRect(), rect = tab.getBoundingClientRect();
+    const style = strip.ownerDocument.defaultView.getComputedStyle(strip);
+    const left = bounds.left + strip.clientLeft + (parseFloat(style.scrollPaddingInlineStart) || 0);
+    const right = bounds.left + strip.clientLeft + strip.clientWidth - (parseFloat(style.scrollPaddingInlineEnd) || 0);
+    if (rect.left < left) strip.scrollLeft += rect.left - left;
+    else if (rect.right > right) strip.scrollLeft += rect.right - right;
+}
+
 export function bindTabStrip(strip, { dataAttr, activeClass = 'active', onChange } = {}) {
     if (!dataAttr) throw new Error('bindTabStrip requires dataAttr');
     let disposed = false;
@@ -333,17 +343,7 @@ export function bindTabStrip(strip, { dataAttr, activeClass = 'active', onChange
         const tab = tabs().find((item) => item.getAttribute(dataAttr) === selected);
         if (!tab) return;
         if (strip.getAttribute('aria-orientation') === 'vertical') { revealInScroller(tab); return; }
-        const bounds = strip.getBoundingClientRect();
-        const rect = tab.getBoundingClientRect();
-        const style = strip.ownerDocument.defaultView.getComputedStyle(strip);
-        const inset = parseFloat(style.scrollPaddingInlineStart) || 0;
-        const endInset = parseFloat(style.scrollPaddingInlineEnd) || 0;
-        const left = bounds.left + strip.clientLeft + inset;
-        const right = bounds.left + strip.clientLeft + strip.clientWidth - endInset;
-        // Scroll only this strip. scrollIntoView can also move the page or its
-        // scroll panel when restoring an inactive page's saved selection.
-        if (rect.left < left) strip.scrollLeft += rect.left - left;
-        else if (rect.right > right) strip.scrollLeft += rect.right - right;
+        revealStripChoice(strip, tab);  // only the strip moves, never its page or scroll panel
     }
     function select(value, { focus = false } = {}) {
         if (disposed) return false;

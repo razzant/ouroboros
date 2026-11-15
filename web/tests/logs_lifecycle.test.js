@@ -39,6 +39,18 @@ function mountLogs(t, { page = 'dashboard', history = {} } = {}) {
 
 const at = (second) => `2026-11-04T01:00:${String(second).padStart(2, '0')}Z`;
 
+test('the section owns the filter rail and Clear; the list has no sticky chrome', (t) => {
+    const { mount, ws, document } = setup(t);
+    const band = document.createElement('div');
+    let tab;
+    initLogs({ mount, ws, state: { activePage: 'chat' }, setControls: (name, node) => { tab = name; band.appendChild(node); } });
+    assert.equal(tab, 'logs');
+    assert.equal(mount.querySelector('#log-filters'), null);
+    assert.ok(band.querySelector('#log-filters').classList.contains('app-tab-strip'));
+    assert.equal(band.querySelector('#btn-clear-logs').textContent, 'Clear');
+    assert.ok(mount.querySelector('#log-entries'), 'the events stay in their scroller');
+});
+
 test('Clear cancels a pending backfill without accepting its late rows or leaving Loading behind', async (t) => {
     const { mount, routes, ws } = setup(t);
     for (const name of STREAMS) routes.set(logUrl(name), response({ entries: [] }));

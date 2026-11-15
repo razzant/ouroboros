@@ -3412,7 +3412,7 @@ One component (`web/modules/page_header.js`) draws the page's row, including a P
 top page layer's named return, before controls: ‹ Settings, ‹ Main, or a level's parent. The word ellipsizes before
 controls yield; its chevron stays. Two panes place it over the page; one column replaces the leading picture. On docked, a section without pages that the column already
 names shows no title: its tabs or Files' location take that place and its actions the end, on Main's line, so the
-bar has two ends as Main's does; tabs wrap and never scroll, a location that does not fit scrolls inside it (it
+bar has two ends as Main's does; tabs and filters share one sideways-scrolling rail, as does a location that does not fit (it
 rests at the folder you are in, no folder wider than the bar's start), and in the macOS window its empty parts
 still move the window. A section with pages keeps its heading for readers; its chosen row names the pane. A deeper Settings level keeps its name. A header with nothing to
 show draws no bar, and its page starts at the window's top edge: the band under the macOS title bar stays the
@@ -3421,7 +3421,7 @@ crisp edges (owner 20.10), as a room's feed does (owner 21.10), while a plain pr
 the window. A Project shows its name. In the stack layout the row is at most 56 px and is the only header row:
 the leading control (Ouroboros's picture at a room or a section's list, Back on a page), the destination's name,
 its status, then a room's consciousness chip and Panic; a page's tabs stand at the top of the page, never as a
-second header row, and Files' location and its actions return above the list (below). The name wins over the
+second caption row. Logs keeps its filters in one rail below the row, Clear at its end. Files' location and actions stay in the band. The name wins over the
 status word, which a short row drops whole after its start step, keeping its mark, and Main's title ellipsizes
 before its chip or Panic yields.
 A Project's name keeps one line inside its capsule, at the controls' size and weight (`--type-body`, 600), and ends

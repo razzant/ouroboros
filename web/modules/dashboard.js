@@ -209,7 +209,10 @@ export function initDashboard({ state, layers = null, openSettings = null, state
         const view = panes() || level ? 'page' : 'home';
         page.dataset.sectionView = view;
         shell.dataset.sectionView = view;
-        header.toggleAttribute('data-empty', panes());
+        const controls = header.querySelectorAll('[data-dashboard-controls]');
+        controls.forEach((node) => { node.hidden = node.dataset.dashboardControls !== state.dashboardActiveSubtab; });
+        header.toggleAttribute('data-controls', Array.from(controls).some((node) => !node.hidden));
+        header.toggleAttribute('data-empty', panes() && !header.hasAttribute('data-controls'));
         const tab = DASHBOARD_TABS.find((each) => each.value === state.dashboardActiveSubtab);
         if (leadName) leadName.textContent = tab?.label || '';
         syncLayer();
@@ -312,6 +315,11 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     return {
         page,
         activateTab,
+        setControls(tab, node) {
+            node.dataset.dashboardControls = tab;
+            header.querySelector('.section-lead-page').appendChild(node);
+            paint();
+        },
         pressedAgain: () => { level = false; paint(); },
         capture() {
             const tab = state.dashboardActiveSubtab, opened = level;
