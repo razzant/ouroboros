@@ -6,15 +6,21 @@ import os
 import pathlib
 import shlex
 import subprocess
+import sys
 
 import pytest
 
 from ouroboros import body_candidate, workspace_executor as executor
+from ouroboros.docker_process_observer import proc_observer_function
 # The executor imports this lazily; it subclasses ``subprocess.Popen`` at import, so it must be imported before
 # the transport double below replaces ``subprocess.Popen`` with a function.
 from ouroboros.tools import shell_process  # noqa: F401
 from tests.body_candidate_support import isolate, make_ctx, make_serving
 
+
+# A container's ``setsid`` (util-linux): the launched command leads its own session; same as the execution-domain
+# suite's shim.
+SETSID_SHIM = 'import os, sys\ntry:\n    os.setsid()\nexcept OSError:\n    pass\nos.execvp(sys.argv[1], sys.argv[1:])\n'
 
 
 @pytest.mark.parametrize('consumer', ['command', 'service'])
@@ -41,13 +47,29 @@ def test_docker_candidate_uses_mapped_clean_environment(tmp_path, monkeypatch, c
         return dict(word.split('=', 1) for word in shlex.split(stdout) if '=' in word)
     real_popen = subprocess.Popen
     commands = []
+    # The fake container supplies what a Linux container has and the host may lack: ``setsid`` (the wrapper
+    # refuses to start without it; macOS has none) and a container /proc for the guarded completion probe's
+    # group observer (macOS and Windows/MSYS have no Linux /proc). After the synchronous ``export -p`` ended,
+    # that container's process table holds nothing of the command, so the observer reads an empty /proc.
+    container_path = os.environ['PATH']
+    if subprocess.run(['sh', '-c', 'command -v setsid'], capture_output=True).returncode != 0:
+        shim_dir = tmp_path / 'container-bin'
+        shim_dir.mkdir()
+        (shim_dir / 'setsid').write_text(f'#!{sys.executable}\n' + SETSID_SHIM, encoding='utf-8')
+        (shim_dir / 'setsid').chmod(0o755)
+        container_path = f'{shim_dir}{os.pathsep}{container_path}'
+    if not os.path.isdir('/proc/self'):
+        container_proc = tmp_path / 'container-proc'
+        container_proc.mkdir()
+        monkeypatch.setattr(executor, '_docker_proc_observer_function',
+                            lambda: proc_observer_function(proc_root=str(container_proc)))
 
     def transport(cmd, **kwargs):
         if cmd[:2] != ['docker', 'exec']:
             return real_popen(cmd, **kwargs)
         # Model docker exec's container env: host env arrives only under named --env aliases.
         host_env = kwargs.get('env') or os.environ
-        backend_env = {'PATH': os.environ['PATH'], 'HOME': '/container-home',
+        backend_env = {'PATH': container_path, 'HOME': '/container-home',
                        'CONTAINER_API_KEY': 'synthetic-leak', 'OUROBOROS_MANAGED_BY_LAUNCHER': '1'}
         for index, arg in enumerate(cmd):
             if arg == '--env':
@@ -62,6 +84,9 @@ def test_docker_candidate_uses_mapped_clean_environment(tmp_path, monkeypatch, c
     if consumer == 'command':
         result = executor.execute(ctx, probe, candidate, 10)
         assert result.returncode == 0 and result.operation_outcome == 'completed', result
+        # Completion came from the wrapper's real wait receipt, read once by the guarded settlement probe.
+        guarded = [cmd for cmd, _ in commands if cmd[-1].startswith('case "$(cat ')]
+        assert len(guarded) == 1 and guarded[0][-1].endswith(' && printf completed'), guarded
         env = exported_env(result.stdout)
     else:
         # Execute the real service command expansion synchronously, preserving the
