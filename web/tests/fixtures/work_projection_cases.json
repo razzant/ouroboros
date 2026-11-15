@@ -3702,6 +3702,9 @@
   "held": {
    "": "Held"
   },
+  "start_unconfirmed": {
+   "": "It is not known whether its last start went through"
+  },
   "sleeping": {
    "": "Sleeping until it is woken"
   },

@@ -259,6 +259,9 @@ def test_under_a_settling_pause_only_running_helpers_are_said_still_working():
 def test_refused_source_keeps_resume_for_rechecking_and_unknown_without_a_stop_stays_held():
     state = ws.classify_member(row("t", "budget_paused", pause_cause="unknown"), {"hold": {"reason": "restore_refused:x"}})
     assert state["reasons"][0]["code"] == "restore_failed" and state["release"] == "mind"
+    # A start whose outcome is unknown says that, never that saved state was lost; Resume stays the same door.
+    unknown = ws.classify_member(row("t", "budget_paused", pause_cause="unknown"), {"hold": {"reason": "dispatch_outcome_unknown"}})
+    assert unknown["reasons"][0]["code"] == "start_unconfirmed" and unknown["release"] == "mind"
     raw = ws.classify_member(row("t", "budget_paused", pause_cause="mystery"), {"hold": {}})
     assert raw["reasons"][0]["code"] == "held" and raw["reasons"][0]["text"] == "Held"
 
