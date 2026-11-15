@@ -142,7 +142,7 @@ def test_a_skill_left_on_over_its_review_is_named_on_the_works_card(development,
     import ouroboros.review_overrides as overrides
     import ouroboros.skill_lifecycle_actions as actions
 
-    named = []
+    named, note, keep_on_work = [], overrides.note_skill_over_review, overrides._keep_on_work
     monkeypatch.setattr(overrides, "note_skill_over_review", lambda _ctx, skill, gate, door: named.append((skill, door, bool(gate))))
     monkeypatch.setattr(actions, "_caller_action_error", lambda *_a: ("", {}))  # an admitted action: its end is what counts
     held_hash = actions.find_skill(drive, "held", repo_path="").content_hash
@@ -154,6 +154,19 @@ def test_a_skill_left_on_over_its_review_is_named_on_the_works_card(development,
     save_enabled(drive, "held", True, actor="turn_on_when_ready")
     actions.run_skill_action(ctx, "held", "grant", expected_content_hash=held_hash, repo_path="")
     assert named == [("held", "turned_on", True)]
+
+    # The note is timed at its write: another task's outcome that lands while the note waits for the store leaves the
+    # note the newer of the two, which is what tells the open card that a skill counted before was left on again.
+    def another_lands_first(ctx_, change):
+        monkeypatch.setattr(overrides, "_keep_on_work", keep_on_work)
+        keep_on_work(ctx_, lambda fact: {**fact, "count": 1, "latest": {"reason": "critical_findings", "at": overrides.utc_now_iso()}})
+        return keep_on_work(ctx_, change)
+
+    monkeypatch.setattr(overrides, "_keep_on_work", another_lands_first)
+    note(ctx, "demo", {"executable_review": True, "blocking_reason": "cyber_authority", "status": "pending"}, "turned_on")
+    fact = load_task_result(drive, ctx.task_id, strict=True)["review_overrides"]
+    assert (fact["skills"]["count"], fact["skills"]["latest"]["reason"]) == (1, "no_review_verdict")
+    assert fact["skills"]["latest"]["at"] > fact["latest"]["at"]
 
 
 def test_free_replay_refreshes_disabled_auto_flow_without_another_panel(development, monkeypatch):

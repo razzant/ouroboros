@@ -273,13 +273,14 @@ def note_skill_over_review(ctx: Any, skill: str, gate: Any, door: str) -> None:
     reason = runs_over(gate)
     if not (reason and skill):
         return
-    latest = {"skill": str(skill), "reason": reason, "door": str(door), "at": utc_now_iso(),
-              "task_id": str(getattr(ctx, "task_id", "") or "")}
+    noted = {"skill": str(skill), "reason": reason, "door": str(door), "task_id": str(getattr(ctx, "task_id", "") or "")}
 
     def keep(fact: Dict[str, Any]) -> Dict[str, Any]:
         part = fact.get("skills") if isinstance(fact.get("skills"), dict) else {}
-        seen = [name for name in part.get("seen") or [] if name != latest["skill"]] + [latest["skill"]]
-        return {**fact, "skills": {"count": len(seen), "latest": latest, "seen": seen}}
+        seen = [name for name in part.get("seen") or [] if name != noted["skill"]] + [noted["skill"]]
+        # Timed at the write: a skill left on again keeps its count, so its time is what tells the open card that
+        # the part changed, also after another task's outcome landed while this note waited for the store.
+        return {**fact, "skills": {"count": len(seen), "latest": {**noted, "at": utc_now_iso()}, "seen": seen}}
 
     _keep_on_work(ctx, keep)
 
