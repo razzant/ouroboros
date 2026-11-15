@@ -257,19 +257,17 @@ export function bindSecretRows(container, { rowOf, ask } = {}) {
         const unread = known ? '' : settingsReadMessage();
         held = Object.fromEntries(nodes().map((node) => [node.dataset.settingRow, Boolean(known?.[node.dataset.settingRow])]));
         for (const node of nodes()) {
-            const { opener, state, show, remove } = parts(node);
+            const { opener, state, remove } = parts(node);
             // A value the organization fixes is said, never offered for change (settings_policy.js).
             const owner = organizationSettingOwner(deploymentOf(known?._meta), node.dataset.settingRow);
-            const words = owner ? `Set by your organization for ${owner}` : unread || (isSet(node) ? 'Saved' : '');
+            const words = owner ? `Set by your organization for ${owner}` : isSet(node) ? 'Saved' : '';
             if (state.textContent !== words) state.textContent = words;
-            const label = unread || (isSet(node) ? 'Replace' : 'Add');
+            const label = isSet(node) ? 'Replace' : 'Add';
             if (opener.textContent !== label) opener.textContent = label;
-            opener.hidden = Boolean(owner);
+            opener.hidden = Boolean(owner || unread);
             opener.disabled = Boolean(unread);
             opener.className = `btn ${isSet(node) ? 'btn-ghost' : 'btn-default'} btn-sm`;
-            show.disabled = Boolean(unread);
             remove.hidden = Boolean(unread) || !isSet(node);
-            remove.disabled = Boolean(unread);
             if (owner || unread) open(node, false);
         }
     }

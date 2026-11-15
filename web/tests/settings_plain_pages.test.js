@@ -520,17 +520,20 @@ test('a stored network password starts neutral until its first settings read', a
     const row = () => container.querySelector('[data-setting-row="OUROBOROS_NETWORK_PASSWORD"]');
     const part = (hook) => row().querySelector(hook);
     const hostRow = () => container.querySelector('[data-setting-row="OUROBOROS_DESKTOP_KEEP_RUNNING"]');
-    assert.deepEqual([part('[data-secret-state]').textContent, part('[data-secret-open]').textContent,
+    assert.deepEqual([part('[data-secret-state]').textContent, part('[data-secret-open]').hidden,
         part('[data-secret-open]').disabled, part('[data-secret-show]').disabled, part('[data-secret-remove]').hidden],
-    ['Reading…', 'Reading…', true, true, true]);
+    ['', true, true, true, true]);
+    assert.equal(part('[data-setting-meta]').textContent, 'Reading…');
+    assert.equal(row().textContent.match(/Reading…/g)?.length, 1, 'only the row line says it is reading');
     assert.equal(hostRow().querySelector('[data-background-toggle]').disabled, false, 'the host-owned switch stays usable');
     assert.equal(hostRow().querySelector('[data-setting-meta]').textContent, rowById('OUROBOROS_DESKTOP_KEEP_RUNNING').meta);
     assert.doesNotMatch(hostRow().textContent, /Reading|Could not be read/);
     held.resolve(response({ error: 'settings unavailable' }, 500));
     await settle();
-    assert.deepEqual([part('[data-secret-state]').textContent, part('[data-secret-open]').textContent,
+    assert.deepEqual([part('[data-secret-state]').textContent, part('[data-secret-open]').hidden,
         part('[data-secret-open]').disabled, part('[data-secret-remove]').hidden],
-    ['Could not be read', 'Could not be read', true, true]);
+    ['', true, true, true]);
+    assert.equal(row().textContent.match(/Could not be read/g)?.length, 1);
     assert.equal(hostRow().querySelector('[data-background-toggle]').disabled, false, 'a failed settings read does not lock the host switch');
     env.routes.set('/api/settings', originalSettings);
     env.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'computer' } }));
@@ -538,7 +541,28 @@ test('a stored network password starts neutral until its first settings read', a
     assert.deepEqual([part('[data-secret-state]').textContent, part('[data-secret-open]').textContent,
         part('[data-secret-open]').disabled, part('[data-secret-show]').disabled, part('[data-secret-remove]').hidden],
     ['Saved', 'Replace', false, false, false]);
+    assert.equal(part('[data-secret-open]').hidden, false);
     assert.equal(server.values.OUROBOROS_NETWORK_PASSWORD, 'old horse');
+    // Both replacing and removing own this row's busy state. Its saved-key painter must not unlock the actions.
+    await container.fire('click', { target: part('[data-secret-open]') });
+    const actions = () => ['[data-secret-show]', '[data-secret-remove]'].map((hook) => [part(hook).disabled, part(hook).getAttribute('aria-busy')]);
+    assert.deepEqual(actions(), [[false, null], [false, null]]);
+    for (const action of ['replace', 'remove']) {
+        const write = deferred();
+        env.routes.set('/api/settings', (url, init = {}) => init.method === 'POST' ? write.promise : originalSettings(url, init));
+        const input = part('[data-setting-control]');
+        input.value = action === 'replace' ? 'new horse' : '';
+        const pending = container.fire(action === 'replace' ? 'change' : 'click',
+            { target: action === 'replace' ? input : part('[data-secret-remove]') });
+        await settle();
+        assert.deepEqual(actions(), [[true, 'true'], [true, 'true']], `${action}: both actions wait for the write`);
+        await readSettings();
+        assert.deepEqual(actions(), [[true, 'true'], [true, 'true']], `${action}: a read cannot unlock them either`);
+        write.resolve(response({ saved: false, error: 'refused' }, 500));
+        await pending;
+        await settle();
+        assert.deepEqual(actions(), [[false, null], [false, null]], `${action}: both actions return after the refusal`);
+    }
 });
 
 test('Advanced holds what an installation rarely changes, and About the reset in its fold, asked first', async (t) => {

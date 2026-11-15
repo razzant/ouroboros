@@ -782,7 +782,7 @@ function paintRow(node, row, ctx) {
     }
     // A write in flight: the control is disabled and busy; nothing else is drawn for "saving". Disabling moves the
     // focus away, so a control that had it takes it back when the answer comes, unless the owner has moved on.
-    [...controls, ...node.querySelectorAll('[data-setting-value]'), ...node.querySelectorAll('[data-setting-no-limit]')].forEach((element) => {
+    [...controls, ...node.querySelectorAll('[data-setting-value]'), ...node.querySelectorAll('[data-setting-no-limit], [data-secret-show], [data-secret-remove]')].forEach((element) => {
         if (state.busy) {
             if (!element.dataset.settingBusy && doc?.activeElement === element) element.dataset.settingRefocus = '1';
             element.disabled = true;
