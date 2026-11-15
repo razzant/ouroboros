@@ -3806,7 +3806,7 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
 }
 
 /* A child with nothing for its foot (no meta, no count, no control) closes on its summary. Its meta line and its
-   actions hold only elements, asked for as at a root's foot (`> *`): never `:empty` inside `:has()` (why: above). */
+   actions hold only elements, asked for as at a root's foot (`> *`): never `:empty` inside `:has()` (WebKit misses it later). */
 .chat-live-card.subagent > .chat-live-foot:not(:has(> .chat-live-meta > *, > .chat-live-foot-end > .chat-live-review-summary:not([hidden]), > .chat-live-foot-end > .chat-live-actions > *)) {
     display: none;
 }
