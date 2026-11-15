@@ -97,7 +97,8 @@ def _seed_reviewing_behavior(data_dir: pathlib.Path) -> str:
 
 @pytest.fixture
 def host(harness, monkeypatch):
-    from tests.conversation_carrier_support import host_lane
+    from ouroboros.presence_carrier import set_presence_runner
+    from tests.conversation_carrier_support import host_lane, join_host_lane_carriers
 
     host_lane(monkeypatch, harness.data)
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *_args, **_kwargs: (True, ""))
@@ -123,6 +124,8 @@ def host(harness, monkeypatch):
             h.release.set()
             executions = client.app.state.host_service_context.presence_turns
             wait_for(lambda: not executions.live(), timeout=90, what="Host author teardown")
+            join_host_lane_carriers()  # its carriers settle after the waiters: that tail stays in this world
+    set_presence_runner(h.data, None)
 
 
 def turn(h, number, text="Please prepare the status report", version=1, thread="topic-1", reporting=0, transport_queue=None):
