@@ -949,6 +949,20 @@ def test_the_continuation_proof_is_the_saved_steps_unlaunched_attempt(monkeypatc
     assert continues_saved_step({"id": "digest"}, "/drive") is False  # no saved step: nothing to continue
 
 
+def test_a_late_naming_that_fails_names_nothing_and_does_not_raise(monkeypatch, caplog):
+    """The late step runs inside a door's stop: a failure is logged and leaves the door's own names to the next boot,
+    never an exception into the door (an update would take it for its own abort)."""
+    from types import SimpleNamespace
+
+    from supervisor import restart_retention
+
+    def unreadable(_root):
+        raise OSError("restart transaction unreadable")
+    monkeypatch.setattr(restart_retention, "_txn", lambda: SimpleNamespace(active_restart_transaction=unreadable))
+    assert restart_retention.name_late_returns("/drive", "tx-update") == set()
+    assert "Naming late work into restart tx-update did not finish" in caplog.text
+
+
 @pytest.mark.parametrize("door_named", [True, False], ids=["named-at-the-stop", "not-named"])
 def test_work_that_arrived_after_the_returns_were_named_returns_with_them(tmp_path, monkeypatch, door_named):
     """#3192, 13.11: an update named its returns, then a running parent started a helper before the stop reached

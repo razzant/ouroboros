@@ -821,7 +821,7 @@ def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: L
 
 def name_late_returns(drive_root: Any, transaction_id: str) -> set:
     """Once a returning stop's workers are down, name into its own still active transaction, by the same rules, work
-    that arrived after the door named its returns (a helper started meanwhile, #3192). The managed update and the
+    the door left undecided: what arrived meanwhile (a helper started, #3192) or saved since. The managed update and the
     planned restart call it; the owner's Restart does not (running work it did not name is cancelled, queued work is
     held for the owner). Never an id already decided. A failure can come after the transaction row was written: what
     it holds then is what the next boot reads."""
