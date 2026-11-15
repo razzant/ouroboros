@@ -178,7 +178,17 @@ def test_a_publication_encodes_each_large_value_once_and_writes_the_encoders_own
     queue.RUNNING["r0"]["task"]["focus"] = "moved"
     assert queue.persist_queue_snapshot("focus") is True
     published_exactly()
-    assert queue_observation.load_queue_document(root)["running"][0]["task"]["note"] == {"kept": {"$shared": "0" * 64}}
+    note = queue_observation.load_queue_document(root, fresh=True)["running"][0]["task"]["note"]
+    assert note == {"kept": {"$shared": "0" * 64}}
+    # The stamp is appended to the text, unless the document is empty or already names a stamp key.
+    encode, stamped, large = queue_publication.machine_json, queue_publication._stamped, queue_publication._large_text
+    for document in ({}, {"ts": 1, "x": "y"}, {"x": "y"}):
+        expected = encode({**document, "generation": "g", "ts": queue_publication.utc_now_iso(), "reason": "r"})
+        assert stamped(document, encode(document), "g", "r") == expected
+    # A value is large from SHARED_MIN_LENGTH on: a string's characters, a dict's text ('{"a":"' + n + '"}').
+    edge = queue_publication.SHARED_MIN_LENGTH
+    assert large("x" * (edge - 1)) is None and large("x" * edge)
+    assert large({"a": "x" * (edge - 9)}) is None and large({"a": "x" * (edge - 8)})
 
 
 def test_alive_is_written_without_fsync_and_only_on_change(published, monkeypatch):

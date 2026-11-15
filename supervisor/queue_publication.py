@@ -73,7 +73,7 @@ log = logging.getLogger(__name__)
 
 #: ``queue.alive`` is refreshed inside the readers' freshness bound (``task_status``), without fsync.
 QUEUE_ALIVE_REFRESH_SEC = QUEUE_ALIVE_FRESH_SEC / 4
-#: A task value whose JSON is at least this many characters long may be shared by content address.
+#: A task value at least this long (a string's characters, a container's JSON text) may be shared by its address.
 SHARED_MIN_LENGTH = 1024
 #: ``shared_values.TOKEN_PATTERN`` as text: a reference as ``machine_json`` spells it in a skeleton's text.
 _TOKEN_TEXT = re.compile(TOKEN_PATTERN.pattern.decode("ascii"))
@@ -525,28 +525,35 @@ def _share_replicated(payload: Dict[str, Any]) -> str:
     """Replace every large task value that appears more than once (top level and one level inside
     ``metadata``) by its address, set the table of those values, and return the document's text. A
     value published once stays where it is: only replication is waste, and a raw reader still sees
-    singletons inline. The rows are this publication's own frozen capture, so they are rewritten in place.
+    singletons inline. The rows are this publication's own frozen capture (``_frozen``: no container reached
+    twice), so they are rewritten in place.
 
-    Each large value is encoded once: that text says whether it is large and whether it repeats, its
-    address is the sha256 of that text, and the document's text is the skeleton's (each large value a
-    placeholder) with the texts spliced in, so neither a row nor the table is encoded again
-    (``machine_json`` is compositional, as ``shared_values`` relies on). A splice that does not place
-    every text exactly once falls back to encoding the document whole.
+    Each place's value is encoded once: that text says whether it is large and whether it repeats (one
+    text is kept per distinct value), its address is the sha256 of that text, and the document's text is
+    the skeleton's (a placeholder for each value published once and for each table entry; a repeated
+    value's places hold its token) with the texts spliced in, so neither a row nor the table is encoded
+    again (``machine_json`` is compositional, as ``shared_values`` relies on). A splice that does not
+    place every placeholder exactly once falls back to encoding the document whole.
     """
-    counts: Dict[str, int] = {}
+    kept: Dict[str, str] = {}  # one text per distinct value: a repeat's own copy is dropped at once
+    counts: Dict[str, int] = {}  # text -> its places
     places = []  # (container, key, value, text) of every large value, in document order
+
+    def count(container: Dict[str, Any], key: str, value: Any) -> None:
+        if (text := _large_text(value)) is not None:
+            text = kept.setdefault(text, text)
+            counts[text] = counts.get(text, 0) + 1
+            places.append((container, key, value, text))
+
     for lane in ("pending", "running"):
         for row in payload[lane]:
             task = row["task"]
             for key, value in task.items():
                 if key == "metadata" and isinstance(value, dict):
                     for name, item in value.items():
-                        if (text := _large_text(item)) is not None:
-                            counts[text] = counts.get(text, 0) + 1
-                            places.append((value, name, item, text))
-                elif (text := _large_text(value)) is not None:
-                    counts[text] = counts.get(text, 0) + 1
-                    places.append((task, key, value, text))
+                        count(value, name, item)
+                else:
+                    count(task, key, value)
     prefix, holes = uuid.uuid4().hex, {}  # placeholder address (this publication's own) -> the text it stands for
 
     def hole(text: str) -> Dict[str, str]:
@@ -571,14 +578,17 @@ def _share_replicated(payload: Dict[str, Any]) -> str:
     for container, key, value, text in places:
         if counts[text] == 1:
             container[key] = value
-    pieces, position, placed = [], 0, 0
+    pieces, position, placed = [], 0, set()
     for match in _TOKEN_TEXT.finditer(skeleton):
         text = holes.get(match.group(1))
         if text is not None:
+            if match.group(1) in placed:  # a placeholder seen twice: stray data or a shared container
+                return machine_json(payload)
             pieces += (skeleton[position:match.start()], text)
-            position, placed = match.end(), placed + 1
+            position = match.end()
+            placed.add(match.group(1))
     pieces.append(skeleton[position:])
-    return "".join(pieces) if placed == len(holes) else machine_json(payload)
+    return "".join(pieces) if len(placed) == len(holes) else machine_json(payload)
 
 
 def _large_text(value: Any) -> Optional[str]:
