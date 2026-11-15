@@ -2,6 +2,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { clearReloadParams, createLayerStack } from '../modules/layers.js';
 
+test('a destination level sits under its jump; its named parent control closes that level alone', () => {
+    const layers = createLayerStack({ doc: null, win: null }), closed = [];
+    layers.push({ id: 'jump', page: true, returnTo: {}, onClose: () => closed.push('jump') });
+    layers.push({ id: 'level', page: true, before: 'jump', onClose: () => closed.push('level') });
+    assert.deepEqual(layers.ids(), ['level', 'jump']);
+    layers.back('control', 'level');
+    assert.deepEqual(closed, ['level']);
+    assert.deepEqual(layers.ids(), ['jump']);
+    layers.back('history');
+    assert.deepEqual(closed, ['level', 'jump']);
+    assert.equal(layers.size(), 0);
+    layers.destroy();
+});
+
 test('boot hints are consumed by the history owner without erasing a layer or a page address', () => {
     const state = { ouroborosLayer: true }, calls = [];
     const win = { location: { href: 'https://local/?room=2&_ouro_reason=refresh&_ouro_refresh=1#settings' },

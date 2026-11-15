@@ -149,6 +149,15 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
     restore.forget = (root) => {
         for (const box of places.keys()) if (!box.isConnected || root?.contains(box)) places.delete(box);
     };
+    // A forward jump starts the visible destination anew; its captured return still owns the old reading place.
+    restore.land = (root) => {
+        for (const box of [root, ...(root?.querySelectorAll('*') || [])]) {
+            if (!box || box.matches(OWN_PLACE) || !box.getClientRects().length) continue;
+            if (!box.scrollTop && !box.scrollLeft) continue;
+            box.scrollTop = box.scrollLeft = 0;
+            remember(box);
+        }
+    };
     // A return owns a snapshot of the retained place, not a second navigation stack. The room's feed and Logs
     // still restore through their reading owners. Keep nearby anchors too: a row may disappear while away.
     restore.capture = (root, opener) => {

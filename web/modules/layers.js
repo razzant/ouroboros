@@ -228,7 +228,7 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
 
     /** Open: `{ id, el, modal = true, onClose(reason), opener = activeElement, focus, live, page }` (`live`: elements
      * beside the layer that stay usable under a modal one, its scrim; `page`: a part of the page, placed under every
-     * overlay already open). A known id keeps its
+     * overlay already open; `before` keeps a destination's parent level under its jump). A known id keeps its
      * place in the stack and takes the new facts (an owner that syncs its state calls push on every sync). */
     function push(layer) {
         if (disposed || !layer || !layer.id) return false;
@@ -248,7 +248,7 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
                 opener = gone.opener;
             }
             const entry = { modal: true, opener, ...layer };
-            const under = entry.page ? stack.findIndex((open) => !open.page) : -1;
+            const under = entry.page ? stack.findIndex((open) => open.id === entry.before || !open.page) : -1;
             if (under < 0) stack.push(entry);
             else stack.splice(under, 0, entry);
             change.pushed.add(entry.id);
@@ -267,10 +267,10 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
         });
     }
 
-    /** THE dismiss: exactly one layer, the top one, through its owner's onClose. An asynchronous owner keeps its
+    /** THE dismiss: exactly one layer, the named control's or the top one, through its owner's onClose. An asynchronous owner keeps its
      * layer until it has arrived (or returns false to stay), so a page return can replace it without losing Back. */
-    function pop(reason = 'close') {
-        const layer = top();
+    function pop(reason = 'close', id = top()?.id) {
+        const layer = get(id);
         if (!layer) return false;
         if (layer.closing) { layer.closing.again = reason; reconcileHistory(); return true; }
         const finish = (allowed) => {
@@ -294,7 +294,7 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
     /** Back (system, browser, Telegram): a dialog the page opened over the layers is on top, so it takes the press
      * as its Escape (the dialogs close on Escape through ui_interactions.bindDialogFocus; a bare native dialog that
      * nothing answered closes as its own Escape would close it) and the layer stays; otherwise the top layer closes. */
-    function back(reason = 'history') {
+    function back(reason = 'history', id) {
         const dialogs = [...(doc?.querySelectorAll?.('dialog[open], [aria-modal="true"], [role="dialog"], [role="menu"], .ui-popup') || [])]
             .filter((el) => el.getClientRects?.().length && !el.closest?.('[inert], [hidden], [aria-hidden="true"]')
                 && !stack.some((layer) => layer.el === el));
@@ -306,7 +306,7 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
                 field.dispatchEvent(new win.Event('input', { bubbles: true }));
                 return true;
             }
-            return pop(reason);
+            return pop(reason, id);
         }
         const target = dialog.contains(doc.activeElement) ? doc.activeElement : dialog;
         const escape = new win.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true });

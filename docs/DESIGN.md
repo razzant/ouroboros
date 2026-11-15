@@ -3428,7 +3428,7 @@ Telegram, and nothing depends on a haptic (`web/modules/haptics.js`).
 
 A jump leaves a named page layer under overlays in `web/modules/layers.js`. Every move except a sidebar/drawer
 choice, section list row or tab is a jump. Jumps stack; sidebar/drawer choices clear returns; section choices keep
-them. Back restores the page, levels, reading place and pressed row. Drawer, Project, section levels and Files'
+them. Jumps land at their row or top; Back/sidebar restore place. Drawer, Project, section levels and Files'
 preview share this stack. Escape, browser, system, mouse, Telegram and ⌘[ (Ctrl+[ elsewhere) use one Back: popup
 first, then top layer. Dialogs, menus and the work list keep their dismissal; Escape clears a filled search first.
 × and the scrim close their layer. A Project covering Main (phone card or finger's docked column) is modal, with
@@ -3441,7 +3441,7 @@ glyphs (`web/modules/page_icons.js`).
 
 The shared header (`web/modules/page_header.js`) draws one row, without decorative icons. Its first capsule is the
 top page layer's return: ‹ Settings, ‹ Main, or a level's parent. Its tooltip and accessible name give the full path.
-The word ellipsizes before controls yield; the chevron stays. Two panes place it over the page column; one column
+Two panes put it over the page column, before a deeper level's own named Back and title; one column
 replaces the leading picture. Docked, the sidebar names a section without pages: tabs or Files' location lead its
 band, actions end it, on Main's line. If the actions and navigation cannot fit beside the widest sidebar, the same
 row scrolls sideways, keeping every control reachable. Tabs, filters and location use the shared fade; location reveals the current

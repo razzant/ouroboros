@@ -313,3 +313,25 @@ test('a named return occupies one shell slot in both layouts, and clearing relea
     assert.equal(header.querySelector('[data-shell-back]'), null);
     assert.equal(header.hasAttribute('data-return'), false);
 });
+
+test('a two-pane level keeps its own named parent after the jump capsule, and spends each independently', (t) => {
+    const { mount } = setup(t), page = new NodeStub();
+    page.innerHTML = renderPageHeader({ page: 'settings', leadHtml: '<span class="section-lead-page"><span data-page-return></span></span>' });
+    mount.append(page);
+    const header = page.querySelector('.app-page-header');
+    const level = { id: 'level', page: true, back: { label: 'Models' } };
+    let jump = { id: 'jump', page: true, returnTo: {}, back: { label: 'Consciousness' } }, notify;
+    const calls = [], layers = { page: () => jump || level, returnPage: () => jump,
+        ids: () => ['level', ...(jump ? ['jump'] : [])], get: id => id === 'level' ? level : jump,
+        onChange: fn => { notify = fn; return () => {}; }, back: (...args) => calls.push(args) };
+    t.after(bindPageBack({ layers, currentHeader: () => header }));
+    const first = header.querySelector('[data-shell-back]'), parent = header.querySelector('[data-shell-level]');
+    assert.equal(first.getAttribute('aria-label'), 'Back to Consciousness');
+    assert.equal(parent.getAttribute('aria-label'), 'Back to Models');
+    parent.dispatchEvent({ type: 'click' }); first.dispatchEvent({ type: 'click' });
+    assert.deepEqual(calls, [['control', 'level'], ['control', 'jump']]);
+    jump = null; notify();
+    assert.equal(header.querySelector('[data-shell-back]'), first);
+    assert.equal(first.getAttribute('aria-label'), 'Back to Models');
+    assert.equal(header.querySelector('[data-shell-level]'), null, 'one control when the jump is spent');
+});

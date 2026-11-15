@@ -60,6 +60,23 @@ test('a kept room\'s inner box returns with the room; its feed and the Logs list
     assert.doesNotThrow(() => w.restore(null));
 });
 
+test('a forward landing resets visible ordinary scrollers, and a captured return still restores its own position', () => {
+    const w = world(), root = w.page('page-skills');
+    const list = w.box(root), hidden = w.box(root), feed = w.box(root, { owned: true });
+    Object.assign(root, { matches: () => false, querySelectorAll: () => [list, hidden, feed], getClientRects: () => [1] });
+    for (const box of [list, hidden, feed]) Object.assign(box, { getClientRects: () => [1],
+        scrollHeight: 1000, clientHeight: 100, scrollWidth: 700, clientWidth: 100 });
+    hidden.getClientRects = () => [];
+    w.scrolled(list, 320, 80); w.scrolled(hidden, 220); w.scrolled(feed, 600);
+    const back = w.restore.capture(root);
+    w.restore.land(root);
+    assert.deepEqual([list.scrollTop, list.scrollLeft, hidden.scrollTop, feed.scrollTop], [0, 0, 220, 600]);
+    w.restore(root);
+    assert.equal(list.scrollTop, 0, 'a repaint cannot resurrect the stale arrival');
+    back();
+    assert.deepEqual([list.scrollTop, list.scrollLeft, hidden.scrollTop, feed.scrollTop], [320, 80, 220, 600]);
+});
+
 test('disposal releases a room\'s places even before another page restore', () => {
     const w = world(), room = w.page('room');
     const box = w.box(room);

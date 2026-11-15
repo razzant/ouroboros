@@ -110,9 +110,9 @@ syncMarkPhases(document);
 // What the owner scrolled keeps its place while hidden (page_places.js), registered before any page's own show handler.
 const restorePlaces = initPagePlaces();
 const pageNavigation = createPageNavigation({ layers, capture: opener => capturePagePlace({
-    state, navState, settingsControls, dashboardControls, skillsControls,
-    projectInstances, projectPanelTitle, rooms, mainChat, logsControls, restorePlaces, commitPage,
-}, opener), canLeave: key => canLeavePage(key, state, beforePageLeaveHandlers) });
+    state, navState, settingsControls, dashboardControls, skillsControls, projectInstances, projectPanelTitle,
+    rooms, mainChat, logsControls, restorePlaces, commitPage,
+}, opener), canLeave: key => canLeavePage(key, state, beforePageLeaveHandlers), land: () => restorePlaces.land(document.querySelector('.page.active')) });
 bindPageBack({ layers, currentHeader: () => navState.activeProjectId
     ? document.querySelector('.project-panel-bar') : document.querySelector(`#page-${state.activePage} > .app-page-header`) });
 const primarySidebar = document.getElementById('primary-sidebar');

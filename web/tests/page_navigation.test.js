@@ -5,6 +5,29 @@ import { capturePagePlace, createPageNavigation, canLeavePage, openInitialPage }
 
 const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 
+test('only a forward jump without a named row lands at the top; vetoes, map choices and returns keep their place', async () => {
+    const layers = createLayerStack({ win: null, doc: null });
+    const calls = [], doc = { addEventListener() {}, removeEventListener() {} };
+    let allow = true;
+    const nav = createPageNavigation({ layers, doc, canLeave: () => allow, land: () => calls.push('top'),
+        capture: () => ({ key: 'chat', label: 'Main', restore: () => calls.push('restore') }) });
+    const commit = () => calls.push('show');
+    await nav.go('skills', commit);
+    assert.deepEqual(calls.splice(0), ['show', 'top']);
+    layers.back(); await settle();
+    assert.deepEqual(calls.splice(0), ['restore']);
+    for (const options of [{ map: true }, { map: 'section' }, { row: 'TOTAL_BUDGET' }]) {
+        await nav.go('dashboard:costs', commit, options);
+        assert.deepEqual(calls.splice(0), ['show']);
+    }
+    await nav.go('chat', commit);
+    assert.deepEqual(calls.splice(0), ['show'], 'reopening the same place is not a forward jump');
+    allow = false;
+    await nav.go('skills', commit);
+    assert.deepEqual(calls, []);
+    nav.destroy(); layers.destroy();
+});
+
 test('a captured place restores its retained owners before their independent reading snapshots', () => {
     for (const page of ['settings', 'dashboard', 'skills', 'chat']) {
         const restored = [], opener = {}, root = {}, state = { activePage: page, settingsPath: 'tools', dashboardActiveSubtab: 'logs' };

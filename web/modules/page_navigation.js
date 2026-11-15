@@ -2,7 +2,7 @@ import { pageLabel } from './pages.js';
 
 /** A jump is a page layer, never another history. The shell supplies the current retained place and the leave
  * guard; the destination commits synchronously with its return, after that guard has allowed the move. */
-export function createPageNavigation({ layers, capture, canLeave, doc = document } = {}) {
+export function createPageNavigation({ layers, capture, canLeave, land = () => {}, doc = document } = {}) {
     let serial = 0;
     let pressed = null;
     const onPress = (event) => {
@@ -18,7 +18,7 @@ export function createPageNavigation({ layers, capture, canLeave, doc = document
     }
 
     const currentPlace = () => capture(pressed || doc.activeElement);
-    async function go(key, commit, { map = false, origin = currentPlace(), current = () => true } = {}) {
+    async function go(key, commit, { map = false, row = '', origin = currentPlace(), current = () => true } = {}) {
         // A source owns its claim until this commit; covering its room then transfers ownership to the destination.
         if (await canLeave(key) === false || !current()) return false;
         if (origin.key !== key) doc.activeElement?.blur?.();
@@ -41,6 +41,7 @@ export function createPageNavigation({ layers, capture, canLeave, doc = document
                     } });
             }
             commit();
+            if (!map && origin.key !== key && !row) land();
         });
         return true;
     }

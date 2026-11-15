@@ -6,7 +6,7 @@
  * at the home (in two panes beside the first-level page last opened on this device, kept in localStorage). An address no page registers (a skill written for the tabs Settings had) never shows an empty page:
  * the home opens with the address's last part searched, its hyphens and underscores read as spaces (`local-model`
  * searches "local model"), and search says where the thing lives now. Pages open in levels. One opened from the
- * home, a search result or outside Settings is the first level; one opened from a page lies over that page. The
+ * home, search or outside keeps its list page under a child address; one opened from a page lies over that page. The
  * shell names the top page layer's Back: the parent level, Settings, or a jump's origin.
  *
  * The page box's width decides the layout (settings.css `@container sectionplace`). Narrow: one level alone, each one
@@ -25,6 +25,7 @@ import { revealPastFade, bindScrollFade } from './scroll_fade.js';
 import { readSettings } from './settings_controls.js';
 import { isDoorId, mountSettingsHome, settingsTitle } from './settings_home.js';
 import { settingsPageFor } from './settings_pages.js';
+import { HOME_ROWS } from './settings_rows.js';
 import { resetSecretReveals } from './settings_secrets.js';
 import { setResult } from './ui_primitives.js';
 // The page modules: each registers its family when it is imported (settings_pages.js).
@@ -204,6 +205,11 @@ export function initSettings(ctx = {}) {
     // `opener` is the control that opened the level, where focus returns: WebKit does not focus a pressed button.
     // A jump-owned or unsaved level comes back as left; a closed clean page is drawn anew.
     function open(path, { row, under, opener, view = '', remember = true }) {
+        const parent = path.split('/')[0];
+        if (!under && path.includes('/') && HOME_ROWS.some(row => row.to === parent) && settingsPageFor(parent)) {
+            open(parent, { under: 0, opener, remember });
+            under = levels.length;
+        }
         if (remember && !under && path !== lastFirst) {
             lastFirst = path;
             try { globalThis.localStorage?.setItem(LAST_PAGE_KEY, path); } catch { /* storage blocked: kept for this load */ }
@@ -385,6 +391,7 @@ export function initSettings(ctx = {}) {
             }
             for (const level of wanted) {
                 layers.push({ id: level.id, el: level.el, page: true, modal: false, focus: false, opener: null,
+                    before: layers.returnPage?.()?.id,
                     back: { label: levels.indexOf(level) > 0 ? settingsTitle(levels[levels.indexOf(level) - 1].path) : 'Settings' },
                     onClose: () => backFrom(level) });
                 layered.add(level.id);

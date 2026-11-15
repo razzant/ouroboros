@@ -528,7 +528,7 @@ test('two panes land on the first-level page last opened on this device, or on M
         store.set('ouroboros.settings.last-page', 'agents/reviewer');
         const { state } = await land(sub);
         assert.equal(state.settingsPath, 'agents/reviewer');
-        assert.deepEqual(mounted, ['agents/reviewer'], 'the remembered child reaches its registered renderer');
+        assert.deepEqual(mounted, ['agents', 'agents/reviewer'], 'the remembered child keeps its named list page underneath');
         assert.equal(store.get('ouroboros.settings.last-page'), 'agents/reviewer');
     });
     await t.test('installed skill and then uninstalled skill', async (sub) => {
@@ -587,6 +587,25 @@ test('the header Back is hidden beside the list, leads to the list in one column
     await back().fire('click');
     await settle();
     assert.deepEqual([pages(), back()], [[], null]);
+});
+
+test('a direct child address keeps its named parent under it; a first-level address has no extra level', async (t) => {
+    const { env, content, state, showPage, layers } = world(t);
+    env.document.createElement = (tag) => new DescendantStub(tag);
+    const models = settingsPageFor('models');
+    t.after(() => registerSettingsPage('models', models));
+    registerSettingsPage('models', { title: path => path.includes('/') ? 'Consciousness' : 'Models', mount() {} });
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage, setBeforePageLeave() {} });
+    await controls.open('models/role/consciousness'); await settle();
+    assert.equal(controls.page.dataset.settingsDepth, '2');
+    assert.equal(content.querySelector('[data-settings-lead-name]').textContent, 'Consciousness');
+    assert.equal(content.querySelector('[data-shell-back]').getAttribute('aria-label'), 'Back to Models');
+    layers.back(); await settle();
+    assert.equal(state.settingsPath, 'models');
+    assert.equal(controls.page.dataset.settingsDepth, '1');
+    assert.equal(content.querySelector('[data-shell-back]'), null);
+    await controls.open('models'); await settle();
+    assert.equal(controls.page.dataset.settingsDepth, '1', 'a root never gains a synthetic parent');
 });
 
 test('a root font that moves the two panes\' 40rem repaints Settings: the pane and the list are watched beside the shell', async (t) => {
