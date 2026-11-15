@@ -6,6 +6,10 @@ import { NodeStub, setup } from '../dashboard_dom_fixture.js';
 // The fixture's element, reading a self-closed tag (an SVG `<path … />` of a glyph) as childless, so a row drawn
 // after a glyph is that glyph's sibling here as it is in a browser.
 export class Stub extends NodeStub {
+    toggleAttribute(name, force = !this.hasAttribute(name)) {
+        if (force) this.setAttribute(name, ''); else this.removeAttribute(name);
+        return force;
+    }
     get innerHTML() { return super.innerHTML; }
     set innerHTML(html) {
         this.textContent = '';
