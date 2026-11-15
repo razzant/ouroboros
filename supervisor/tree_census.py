@@ -1,4 +1,4 @@
-"""One tree's writer census, its durable facts read once per change of the tree's own rows.
+"""One tree's writer census, its durable facts read once per change of the tree's own rows (only the rows that moved).
 
 The settle pass, Pause and Resume (``conflicting_writers``) and the display and
 roster readers (``model_handoffs``) all ask the same store the same question about one tree. They share
@@ -40,7 +40,7 @@ _MEMO: "collections.OrderedDict[Tuple[str, str], _Facts]" = collections.OrderedD
 
 
 class Revision(NamedTuple):
-    members: tuple  # the tree's rows and their sequences, the tree's custody tasks, its requests
+    members: tuple  # the tree's rows and their signatures, the tree's custody tasks, its requests
     runs: Dict[str, tuple]  # per asked id: its runs' sequences and its open requests
 
 
@@ -96,9 +96,11 @@ def read_revision(root: pathlib.Path, tree: str, asked: Iterable[str] = ()) -> O
     with task_store.open_store(root, write=False) as txn:
         if int(txn.meta("schema_version") or VERSION) < VERSION:
             return None
-        rows = sorted((row["task_id"], row["write_seq"]) for row in txn.conn.execute(
-            "SELECT task_id,write_seq FROM tasks WHERE root_task_id=? UNION ALL "
-            "SELECT task_id,write_seq FROM tasks INDEXED BY tasks_underived_root WHERE root_task_id IS NULL", (tree,)))
+        # Each row by its store signature (``task_store.signature``): a row deleted and written again restarts
+        # its sequence, and a writer that stamps the time (``write_task_result``) moves the signature.
+        rows = sorted((row["task_id"], (row["write_seq"], row["updated_at"])) for row in txn.conn.execute(
+            "SELECT task_id,write_seq,updated_at FROM tasks WHERE root_task_id=? UNION ALL SELECT task_id,write_seq,"
+            "updated_at FROM tasks INDEXED BY tasks_underived_root WHERE root_task_id IS NULL", (tree,)))
         where, params = _selected(txn, _TREE, _LEGACY_TREE, (tree, tree))
         custody = sorted({row["task_id"] for row in txn.conn.execute(
             f"SELECT DISTINCT task_id FROM custody_runs WHERE {where}", params)})
@@ -126,20 +128,28 @@ def _digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
 
 
-def _read_facts(root: pathlib.Path, tree: str, linked: Iterable[str], key: Any) -> _Facts:
-    """Each source answers on its own: a failed body census still leaves custody and queue members observed."""
+def _read_facts(root: pathlib.Path, tree: str, linked: Iterable[str], key: Any,
+                held: Optional[_Facts] = None) -> _Facts:
+    """Each source answers on its own: a failed body census still leaves custody and queue members observed.
+    ``held`` (this tree's previous clean census) offers each row it read with the store signature of the revision
+    it was read after; ``tree_member_results`` keeps the rows whose signature still stands when it reads the members,
+    so one member's write decodes that member alone, not the whole tree again."""
     from ouroboros.delegate_custody_current import tree_task_ids
     from ouroboros.owner_pause import tree_member_results
 
     links = frozenset(map(str, linked))
     facts = _Facts(key, links)
+    known: Dict[str, tuple] = {}
+    if held is not None and key is not None:  # a held census was always read under a revision
+        signed = dict(held.key[0])
+        known = {task_id: (signed[task_id], row) for task_id, row in held.rows.items() if task_id in signed}
     try:
         # A member whose result has been collected can still own a remote start.
         facts.tree_ids = list(tree_task_ids(root, tree))  # the store answers or raises
     except Exception as exc:
         facts.tree_error = str(exc)[:200]
     try:
-        census = tree_member_results(root, tree, linked={*links, *facts.tree_ids})
+        census = tree_member_results(root, tree, linked={*links, *facts.tree_ids}, known=known)
         facts.rows = {task_id: {name: row[name] for name in MEMBER_FIELDS if name in row}
                       for task_id, row in census.members.items()}
         facts.unresolved = dict(census.unresolved)
@@ -167,7 +177,7 @@ def writer_facts(custody_root: Any, tree: str, *, linked: Optional[Iterable[str]
     if (held is not None and revision is not None and held.key == revision.members
             and (asked is None or not held.unresolved or asked == held.links)):
         return WriterFacts(root, held, revision)
-    facts = _read_facts(root, tree, asked or (), revision.members if revision is not None else None)
+    facts = _read_facts(root, tree, asked or (), revision.members if revision is not None else None, held)
     if revision is not None and not facts.tree_error and not facts.census_error:
         with _LOCK:
             _MEMO[key] = facts

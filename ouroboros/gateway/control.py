@@ -692,6 +692,10 @@ def _stop_repo_writers(reason: str) -> list[str]:
         custody_blockers = [f"custody_ledger:{type(exc).__name__}: {exc}"]
     blockers = [f"service:{label}" for label in failed] + custody_blockers
     update_returns["quiesced"] = not blockers
+    if not blockers and reason != "manual_rollback":  # a helper started after the returns were named (#3192);
+        from supervisor.restart_retention import name_late_returns  # a stop that did not quiesce adds no names
+
+        name_late_returns(DRIVE_ROOT, restart_transaction_id)
     return blockers
 
 

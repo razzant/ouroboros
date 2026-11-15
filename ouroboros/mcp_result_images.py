@@ -1,30 +1,39 @@
-"""MCP protocol images: exact response custody, a concise projection and same-round attachment.
+"""MCP protocol binary results: exact response custody, task files and image attachment.
 
 A confirmed MCP response holding a protocol image (``ImageContent`` data, or an
 ``EmbeddedResource`` blob whose mimeType is image/*) leaves the transport as
 ``ReturnedResult``, which also carries its SDK value (never in meta, text or repr); every
-other response stays the plain adapted result. ``project_returned`` engages only for such a
-value and a calling task. It keeps the complete response once as an exact task source, writes
-each decodable image as its own task file, and shows text parts, structured content and
-non-binary fields with each binary field read as a marker (an image's names its file for
-``view_image``), plus one host note naming the source. Any other value keeps the ordinary
-projection byte for byte. Configured secrets are masked in data, never inside base64 (a short
-secret can occur there, and masking it would corrupt the image) and never in the protocol's own
+other response stays the plain adapted result, except an ``EmbeddedResource`` blob also enters
+this path. ``project_returned`` keeps the complete response once as an exact task source, writes
+each decodable image as its own task file and each decodable ``EmbeddedResource`` blob as a
+registered task artifact. Text parts, structured content and non-binary fields remain visible;
+each binary field becomes a marker naming its saved file, plus one host note names the source.
+Any other value keeps the ordinary projection byte for byte. Configured secrets are masked in
+data, never inside base64 (a short secret can occur there, and masking it would corrupt the
+bytes) and never in the protocol's own
 vocabulary: field names, the ``type`` discriminator and the media type that opens a ``mimeType``
 stay exact, so a secret that spells one cannot reclassify the payload. Fields a server adds, maps
 such as ``_meta``, MIME parameters and all other text are data and are masked. Each image file
 keeps its exact decoded bytes; the shared image loader alone decides, when it is viewed, whether
-and how they are shown. When the source cannot be kept, the sole payload stays inline with the
-gap named and no image is offered. Projection never changes the call's status, and a fault in it
-is a named gap, so a completed remote call never reads as a retryable failure.
+and how they are shown. When the source cannot be kept, an image's sole payload stays inline with
+the gap named and no image is offered. An ``EmbeddedResource`` blob never reaches the model as
+base64: without a task store (no owning task, retention or projection failed) it is described by
+its approximate size and the reason, its URI and the error bit kept as data, nothing fetched.
+Projection never changes the call's status, and a fault in it is a named gap, so a completed
+remote call never reads as a retryable failure.
 
 These sources live in the task's store on the canonical data root from the start, like
 delegated outputs in the same plane: write-once by digest, they outlive a child's execution
 drive, and the retention walk that transfers a child's sources does not follow them. Printed
 readers are absolute, so one address holds before and after retirement for the task, a later
 attempt and its parent; dispatch and the common image loader still decide who may open it.
+A blob's artifact is a deliverable like any tool's, in the execution store (``ctx.drive_root``)
+every lifecycle reader lists; a split drive also gets the canonical twin it prints, which
+settlement finds held instead of copying (``_saved_resource``). It is one even when the call only
+read a file: result review counts it as produced work, unlike an owner's attachment (an input),
+and later ``read_file``/``read_archive``/``list_files`` of it produce nothing more.
 
-Only host metadata offers attachment: ``mcp_response_source`` with ``mcp_image_owner``, the
+Only host metadata offers image attachment: ``mcp_response_source`` with ``mcp_image_owner``, the
 calling context's [task, attempt], minted on a successful call. Remote text, ``_meta``,
 URIs, paths and tool-name spellings grant nothing and are never followed.
 ``loop_tool_execution.process_tool_results`` calls ``attach_returned_images`` on its staged
@@ -44,8 +53,10 @@ from __future__ import annotations
 import base64
 import copy
 import dataclasses
+import hashlib
 import json
 import logging
+import mimetypes
 import pathlib
 import re
 from types import SimpleNamespace
@@ -62,18 +73,19 @@ _MEDIA_TYPE = re.compile(r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,126}/[A-Za-z0-9][A-
 
 @dataclasses.dataclass(frozen=True)
 class ReturnedResult(ToolResult):
-    """An adapted transport result and the image-bearing SDK value it came from, for projection only."""
+    """An adapted transport result and its binary-bearing SDK value, for projection only."""
 
     returned: Any = dataclasses.field(default=None, repr=False, compare=False)
 
 
 def with_returned(result: ToolResult, raw: Any) -> ToolResult:
-    """``result`` itself, unless ``raw`` holds a protocol image: then its carrier for projection."""
+    """``result`` itself, unless ``raw`` holds an image or embedded blob."""
     try:
-        if not any(_is_image(_part(item)) for item in getattr(raw, "content", None) or []):
+        if not any(_is_image(part) or _is_resource_blob(part)
+                   for part in (_part(item) for item in getattr(raw, "content", None) or [])):
             return result
     except Exception:  # noqa: BLE001 - the remote call is complete; the ordinary result still holds its answer
-        log.warning("MCP response could not be inspected for images; the ordinary projection is used", exc_info=True)
+        log.warning("MCP response could not be inspected for binary content; the ordinary projection is used", exc_info=True)
         return result
     return ReturnedResult(**{item.name: getattr(result, item.name) for item in dataclasses.fields(ToolResult)},
                           returned=raw)
@@ -107,6 +119,10 @@ def _is_image(part: Any) -> bool:
     found = _binary_field(part)
     return found is not None and (part["type"] == "image"
                                   or str(found[0].get("mimeType") or "").lower().startswith("image/"))
+
+
+def _is_resource_blob(part: Any) -> bool:
+    return isinstance(part, dict) and part.get("type") == "resource" and _binary_field(part) is not None
 
 
 def _masked(value: Any, cfg: Any) -> Any:
@@ -206,9 +222,43 @@ def _saved_image(drive_root: pathlib.Path, task_id: str, source: dict, index: in
     return {"path": task_artifact_dir_path(drive_root, task_id) / ref["path"], "size": len(data)}
 
 
+def _saved_resource(drive: pathlib.Path, canonical: pathlib.Path, task_id: str, source: dict, index: int,
+                    part: dict) -> dict:
+    """Register decoded blob bytes under a host-generated name in the execution store ``drive`` and, for a split
+    drive, the same immutable bytes under that name in the ``canonical`` store, as ``send_file`` does: the printed
+    canonical path outlives the drive like the sources beside it. The URI is never read."""
+    from ouroboros.artifacts import store_task_artifact_bytes, task_artifact_dir_path
+
+    container, field = _binary_field(part)
+    try:
+        data = base64.b64decode("".join(container[field].split()), validate=True)
+    except ValueError as exc:
+        return {"gap": f"resource data is not valid base64 ({exc})"}
+    media_type = str(container.get("mimeType") or "").split(";", 1)[0].strip().lower()
+    suffix = mimetypes.guess_extension(media_type, strict=False) or ".bin"
+    if not re.fullmatch(r"\.[a-zA-Z0-9]{1,12}", suffix):
+        suffix = ".bin"
+    digest = hashlib.sha256(data).hexdigest()
+    name = f"mcp-{source['sha256'][:16]}-content-{index}-{digest}{suffix}"
+    try:
+        ref = store_task_artifact_bytes(drive, task_id, name, data, kind="mcp_resource")
+    except Exception as exc:  # noqa: BLE001 - the exact base64 remains in the retained response
+        return {"gap": f"resource artifact not saved ({type(exc).__name__})"}
+    saved = {"path": task_artifact_dir_path(drive, task_id) / ref["path"], "size": len(data), "sha256": ref["sha256"]}
+    if canonical != drive:
+        try:
+            store_task_artifact_bytes(canonical, task_id, name, data, kind="mcp_resource")
+            saved["path"] = task_artifact_dir_path(canonical, task_id) / ref["path"]
+        except Exception as exc:  # noqa: BLE001 - the execution copy stands; the drive's custody adopts it on settling
+            log.warning("MCP resource artifact has no canonical copy; its execution path is shown", exc_info=True)
+            saved["note"] = (f"canonical copy not saved ({type(exc).__name__}): this execution-drive path lasts until "
+                             "the drive retires; the task's durable artifact row then names the copy kept")
+    return saved
+
+
 def project_returned(adapted: ToolResult, raw: Any, ctx: Any, cfg: Any, tool_name: str) -> Optional[ToolResult]:
     """``adapted`` retained and projected for ``ctx``'s task when ``raw`` holds a protocol
-    image; ``None`` keeps the ordinary projection."""
+    image or embedded blob; ``None`` keeps the ordinary projection."""
     from ouroboros.artifacts import store_actor_source_bytes, task_artifact_dir_path
     from ouroboros.mcp_schema import _model_facing_result, _redact_error_text
     from ouroboros.tool_access import canonical_data_root
@@ -217,12 +267,22 @@ def project_returned(adapted: ToolResult, raw: Any, ctx: Any, cfg: Any, tool_nam
     try:
         items = list(getattr(raw, "content", None) or []) if raw is not None else []
         parts = [_part(item) for item in items]
-        if owner is None or not any(_is_image(part) for part in parts):
-            return None
-        root = canonical_data_root(ctx)
     except Exception:  # noqa: BLE001 - the ordinary projection still carries the complete response
-        log.warning("MCP image projection unavailable; the ordinary projection is used", exc_info=True)
+        log.warning("MCP binary projection unavailable; the ordinary projection is used", exc_info=True)
         return None
+    if not any(_is_image(part) or _is_resource_blob(part) for part in parts):
+        return None
+    try:
+        if owner is None:
+            raise LookupError("no task owns this call")
+        root, drive = canonical_data_root(ctx), pathlib.Path(getattr(ctx, "drive_root")).resolve(strict=False)
+    except Exception as exc:  # noqa: BLE001 - nowhere to keep the bytes: images stay ordinary, blobs described
+        if owner is not None:
+            log.warning("MCP binary projection has no task store; nothing is retained", exc_info=True)
+        if not any(_is_resource_blob(part) for part in parts):
+            return None
+        why = str(exc) if owner is None else f"its task store is unavailable ({type(exc).__name__})"
+        return _withheld_result(adapted, raw, items, parts, cfg, tool_name, why)
     source, meta = None, {}
     try:
         source = store_actor_source_bytes(root, owner[0], category="tool_results",
@@ -231,27 +291,68 @@ def project_returned(adapted: ToolResult, raw: Any, ctx: Any, cfg: Any, tool_nam
         note = (f"MCP response retained exactly: read_file(path={str(task_artifact_dir_path(root, owner[0]) / source['path'])!r}); "
                 f"{source['size']} bytes, sha256 {source['sha256']}.")
         meta["mcp_response_source"] = source
-    except Exception as exc:  # noqa: BLE001 - the sole payload then stays inline
-        note = (f"MCP response retention failed ({type(exc).__name__}): its original content stays inline above "
-                "and no image is attached automatically.")
+    except Exception as exc:  # noqa: BLE001 - an image's sole payload then stays inline; a blob is described
+        note = (f"MCP response retention failed ({type(exc).__name__}): its images stay inline above, its embedded "
+                "resource blobs are described, not shown, and no binary file or automatic image attachment is offered.")
         meta["mcp_response_retention_gap"] = type(exc).__name__
     try:
-        producer = _model_facing_result(cfg, tool_name, _projected_body(adapted, raw, items, parts, source, owner, root, cfg))
-        if source is not None and adapted.status == "ok":
+        producer = _model_facing_result(cfg, tool_name, _projected_body(
+            adapted, raw, items, parts, source, owner, root, cfg, deliverables=drive,
+            withheld=f"response retention failed ({meta.get('mcp_response_retention_gap')})"))
+        if source is not None and adapted.status == "ok" and any(_is_image(part) for part in parts):
             meta["mcp_image_owner"] = owner
     except Exception as exc:  # noqa: BLE001 - the remote call is complete: a named gap, never a failure or a resend
-        log.warning("MCP image projection failed after the remote call", exc_info=True)
-        producer = _model_facing_result(cfg, tool_name, _redact_error_text(adapted.text, cfg))
-        note += (f" Its projection failed ({type(exc).__name__}): the ordinary result stays above "
-                 "and no image is attached automatically.")
+        log.warning("MCP binary projection failed after the remote call", exc_info=True)
+        if any(_is_resource_blob(part) for part in parts):
+            withheld = (f"its projection failed ({type(exc).__name__}); "
+                        + (_RETAINED if source is not None else "response retention failed"))
+            producer = _model_facing_result(cfg, tool_name, _withheld_body(adapted, raw, items, parts, cfg, withheld))
+        else:
+            producer = _model_facing_result(cfg, tool_name, _redact_error_text(adapted.text, cfg))
+        note += (f" Its projection failed ({type(exc).__name__}): the ordinary result stays above, embedded "
+                 "resource blobs described, and no image is attached automatically.")
         meta["mcp_response_projection_gap"] = type(exc).__name__
     return ToolResult(status=adapted.status, code=adapted.code, text=f"{producer}\n\n{note}",
                       meta={**adapted.meta, **meta}, producer_text=producer, host_annotations=(note,))
 
 
+def _withheld(container: dict, field: str, why: str) -> str:
+    """An embedded resource's blob described, never shown: its decoded size from the base64 length alone."""
+    text = "".join(str(container[field]).split())
+    size = len(text) * 3 // 4 - (2 if text.endswith("==") else 1 if text.endswith("=") else 0)
+    return f"[binary resource, about {max(size, 0)} bytes, not shown: {why}]"
+
+
+def _withheld_body(adapted: ToolResult, raw: Any, items: list, parts: list, cfg: Any, why: str) -> str:
+    """The ordinary rendering with each embedded resource blob described (``_withheld``); a rendering that fails
+    still never falls back to the raw base64, only to the error bit and a count."""
+    try:
+        return _projected_body(adapted, raw, items, parts, None, None, None, cfg, withheld=why)
+    except Exception as exc:  # noqa: BLE001 - nothing of the payload is shown then
+        count = sum(1 for part in parts if _is_resource_blob(part))
+        body = f"(an MCP result with {count} embedded binary resource(s), not shown: {why}; rendering failed: {type(exc).__name__})"
+        return f"⚠️ MCP_TOOL_ERROR: {body}" if adapted.status == "error" else body
+
+
+def _withheld_result(adapted: ToolResult, raw: Any, items: list, parts: list, cfg: Any, tool_name: str,
+                     why: str) -> ToolResult:
+    """A result whose blobs have nowhere to be kept: its text, URIs and error bit as the server gave them, each
+    embedded resource blob described and its bytes not retained; images stay as the ordinary projection has them."""
+    from ouroboros.mcp_schema import _model_facing_result
+
+    producer = _model_facing_result(cfg, tool_name, _withheld_body(adapted, raw, items, parts, cfg, why))
+    note = (f"MCP embedded resource bytes were not retained ({why}); each is described above, never shown, "
+            "and its URI is data, not fetched.")
+    return ToolResult(status=adapted.status, code=adapted.code, text=f"{producer}\n\n{note}",
+                      meta={**adapted.meta, "mcp_resource_gap": why}, producer_text=producer, host_annotations=(note,))
+
+
 def _projected_body(adapted: ToolResult, raw: Any, items: list, parts: list, source: Optional[dict],
-                    owner: list, root: pathlib.Path, cfg: Any) -> str:
-    """The ordinary rendering with each binary field a marker; exact, unmasked, without a source."""
+                    owner: Optional[list], root: Optional[pathlib.Path], cfg: Any, *, withheld: str = "",
+                    deliverables: Optional[pathlib.Path] = None) -> str:
+    """The ordinary rendering with each binary field a marker; exact, unmasked, without a source, except an
+    embedded resource blob, which is described (``withheld``: why) and never inlined. Images are sources under
+    ``root``; a blob is a deliverable of the execution store ``deliverables`` (``_saved_resource``)."""
     from ouroboros.mcp_schema import _content_part_text, _redact_error_text, _stringify_call_result
 
     shown = []
@@ -261,11 +362,21 @@ def _projected_body(adapted: ToolResult, raw: Any, items: list, parts: list, sou
             shown.append(SimpleNamespace(text=_redact_error_text(_content_part_text(item), cfg)))
             continue
         if source is None:
-            binary = found[0][found[1]]
+            binary = _withheld(*found, withheld) if _is_resource_blob(part) else found[0][found[1]]
         elif _is_image(part):
             saved = _saved_image(root, owner[0], source, index, part)
             binary = (f"[image data, {saved['size']} bytes, retained as {saved['path']}]"
                       if "path" in saved else f"[{saved['gap']}; {_RETAINED}]")
+            if _is_resource_blob(part):
+                resource = _saved_resource(deliverables, root, owner[0], source, index, part)
+                binary += (f" [task artifact {resource['path']}; sha256 {resource['sha256']}]"
+                           if "path" in resource else f" [{resource['gap']}; {_RETAINED}]")
+                binary += f" [{resource['note']}]" if "note" in resource else ""
+        elif _is_resource_blob(part):
+            saved = _saved_resource(deliverables, root, owner[0], source, index, part)
+            binary = (f"[binary resource, {saved['size']} bytes, task artifact {saved['path']}; "
+                      f"sha256 {saved['sha256']}]" if "path" in saved
+                      else f"[{saved['gap']}; {_RETAINED}]") + (f" [{saved['note']}]" if "note" in saved else "")
         else:
             binary = f"[binary data {_RETAINED}]"
         shown.append(SimpleNamespace(text=json.dumps(_protocol_view(part, item, cfg, binary), ensure_ascii=False)))
