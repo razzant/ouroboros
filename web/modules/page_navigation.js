@@ -73,3 +73,17 @@ export function capturePagePlace({ state, navState, settingsControls, dashboardC
             return () => { reading(); feed?.(); };
         } };
 }
+
+/** The boot fragment names an injected page, once; navigation never writes a route back into the address. */
+export function openInitialPage(showPage, current, win = window, doc = document) {
+    const name = String(win.location.hash || '').replace(/^#/, '').trim();
+    if (name && name !== current && doc.getElementById(`page-${name}`)) showPage(name, { map: true });
+}
+
+/** Section levels stay with their owner; crossing pages asks each registered leave guard in order. */
+export async function canLeavePage(key, state, handlers) {
+    const to = key.startsWith('project:') ? 'chat' : key.split(':')[0];
+    if (to === state.activePage) return true;
+    for (const handler of handlers) if (await handler({ from: state.activePage, to }) === false) return false;
+    return true;
+}

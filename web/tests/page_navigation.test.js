@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createLayerStack } from '../modules/layers.js';
-import { capturePagePlace, createPageNavigation } from '../modules/page_navigation.js';
+import { capturePagePlace, createPageNavigation, canLeavePage, openInitialPage } from '../modules/page_navigation.js';
 
 const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 
@@ -87,4 +87,21 @@ test('a vetoed asynchronous Back keeps the same return and a second press does n
     layers.back(); answer(true); await settle();
     assert.equal(layers.size(), 0); assert.equal(restores, 1);
     layers.destroy();
+});
+
+test('boot accepts only a mounted destination and never adds a jump or reopens the current page', () => {
+    const calls = [], show = (...args) => calls.push(args);
+    const doc = { getElementById: id => ['page-settings', 'page-chat'].includes(id) };
+    for (const hash of ['', '#missing', '#chat', '# settings ']) openInitialPage(show, 'chat', { location: { hash } }, doc);
+    assert.deepEqual(calls, [['settings', { map: true }]]);
+});
+
+test('leave guards preserve section moves, map Projects to Main, and stop at the first refusal', async () => {
+    const calls = [], state = { activePage: 'settings' };
+    const guard = async place => { calls.push(place); return false; };
+    assert.equal(await canLeavePage('settings:tools', state, [guard]), true);
+    assert.deepEqual(calls, []);
+    assert.equal(await canLeavePage('project:one', state, [guard, () => assert.fail('after refusal')]), false);
+    assert.deepEqual(calls, [{ from: 'settings', to: 'chat' }]);
+    assert.equal(await canLeavePage('dashboard:costs', state, [() => true]), true);
 });

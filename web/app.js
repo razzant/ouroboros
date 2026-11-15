@@ -49,7 +49,7 @@ import { afterMotion, reducedMotion } from './modules/motion.js';
 import { createShellMotion } from './modules/shell_motion.js';
 import { createRoomRetirement, roomSocket } from './modules/room_retire.js';
 import { initPagePlaces } from './modules/page_places.js';
-import { capturePagePlace, createPageNavigation } from './modules/page_navigation.js';
+import { capturePagePlace, createPageNavigation, canLeavePage, openInitialPage } from './modules/page_navigation.js';
 import { setupResizablePanels } from './modules/panel_widths.js';
 import { createTelegramHost } from './modules/host_telegram.js';
 import { DRAWER_DRAG, bindDrawerDrag } from './modules/drawer_drag.js';
@@ -112,12 +112,7 @@ const restorePlaces = initPagePlaces();
 const pageNavigation = createPageNavigation({ layers, capture: opener => capturePagePlace({
     state, navState, settingsControls, dashboardControls, skillsControls,
     projectInstances, projectPanelTitle, rooms, mainChat, logsControls, restorePlaces, commitPage,
-}, opener), canLeave: async (key) => {
-    const to = key.startsWith('project:') ? 'chat' : key.split(':')[0];
-    if (to === state.activePage) return true;
-    for (const handler of beforePageLeaveHandlers) if (await handler({ from: state.activePage, to }) === false) return false;
-    return true;
-} });
+}, opener), canLeave: key => canLeavePage(key, state, beforePageLeaveHandlers) });
 bindPageBack({ layers, currentHeader: () => navState.activeProjectId
     ? document.querySelector('.project-panel-bar') : document.querySelector(`#page-${state.activePage} > .app-page-header`) });
 const primarySidebar = document.getElementById('primary-sidebar');
@@ -211,17 +206,6 @@ function setMobileDrawerOpen(open, { sync = true } = {}) {
     }
     navState.mobileDrawerOpen = nextOpen;
     if (sync) syncNavigationState();
-}
-
-// The application's one client-side route: a `#<page>` fragment, honoured once
-// on load and validated against the injected sections rather than against a
-// duplicated page list — the DOM is the single source of truth, so an unknown
-// fragment is ignored instead of painting a blank surface. Deliberately NOT
-// written back on navigation: the desktop shell and the Telegram mini app have
-// no address bar to read it from.
-function pageFromHash() {
-    const name = String(window.location.hash || '').replace(/^#/, '').trim();
-    return name && document.getElementById(`page-${name}`) ? name : '';
 }
 
 async function showPage(name, options = {}) {
@@ -1419,8 +1403,7 @@ window.addEventListener('pagehide', (event) => {
 });
 loadVersion();
 syncNavigationState();
-const hashPage = pageFromHash();
-if (hashPage && hashPage !== state.activePage) showPage(hashPage, { map: true });
+openInitialPage(showPage, state.activePage);
 
 // Mobile soft-keyboard handling: viewport shrink counts only while an editable
 // owns focus. Drawer opening clears that state explicitly before navigation is
