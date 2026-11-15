@@ -649,7 +649,7 @@ def prepare_retrieving_seats(ctx: Any, row_plan: dict, models: list, row_routes:
                 commit_message=commit_message, intent=intent, parts=parts, delegated=delegated,
                 model=models[i], slot_id=str(row_plan["slot_ids"][i]),
                 session_profile=str(row_plan["session_profiles"][i] or ""), use_local=row_plan["use_local"][i],
-                drive_root=getattr(ctx, "drive_root", None),
+                drive_root=getattr(ctx, "budget_drive_root", None) or getattr(ctx, "drive_root", None),
                 task_id=str(getattr(ctx, "task_id", "") or "") or "commit_review",
                 source_root=source_root_for(ctx, task_evidence), review_words=review_words)
         except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as exc:
