@@ -172,19 +172,20 @@ test('the Model capsule alone offers it, as the artifact with use_local and neve
     const index = buildModelIndex({ catalog: CATALOG });
     assert.deepEqual(index.sources.map((source) => source.id), ['subscription:codex', 'openrouter', 'openai', 'openai-compatible', 'local']);
     assert.deepEqual(searchModels(index, 'qwen').map((row) => row.route), [{ model: 'qwen3.gguf', use_local: true }]);
-    // And through the capsule itself: Search, the Local source, the row, the save.
+    // And through the capsule itself: its sheet, All sources, the Local source, the row, the save.
     const store = createModelCatalogStore({ readCatalog: async () => CATALOG, readPreferences: async () => ({}) });
     const m = mountPair({ projectId: 'p7', chatId: 7, model: { store } });
     m.controls.syncState({ main_route: { model: 'claudexor::codex=gpt-6-astra', use_local: false }, projects: [{ id: 'p7', model_choice: { kind: 'main' } }] });
     await m.press(m.modelHead);
     await new Promise((resolve) => setImmediate(resolve));
-    m.controls.model.startSearch();
-    const list = m.doc.body.children.find((node) => node.classList.contains('chat-model-list'));
+    const list = m.doc.body.children.find((node) => node.classList.contains('model-sheet')).querySelector('.model-sheet-list');
     const row = (key) => list.querySelectorAll('.chat-model-row').find((node) => node.dataset.row === key);
+    const press = (key) => m.fire(list, 'click', { target: { closest: (selector) => (selector === '.chat-model-row' ? row(key) : null) } });
+    await press('sources');
     assert.match(list.innerHTML, /data-row="source:local"[^>]*>.*?Local<\/span><span class="chat-model-row-facts" data-i18n-skip>1 model · on this computer</);
-    await m.fire(list, 'click', { target: { closest: () => row('source:local') } });
+    await press('source:local');
     assert.match(list.innerHTML, /data-row="local\|qwen3\.gguf"[^>]*>.*?qwen3\.gguf<\/span><span class="chat-model-row-facts" data-i18n-skip>33K · Local · on this computer</);
-    await m.fire(list, 'click', { target: { closest: () => row('local|qwen3.gguf') } });
+    await press('local|qwen3.gguf');
     await new Promise((resolve) => setImmediate(resolve));
     assert.deepEqual(m.posts.at(-1), ['/api/owner/chat-model', { kind: 'model', model: 'qwen3.gguf', use_local: true, project_id: 'p7' }]);
     m.controls.destroy();

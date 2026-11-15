@@ -1658,6 +1658,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -1859,6 +1860,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -2035,6 +2037,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -2215,6 +2218,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -2420,6 +2424,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -2625,6 +2630,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -2769,6 +2775,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -3003,6 +3010,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -3238,6 +3246,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,
@@ -3425,6 +3434,7 @@
               "default_headers": {
                 "HTTP-Referer": "https://ouroboros-agent.ai/",
                 "X-OpenRouter-Title": "Ouroboros",
+                "X-OpenRouter-Categories": "personal-agent,programming-app",
                 "X-OpenRouter-Metadata": "enabled"
               },
               "max_retries": 0,

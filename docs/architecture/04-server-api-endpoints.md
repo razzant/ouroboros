@@ -105,6 +105,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/owner/effort-range` | |
 | POST | `/api/owner/subagents-mode` | `{mode, project_id?}` → `{ok, project_id, subagents_mode, cognition}` (§7) |
 | POST | `/api/owner/chat-model` | |
+| POST | `/api/owner/chat-processing` | |
 | POST | `/api/owner/safety-mode` | |
 | POST | `/api/owner/safety-model` | |
 | POST | `/api/owner/safety-rules` | |

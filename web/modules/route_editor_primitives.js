@@ -20,31 +20,35 @@ export const DEFAULT_API_PROVIDER = 'openrouter';
 export const EFFORT_CHOICES = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 export const PROCESSING_PREFERENCE_KEY = 'OUROBOROS_PROCESSING_PREFERENCE';
 export const MODEL_PROCESSING_PREFERENCES_KEY = 'OUROBOROS_MODEL_PROCESSING_PREFERENCES';
-export const PROCESSING_CHOICES = ['standard', 'fast', 'economy'];
-/** Fast and Economy send another processing tier, which its own endpoint prices: a catalog's row is not that call's price. */
-export const tierPriced = (preference) => preference === 'fast' || preference === 'economy';
+export const PROCESSING_CHOICES = ['standard', 'fast', 'economy'];  // Settings never hold Ultrafast (an older reader refuses it)
+/** Fast, Ultrafast and Flex (`economy`) send another processing tier, which its own endpoint prices: a catalog's row is not that call's price. */
+export const tierPriced = (preference) => preference === 'fast' || preference === 'economy' || preference === 'ultrafast';
 
 export function processingLabel(value) {
-    return { standard: 'Standard', fast: 'Fast', economy: 'Economy', mixed: 'Mixed', unknown: 'Unknown' }[value] || 'Route default';
+    return { standard: 'Standard', fast: 'Fast', ultrafast: 'Ultrafast', economy: 'Flex', mixed: 'Mixed', unknown: 'Unknown' }[value] || 'Route default';
 }
 
-export function processingIntentLabel(value, inherited = '') {
-    return value ? `${processingLabel(value)} (override)`
-        : inherited ? `${processingLabel(inherited)} (from Models)` : 'Route default (inherited)';
+/** A row's tier as its summary says it. `helper`: an Agents row, whose new helper without a tier of its own takes the
+ *  tier of the work that starts it, the global one otherwise (a review seat on it). */
+export function processingIntentLabel(value, inherited = '', { helper = false } = {}) {
+    if (value) return `${processingLabel(value)} (override)`;
+    const global = inherited ? `${processingLabel(inherited)} (from Models)` : 'Route default (inherited)';
+    return helper ? `The work's tier, else ${global}` : global;
 }
 
-export function processingSelectHtml(attrs, selected, { global = false } = {}) {
+export function processingSelectHtml(attrs, selected, { global = false, helper = false } = {}) {
     return selectHtml(attrs, [{ options: [
-        { value: '', label: global ? 'Keep route defaults' : 'Use global setting' },
+        { value: '', label: global ? 'Keep route defaults' : helper ? 'The work\'s tier, else the global setting' : 'Use global setting' },
         ...PROCESSING_CHOICES.map((value) => ({ value, label: processingLabel(value) })),
     ] }], selected || '');
 }
 
 /** Intent controls never change model/effort or claim the route served this mode. */
-export function processingDetailsHtml(attrs, selected, inherited = '') {
-    return `<details class="model-role-details ui-disclosure" data-processing-details><summary><span>Processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(selected, inherited))}</span></span></summary>
-        <label class="ui-field">Processing ${processingSelectHtml(attrs, selected)}</label>
-        <div class="ui-field-help">Uses the same model and reasoning effort. An explicit native service choice takes precedence.</div></details>`;
+export function processingDetailsHtml(attrs, selected, inherited = '', { helper = false } = {}) {
+    return `<details class="model-role-details ui-disclosure" data-processing-details><summary><span>Processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(selected, inherited, { helper }))}</span></span></summary>
+        <label class="ui-field">Processing ${processingSelectHtml(attrs, selected, { helper })}</label>
+        <div class="ui-field-help">Uses the same model and reasoning effort. An explicit native service choice takes precedence.${helper
+            ? ' Without one of its own, a new helper takes the tier of the work that starts it; a review seat takes the global setting.' : ''}</div></details>`;
 }
 
 export function processingCapabilityNote(preference, capability, transportPreferences) {

@@ -10,6 +10,25 @@ import { sendModelWaitDecision } from '../modules/model_wait.js';
 import { forgetSettingRows } from '../modules/settings_controls.js';
 import { setup } from './dashboard_dom_fixture.js';
 
+test('the room and Main model and tier writes declare the owner app, without changing generic fetch', async () => {
+    const seen = [];
+    const previous = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+        seen.push([url, init.headers]);
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    };
+    try {
+        await apiClient.ownerChatModel({ kind: 'main', project_id: 'fixture' });
+        await apiClient.ownerChatProcessing({ processing: 'fast' });
+        await apiClient.saveSettings({ TOTAL_BUDGET: 25 });
+    } finally { globalThis.fetch = previous; }
+    assert.deepEqual(seen, [
+        ['/api/owner/chat-model', { 'Content-Type': 'application/json', ...APP_SETTINGS_ORIGIN }],
+        ['/api/owner/chat-processing', { 'Content-Type': 'application/json', ...APP_SETTINGS_ORIGIN }],
+        ['/api/settings', { 'Content-Type': 'application/json' }],
+    ]);
+});
+
 test('the generic save carries the declaration only when its caller passes one', async () => {
     const seen = [];
     const previous = globalThis.fetch;

@@ -809,8 +809,10 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
 
         _require_room_subagents()
         settings = effective_runtime_subagent_settings(runtime_settings(settings_reader=_ctl().load_settings))
+        from ouroboros.supervisor_route import work_tier
+
         configured_subagent, legacy_selection = select_subagent_snapshot(
-            settings,
+            settings, work_tier=work_tier(ctx, settings),
             subagent_id=str(params.get("subagent_id") or ""), access=params.get("access"),
             legacy_model_lane=params.get("model_lane"),
             legacy_executor=params.get("executor"),
