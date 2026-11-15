@@ -10,6 +10,9 @@ behaviour: commands keep their local or task-scoped executor and every Claudexor
                   "skill_state_root": "<persistent work folder for skills' own runtime state>",
                   "staging_root": "<work folder for private copies, staged inputs, scratch, skill copies>"}
 
+The service host must be POSIX: a Windows one refuses the section first (``WINDOWS_HOST_REFUSAL``), since none of
+its paths can be the one the work sees and which domain a path belongs to (``work_domain``) is read POSIX-wise.
+
 ``executor`` is the installation-pinned ``workspace_executor`` backend (``managed_executor_ref``): foreground
 commands, scripts, checks and services run there whatever a task or its environment names, and so do the processes
 the service attaches to its own streams, stdio MCP servers, skill scripts and dependency builds
@@ -55,11 +58,18 @@ import uuid
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
+from ouroboros.platform_layer import IS_WINDOWS
 from ouroboros.workspace_executor_paths import ExecutorRef, map_host_path, normalize_executor_ref
 
 log = logging.getLogger(__name__)
 
 POLICY_FIELD = "execution"
+# A container path is POSIX, so on a Windows service host no folder the service names is the one the work sees, and
+# ``work_domain`` would read every file below a mapping as the service's own: the section could only fail open there.
+WINDOWS_HOST_REFUSAL = ("execution needs a POSIX service host: on Windows a host path is never the path the work "
+                        "container sees, so the service would act on work files itself; run the service on Linux or "
+                        "macOS (for example in WSL2 or a Linux container), or remove execution and extensions.trusted, "
+                        "which needs it")
 WORK_ENGINE = "work"
 _DOCKER_TIMEOUT_SEC = 10.0  # one Docker CLI call: the transport's bound, never a judgment
 _LOCK = threading.Lock()
@@ -128,7 +138,10 @@ def _outside_service(text: Any, where: str, roots: Optional[List[Tuple[str, str]
 
 
 def parse_execution(value: Any) -> ExecutionDomain:
-    """The ``execution`` section, strictly; ``ValueError`` names the first problem (the policy wraps it)."""
+    """The ``execution`` section, strictly; ``ValueError`` names the first problem (the policy wraps it). A Windows
+    service host refuses any section before reading it (``WINDOWS_HOST_REFUSAL``)."""
+    if IS_WINDOWS:
+        raise ValueError(WINDOWS_HOST_REFUSAL)
     section = _fields(value, "execution", ("executor", "engine", "dedicated_containers", "skill_state_root",
                                            "staging_root"))
     raw = _fields(section.get("executor"), "execution.executor", ("type", "container_name", "network", "path_mappings"))
