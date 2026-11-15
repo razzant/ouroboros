@@ -93,6 +93,8 @@ function reviewLine(review) {
 // or an unrecognized value is not counted: what is unknown names nothing.
 const OVER_REVIEW = new Set(['FAIL', 'NOT_PERFORMED', 'QUORUM_FAILED', 'NOT_DISPATCHED', 'unknown']);
 const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
+// Said wherever this install's own landed rows were not read for a range: unknown, never "none".
+const NOT_READ = 'Not read for this range: whether its commits landed over a review FAIL or no verdict is unknown.';
 
 /**
  * What a range brings over a review FAIL or no verdict, from its qualification: this install's own commits it
@@ -115,8 +117,9 @@ export function updateOverReview(facts) {
         ...merges.map((commit) => `${String(commit.sha).slice(0, 8)} (merge; ${
             commit.receipt.review.observed === 'FAIL' ? 'review FAIL' : 'no review verdict recorded'})`)];
     const said = (items) => [items.length ? `Went in over a review FAIL or no verdict: ${items.join(', ')}.` : '',
-        unread ? `The review receipts of ${plural(unread, 'older commit')} were not read.` : ''].filter(Boolean).join(' ');
-    return { line: said(parts), detail: said(names), names, landed };
+        unread ? `The review receipts of ${plural(unread, 'older commit')} were not read.` : ''].filter(Boolean);
+    const blind = facts && !Array.isArray(facts.landed_over_review) ? [`Made on this computer: ${NOT_READ}`] : [];
+    return { line: said(parts).join(' '), detail: [...said(names), ...blind].join(' '), names, landed };
 }
 
 /**
@@ -136,8 +139,7 @@ export function preflightEvidenceRows(preflight) {
     const rows = updateOverReview(facts).landed.map((row) => ({ label: String(row.sha).slice(0, 8),
         value: `${row.subject ? `${row.subject}\n` : ''}Ouroboros made it on this computer; ${row.outcome}${/[.!?]"?$/.test(row.outcome) ? '' : '.'}` }));
     if (!Array.isArray(facts.landed_over_review)) {
-        rows.push({ label: 'Made on this computer',
-            value: 'Not read for this range: whether its commits landed over a review FAIL or no verdict is unknown.' });
+        rows.push({ label: 'Made on this computer', value: NOT_READ });
     }
     const listed = facts.commits || [];
     const receipts = listed.filter((commit) => commit.receipt).length;

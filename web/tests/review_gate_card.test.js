@@ -57,6 +57,17 @@ test('a skill left on over its review is its own part: its own headline alone, o
     syncReviewGateItem(accepted, { review_overrides: { skills: skills(1, 'weather', 'no_review_verdict', 'author_finish', 'work-2') } });
     assert.equal(accepted.items[0].body,
         'Skill "weather" stayed on because Ouroboros accepted it as its author, although no review passed its current files.');
+    // A skill left on again in the same work keeps its count and moves its latest: the newer read replaces the line
+    // and the item, an older one arriving late does not.
+    const first = skills(1, 'weather', 'no_review_verdict', 'turned_on', 'work-3');
+    const later = { ...first, latest: { ...first.latest, reason: 'review_problems', door: 'after_review', at: '2026-11-15T10:09:00+00:00' } };
+    const again = { groupId: 'work-3', items: [] };
+    syncReviewGateItem(again, { review_overrides: { skills: first } });
+    assert.equal(syncReviewGateItem(again, { review_overrides: { skills: later } }), true, 'the same count with a newer latest is news');
+    assert.equal(again.reviewGateLine, 'Review: skill "weather" left on over review problems');
+    assert.equal(again.items[0].body, 'Skill "weather" was left on although its review found problems.');
+    assert.equal(syncReviewGateItem(again, { review_overrides: { skills: first } }), false, 'an older read never replaces a newer one');
+    assert.equal(again.reviewGateLine, 'Review: skill "weather" left on over review problems');
 });
 
 test('one Details item and one meta phrase, replaced in place; an older read never wins', () => {

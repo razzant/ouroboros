@@ -54,10 +54,15 @@ export function reviewGateLine(fact) {
 export function syncReviewGateItem(record, detail) {
     const fact = detail?.review_overrides;
     const line = reviewGateLine(fact);
-    // Each part only grows, so the sum of its counts orders two reads of one work's fact.
+    // Each part's count only grows and each latest carries its time (a skill left on again keeps its count and moves
+    // its latest): the sum of counts, then the newest of those times, orders two reads of one work's fact.
     const total = counted(fact) + counted(fact?.continued) + counted(fact?.landed) + counted(fact?.skills);
-    if (!record || !line || total <= (record.reviewGateTotal || 0)) return false;
+    const at = [fact?.latest?.at, fact?.continued?.latest?.at, fact?.landed?.latest?.at, fact?.skills?.latest?.at]
+        .map((value) => String(value || '')).sort().pop();
+    const seen = record?.reviewGateTotal || 0;
+    if (!record || !line || total < seen || (total === seen && at <= (record.reviewGateAt || ''))) return false;
     record.reviewGateTotal = total;
+    record.reviewGateAt = at;
     record.reviewGateLine = line;
     const latest = fact.latest || {}, continued = fact.continued || {}, landed = fact.landed || {}, skills = fact.skills || {};
     const reviewed = counted(fact) || counted(continued) || counted(landed);
@@ -77,7 +82,6 @@ export function syncReviewGateItem(record, detail) {
             + door(skillName(skills), SKILL_WHY[skills.latest?.reason] || 'no review passed its current files')
             + (skills.latest?.task_id && skills.latest.task_id !== record.groupId ? ` (task ${skills.latest.task_id})` : '') : '',
     ].filter(Boolean).join('\n');
-    const at = [latest.at, continued.latest?.at, landed.latest?.at, skills.latest?.at].map((value) => String(value || '')).sort().pop();
     const headline = reviewed ? 'Review returned FAIL or no verdict' : 'Skill left on without a passed review';
     const key = `review-gate|${record.groupId}`;
     const item = {

@@ -299,11 +299,12 @@ test('the host line about the update on offer shows with or without a descriptio
     assert.equal(updateLetterView({ ...CURRENT, letter: letter({ relation: 'applied', qualification: facts }) }).over, '');
     const quiet = { ...facts, commits: [{ sha: 'm'.repeat(40), subject: 'merge', receipt: { checks: [], review: { observed: 'PASS' } } }] };
     assert.equal(updateLetterView({ ...AVAILABLE, letter: letter({ qualification: quiet, checked_key: range }) }).over, '');
-    // The panel paints it before the unchanged-body return, in its own element above the description body, and the
-    // Apply confirmation mounts its content region for the line alone.
-    assert.ok(SOURCE.indexOf("letterOver.textContent = view.over") < SOURCE.indexOf('if (nextKey === letterKey)'));
-    assert.ok(SOURCE.indexOf('id="updates-letter-over"') < SOURCE.indexOf('id="updates-letter-body"'));
-    assert.match(SOURCE, /content: description \|\| over \? \{/);
+    // Rows of this computer that were not read are said in Details, with or without a line; what is painted and
+    // where is the browser test's (tests/test_update_description_browser.py).
+    const { landed_over_review: _unread, ...blind } = quiet;
+    const unreadView = updateLetterView({ ...AVAILABLE, letter: letter({ qualification: blind, checked_key: range }) });
+    assert.equal(unreadView.over, '');
+    assert.match(unreadView.overDetail, /^Made on this computer: Not read for this range/);
 });
 
 test('a description-bearing payload leaves the verdict byte-for-byte identical', () => {
