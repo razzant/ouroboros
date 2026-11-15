@@ -556,7 +556,7 @@ TITLE_BAND = """({band, allowed}) => {
             t.dispatchEvent(press);
             const messages = window.__chromeMessages.map(m => m.type);
             if (control) {
-                controls.add(control.id || control.textContent.trim());
+                controls.add(control.id || control.querySelector('input')?.id || control.textContent.trim());
                 if (messages.length || press.defaultPrevented) unexpected.push({x, y, messages, control: control.outerHTML});
             } else if (messages.join() === 'drag' && press.defaultPrevented) {
                 drags++;
@@ -587,14 +587,16 @@ def test_the_desktop_title_band_over_a_page_moves_the_window(shell_ui, tmp_path,
         page.locator(f'[data-nav-page="{page_name}"]').click()
         page.locator(f'#page-{page_name}').wait_for(state='visible')
         settle(page)
-        allowed = ('.app-page-lead .app-tab, .app-page-lead .files-crumb, '
+        allowed = ('.app-page-lead .app-tab, .app-page-lead .files-crumb, .settings-search, '
                    '.app-page-toolbar :is(#skills-refresh, #skills-update-all, #files-refresh, '
                    '#files-new-file, #files-new-dir, #files-paste)')
         facts['band'] = page.evaluate(TITLE_BAND, {'band': 52, 'allowed': allowed})
         band = facts['band']
         assert band['height'] == 52 and band['drags'] > 0 and not band['unexpected'], facts
-        if page_name in ('widgets', 'settings'):  # Settings has no tab strip: Back is the first row of a page
+        if page_name in ('widgets', 'dashboard'):  # Dashboard's pages are a list; the band names its columns.
             assert band['controls'] == [] and band['firstTabTop'] is None, facts
+        elif page_name == 'settings':
+            assert band['controls'] == ['settings-search'] and band['firstTabTop'] is None, facts
         else:
             assert band['controls'], facts
             if page_name != 'files':
@@ -611,7 +613,16 @@ def test_the_desktop_title_band_over_a_page_moves_the_window(shell_ui, tmp_path,
         if page_name == 'files':
             page.locator('#files-new-file').click()
             page.locator('#page-files .files-editor').wait_for()
-        elif page_name not in ('widgets', 'settings'):
+        elif page_name == 'settings':
+            page.locator('#settings-search').fill('models')
+            page.locator('[data-settings-result="home:models"]').wait_for(state='visible')
+            assert page.locator('#settings-search').input_value() == 'models'
+        elif page_name == 'dashboard':
+            row = page.locator('[data-dashboard-tab="activity"]')
+            row.click()
+            assert row.get_attribute('aria-selected') == 'true'
+            page.locator('#dashboard-panel-activity.active').wait_for(state='visible')
+        elif page_name != 'widgets':
             tab = page.locator(f'#page-{page_name} .app-page-lead .app-tab').nth(1)
             tab.click()
             assert tab.get_attribute('aria-selected') == 'true'
