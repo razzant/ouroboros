@@ -374,6 +374,9 @@ def select_lineage(root: Any, parent: str, root_id: str, *, direct_only: bool = 
     where, params = lineage_where(str(parent or ""), str(root_id or ""), direct_only=direct_only,
                                   queue_members=queue_members)
     names = sorted({str(task_id) for task_id in unread if str(task_id or "")})
+    if names and skipped is None:
+        raise TypeError("select_lineage: UNREAD needs the SKIPPED set that receives the rows not fetched")
+    captured = None
     with open_store(root, write=False) as txn:
         if names:
             held = ("t.task_id IN (SELECT value FROM json_each(?)) AND t.superseded_by IS NULL "
@@ -381,9 +384,10 @@ def select_lineage(root: Any, parent: str, root_id: str, *, direct_only: bool = 
             params = (*params, json.dumps(names))
             captured = capture(txn.conn, "SELECT t.task_id FROM tasks AS t JOIN task_bodies AS b "
                                f"ON b.task_id = t.task_id WHERE ({where}) AND {held}", params, ("task_id",))
-            skipped.update(row[0] for row in captured.tuples())
             where = f"({where}) AND NOT ({held})"
         fetched = _fetch(txn, where, params)
+    if captured is not None:
+        skipped.update(row[0] for row in captured.tuples())
     return _decode(fetched)
 
 

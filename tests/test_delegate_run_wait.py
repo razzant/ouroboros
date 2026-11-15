@@ -435,6 +435,38 @@ def test_a_sleepers_tick_reads_no_child_whose_end_its_last_wake_showed(tmp_path,
     assert model_sleep.wake_reason(ctx, chosen) == "" and "busy" not in read
 
 
+def test_a_sleeper_wakes_only_on_what_its_acknowledging_read_shows(tmp_path, monkeypatch):
+    """The tick's read that skips ended children only says that nothing is new: on an event it reads every child again,
+    as the wake's acknowledging read does. While an ended child cannot be read, both reads are blind and the sleep stays
+    quiet, as before; it never wakes on a sibling's end that its wake cannot show (every acknowledged delegate_wait
+    would then return at once, showing nothing)."""
+    from ouroboros import delegate_supervision as ds, model_sleep, task_status
+    from ouroboros.task_results import write_task_result
+
+    ctx, _limit = _nanny(tmp_path)
+    _run(tmp_path, "run-sel")
+    chosen = ds._choice({"runs": ["run-sel"]})
+    for task_id, status in (("ended", "completed"), ("busy", "running"), ("busy", "completed")):
+        write_task_result(tmp_path, task_id, status, parent_task_id=_NANNY, root_task_id=_NANNY, chat_id=0,
+                          delegation_role="subagent")
+        if status == "running":
+            state = ds._load_state(ctx, "")
+            state["coordination_cursor"] = ds._coordination_wakes(ctx, state)[1]  # acknowledged: "ended" shown
+            ds._save_state(ctx, state)
+    effective = task_status.effective_task_result
+
+    def unreadable(root, row, **kw):
+        if row.get("task_id") == "ended":
+            raise OSError("the ended child's store cannot be read")
+        return effective(root, row, **kw)
+
+    monkeypatch.setattr(task_status, "effective_task_result", unreadable)
+    assert ds._coordination_wakes(ctx, ds._load_state(ctx, ""))[0] == [], "the acknowledging read is blind"
+    assert model_sleep.wake_reason(ctx, chosen) == "", "so the tick is quiet too"
+    monkeypatch.setattr(task_status, "effective_task_result", effective)
+    assert model_sleep.wake_reason(ctx, chosen) == "coordination:busy"
+
+
 def test_the_wake_read_is_one_detail_read_and_never_the_journal(tmp_path):
     """(c) The body is the only journal reader: a wake's addressed read of its run is one detail read, no window, no
     run-event stream and no speech, whatever the engine serves."""

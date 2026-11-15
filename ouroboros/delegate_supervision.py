@@ -37,7 +37,7 @@ import logging
 import pathlib
 import time
 import uuid
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from ouroboros import delegate_custody as custody
 from ouroboros.delegate_shared import _fail, delegate_result, refusal_host_code
@@ -333,9 +333,9 @@ def _coordination_cursor(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _direct_children(ctx: Any, materialize: bool = True, settled: Any = ()) -> dict[str, dict[str, Any]]:
-    """Read the existing durable direct-child projection for this nanny (a readiness check needs no artifacts and no
-    row of a child its cursor holds settled: ``find_child_tasks(settled=...)``)."""
+def _direct_children(ctx: Any, materialize: bool = True, settled: Iterable[str] = ()) -> dict[str, dict[str, Any]]:
+    """Read the existing durable direct-child projection for this nanny (a readiness check needs no artifacts, and
+    its first read no row of a child its cursor holds settled: ``find_child_tasks(settled=...)``)."""
     task_id = str(getattr(ctx, "task_id", "") or "").strip()
     if not task_id:
         return {}
@@ -379,23 +379,28 @@ def _coordination_wakes(
     """Collect direct-child beacons and terminal transitions on one cursor (pure: the next cursor is
     returned, committed only by the acknowledgement of the wake that showed them).
 
-    A sleeper's ``readiness`` check (``run_wait_reason``, every assignment tick) gets the same events and no cursor.
-    It reads no artifacts and no row of a child the cursor holds settled: a held terminal shows no transition, and
-    such a child stands in the beacon filter unread. A new beacon naming an unread child reads every child after all
-    (its own row is the only proof that it is one)."""
+    A sleeper's ``readiness`` check (``run_wait_reason``, every assignment tick) reads no artifacts and returns no
+    cursor. Its first read skips each child whose end the cursor already holds (``find_child_tasks(settled=...)``):
+    such a child shows no transition, and its id still stands in the beacon filter. That read only answers that
+    nothing is new: when it sees an event, every child is read again and the events are those of that read, the one
+    the wake's acknowledging read repeats."""
     from ouroboros.task_tree_ledger import tree_ledger_row_id
     from ouroboros.task_status import SETTLED_STATUSES
 
     cursor = _coordination_cursor(state)
     prior_children = cursor.get("children") if isinstance(cursor.get("children"), dict) else {}
-    held = {child_id for child_id, previous in prior_children.items() if isinstance(previous, dict)
-            and str(previous.get("status") or "") in SETTLED_STATUSES} if readiness else set()
+
+    def shown_settled(child_id: str) -> bool:  # the cursor already holds this child's end
+        previous = prior_children.get(child_id)
+        return isinstance(previous, dict) and str(previous.get("status") or "") in SETTLED_STATUSES
+
+    held = {child_id for child_id in prior_children if shown_settled(child_id)} if readiness else set()
     metadata = getattr(ctx, "task_metadata", {})
     root_id = str(metadata.get("root_task_id") or "").strip() if isinstance(metadata, dict) else ""
     root_id = root_id or str(getattr(ctx, "task_id", "") or "").strip()
     seen = {str(item) for item in cursor.get("attention_seen", []) if str(item)}
 
-    def beacons(children: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    def observe(children: dict[str, dict[str, Any]]) -> tuple[list, dict, list]:
         try:
             from ouroboros.task_tree_ledger import tree_ledger_attention_after
 
@@ -408,39 +413,30 @@ def _coordination_wakes(
             )
         except Exception:
             attention = []
-        return [row for row in attention if tree_ledger_row_id(row) not in seen]
+        new_attention = [row for row in attention if tree_ledger_row_id(row) not in seen]
+        markers = {child_id: _child_marker(child) for child_id, child in children.items() if child_id not in held}
+        terminal_events: list[dict[str, Any]] = []
+        for child_id, marker in markers.items():
+            status = marker["status"]
+            if status in SETTLED_STATUSES and not shown_settled(child_id):
+                terminal_events.append({
+                    "type": "child_terminal",
+                    "child_task_id": child_id,
+                    "status": status,
+                    "updated_at": marker["updated_at"],
+                    "result_sha256": marker["result_sha256"],
+                })
+        return new_attention, markers, terminal_events
 
-    children = _direct_children(ctx, not readiness, held)
-    unread = {child_id for child_id, child in children.items() if child_id in held and child.get("settled_unread")}
-    new_attention = beacons(children)
-    if any(str(row.get("task_id") or "") in unread for row in new_attention):
-        children, unread = _direct_children(ctx, False), set()
-        new_attention = beacons(children)
-    markers = {
-        child_id: _child_marker(child) for child_id, child in children.items() if child_id not in unread
-    }
-    terminal_events: list[dict[str, Any]] = []
-
-    for child_id, marker in markers.items():
-        previous = prior_children.get(child_id) if isinstance(prior_children.get(child_id), dict) else {}
-        status = marker["status"]
-        if (
-            status in SETTLED_STATUSES
-            and str(previous.get("status") or "") not in SETTLED_STATUSES
-        ):
-            terminal_events.append({
-                "type": "child_terminal",
-                "child_task_id": child_id,
-                "status": status,
-                "updated_at": marker["updated_at"],
-                "result_sha256": marker["result_sha256"],
-            })
+    new_attention, markers, terminal_events = observe(_direct_children(ctx, not readiness, held))
+    if held and (new_attention or terminal_events):  # what ends the sleep is what the acknowledging read will show
+        new_attention, markers, terminal_events = observe(_direct_children(ctx, not readiness))
     events = [
         {"type": "child_attention_beacon", "beacon": row}
         for row in new_attention
     ] + terminal_events
     if readiness:
-        return events, None  # an unread child's marker is not known: nothing here may become a cursor
+        return events, None  # a held child's marker is not read: nothing here may become a cursor
     next_cursor = {
         "attention_after_ts": str(cursor.get("attention_after_ts") or ""),
         "attention_seen": list(cursor.get("attention_seen", [])),
@@ -1105,8 +1101,9 @@ def run_wait_reason(ctx: Any) -> str:
     input and controls, a question of any run this task owns, the selected runs' terminals, the chosen
     time): the task's own cancel intent or spent deadline, and a direct child's attention beacon or
     terminal past the coordination cursor the last acknowledged wake committed. Reads only: no cursor
-    moves here, no child's artifacts are materialized for it, and no row of a child that cursor holds
-    settled is read (``_coordination_wakes(readiness=True)``)."""
+    moves here, no child's artifacts are materialized for it, and a quiet tick reads no row of a child
+    that cursor holds settled unless a pointer redirects it or the queue names it
+    (``_coordination_wakes(readiness=True)``)."""
     controls = _control_wakes(ctx)
     if controls:
         return "control:" + ("cancelled" if controls[0]["type"] == "cancellation_intent" else "deadline")
