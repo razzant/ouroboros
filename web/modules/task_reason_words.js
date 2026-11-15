@@ -87,7 +87,7 @@ export const TASK_CAUSE_PHRASES = {
     child_results_deferred: "Some sub-task results were deferred instead of being folded into this answer",
     tool_failure: "A tool this task used failed and nothing recovered it",
     receipt_absent: "No recorded check or result review examined this result after its last change; this does not establish whether other checks ran.",
-    verification_red_unreconciled: "A check of this result failed and no later run of the same check passed.",
+    verification_red_unreconciled: "A check did not pass and no later run recorded as the same check passed; this record does not say whether other checks passed after it.",
     children_undecided: "Some finished sub-task results carry no recorded decision on how this answer used them.",
     expected_output_ungrounded: "A retired check recorded no tool calls or structured answer; it does not assess the written result.",
     residual_tool_errors_without_review: "Tool errors remain in the record.",
@@ -110,6 +110,7 @@ export const TASK_CAUSE_PHRASES = {
     // Recovery finalized a dead attempt from its registered answer; the Done card's delivery
     // disposition keys (the row's typed terminal_delivery), rendered by terminalDeliveryClause.
     finalization_incomplete: "The answer was authored, but the task's finalization did not complete, so its review evidence, artifacts and cost accounting are incomplete.",
+    finalization_incomplete_delivered: "The answer was delivered. The task stopped before its review evidence, artifacts and cost accounting were stored.",
     terminal_delivery_exhausted: "Sending the final answer was not confirmed after the delivery attempts ran out",
     terminal_delivery_unknown: "Delivery of the final answer could not be confirmed because the delivery registry could not be read; the result is in task details.",
     // Presentation only; no producer stamps this as a reason code.
@@ -122,6 +123,13 @@ export const TASK_CAUSE_PHRASES = {
 // a red check no later run passed, finished children without a decision. Twin: outcomes.DETAIL_ONLY_WARNINGS.
 export const DETAIL_ONLY_WARNINGS = ['receipt_absent', 'verification_red_unreconciled', 'children_undecided'];
 export const UNSTARTED_REASONS = new Set(['subagent_executor_unavailable', 'delegate_tools_invisible', 'delegate_visibility_unverified']);
+
+// Twin of working_checkpoint.delivered_answer_cause: the model's own final answer, proven delivered before its
+// task's finalization was cut, reads Done with this cause; '' for every other record.
+export function deliveredAnswerCause(record, reason = 'finalization_incomplete') {
+    return reason === 'finalization_incomplete' && record?.reason_code === reason && record.terminal_origin === 'model_final'
+        && record.finalization_recovery?.answer === 'delivered' ? 'finalization_incomplete_delivered' : '';
+}
 
 export function taskReasonPhrase(code) {
     const raw = String(code || '');
@@ -169,13 +177,33 @@ export function heldCallPhrase(tool, status) {
         : fmt('{noun} was not run: the Safety Supervisor could not read it', { noun });
 }
 
-/** The headline of a finished step that did not succeed: held by Safety (never "failed"), a command's exit, or a
- *  failed step. */
+// What ended a call before it returned, by the word its row names (tools.jsonl ``control_reason``, written by
+// ``tool_call_log.host_settlement``); any other word reads "Interrupted".
+const INTERRUPTED_BY = {
+    pause: 'Interrupted by Pause', stop: 'Interrupted by Stop', wrap_up: 'Interrupted by Wrap up',
+    time_limit: 'Interrupted: time limit', spend_limit: 'Interrupted: spend limit',
+    task_ended: 'Interrupted: the task ended', call_end: 'Interrupted: the call ended', other: 'Interrupted',
+};
+const CONTROL_KIND = {
+    owner_pause: 'pause', pausing: 'pause', owner_pause_before_review_launch: 'pause', cancelled: 'stop',
+    owner_stopped_direct_chat_turn: 'stop', finalize_requested: 'wrap_up', deadline: 'time_limit',
+    execution_deadline: 'time_limit', absolute_ceiling: 'time_limit', spend_limit_global: 'spend_limit',
+    spend_limit_root: 'spend_limit', task_ended: 'task_ended', "the call's end": 'call_end',  // live_tool_lane.CALL_END
+};
+const interruptedBy = (reason) => {
+    const kind = Object.hasOwn(CONTROL_KIND, reason) ? CONTROL_KIND[reason] : 'other';
+    return tr(`task.interrupted.${kind}`, INTERRUPTED_BY[kind]);
+};
+
+/** The headline of a finished step that did not succeed: held by Safety (never "failed"), ended by a control (never
+ *  "failed"), a command's exit, or a failed step. */
 export function failedStepHeadline(evt = {}) {
     const exitCode = Number(evt.exit_code);
+    const tool = evt.tool ? ` · ${evt.tool}` : '';
+    if (evt.status === 'interrupted') return `${interruptedBy(evt.control_reason)}${tool}`;
     return heldCallPhrase(evt.tool, evt.status) || (evt.status === 'non_zero_exit'
         ? `A command returned ${Number.isFinite(exitCode) ? `exit code ${exitCode}` : 'a non-zero exit code'}`
-        : `One of the steps failed${evt.tool ? ` · ${evt.tool}` : ''}`);
+        : `One of the steps failed${tool}`);
 }
 
 // The first error of both lists a view names (unresolved first), how many more, and whether a capped list is named

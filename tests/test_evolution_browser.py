@@ -114,7 +114,13 @@ def test_one_measure_milestones_and_the_chosen_version_beneath(subscription_ui, 
             for (const [b, text] of labels) if (p.x > b.x && p.x < b.x + b.width && p.y > b.y && p.y < b.y + b.height) out.push(text); }
         return [...new Set(out)]; }""")
     assert covered == [], f"the line runs through these milestone labels: {covered}"
-    assert page.locator(".evo-chart text", has_text="no releases").count() == (1 if width > 500 else 0), "the quiet months are a gap"
+    # The quiet months are a break in the axis at every width; its words stand in the break only where the chart's own
+    # box gives the break 54 px (evolution.js `timeAxis`: 40 px under a 420 px axis, the chart keeping 78 px at its end).
+    # The page's box decides, not the window: beside the Dashboard list a 1100 px window holds a chart under that.
+    axis = page.evaluate("() => document.querySelector('.evo-chart').clientWidth") - 78
+    assert page.locator(".evo-chart .evo-ch-break").count() == 1, "the quiet months are a gap"
+    assert page.locator(".evo-chart text", has_text="no releases").count() == (1 if axis >= 420 else 0), \
+        ("the gap names the quiet months where it holds the words", axis)
     assert page.locator("#evo-campaign-chip").inner_text() == "Off"
     # One quiet pointer to the Consciousness tab; its allowance is that tab's fact.
     assert page.locator("#evo-consciousness").inner_text().startswith("Consciousness: sleeping")
@@ -153,6 +159,11 @@ def test_one_measure_milestones_and_the_chosen_version_beneath(subscription_ui, 
     assert page.locator(".evo-chart .evo-ch-strong").text_content() == "26,500 characters", "the newest journal record ends the line"
     assert overflow(page) == {"page": 0, "panel": 0}
     setup_browser.capture(page, f"evolution-identity-{width}")
+    if width > 500:
+        # A desktop window wide enough for the chart's own box names the quiet months in their gap.
+        page.set_viewport_size({"width": 1600, "height": 750})
+        page.wait_for_function("() => [...document.querySelectorAll('.evo-chart text')].some((n) => n.textContent === 'no releases')")
+        assert page.evaluate("() => document.querySelector('.evo-chart').clientWidth") - 78 >= 420
 
 
 @pytest.mark.parametrize("running", [False, True])
@@ -289,7 +300,8 @@ def test_show_more_appears_when_a_narrower_window_starts_clipping_the_body(subsc
 
 
 def test_milestone_labels_follow_the_room_and_never_drop_a_version(subscription_ui):
-    page = open_evolution(subscription_ui, history(), width=1360, height=800)
+    # Wide enough that the page beside the Dashboard list holds a chart with room for more names than a phone's.
+    page = open_evolution(subscription_ui, history(), width=1600, height=800)
     page.locator(".evo-detail-title").wait_for()
     wide = page.locator(".evo-ch-mlabel").count()
     page.set_viewport_size({"width": 390, "height": 844})
@@ -465,6 +477,8 @@ def test_release_words_stay_as_written_in_a_translated_interface(subscription_ui
     page.wait_for_function("() => document.documentElement.lang === 'ru'")
     page.locator(".evo-detail-title").wait_for()
     page.wait_for_function("() => document.querySelector('[data-measure=\"code_lines\"]').textContent === 'Код'")
+    # Below the campaign card the chart starts under a 750 px window's fold: bring it into view before pointing at it.
+    page.locator(".evo-chart-hit").scroll_into_view_if_needed()
     box = page.locator(".evo-chart-hit").bounding_box()
     page.mouse.move(box["x"] + box["width"] * 0.6, box["y"] + 60)
     page.locator(".evo-tip").wait_for(state="visible")

@@ -1,7 +1,7 @@
 import { accountedUpperBound, accountedUpperBoundWithChildren, formatUsd4, isoMicros, plainCauseText, projectMarkdownLines, savedTerminalRowNote } from './utils.js';
 import { cancelCauseClauses, ownerStopEnding } from './cancel_presentation.js';
 import { DETAIL_ONLY_WARNINGS, TASK_CAUSE_PHRASES, UNSTARTED_REASONS, taskReasonPhrase, describedCause, reasonCodesNote, residualToolErrorsPhrase,
-    failedStepHeadline, heldCallPhrase, heldCallsLine } from './task_reason_words.js';
+    failedStepHeadline, heldCallPhrase, heldCallsLine, deliveredAnswerCause } from './task_reason_words.js';
 export { taskReasonPhrase, reasonCodesNote } from './task_reason_words.js';
 import { taskCheckpointLabel, taskCheckpointIdentity, checkpointHasProgressRow, waitEpisode } from './task_checkpoints.js';
 export { taskCheckpointLabel } from './task_checkpoints.js';
@@ -9,7 +9,7 @@ import { coordinatorRouteClause, formatCoordinatorProvenance, harnessPresentatio
 import { acceptanceIncidentClauses } from './acceptance_incident_presentation.js';
 import { fmt, tr } from './i18n.js';
 import { historyRetentionView } from './history_retention.js';
-import { checkFailureView } from './verification_presentation.js';
+import { checkFailureView, redCheckPhrase } from './verification_presentation.js';
 import { hostRowDisplayText, hostTaskMessage } from './host_notice_text.js';
 import { effortEvidenceText } from './effort_evidence.js';
 import { delegatedActivityView } from './delegated_activity.js';
@@ -565,14 +565,14 @@ export function taskReasonDetail(evt, codes = []) {
         const receiptVeto = objective?.receipt_veto;
         clause = receiptVeto?.reason === reason && receiptVeto.detail
             ? String(receiptVeto.detail).split(/\s+/).filter(Boolean).join(' ')
-            : phrase(reason === 'plan_review_advisory' ? planReviewKey(record, reason) : reason);
+            : phrase(reason === 'plan_review_advisory' ? planReviewKey(record, reason) : deliveredAnswerCause(record, reason) || reason);
     }
     if (reviewCause && (reason === reviewCause || bypass[reason] === reviewCause)) clause = '';
     const excluded = ['', 'delegated_custody_unreconciled', 'terminal_delivery_unknown', 'terminal_delivery_exhausted'];
     const warnings = [...(Array.isArray(objective?.warnings) ? objective.warnings : []), objective?.warning || ''];
-    const named = residualToolErrorsPhrase(execution);  // the failure the record holds, in owner words
-    const warningClauses = warnings.filter(w => !excluded.includes(w))
-        .map(w => (w === 'residual_tool_errors_without_review' && named) || taskReasonPhrase(w));
+    // The failure the record holds, in owner words; a record without the fact keeps its code's sentence.
+    const named = { residual_tool_errors_without_review: residualToolErrorsPhrase(execution), verification_red_unreconciled: redCheckPhrase(objective) };
+    const warningClauses = warnings.filter(w => !excluded.includes(w)).map(w => (Object.hasOwn(named, w) && named[w]) || taskReasonPhrase(w));
     const artifacts = record.artifact_bundle?.status || record.artifact_status || record.outcome_axes?.artifacts?.status;
     if (['failed', 'missing'].includes(artifacts)) warningClauses.push(taskReasonPhrase('artifacts_unavailable'));
     if (decision?.open_obligations?.length) warningClauses.push(taskReasonPhrase('open_obligations'));
@@ -638,8 +638,8 @@ export function taskOutcomeSeverity(evt) {
     const artifacts = String(record.outcome_axes?.artifacts?.status || record.artifact_bundle?.status || record.artifact_status || '').toLowerCase();
     const artifactStatus = String(record.artifact_bundle?.status || record.artifact_status || '').toLowerCase();
     if (
-        ((lifecycle === 'failed' || execution === 'failed') && !unanswered)
-        || execution === 'infra_failed'
+        ((lifecycle === 'failed' && !deliveredAnswerCause(record) || execution === 'failed') && !unanswered)
+        || (execution === 'infra_failed' && !deliveredAnswerCause(record))
         || (objective === 'fail' && !authorStopped)
         || (review === 'fail' && !authorFinished)
         || ['failed', 'missing'].includes(artifacts)
@@ -869,9 +869,9 @@ export function summarizeLogEvent(evt) {
         const held = heldCallPhrase(evt.tool, evt.status);  // returned by Safety, or unread by it: no failure
         const failed = !held && (Boolean(evt.is_error) || signalDeath);
         const finished = t === 'tool_call_finished';
-        const label = signalDeath ? `killed (${evt.signal || evt.exit_code})`
-            : failed ? 'failed' : finished ? 'finished' : 'result';
-        return view(held ? 'warn' : failed ? 'error' : finished ? 'done' : 'result', held || `${evt.tool || 'tool'} ${label}`, {
+        const label = signalDeath ? `killed (${evt.signal || evt.exit_code})` : evt.status === 'interrupted'
+            ? `interrupted (${evt.control_reason || 'control'})` : failed ? 'failed' : finished ? 'finished' : 'result';
+        return view(held ? 'warn' : evt.status === 'interrupted' ? 'info' : failed ? 'error' : finished ? 'done' : 'result', held || `${evt.tool || 'tool'} ${label}`, {
             body: shortText(evt.result_preview || (finished ? '' : compactJson(evt.args, 220)), 260),
             meta: taskMeta(formatLogDuration(evt.duration_sec)),
         });
@@ -1497,13 +1497,13 @@ function summarizeChatLiveEventView(evt) {
         if (commandText.full) fullBodyParts.push(`Command: ${commandText.full}`);
         if (errorResult.full) fullBodyParts.push(errorResult.full);
         return chatView({
-            phase: held || evt.status === 'non_zero_exit' ? 'warn' : 'error',
+            phase: held || evt.status === 'non_zero_exit' ? 'warn' : evt.status === 'interrupted' ? 'info' : 'error',
             headline: failedStepHeadline(evt),
             body: shortText(bodyParts.join(' '), 220),
             fullBody: fullBodyParts.join('\n\n'),
             visible: true,
             dedupeKey: toolCallKey(evt, groupId),
-            toolCall: toolObservation(evt, groupId, held ? 'held' : 'error'),
+            toolCall: toolObservation(evt, groupId, held ? 'held' : evt.status === 'interrupted' ? 'interrupted' : 'error'),
         });
     }
 

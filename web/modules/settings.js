@@ -21,9 +21,9 @@
  * path; the row helper never rewrites a field that holds focus or typed text. */
 
 import { settingsReturn } from './dashboard.js';
-import { sectionHoldsTwoPanes } from './layout.js';
+import { currentLayout, sectionHoldsTwoPanes } from './layout.js';
 import { renderBackControl, renderPageHeader, setBackControlTarget } from './page_header.js';
-import { FADE_CLEARANCE, bindScrollFade } from './scroll_fade.js';
+import { revealPastFade, bindScrollFade } from './scroll_fade.js';
 import { readSettings } from './settings_controls.js';
 import { isDoorId, mountSettingsHome, settingsTitle } from './settings_home.js';
 import { settingsPageFor } from './settings_pages.js';
@@ -57,7 +57,7 @@ export function initSettings(ctx = {}) {
     // The header over the columns (docs/DESIGN.md "Page header"): no `Settings` word in the band (the sidebar's row
     // names the place). Over the list (and over the home alone) stands its search field; over a page, its name in the
     // header's one title style, after the one Back where Back leads to a level not on screen (settings.css lays the
-    // lead on the shell's own columns). On a phone the band is `☰ Settings` and the lead is the row under it.
+    // lead on the shell's own columns). A phone's home has one band, `☰ Settings`; its search starts the list.
     const leadHtml = `<div class="settings-lead section-lead" data-settings-lead>
             <span class="settings-lead-col settings-lead-rail section-lead-col section-lead-rail" data-settings-search-slot></span>
             <span class="settings-lead-col settings-lead-page section-lead-col section-lead-page">${renderBackControl({ to: 'Settings', attrs: 'data-settings-back' })}<span class="app-page-lead-title" data-settings-lead-name></span></span>
@@ -70,6 +70,7 @@ export function initSettings(ctx = {}) {
         </div>`;
     document.getElementById('content').appendChild(page);
     const shell = page.querySelector('.settings-shell');
+    const header = page.querySelector('.app-page-header');
     const homeEl = page.querySelector('[data-settings-home]');
     const levelsEl = page.querySelector('.settings-levels');
     const headerBack = page.querySelector('.app-page-header [data-settings-back]');
@@ -102,9 +103,9 @@ export function initSettings(ctx = {}) {
     };
     const home = mountSettingsHome(homeEl, { open: pressed,
         ctx: { ...pageCtx, stateSnapshots } });
-    // The home's search field moves into the header's lead, over the list: the same element, with its listeners.
+    // The same search field, with its listeners and query, follows the list between its home and header.
     const searchField = homeEl.querySelector('.settings-search');
-    if (searchField) page.querySelector('[data-settings-search-slot]')?.append(searchField);
+    const searchSlot = page.querySelector('[data-settings-search-slot]');
     // From a 40rem box Settings always shows two panes; when the list's Ouroboros row is chosen its pane holds
     // Ouroboros's card. Below 40rem the list is one column.
     const card = homeEl.querySelector('[data-settings-card]');
@@ -127,11 +128,34 @@ export function initSettings(ctx = {}) {
         return overviewEl;
     }
     const panes = () => sectionHoldsTwoPanes(page);
+    function placeSearch() {
+        const inHome = currentLayout() === 'stack' && !panes();
+        const parent = inHome ? cardHome : searchSlot;
+        if (!searchField || !parent) return;
+        header.toggleAttribute('data-search-in-home', inHome);
+        if (searchField.parentElement === parent && (!inHome || parent.firstChild === searchField)) return;
+        const active = searchField.contains(document.activeElement) ? document.activeElement : null;
+        if (inHome) parent.insertBefore(searchField, parent.firstChild);
+        else parent.append(searchField);
+        if (active?.isConnected && document.activeElement !== active) active.focus?.({ preventScroll: true });
+    }
     // With two panes and no page open, the page last seen on this device comes back (Models on a first visit, or
     // when that page is no longer there).
-    const ensurePage = () => {
-        if (!panes() || levels.length || ownChosen || opening || !shown()) return;
-        go(lastFirst && !isDoorId(lastFirst) && settingsPageFor(lastFirst) ? lastFirst : 'models');
+    let landing = false;
+    const ensurePage = async () => {
+        if (!panes() || levels.length || ownChosen || opening || !shown() || landing) return;
+        landing = true;
+        const saved = lastFirst;
+        let target = 'models';
+        try {
+            const registered = !isDoorId(saved) && settingsPageFor(saved);
+            if (registered && (!registered.exists || await registered.exists(saved))) target = saved;
+        } catch { /* An unread registry cannot establish that the stored page still exists. */ }
+        landing = false;
+        if (!panes() || levels.length || ownChosen || opening || !shown() || saved !== lastFirst) return;
+        // Open a resolved page directly: unknown-path search paints the home and queues ensurePage again.
+        // Landing never overwrites the device's choice, including while its registry cannot be read.
+        open(target, { under: 0, remember: false });
     };
     let panesBefore = null;
     function placeOverview(level) {
@@ -163,17 +187,25 @@ export function initSettings(ctx = {}) {
     // outside Settings (a capsule's `dashboard:costs`) gets no Back: nobody came from Settings. `main:context` shows
     // Main and does nothing else: the Context capsule is the room's.
     const doorBack = settingsReturn({ layers, openSettings: (path) => openFromOutside(path), id: 'settings-door-back' });
+    let leavingDoor = false;
     async function leave(door, { row = '', back } = {}) {
         const [kind, name] = door.split(':');
         const inside = typeof back === 'string';
-        if (kind === 'dashboard') return openDashboardTab?.(name, inside ? { row, back } : { row });
-        const left = await showPage?.(kind === 'main' ? 'chat' : name);
-        const landed = left !== false && kind === 'page' && inside ? document.getElementById(`page-${name}`) : null;
-        let first = landed && [...landed.children].find((part) => part.matches('.app-page-header'))?.nextElementSibling;
-        if (first?.matches('.app-page-tabs')) first = first.nextElementSibling;
-        if (first?.matches('.dashboard-shell')) doorBack.show(first, back);
-        else if (first) doorBack.show(landed, back, first);
-        return left;
+        leavingDoor = inside;
+        try {
+            if (kind === 'dashboard') return await openDashboardTab?.(name, inside ? { row, back } : { row });
+            const left = await showPage?.(kind === 'main' ? 'chat' : name);
+            const landed = left !== false && kind === 'page' && inside ? document.getElementById(`page-${name}`) : null;
+            let first = landed && [...landed.children].find((part) => part.matches('.app-page-header'))?.nextElementSibling;
+            if (first?.matches('.app-page-tabs')) first = first.nextElementSibling;
+            if (first?.matches('.dashboard-shell')) doorBack.show(first, back);
+            else if (first) doorBack.show(landed, back, first);
+            return left;
+        } finally {
+            // The destination's return replaces the Settings levels without consuming their browser Back entry.
+            leavingDoor = false;
+            syncLayers();
+        }
     }
 
     // `view` is what a door asks its page to show first (Permissions' Reviewers: the Agents list on its reviewers).
@@ -181,6 +213,7 @@ export function initSettings(ctx = {}) {
         const target = String(path || '');
         if (isDoorId(target)) return leave(target, { row, back: state.settingsPath });
         if (target && !settingsPageFor(target)) {
+            ownChosen = true; // an explicit unknown address keeps its search, rather than re-entering landing
             closeLevels(0);
             home.search((target.split('/').filter(Boolean).pop() || '').replace(/[-_]+/g, ' ').trim());
             return true;
@@ -194,8 +227,8 @@ export function initSettings(ctx = {}) {
 
     // `opener` is the control that opened the level, where focus returns: WebKit does not focus a pressed button.
     // A level put aside with unsaved words (`close`) comes back as it was left; any other is drawn anew.
-    function open(path, { row, back, under, opener, view = '' }) {
-        if (!under && path !== lastFirst) {
+    function open(path, { row, back, under, opener, view = '', remember = true }) {
+        if (remember && !under && path !== lastFirst) {
             lastFirst = path;
             try { globalThis.localStorage?.setItem(LAST_PAGE_KEY, path); } catch { /* storage blocked: kept for this load */ }
         }
@@ -327,6 +360,7 @@ export function initSettings(ctx = {}) {
         const level = top();
         state.settingsPath = level?.path || '';
         const overview = placeOverview(level);
+        placeSearch();
         shell.dataset.settingsView = shell.dataset.sectionView = level || overview ? 'page' : 'home';
         if (!level) queueMicrotask(ensurePage);
         paintLead();
@@ -356,15 +390,7 @@ export function initSettings(ctx = {}) {
     function revealInRail() {
         const chosen = homeEl.querySelector('[aria-current="page"]');
         if (!chosen) return;
-        // `block: 'nearest'` by hand (the rail alone scrolls): a row already in the rail's view never moves; one out of
-        // it, or under the fade of an edge where more waits, comes in just past that fade.
-        const rail = homeEl.getBoundingClientRect();
-        const box = chosen.getBoundingClientRect();
-        const above = homeEl.scrollTop > 1 ? FADE_CLEARANCE : 0;
-        const below = homeEl.scrollHeight - homeEl.clientHeight - homeEl.scrollTop > 1 ? FADE_CLEARANCE : 0;
-        if (box.top >= rail.top + above && box.bottom <= rail.bottom - below) return;
-        if (box.top < rail.top + above) homeEl.scrollTop += box.top - rail.top - FADE_CLEARANCE;
-        else homeEl.scrollTop += box.bottom - rail.bottom + FADE_CLEARANCE;
+        revealPastFade(homeEl, chosen);
         places.set(homeEl, homeEl.scrollTop);
     }
 
@@ -372,7 +398,7 @@ export function initSettings(ctx = {}) {
     // top one: in one column every level; in two panes every level below the first (the first stands beside the list,
     // which is not hidden). Settings put away: none.
     function syncLayers() {
-        if (!layers) return;
+        if (!layers || leavingDoor) return;
         const wanted = !shown() ? [] : beside() ? levels.slice(1) : levels;
         layers.batch(() => {
             for (const id of [...layered]) {
@@ -388,11 +414,20 @@ export function initSettings(ctx = {}) {
         });
     }
 
-    // The home reads its answers again whenever it is on screen; a page reads on the signal for its own path.
-    function announce() {
+    // The home reads its answers when it comes on screen (Settings shown, the window seen again, a reconnect, one column
+    // back on the list, a width that brings it beside the page), not at a press beside it; off screen its reads are
+    // dropped. A page reads on the signal for its own path.
+    let listOn = false;
+    function look(again = false) {
+        const on = shown() && !document.hidden && visible(homeEl);
+        if (on && (again || !listOn)) void home.refresh();
+        else if (!on && listOn) home.hide();
+        listOn = on;
+    }
+    function announce(again = false) {
         if (!shown()) return;
-        if (visible(homeEl)) void home.refresh();
         window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: state.settingsPath } }));
+        look(again);
     }
 
     // From outside Settings (app.js `openSettings`): Settings is shown first, and refused when the page left vetoes.
@@ -427,27 +462,31 @@ export function initSettings(ctx = {}) {
     const onPageShown = (event) => {
         doorBack.clear();  // a door's page was left (its own showing came before its row was drawn)
         syncLayers();
-        if (event.detail?.page === 'settings' && !opening) { announce(); ensurePage(); }
+        if (event.detail?.page !== 'settings') look();
+        else if (!opening) { announce(); ensurePage(); }
     };
-    const onVisible = () => { if (!document.hidden) announce(); };
-    const offReconnect = ws?.on?.('open', () => announce());
-    // A width that puts the home beside the page, or takes it away: the layers follow, and the home comes back
-    // where it was left.
+    const onVisible = () => (document.hidden ? look() : announce());
+    const offReconnect = ws?.on?.('open', (event) => announce(Boolean(event?.previouslyConnected)));  // a reconnect, not the first open
+    // A width that puts the home beside the page, or takes it away: the layers follow, the home comes back where it
+    // was left, and reads when it comes on screen.
     const resized = () => {
-        if (panes() !== panesBefore) { paint({ quiet: true }); return; }
-        if (beside() === besideBefore) return;
-        besideBefore = beside();
-        if (besideBefore) homeEl.scrollTop = places.get(homeEl) || 0;
-        paintLead();
-        syncLayers();
+        if (panes() !== panesBefore) paint({ quiet: true });
+        else {
+            placeSearch();
+            if (beside() !== besideBefore) {
+                besideBefore = beside();
+                if (besideBefore) homeEl.scrollTop = places.get(homeEl) || 0;
+                paintLead();
+                syncLayers();
+            }
+        }
+        look();
     };
-    // The shell's box repaints at once. A change of the root font moves the two panes' 40rem while the box keeps its
-    // width: the pane gains or loses the list beside it and the list's rows resize, and those repaint at the next frame
-    // (the repaint resizes them again, a loop the observer would refuse).
+    // A new shell width or root font can move the two panes' 40rem. Repaint at the next frame: moving Search
+    // between the header and list changes these observed boxes again, which a resize callback must not do.
     let frame = 0;
-    const resize = typeof ResizeObserver === 'function' ? new ResizeObserver((entries) => {
-        if (entries.some((entry) => entry.target === shell)) resized();
-        else frame ||= requestAnimationFrame(() => { frame = 0; resized(); });
+    const resize = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
+        frame ||= requestAnimationFrame(() => { frame = 0; resized(); });
     }) : null;
     [shell, levelsEl, homeEl.querySelector('[data-settings-list]')].forEach((box) => box && resize?.observe(box));
     const disposeFade = bindScrollFade(homeEl);

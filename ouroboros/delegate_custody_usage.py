@@ -7,19 +7,22 @@ import logging
 import pathlib
 import time
 from contextlib import contextmanager
-from typing import Any, Dict, Literal, Optional, Tuple
-
-try:  # Python 3.11+
-    from typing import NotRequired, TypedDict  # type: ignore[attr-defined]
-except ImportError:  # pragma: no cover - CI supports Python 3.10.
-    from typing_extensions import NotRequired, TypedDict  # type: ignore[assignment]
+# Standard library only: scripts/safe_test.py imports this chain without site-packages.
+from typing import Any, Dict, Literal, Optional, Tuple, TypedDict
 
 from ouroboros._usage_response import provider_cost_value
 
 log = logging.getLogger(__name__)
 
 
-class CostCustody(TypedDict):
+class _CostCustodyRequired(TypedDict):
+    status: Literal["available", "unavailable"]
+    open_run_ids: list[str]
+    unrecorded_run_ids: list[str]
+    pending_invocation_ids: list[str]
+
+
+class CostCustody(_CostCustodyRequired, total=False):
     """Execution coverage for the amount's scope; never another monetary store.
 
     ``unrecorded_run_ids`` names every run without a matching receipt. Its subset
@@ -28,11 +31,7 @@ class CostCustody(TypedDict):
     Records written before that field lack it; absence keeps their earlier reading.
     """
 
-    status: Literal["available", "unavailable"]
-    open_run_ids: list[str]
-    unrecorded_run_ids: list[str]
-    closed_unrecorded_run_ids: NotRequired[list[str]]
-    pending_invocation_ids: list[str]
+    closed_unrecorded_run_ids: list[str]
 
 
 def unavailable_cost_custody() -> CostCustody:

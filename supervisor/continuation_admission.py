@@ -145,7 +145,7 @@ def action_writers(q: Any, predecessor: str, *, drive_root: Any = None, owner_pa
     exactly as ``conflicting_writers`` — which stays the passive, write-free
     reader every census and GET uses (#1554). ``purpose`` and ``gaps`` are
     passed through unchanged: only the owner's Continue and its held selection
-    name ``CONTINUE_PURPOSE``; Pause and Resume keep the default.
+    name ``CONTINUE_PURPOSE``; Pause and Resume keep the default census.
     """
     from ouroboros.control_actor import accepted_unknown, control_actor
     from ouroboros.local_custody_repair import accept_unknown_custody, repair_ended_local_custody

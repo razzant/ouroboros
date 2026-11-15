@@ -32,7 +32,7 @@ def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscrip
     columns = 1 if viewport[0] <= 760 else 2
     measurements = {}
 
-    def measure_grid(name, selector):
+    def measure_grid(name, selector, expected_columns=columns):
         grid = page.locator(selector).first
         expect(grid).to_be_visible()
         facts = grid.evaluate("""el => ({
@@ -42,7 +42,7 @@ def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscrip
             bodyWidth: document.body.clientWidth, bodyScrollWidth: document.body.scrollWidth,
         })""")
         measurements[name] = facts
-        assert facts["columns"] == columns, facts
+        assert facts["columns"] == expected_columns, facts
         assert facts["scrollWidth"] <= facts["width"] + 1, facts
         assert facts["bodyScrollWidth"] <= facts["bodyWidth"] + 1, facts
         assert facts["titleSize"] == "24px", facts
@@ -83,14 +83,15 @@ def test_connection_discovery_feedback_stays_visible_on_compact_screens(subscrip
         expect(status).to_have_css("font-size", "12px")
 
     page.click("#next-btn")
-    # The Review choices are two columns; the separate Access grid deliberately
-    # has its own count, so it is not part of this two-column contract.
-    measure_grid("review", ".wizard-choice-grid")
+    # Reviewers are chosen under Models; this step has the four Access choices and the reviewer summary.
+    measure_grid("access", ".runtime-mode-card .wizard-choice-grid", 1 if viewport[0] <= 760 else 4)
+    expect(page.locator('[data-reviewers-note]')).to_be_visible()
+    assert page.locator('[data-runtime-mode]').count() == 4
     # What each choice means, and the step's own sentence, are readable at every size: the step scrolls under
     # the pinned footer instead.
     expect(page.locator('.step-copy')).to_be_visible()
     meanings = page.locator('.wizard-choice p')
-    assert meanings.count() == 6, meanings.count()
+    assert meanings.count() == 4, meanings.count()
     for index in range(meanings.count()):
         expect(meanings.nth(index)).to_be_visible()
     expect(page.locator('#next-btn')).to_be_in_viewport()
@@ -174,7 +175,7 @@ def test_connection_discovery_survives_general_refresh_without_replacing_other_s
     ):
         ui['backend'].update(catalog_response=response, catalog_status=status)
         page.click('#back-btn')
-        with page.expect_response('**/api/model-catalog'):
+        with page.expect_response('**/api/onboarding/model-catalog'):
             page.click('#onboarding-access-retry')
         expect(page.locator('#onboarding-access-retry')).to_be_enabled()
         page.click('#next-btn')

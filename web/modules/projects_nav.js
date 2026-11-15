@@ -64,9 +64,10 @@ export function whenOf(at, now = Date.now()) {
     return t.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' });
 }
 
-/** The one line a row says under its name: what waits for the owner, else what its work is doing, else nothing. */
+/** The one line a row says under its name: what waits for the owner (the waiting question's own opening words when the
+ *  room has them, else the sentence that says what waits), else what its work is doing, else nothing. */
 export function rowLine(summary = IDLE_SUMMARY) {
-    if (summary.owner) return { kind: 'ask', text: summary.note || summary.word || '' };
+    if (summary.owner) return { kind: 'ask', text: summary.ask?.words || summary.note || summary.word || '' };
     if (!['moving', 'still', 'pause'].includes(summary.mark)) return { kind: 'rest', text: '' };
     const doing = summary.focus || summary.name || summary.line || '';
     if (summary.mark === 'pause') return { kind: 'rest', text: [summary.word, doing].filter(Boolean).join(' · ') };
@@ -474,6 +475,7 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
         const keyed = new Map([...list.children].filter((el) => el.dataset.navProjectId)
             .map((el) => [el.dataset.navProjectId, el]));
         const focused = document.activeElement;
+        const ownedFocus = focused && list.contains(focused);
         const nodes = [...shown.map((project) => itemFor(project, keyed)), ...after];
         nodes.forEach((node, index) => {
             if (list.children[index] !== node) list.insertBefore(node, list.children[index] || null);
@@ -486,6 +488,11 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
         if (anchor?.isConnected) keepOnScreen(anchor, anchorTop);
         // Moving an existing node can blur it even though its identity survives.
         if (focused?.isConnected && list.contains(focused) && focused !== document.activeElement) focused.focus({ preventScroll: true });
+        // A removed row hands its lost keyboard to Find; a control that already took it keeps it.
+        else if (ownedFocus && !focused.isConnected &&
+            (!document.activeElement || document.activeElement === document.body || document.activeElement === focused)) {
+            keyboardHome()?.focus({ preventScroll: true });
+        }
         if (state.handoff && !waiting) handOff(state.handoff, nodes);
         repositionProjectRowMenu();  // anchoring may have scrolled its row after visibility settled
         if (relisted) onShown();  // app.js says its marks and ☰ again, in place: no read, no render
@@ -528,8 +535,10 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
             button.toggleAttribute('data-solo', !said?.text);
             // The pin is said in the row's full name (its tooltip and accessible name); at rest nothing draws it.
             const name = `${row.name || row.id}${row.pinned === true ? ' · Pinned' : ''}`;
+            // A waiting question's words follow the state's in the row's name, as they stand in its line.
+            const asked = !deleting && summary.owner ? summary.ask?.words || '' : '';
             setActivityOwnerName(button, deleting ? `${name} — Deleting…${row.delete_error ? ` ${row.delete_error}` : ''}` : name,
-                markWords(summary, unreadRow));
+                [markWords(summary, unreadRow), asked].filter(Boolean).join(' · '));
         }
     }
 

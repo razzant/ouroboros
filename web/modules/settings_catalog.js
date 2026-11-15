@@ -1,5 +1,5 @@
 import { accountRows, claudexorStatus, READ_OK } from './claudexor_status_store.js';
-import { apiFetch } from './api_client.js';
+import { apiFetch, fetchJson } from './api_client.js';
 import { setResult } from './ui_primitives.js';
 import { parseModelSource } from './route_editor_primitives.js';
 export const MODEL_CATALOG_TIMEOUT_MS = 25000;
@@ -91,13 +91,30 @@ export function mergeModelCatalog(previous = {}, incoming = {}) {
     };
 }
 
-/** Overlay successful connection-local lists on a general catalog, preserving its read provenance.
+/** Overlay successful connection-local lists on a general catalog, preserving its read provenance: a general
+ * catalog nobody read yet stays unread (the overlay's own item list is no read of it).
  * An empty list replaces that source too; identical model names in other sources are unrelated. */
 export function withConnectionCatalogs(catalog = {}, connectionCatalogs = {}) {
-    return { ...catalog, items: [
+    return { ...catalog, read_state: catalogReadState(catalog), items: [
         ...(catalog.items || []).filter((item) => !Object.hasOwn(connectionCatalogs, parseModelSource(item.value || item.id).source)),
         ...Object.values(connectionCatalogs).flat(),
     ] };
+}
+
+/** One read of the catalog an unsaved setup draft's access gives (POST /api/onboarding/model-catalog; the server
+ * knows a typed key only from the draft), bounded like every catalog read: `{ promise, abort }`. The promise answers
+ * a catalog to merge; a transport failure or a timeout is one too (`read_state: 'transport'`), never a rejection. */
+export function readDraftCatalog(draft) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), MODEL_CATALOG_TIMEOUT_MS);
+    const promise = fetchJson('/api/onboarding/model-catalog', { method: 'POST', cache: 'no-store', signal: controller.signal,
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(draft) }).then((catalog) => {
+        if (!catalog || typeof catalog !== 'object') throw new Error('Model catalog response is unreadable.');
+        return catalog;
+    }).catch((error) => ({ read_state: 'transport',
+        errors: [{ error: error.name === 'AbortError' ? 'Model catalog request timed out.' : error.message }] }))
+        .finally(() => clearTimeout(timer));
+    return { promise, abort: () => controller.abort() };
 }
 
 /** Keep last-known native choices only for account reads that did not succeed. */

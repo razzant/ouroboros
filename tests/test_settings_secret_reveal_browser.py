@@ -82,6 +82,9 @@ def test_saved_secret_show_preserves_settings_and_drafts(direct_server_with_data
             preview = page.locator("#s-anthropic-reveal")
             mask = field.input_value()
             assert mask == ANTHROPIC[:8] + "..."
+            # An arriving Settings page slides 8 px in from the right (settings.css `[data-settings-arrive]`): the
+            # field's place is measured once the page has come in.
+            page.wait_for_function("() => !document.querySelector('#page-settings [data-settings-arrive]')")
             page.screenshot(path=str(evidence / f"secret-before-{engine}.png"))
             masked_box = field.bounding_box()
             toggle.focus()

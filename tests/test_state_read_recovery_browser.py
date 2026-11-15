@@ -179,7 +179,8 @@ def test_the_restart_confirmation_opens_although_its_census_read_never_answers(d
             dialog.locator("[data-confirm-ok]").click()
             page.wait_for_function("window.__restartSent.length === 1", timeout=10_000)
             sent = page.evaluate("window.__restartSent")
-            assert sent == [{"frame": {"type": "command", "cmd": "/restart"}, "options": {"queue": False}}]
+            assert sent == [{"frame": {"type": "command", "cmd": "/restart", "ui_control": {"name": "restart"}},
+                             "options": {"queue": False}}]
             assert page.evaluate("window.__restartLeak") is False, "a /restart frame tried to leave the page"
             stages.append("confirmed: one /restart frame reached the recorder, queue:false; none left the page")
             assert not errors, errors

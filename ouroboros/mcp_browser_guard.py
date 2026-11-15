@@ -17,7 +17,7 @@ asks) sends one UTF-8 JSON line per TCP connection and gets one line back:
   request, the agent's or the human's in the shared tab.
 
 Every decision reads the session's bound ToolContext with the actor facts
-``tools/browser.py`` passes for its own route (restricted profile, effective mode);
+``tools/browser_session.py`` passes for its own route (restricted profile, effective mode);
 no predicate is copied here or into JavaScript. The client treats anything but the
 exact allowance as a block. Decisions run on this listener's worker threads, never
 on the MCP SDK event loop, so DNS inside the policy cannot stall the session's

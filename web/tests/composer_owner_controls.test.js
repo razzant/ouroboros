@@ -1047,6 +1047,44 @@ test('a row without the model keeps the fit it had: names, then the widest value
     m.controls.destroy();
 });
 
+test('latest occupies its reserved pad, not a second share of the closed capsules line', () => {
+    for (const latest of [false, true]) {
+        const store = createModelCatalogStore({ readCatalog: async () => ({ items: [] }), readPreferences: async () => ({}) });
+        const m = mountPair({ subagents: true, model: { store } });
+        if (latest) {
+            const arrow = new ElementStub('button', m.doc);
+            arrow.className = 'chat-scroll-bottom-btn';
+            arrow.getBoundingClientRect = () => ({ top: -52, bottom: -8, width: 44 });
+            m.row.appendChild(arrow);
+        }
+        const line = layRow(m, { width: 370, values: { model: 50, subagents: 100, context: 100, effort: 100 } });
+        m.controls.syncState({});
+        assert.deepEqual(line.said(), ['values', undefined, '61px'], 'the neighbours keep their values while Model fits whole');
+        m.controls.destroy();
+    }
+});
+
+test('a closed refit reads settled values even when their previous width was still animating', () => {
+    for (const moving of [false, true]) {
+        const store = createModelCatalogStore({ readCatalog: async () => ({ items: [] }), readPreferences: async () => ({}) });
+        const m = mountPair({ subagents: true, model: { store } });
+        const line = layRow(m, { width: 370, values: { model: 50, subagents: 100, context: 100, effort: 100 } });
+        for (const el of [m.modelEl, m.subagentsEl, m.contextEl, m.effortEl]) {
+            const value = el.querySelector('.chat-capsule-value');
+            const settled = value.getBoundingClientRect;
+            // A CSS transition can still report the old zero width after the fitting cap was removed.
+            value.getBoundingClientRect = () => moving && !m.row.dataset.ownerFitting
+                ? { ...settled(), width: 0 } : settled();
+        }
+        for (let repeat = 0; repeat < 2; repeat += 1) {
+            m.controls.syncState({});
+            assert.deepEqual(line.said(), ['values', undefined, '61px'], 'repeated fits use the full words, not an intermediate width');
+            assert.equal(m.row.dataset.ownerFitting, undefined, 'the next owner gesture keeps its transitions');
+        }
+        m.controls.destroy();
+    }
+});
+
 test('a phone\'s ☰, gone down beside the field while the row folds, is not the line the capsules are read by', () => {
     const m = mountPair();
     const menu = new ElementStub('button', m.doc);

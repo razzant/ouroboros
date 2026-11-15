@@ -10,8 +10,10 @@ Isolated roots only; the supervisor's probe is a stub that proves one task absen
 """
 from __future__ import annotations
 
+import copy
+import json
 import pathlib
-from typing import Callable, Dict
+from typing import Callable, Dict, List, Optional
 
 from ouroboros import maintenance_jobs, server_maintenance, store_import
 from ouroboros import subagent_worktrees as trees
@@ -126,6 +128,120 @@ def test_drive_settlement_holds_a_busy_read_for_the_next_pass_and_an_unreadable_
     row = maintenance_jobs.job(data, "drive_settlement")
     assert not (data / "task_drives" / "busy").exists() and row["released"] == 1
     assert [(hold["class"], hold["example"]) for hold in row["holds"]] == [("task_result_unreadable", "torn")]
+
+
+# The pass's event names what each layout released and kept; its young drives (the retention rule, not a hold)
+# are one count per layout, so the row does not grow with them (#3237).
+YOUNG = "younger_than_retention"
+CLOCK = "2026-11-14T12:00:00.000001+00:00"
+
+
+def _root(tmp_path: pathlib.Path, name: str) -> pathlib.Path:
+    root = tmp_path / name
+    root.mkdir()
+    store_import.ensure_current_store(root)
+    return root
+
+
+def _layout(name: str, young: int, **fields) -> Dict:
+    """A layout's report shaped as ``headless._prune_drives`` returns it: ``young`` young drives interleaved with
+    the drives the event keeps naming (a live one, a retained verdict with its reason, one not terminal)."""
+    not_terminal = "parent_not_terminal" if name == "headless" else "task_not_terminal"
+    named = [{"task_id": f"{name}-held", "reason": "task_live"},
+             {"task_id": f"{name}-rested", "reason": "custody_unchanged", "retained": "child_result_unadopted"},
+             {"task_id": f"{name}-running", "reason": not_terminal, "status": "running"}]
+    rows, third = [{"task_id": f"{name}-young-{index}", "reason": YOUNG} for index in range(young)], young // 3
+    return {"retention_days": 7, "scanned": 1500, "pruned": [], "errors": [], "deferred": [f"{name}-later"],
+            "skipped": [*rows[:third], named[0], *rows[third:2 * third], named[1], *rows[2 * third:], named[2]],
+            "cursor": f"{name}-cursor", "rested": False, "arrivals": [f"{name}-new"],
+            "custody_pending": [{"task_id": f"{name}-rested", "reason": "child_result_unadopted"}], **fields}
+
+
+def _drive_pass(root: pathlib.Path, monkeypatch, headless_report: Dict, direct_report: Dict, *,
+                mailboxes: Optional[Dict] = None) -> List[bytes]:
+    """One real ``_run_drive_custody_pass`` (holds, job row, ``record_pass``, events.jsonl) over two stubbed
+    layout reports at a fixed clock; the drive settlement event lines written so far, raw."""
+    from ouroboros import headless, owner_mailbox
+
+    def walking(report: Dict) -> Callable:
+        def prune(*_args, **kwargs):
+            kwargs["rested"]()  # a pass that walks decodes the retained verdicts
+            return report
+        return prune
+
+    monkeypatch.setattr(server_maintenance, "DATA_DIR", root)
+    monkeypatch.setattr(maintenance_jobs, "utc_now_iso", lambda *_a, **_k: CLOCK)
+    monkeypatch.setattr(server_maintenance, "settlement_verdicts", lambda _root: {
+        "headless-rested": {"reason": "child_result_unadopted"}, "direct-rested": {"reason": "child_result_unadopted"}})
+    monkeypatch.setattr(headless, "prune_headless_task_drives", walking(headless_report))
+    monkeypatch.setattr(headless, "prune_task_drives", walking(direct_report))
+    monkeypatch.setattr(owner_mailbox, "sweep_settled_owner_mailboxes",
+                        lambda *_a, **_k: mailboxes or {"removed": [], "kept": 0})
+    server_maintenance._run_drive_custody_pass()
+    path = root / "logs" / "events.jsonl"
+    lines = path.read_bytes().splitlines() if path.exists() else []
+    return [line for line in lines if json.loads(line)["type"] == "headless_task_drive_prune"]
+
+
+def test_drive_settlement_event_counts_its_young_drives_and_keeps_every_other_fact(tmp_path, monkeypatch):
+    """Each layout in the event keeps every field as its prune returned it and every kept drive named, in order (a
+    retained verdict with its ``retained``), and names no young drive; the prune's own reports stay as they
+    were, so the holds and the job row are judged from the whole of them."""
+    root = _root(tmp_path, "data")
+    headless_report = _layout("headless", 7)
+    direct_report = _layout("direct", 2, pruned=[{"task_id": "direct-gone", "path": "/drives/direct-gone"}],
+                            errors=[{"task_id": "direct-torn", "error": "OSError: torn"}])
+    before, mailboxes = copy.deepcopy([headless_report, direct_report]), {"removed": ["t-mail"], "kept": 1}
+    [line] = _drive_pass(root, monkeypatch, headless_report, direct_report, mailboxes=mailboxes)
+    assert [headless_report, direct_report] == before, "the prune's own reports are not changed"
+    event, row = json.loads(line), maintenance_jobs.job(root, "drive_settlement")
+    for name, original, young in (("headless", headless_report, 7), ("direct", direct_report, 2)):
+        logged = event["report"][name]
+        assert list(logged) == [*original, "younger_than_retention_count"] and logged["younger_than_retention_count"] == young
+        assert logged["skipped"] == [item for item in original["skipped"] if item["reason"] != YOUNG]
+        assert {key: value for key, value in logged.items() if key not in ("skipped", "younger_than_retention_count")} == \
+            {key: value for key, value in original.items() if key != "skipped"}
+    assert b'"reason": "younger_than_retention"' not in line and b"-young-" not in line
+    assert (event["released"], event["holds"], event["errors"]) == (row["released"], row["holds"], row["errors"])
+    assert [(hold["class"], hold["count"]) for hold in row["holds"]] == [
+        ("child_result_unadopted", 2), ("parent_not_terminal", 1), ("task_live", 2), ("task_not_terminal", 1)]
+    assert row["released"] == 1 and row["errors"] == ["direct-torn: OSError: torn"]
+    assert event["report"]["mailboxes"] == mailboxes
+
+
+def test_drive_settlement_event_does_not_grow_with_its_young_drives(tmp_path, monkeypatch):
+    """Passes alike but for 0, 1, 100 or 1000 young drives per layout write rows that differ only in the count's
+    digits (each young drive used to add its own entry); a report without a ``skipped`` list gets none."""
+    lines = {young: _drive_pass(_root(tmp_path, f"young-{young}"), monkeypatch, _layout("headless", young),
+                                _layout("direct", young))[-1] for young in (0, 1, 100, 1000)}
+
+    def counts(event: Dict) -> List[int]:  # each layout's count, taken out of the row
+        return [event["report"][name].pop("younger_than_retention_count") for name in ("headless", "direct")]
+
+    none = json.loads(lines[0])
+    assert counts(none) == [0, 0]
+    for young, line in lines.items():
+        event = json.loads(line)
+        assert counts(event) == [young, young] and event == none, "the rows differ only in the count"
+        assert len(line) - len(lines[0]) == 2 * (len(str(young)) - 1), "and only by its digits"
+    bare = {"pruned": [], "errors": [], "cursor": "", "arrivals": []}
+    [line] = _drive_pass(_root(tmp_path, "bare"), monkeypatch, bare, _layout("direct", 0))
+    assert json.loads(line)["report"]["headless"] == {**bare, "younger_than_retention_count": 0}
+
+
+def test_drive_settlement_event_is_written_when_it_was_before(tmp_path, monkeypatch):
+    """Counting young drives leaves the rest law as it was: a pass whose only change is how many drives are young
+    writes nothing; a new hold, an error or a removed mailbox writes the event."""
+    root = _root(tmp_path, "data")
+    assert len(_drive_pass(root, monkeypatch, _layout("headless", 100), _layout("direct", 3))) == 1, "the first pass"
+    assert len(_drive_pass(root, monkeypatch, _layout("headless", 1000), _layout("direct", 0))) == 1, "only young drives moved"
+    busy = _layout("headless", 1000)
+    busy["skipped"].append({"task_id": "headless-busy", "reason": "store_busy"})
+    assert len(_drive_pass(root, monkeypatch, busy, _layout("direct", 0))) == 2, "a new hold"
+    torn = _layout("direct", 0, errors=[{"task_id": "direct-torn", "error": "OSError: torn"}])
+    assert len(_drive_pass(root, monkeypatch, busy, torn)) == 3, "an error"
+    assert len(_drive_pass(root, monkeypatch, busy, _layout("direct", 0))) == 3, "nothing new"
+    assert len(_drive_pass(root, monkeypatch, busy, _layout("direct", 0), mailboxes={"removed": ["t-mail"], "kept": 0})) == 4
 
 
 # ---- private copies ---------------------------------------------------------------------------------------------

@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from tests.settings_browser_helpers import go_back, open_settings
+from tests.settings_browser_helpers import open_settings, top_path
 from tests.test_subscription_setup_browser import capture
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui  # the suite's fixture
 from tests.ui_clipboard_sink import INSTALL, recorded, set_sink
@@ -130,9 +130,12 @@ def test_the_address_row_has_one_copy_button_that_copies_the_current_address(sub
     capture(page, f"settings-lan-copy-{engine}-phone")
     page.set_viewport_size({"width": 1360, "height": 900})
 
-    # One listener lives as long as the page is open: opened again after Back, one press still copies once.
+    # One listener lives as long as the page is open: left and opened again, one press still copies once. Beside the
+    # list a first-level page has no Back; the list's Ouroboros row puts it away (docs/DESIGN.md "Settings").
     set_sink(page, "ok", True, reset=True)
-    assert go_back(page) == ""
+    page.locator("#page-settings [data-settings-overview-row]").click()
+    page.locator('#page-settings [data-settings-page="computer"]').wait_for(state="detached")
+    assert top_path(page) == ""
     _read_again(page)
     row.get_by_role("button", name="Copy link").click()
     expect(toasts.last).to_have_text("LAN URL copied.")

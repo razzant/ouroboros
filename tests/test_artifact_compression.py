@@ -25,7 +25,7 @@ def _fake_ditto(monkeypatch, run):
     monkeypatch.setattr(storage, "sys", SimpleNamespace(platform="darwin"))
     monkeypatch.setattr(storage, "subprocess", SimpleNamespace(
         run=run, DEVNULL=subprocess.DEVNULL, SubprocessError=subprocess.SubprocessError))
-    monkeypatch.setattr(storage, "_may_share", lambda path: False)
+    monkeypatch.setattr(storage, "_clone_lives", lambda path: False)
 
 
 @pytest.mark.parametrize("failure", ["unavailable", "timeout", "sha256"])

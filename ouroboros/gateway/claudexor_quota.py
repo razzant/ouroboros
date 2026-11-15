@@ -14,6 +14,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
+import copy
+from concurrent.futures import Future
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from starlette.requests import Request
@@ -44,6 +48,54 @@ def _refresh_quota(target: dict | None = None) -> Dict[str, Any]:
         if capabilities["refresh"]:
             return gateway.refresh_quota(target=target, view="resources")
         return gateway.refresh_quota()
+
+
+_REFRESH_LOCK = threading.Lock()
+_REFRESH_FLIGHTS: dict[tuple, Future] = {}
+
+
+def _shared_refresh(target=None):
+    """Join an identical refresh still in flight; never reuse a completed attempt.
+
+    Exact-target and all-account POSTs remain separate: neither a legacy full
+    envelope nor a targeted refusal proves the other request's result.
+    """
+    from ouroboros.claudexor_daemon import owned_config_dir
+
+    target = copy.deepcopy(target)
+    key = (str(owned_config_dir()), json.dumps(target, sort_keys=True))
+    with _REFRESH_LOCK:
+        call = _REFRESH_FLIGHTS.get(key)
+        owner = call is None
+        if owner:
+            call = Future()
+            _REFRESH_FLIGHTS[key] = call
+    if owner:
+        started_at = datetime.now(timezone.utc).isoformat()
+        try:
+            envelope = _refresh_quota(target) if target is not None else _refresh_quota()
+            if not isinstance(envelope, dict):  # the engine's answer, never the owner's request
+                raise ClaudexorUnavailable("malformed_response", "The quota refresh answer is not an object")
+            outcome = {**envelope, "refresh_attempt": {
+                "started_at": started_at,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }}
+        except BaseException as exc:
+            outcome = exc
+        # Retire this flight (never a newer one) before publishing: a request arriving
+        # once the attempt has completed starts its own instead of joining a finished one.
+        with _REFRESH_LOCK:
+            if _REFRESH_FLIGHTS.get(key) is call:
+                del _REFRESH_FLIGHTS[key]
+        if isinstance(outcome, BaseException):
+            call.set_exception(outcome)
+        else:
+            call.set_result(outcome)
+    result = copy.deepcopy(call.result())
+    # This is host transport provenance, not a new provider observation: a joined
+    # attempt began before this HTTP request, possibly before a reset it should read back.
+    result["refresh_attempt"]["reused"] = not owner
+    return result
 
 
 def _account_reset(*, request: dict | None = None, key: str = "", operation_id: str = "") -> dict:
@@ -85,8 +137,8 @@ async def api_claudexor_quota_refresh(request: Request) -> JSONResponse:
         if "target" in body:
             if not _target_valid(body["target"]):
                 return json_error("target requires non-empty harness and profile_id strings", 400)
-            return JSONResponse(await asyncio.to_thread(_refresh_quota, body["target"]))
-        return JSONResponse(await asyncio.to_thread(_refresh_quota))
+            return JSONResponse(await asyncio.to_thread(_shared_refresh, body["target"]))
+        return JSONResponse(await asyncio.to_thread(_shared_refresh))
     except (ValueError, TypeError):
         return json_error("Invalid JSON request", 400)
     except ClaudexorUnavailable as exc:

@@ -56,7 +56,7 @@ def fake_darwin(monkeypatch):
     monkeypatch.setattr(artifact_storage, "sys", SimpleNamespace(platform="darwin"))
     monkeypatch.setattr(artifact_storage, "subprocess", SimpleNamespace(
         run=ditto, DEVNULL=subprocess.DEVNULL, SubprocessError=subprocess.SubprocessError))
-    monkeypatch.setattr(artifact_storage, "_may_share", lambda path: False)
+    monkeypatch.setattr(artifact_storage, "_clone_lives", lambda path: False)
     return calls
 
 
@@ -77,12 +77,48 @@ def test_real_apfs_keeps_size_bytes_and_sha_while_allocation_drops(tmp_path):
 
 
 @darwin
-def test_real_apfs_clone_is_kept_because_it_may_share_blocks(tmp_path):
+def test_real_apfs_keeps_a_file_while_a_full_clone_lives_and_compresses_it_once_the_clone_is_gone(tmp_path):
     source = _write(tmp_path / "source.log")
     assert artifact_storage.clone_file(source, tmp_path / "clone.log")
     assert os.lstat(source).st_nlink == 1, "a clone is invisible to nlink"
-    assert artifact_storage.compression_outcome(source) == "shared"
+    # Before macOS 14 the volume counts no clones: the mark then keeps the file either way, as unknown.
+    counted = artifact_storage._extended_attribute(source, 0x1000, "I")
+    kept, freed = ("shared", "compressed") if counted else ("share_unknown", "share_unknown")
+    assert artifact_storage.compression_outcome(source) == kept
+    assert artifact_storage.clone_file(source, tmp_path / "second.log")
+    os.unlink(tmp_path / "clone.log")
+    assert artifact_storage.compression_outcome(source) == kept, "one full clone left is still one"
+    os.unlink(tmp_path / "second.log")  # APFS leaves the may-share mark on the survivor
+    assert artifact_storage.compression_outcome(source) == freed, "a mark without a living clone keeps nothing"
+    grown = _write(tmp_path / "grown.log")
+    assert artifact_storage.clone_file(grown, tmp_path / "earlier.log")
+    with open(grown, "ab") as writer:  # a log copied mid-write: the two have diverged
+        writer.write(TEXT * 4096)
+    assert artifact_storage.compression_outcome(grown) == freed and (tmp_path / "earlier.log").read_bytes() == TEXT * 4096
     assert artifact_storage.compression_outcome(_write(tmp_path / "private.log")) == "compressed"
+
+
+def test_a_once_cloned_file_is_shared_only_while_the_volume_counts_another_full_clone(monkeypatch):
+    """Where the count is not answered (before macOS 14, a volume that returns none) the mark keeps the file, as unknown."""
+    answers, asked = {}, []
+    monkeypatch.setattr(artifact_storage, "_extended_attribute",
+                        lambda path, attribute, layout: asked.append(attribute) or answers.get(attribute))
+    flags, clones = 0x200, 0x1000
+    assert artifact_storage._clone_lives("file") is None, "no extended flags: the volume does not say"
+    answers[flags] = 0x10
+    assert artifact_storage._clone_lives("file") is False and clones not in asked, "never cloned: the count is not asked"
+    assert artifact_storage._may_share("file") is False
+    answers[flags] = 0x41
+    assert artifact_storage._clone_lives("file") is True and clones not in asked, "every block shared: a full clone lives"
+    answers[flags] = 0x1
+    assert artifact_storage._clone_lives("file") is None, "marked and no count answered: unknown, kept"
+    answers[clones] = 0
+    assert artifact_storage._clone_lives("file") is None, "no such count: unknown, kept"
+    answers[clones] = 2
+    assert artifact_storage._clone_lives("file") is True
+    answers[clones] = 1
+    assert artifact_storage._clone_lives("file") is False, "marked once, no full clone left"
+    assert artifact_storage._may_share("file") is True, "the mark stays: it proves a clone was made, never that one lives"
 
 
 def test_each_floor_guard_keeps_its_file_before_any_rewrite(tmp_path, fake_darwin, monkeypatch):
@@ -97,11 +133,11 @@ def test_each_floor_guard_keeps_its_file_before_any_rewrite(tmp_path, fake_darwi
     assert artifact_storage.compression_outcome(noise) == "incompressible"
     assert artifact_storage.compression_outcome(folder) == "not_regular"
     plain = _write(tmp_path / "plain.log")
-    monkeypatch.setattr(artifact_storage, "_may_share", lambda path: True)
+    monkeypatch.setattr(artifact_storage, "_clone_lives", lambda path: True)
     assert artifact_storage.compression_outcome(plain) == "shared"
-    monkeypatch.setattr(artifact_storage, "_may_share", lambda path: None)
+    monkeypatch.setattr(artifact_storage, "_clone_lives", lambda path: None)
     assert artifact_storage.compression_outcome(plain) == "share_unknown", "unknown sharing is kept"
-    monkeypatch.setattr(artifact_storage, "_may_share", lambda path: False)
+    monkeypatch.setattr(artifact_storage, "_clone_lives", lambda path: False)
     monkeypatch.setattr(artifact_storage.shutil, "disk_usage", lambda path: SimpleNamespace(free=1024))
     assert artifact_storage.compression_outcome(plain) == "low_space"
     assert fake_darwin == [], "no guard reached ditto"
@@ -133,7 +169,7 @@ def test_the_compression_sibling_carries_its_own_tag_inside_the_atomic_signature
     monkeypatch.setattr(artifact_storage, "sys", SimpleNamespace(platform="darwin"))
     monkeypatch.setattr(artifact_storage, "subprocess", SimpleNamespace(
         run=ditto, DEVNULL=subprocess.DEVNULL, SubprocessError=subprocess.SubprocessError))
-    monkeypatch.setattr(artifact_storage, "_may_share", lambda path: False)
+    monkeypatch.setattr(artifact_storage, "_clone_lives", lambda path: False)
     assert artifact_storage.compression_outcome(_write(tmp_path / "out.log")) == "failed"
     [sibling] = written
     assert sibling.parent == tmp_path and ".out.log.decmpfs.tmp." in sibling.name
@@ -152,7 +188,7 @@ def test_the_jobs_ditto_runs_at_the_utility_disk_tier_and_a_patch_writers_does_n
     monkeypatch.setattr(artifact_storage, "sys", SimpleNamespace(platform="darwin"))
     monkeypatch.setattr(artifact_storage, "subprocess", SimpleNamespace(
         run=ditto, DEVNULL=subprocess.DEVNULL, SubprocessError=subprocess.SubprocessError))
-    monkeypatch.setattr(artifact_storage, "_may_share", lambda path: False)
+    monkeypatch.setattr(artifact_storage, "_clone_lives", lambda path: False)
     path = _write(tmp_path / "out.log")
     assert artifact_storage.compression_outcome(path, background=True) == "failed"
     assert artifact_storage.compression_outcome(path) == "failed"
@@ -764,13 +800,18 @@ def test_finished_task_sources_are_offered_and_their_neighbours_are_not(data, re
 
 
 def test_a_pass_finished_under_the_old_scope_walks_the_old_terminal_backlog_once(data, recorded):
-    """No terminal write will ever name these tasks again: the coverage fact alone makes the job due."""
+    """No terminal write will ever name these tasks again, and no change this seat home: the coverage fact alone
+    makes the job due, and a record the old floor kept is asked once more."""
+    from ouroboros.task_results import write_task_result
+
     old = _sources(data, "old-terminal")
+    _home, seat = _seat(data, "done", "op-1")
+    write_task_result(data, "done", "completed")
     _rest_row(data)
     row = maintenance_jobs.job(data, job.JOB)
     assert job.due(data, row, {}, False), "the old scope's counter is no proof for the wider one"
     assert _run(data)["state"] == "done"
-    assert {path for path, _owned in recorded} == set(old.values())
+    assert {path for path, _owned in recorded} == {*old.values(), *seat.values()}
     assert maintenance_jobs.job(data, job.JOB)["counter"] == job._counter(data)
     assert _run(data) is None, "and then at rest"
 
@@ -820,7 +861,7 @@ def test_a_stop_inside_the_new_coverage_resumes_at_its_cursor_and_keeps_the_old_
 
 
 def test_a_seat_home_owed_by_the_old_pass_survives_the_restart(data, recorded, monkeypatch):
-    """An old later pass stopped among the seat homes: ``since`` already moved, so only ``owed`` names this home."""
+    """An old later pass stopped among the seat homes: the new coverage walks every home again, this one among them."""
     from ouroboros.task_results import write_task_result
 
     home, files = _seat(data, "done", "op-1")
@@ -831,7 +872,8 @@ def test_a_seat_home_owed_by_the_old_pass_survives_the_restart(data, recorded, m
               owed={"evidence": [], "seats": [home.name]})
     monkeypatch.setattr(job, "FILES_PER_RUN", 1)
     assert _run(data)["state"] == "pending"
-    assert maintenance_jobs.job(data, job.JOB)["owed"]["seats"] == [home.name], "a stop in the evidence plane keeps it"
+    row = maintenance_jobs.job(data, job.JOB)
+    assert (row["since"], row["owed"]["seats"]) == (None, []), "a stop in the evidence plane leaves the homes' backlog owed"
     monkeypatch.setattr(job, "FILES_PER_RUN", 100)
     while _run(data) is not None:
         pass
@@ -901,13 +943,14 @@ def test_real_compression_keeps_what_every_reader_of_a_retained_source_reads(dat
     assert not os.lstat(base / tiny["path"]).st_flags & stat.UF_COMPRESSED, "under the floor"
     assert not os.lstat(base / source["path"]).st_flags & stat.UF_COMPRESSED, "a shared file is never unshared"
     row = maintenance_jobs.job(data, job.JOB)
-    assert row["last"]["skipped"] == {"shared": 1} and row["totals"]["evidence"]["compressed"] == 2
+    kept = "shared" if artifact_storage._extended_attribute(base / source["path"], 0x1000, "I") else "share_unknown"
+    assert row["last"]["skipped"] == {kept: 1} and row["totals"]["evidence"]["compressed"] == 2
 
 
 # ---- in_scope: the places a pass looks, asked by a copier before it clones (#2945) ------------------------------
 
 def test_in_scope_names_by_place_exactly_what_a_pass_offers_whatever_its_task_state(data, recorded):
-    """``delegate_readonly_inputs`` streams what this names: an APFS clone would leave the source ``shared`` for good."""
+    """``delegate_readonly_inputs`` streams what this names: an APFS clone keeps the source ``shared`` while it lives."""
     done = _evidence(data, "done")
     sources = _sources(data, "done-sources")
     _home, seat = _seat(data, "done", "op-1")
@@ -1147,6 +1190,24 @@ def test_the_log_plane_keeps_the_jobs_budget_and_cursor_and_reaps_its_own_siblin
     assert states == ["pending", "pending", "done"]
     assert [path for path, _owned in recorded] == sorted(closed), "each segment once, in name order"
     assert not own.exists() and foreign.exists(), "only this job's own interrupted sibling is reaped"
+
+
+def test_a_file_kept_without_a_read_costs_no_read_budget_and_is_still_counted(data, monkeypatch):
+    """A segment a living copy shares is decided by the volume's answer alone: the files behind it are read in the same run."""
+    closed = [_segment(data, f"events_20261101T00000{index}.jsonl") for index in range(4)]
+    monkeypatch.setattr(artifact_storage, "compression_supported", lambda: True)
+    monkeypatch.setattr(artifact_storage, "compression_outcome", lambda path, owned=None, background=False: (
+        "compressed" if pathlib.Path(path) == closed[-1] else "shared"))
+    monkeypatch.setattr(job, "_queue_live", lambda root: (lambda task_id: False))
+    _walk(data)
+    _start(data)
+    monkeypatch.setattr(job, "FILES_PER_RUN", 1)
+    assert _run(data)["state"] == "done", "three shared segments took none of the one read"
+    row = _row(data)
+    assert row["last"]["skipped"] == {"shared": 3} and row["totals"]["logs"]["compressed"] == 1
+    monkeypatch.setattr(artifact_storage, "compression_outcome", lambda path, owned=None, background=False: "failed")
+    _start(data)
+    assert _run(data)["state"] == "pending", "a file that was read takes the run's budget"
 
 
 @darwin

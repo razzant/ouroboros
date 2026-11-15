@@ -549,6 +549,25 @@ def test_facts_that_outrun_the_cards_creation_keep_the_winner_and_the_delivery(c
     assert card.api.logs == []
 
 
+@pytest.mark.parametrize("state,fields,tail", [
+    ("answered", {"answered_index": 1, "comment": "with backups", "question_delivery": _owed("awaiting_recipient_read")},
+     f"\nAnswered: 2. postgres — with backups\n{_SAVED}"),
+    ("closed", {"closed_reason": "Plan changed."}, "\nQuestion closed.\nPlan changed."),
+], ids=["answered", "closed"])
+def test_a_card_sent_again_for_a_settled_question_keeps_that_state_and_shows_it(card, state, fields, tail):
+    """The same question published again as open (or its card's handler repeated by the outbox) sends
+    the card again: that never takes back what the host settled, and the new card gets the same edit."""
+    card.send()
+    (settled,) = card.apply(state, **fields)
+    assert settled == (42, 555, _BASE + tail, [])
+    Client.instances.clear()
+    card.send()
+    assert _all_edits() == [settled]
+    record = card.record()
+    assert {key: record.get(key) for key in ("state", *fields)} == {"state": state, **fields}
+    assert card.apply("expired_terminal") == []  # nothing older reopens it
+
+
 def test_host_answer_and_its_read_reach_the_card_through_the_real_producers(card, tmp_path, monkeypatch):
     """The host's own decision ingress, mailbox read and acknowledgement drive the card: the
     tap's toast says the answer waits for the task, and the read keeps the recorded winner."""

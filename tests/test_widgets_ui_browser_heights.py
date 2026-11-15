@@ -825,8 +825,10 @@ def test_a_press_on_a_head_or_grip_ends_where_it_is_released_even_over_its_own_f
                 during = lifted()
                 page.mouse.up()
                 heard = inner.evaluate("() => window.__heard")
-                # The place's outline goes with the next layout, an animation frame after the release.
-                page.wait_for_timeout(150)
+                # The place's outline goes with the next layout, an animation frame after the release (masonry.js lays out
+                # in one requestAnimationFrame): read the board after two frames, not after a wall-clock pause that a
+                # runner whose frames come slower than it would report as a card still moving.
+                page.evaluate("() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))")
                 released = board_state()
                 page.wait_for_timeout(250)
                 placed = {"stored": stored_order(page), "shown": visual_order(page)}
@@ -1103,7 +1105,10 @@ _CANVAS = """(() => {
     fit();
 })();
 """
-_TAIL = '<button id="tail" style="position:absolute;bottom:0;height:20px">Bottom control</button>'
+# Its words fit its 20 px in every engine's fonts: with the default button font, Linux WebKit's text stands 3 px below
+# the box, and that overflow is the document's real end (the frame then follows 503, not the 500 the tests mean).
+_TAIL = ('<button id="tail" style="position:absolute;bottom:0;height:20px;box-sizing:border-box;padding:0 6px;'
+         'font:12px/14px sans-serif">Bottom control</button>')
 # Grows to exactly its frame's height when the test asks (8 px default body margins).
 _GROWS = ("const root = document.getElementById('root');"
           "root.style.cssText = 'height:200px;position:relative';"

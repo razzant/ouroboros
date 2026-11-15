@@ -235,8 +235,10 @@ def test_evolution_chip_and_sentence_are_amber_only_for_the_owner(subscription_u
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
 def test_context_low_is_neutral_ink(subscription_ui, theme):
-    """Low is a level, never a warning: its lit arc and the thumb on it are the neutral pair; Max stays crimson, Nano
-    fuchsia. The thumb follows the saved mode, the lit arc the observed one (`data-lit`), each in its mode's ink."""
+    """Low is a level, never a warning: its lit arc is the neutral ink; Max stays crimson, Nano fuchsia. The thumb
+    follows the saved mode, the lit arc the observed one (`data-lit`), each in its mode's ink. Under the approved shell
+    a chosen value never stands on a grey plate (aa7528dcd2, owner 13.11): Low's thumb is the strip's crimson wash, as
+    Max's is, under Low's own neutral ink."""
     page = open_app(subscription_ui)
     set_theme(page, theme)
     page.wait_for_selector('#chat-context-mode .chat-context-arc[data-arc="low"]', state="attached")
@@ -260,7 +262,8 @@ def test_context_low_is_neutral_ink(subscription_ui, theme):
         return out;
     }""")
     assert painted["low"] == {"arc": page.evaluate("__probe('var(--status-neutral-fg)')"),
-                              "thumb": page.evaluate("__probe('var(--status-neutral-bg)', 'backgroundColor')")}, painted
+                              "thumb": page.evaluate("__probe('var(--accent-14)', 'backgroundColor')")}, painted
+    assert painted["low"]["thumb"] == painted["max"]["thumb"], "Low and Max share the strip's crimson wash"
     assert painted["max"]["arc"] == page.evaluate("__probe('var(--accent-light)')"), painted
     assert painted["nano"]["arc"] == page.evaluate("__probe('var(--project)')"), painted
     assert painted["low"]["arc"] != page.evaluate("__probe('var(--status-warn-fg)')")

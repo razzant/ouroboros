@@ -2,7 +2,7 @@
 
 The real SPA and the shared HTTP client in Chromium and WebKit, the Dashboard's Costs tab, with the settings endpoint
 answered per scenario: typing a limit sends nothing, leaving its field (Tab or Enter) posts exactly that key, and the
-row's result line, in its own meta line beside the field, says what happened. No timer ends it (the browser clock moves
+row's result line, on a line of its own under the row's words and field, says what happened. No timer ends it (the browser clock moves
 past any acknowledgement time). A refusal keeps the typed text and says the server's sentence; a value below the setup
 contract's floor is refused in the row and never sent. Undo re-posts the old value with its token. A refresh of the tab
 writes a fresh value only into a field the owner is not in. Light and dark, phone and window, and the 320 x 640 floor
@@ -92,11 +92,13 @@ def _type(page, key, text, *, leave="Tab"):
 
 
 def _beside_field(page, key):
-    """The result is the row's own: in its meta line, in the row that holds the field, never under the card."""
+    """The result is the row's own: a line of the row that holds the field, under its words and its field, never
+    over them and never under the card (settings.css `.settings-row > .settings-row-result`, PR #3391)."""
     return page.evaluate("""(key) => { const result = document.getElementById(`setting-${key}-result`);
-        const row = result.closest('[data-setting-row]');
-        return row.dataset.settingRow === key && row.contains(document.getElementById(`setting-${key}`))
-            && result.parentElement.classList.contains('ui-row-meta') && result.getBoundingClientRect().height > 0; }""", key)
+        const row = result.closest('[data-setting-row]'), field = document.getElementById(`setting-${key}`);
+        const line = result.getBoundingClientRect(), words = row.querySelector(':scope > .ui-row-meta').getBoundingClientRect();
+        return row.dataset.settingRow === key && row.contains(field) && result.parentElement === row && line.height > 0
+            && line.top >= field.getBoundingClientRect().bottom - 1 && line.top >= words.bottom - 1; }""", key)
 
 
 def _fits(page):
@@ -128,7 +130,7 @@ def test_leaving_a_limit_saves_it_and_its_row_says_what_happened(costs_ui, theme
     page.press(f"#setting-{TOTAL}", "Tab")
     _says(page, TOTAL, "Saved · was 200 · Undo", "ok")  # LANE A: the receipt's old value and token
     assert saves == [{TOTAL: 250}], saves
-    assert _beside_field(page, TOTAL), "the result is in the row's own meta line"
+    assert _beside_field(page, TOTAL), "the result is the row's own line, under its words and field"
     page.clock.fast_forward(10_000)
     assert _line(page, TOTAL) == ["Saved · was 200 · Undo", "ok"], "no timer ends a result"
     _shot(page, costs_ui, f"saved-{tag}")

@@ -124,7 +124,7 @@ def test_a_row_reached_with_tab_is_never_left_under_a_pinned_bar(chromium_ui, tm
     assert facts['short'] is True and len(down) > 60 and len(up) > 60, facts
     assert down[-1]['scrollTop'] > 0, ('the walk scrolled the column', facts)
     # Back at the head, Main leaves the column where the row before it did: a bar's own control moves nothing.
-    assert up[-1]['name'] == 'Main Chat' and up[-1]['scrollTop'] == up[-2]['scrollTop'] < down[-1]['scrollTop'], facts
+    assert up[-1]['name'].endswith('Main Chat') and up[-1]['scrollTop'] == up[-2]['scrollTop'] < down[-1]['scrollTop'], facts
     hidden = [(way, stop['name']) for way, stops in (('down', down), ('up', up)) for stop in stops
               if stop['underFoot'] or stop['underHead']]
     assert not hidden, ('a focused row under a pinned bar', hidden, facts)
@@ -186,7 +186,9 @@ FOCUS_MOVES = """async () => {
     const version = document.getElementById('nav-version');
     version.tabIndex = -1;  // the foot's own text stands in for its update capsule, hidden in this fixture
     const bars = {};
-    for (const [name, el] of [['main', side.querySelector('.sidebar-head [data-nav-page="chat"]')], ['foot', version]]) {
+    const controls = [['main', side.querySelector('.sidebar-head [data-nav-page="chat"]')], ['foot', version],
+        ...[...side.querySelectorAll('.nav-tools [data-nav-page]')].map(el => [el.dataset.navPage, el])];
+    for (const [name, el] of controls) {
         document.activeElement?.blur?.();
         side.scrollTop = Math.round((side.scrollHeight - side.clientHeight) / 2);
         await frames();
@@ -242,7 +244,8 @@ def test_a_pinned_bars_own_control_leaves_the_column_where_it_is(shell_ui, tmp_p
     finally:
         evidence(tmp_path, f'sidebar-short-bar-focus-{width}x{height}-{shell_ui["engine"]}', facts)
         page.close()
-    assert facts['short'] is True and facts['rows'] > 30, facts
+    assert facts['short'] is True and facts['rows'] >= 30, facts
+    assert set(facts['bars']) == {'main', 'foot', 'circles', 'files', 'skills', 'widgets', 'dashboard', 'settings'}, facts
     for name, move in facts['bars'].items():
         assert move['before'] > 0 and abs(move['after'] - move['before']) <= 1, ('the column stayed put', name, facts)
     assert facts['parked']['foot'] > 20 and facts['parked']['head'] > 20, ('rows were parked under both bars', facts)

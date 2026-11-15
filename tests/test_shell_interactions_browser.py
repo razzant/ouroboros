@@ -17,6 +17,7 @@ from tests.settings_browser_helpers import open_settings
 from tests.test_design_system_gate_browser import (PROJECTS, open_nav, rest, save_evidence, seed_page, settle,
                                                    sidebar_metrics)
 from tests._work_projection_shared import work_fields
+from tests._shared import answer_projects
 from tests.ui_motion_samples import SAMPLE_TRANSITION
 
 subscription_ui = setup_browser.subscription_ui
@@ -108,7 +109,11 @@ def sync_project_rows(page):
              'project_chat_ids': [p['chat_id'] for p in rows]}
     page.route('**/api/state', lambda route: route.fulfill(json=state))
     page.evaluate("window.__ouroWs.emit('projects_changed', {})")
-    page.wait_for_function("() => document.querySelector('#nav-projects-count')?.textContent === '3'")
+    page.wait_for_function("""() => {
+        const row = document.querySelector('[data-project-id="gate-5"]');
+        return row?.hasAttribute('data-unread') && row.querySelector('.status-mark')?.dataset.hue === 'unread';
+    }""")
+    assert page.locator('#nav-projects-count').count() == 0
     page.wait_for_timeout(300)
 
 
@@ -552,7 +557,7 @@ TITLE_BAND = """({band, allowed}) => {
             t.dispatchEvent(press);
             const messages = window.__chromeMessages.map(m => m.type);
             if (control) {
-                controls.add(control.id || control.textContent.trim());
+                controls.add(control.id || control.querySelector('input')?.id || control.textContent.trim());
                 if (messages.length || press.defaultPrevented) unexpected.push({x, y, messages, control: control.outerHTML});
             } else if (messages.join() === 'drag' && press.defaultPrevented) {
                 drags++;
@@ -583,14 +588,16 @@ def test_the_desktop_title_band_over_a_page_moves_the_window(shell_ui, tmp_path,
         page.locator(f'[data-nav-page="{page_name}"]').click()
         page.locator(f'#page-{page_name}').wait_for(state='visible')
         settle(page)
-        allowed = ('.app-page-lead .app-tab, .app-page-lead .files-crumb, '
+        allowed = ('.app-page-lead .app-tab, .app-page-lead .files-crumb, .settings-search, '
                    '.app-page-toolbar :is(#skills-refresh, #skills-update-all, #files-refresh, '
                    '#files-new-file, #files-new-dir, #files-paste)')
         facts['band'] = page.evaluate(TITLE_BAND, {'band': 52, 'allowed': allowed})
         band = facts['band']
         assert band['height'] == 52 and band['drags'] > 0 and not band['unexpected'], facts
-        if page_name in ('widgets', 'settings'):  # Settings has no tab strip: Back is the first row of a page
+        if page_name in ('widgets', 'dashboard'):  # Dashboard's pages are a list; the band names its columns.
             assert band['controls'] == [] and band['firstTabTop'] is None, facts
+        elif page_name == 'settings':
+            assert band['controls'] == ['settings-search'] and band['firstTabTop'] is None, facts
         else:
             assert band['controls'], facts
             if page_name != 'files':
@@ -607,7 +614,16 @@ def test_the_desktop_title_band_over_a_page_moves_the_window(shell_ui, tmp_path,
         if page_name == 'files':
             page.locator('#files-new-file').click()
             page.locator('#page-files .files-editor').wait_for()
-        elif page_name not in ('widgets', 'settings'):
+        elif page_name == 'settings':
+            page.locator('#settings-search').fill('models')
+            page.locator('[data-settings-result="home:models"]').wait_for(state='visible')
+            assert page.locator('#settings-search').input_value() == 'models'
+        elif page_name == 'dashboard':
+            row = page.locator('[data-dashboard-tab="activity"]')
+            row.click()
+            assert row.get_attribute('aria-selected') == 'true'
+            page.locator('#dashboard-panel-activity.active').wait_for(state='visible')
+        elif page_name != 'widgets':
             tab = page.locator(f'#page-{page_name} .app-page-lead .app-tab').nth(1)
             tab.click()
             assert tab.get_attribute('aria-selected') == 'true'
@@ -634,10 +650,11 @@ SIDEBAR_FACTS = """() => {
     const side = document.getElementById('primary-sidebar');
     const rows = [...side.querySelectorAll('#nav-projects-list > .nav-project-item')].filter((e) => !e.hidden);
     const zone = document.getElementById('nav-projects').getBoundingClientRect();
-    const tools = side.querySelector('.sidebar-foot > [data-nav-page]').getBoundingClientRect();  // the first tool
-    const mark = document.querySelector('.nav-projects-facts .status-mark');
+    const tools = side.querySelector('.nav-tools').getBoundingClientRect();
     return {rows: rows.map((e) => e.querySelector('[data-project-id]').dataset.projectId),
             gapToTools: Math.round(tools.top - zone.bottom), toolsTop: Math.round(tools.top),
+            toolsBottom: Math.round(tools.bottom),
+            footTop: Math.round(side.querySelector('.sidebar-foot-meta').getBoundingClientRect().top),
             sidebarBottom: Math.round(side.getBoundingClientRect().bottom),
             // The foot: how far the version row's bottom sits above the column's content edge (0 = on the edge), and
             // whether the column itself scrolls (the short-window fallback, where the foot is pinned over it).
@@ -646,50 +663,58 @@ SIDEBAR_FACTS = """() => {
             footBelowTools: side.querySelector('.sidebar-foot-meta').getBoundingClientRect().top
                 >= side.querySelector('[data-nav-page="settings"]').getBoundingClientRect().bottom - 0.5,
             columnScrolls: side.scrollHeight > side.clientHeight + 1,
-            showAll: Boolean(document.getElementById('nav-projects-show-all')),
-            header: {shape: mark.dataset.shape, hue: mark.dataset.hue, drawn: getComputedStyle(mark).display !== 'none'},
-            expanded: document.getElementById('nav-projects-toggle').getAttribute('aria-expanded')};
+            retired: side.querySelectorAll('#nav-projects-toggle, #nav-projects-count, .nav-projects-facts').length,
+            moving: rows.filter(e => e.querySelector('.status-mark')?.dataset.shape === 'moving')
+                .map(e => e.dataset.navProjectId)};
 }"""
 
 
 @pytest.mark.parametrize('width,height', [(1108, 680), (390, 844)])
 def test_collapsed_projects_keep_only_the_pinned_ones_and_the_tools_follow(shell_ui, tmp_path, width, height):
+    """Navigation now has no collapse: Find narrows the list; its pins lead and the sections stay at the foot."""
     page = seed_page(shell_ui, width, height)
     live = [PROJECTS[3]['id'], PROJECTS[7]['id']]
     pins = [PROJECTS[1]['id'], PROJECTS[7]['id']]
     facts = {'engine': shell_ui['engine'], 'size': [width, height]}
+    state = live_state(live, pins)
+    for project in state['projects']:
+        if project['id'] in pins:
+            project['name'] = 'Matched pin: ' + project['name']
     try:
-        page.route('**/api/state', lambda route: route.fulfill(json=live_state(live, pins)))
+        page.route('**/api/state', lambda route: route.fulfill(json=state))
+        page.route('**/api/projects*', lambda route: answer_projects(route, state['projects']))
         boot(page, shell_ui)
         page.wait_for_function(MOVING, arg=2, timeout=20_000)
         if width < 720:
             open_drawer(page)
         facts['open'] = page.evaluate(SIDEBAR_FACTS)
-        page.locator('#nav-projects-toggle').click()
+        page.locator('.nav-find-input').fill('matched pin')
+        page.wait_for_function('wanted => JSON.stringify((' + ROWS + ')()) === JSON.stringify(wanted)', arg=pins)
         settle(page)
-        facts['collapsed'] = page.evaluate(SIDEBAR_FACTS)
-        page.locator('#nav-projects-toggle').click()
+        facts['filtered'] = page.evaluate(SIDEBAR_FACTS)
+        setup_browser.capture(page, f'shell-sidebar-filtered-{width}-{shell_ui["engine"]}')
+        page.locator('.nav-find-clear').click()
+        page.wait_for_function('n => (' + ROWS + ')().length === n', arg=len(PROJECTS))
         settle(page)
-        facts['expanded'] = page.evaluate(SIDEBAR_FACTS)
+        facts['cleared'] = page.evaluate(SIDEBAR_FACTS)
     finally:
         evidence(tmp_path, f'shell-sidebar-collapse-{width}-{shell_ui["engine"]}', facts)
         page.close()
-    collapsed = facts['collapsed']
-    # All or nothing (owner 19.10, 2A): only the pinned Projects stay, in their order; work elsewhere keeps no row and
-    # no "Show all" offers the rest. The header's one mark still speaks for them, in both states.
-    assert collapsed['expanded'] == 'false' and collapsed['rows'] == pins, facts
-    assert collapsed['showAll'] is False, facts
-    assert collapsed['header'] == facts['open']['header'] == {'shape': 'moving', 'hue': 'ink', 'drawn': True}, facts
-    # The tools follow the Projects zone: no empty room between them (owner 18.10). The version and the update rest on
-    # the bottom edge in every state (owner 22.10): the free room lies between the tools and the foot.
-    assert collapsed['gapToTools'] <= 24 and collapsed['toolsTop'] < collapsed['sidebarBottom'] - 200, facts
-    for state in ('open', 'collapsed', 'expanded'):
-        side = facts[state]
-        assert side['footBelowTools'], (state, facts)
+    expected = pins + [p['id'] for p in PROJECTS if p['id'] not in pins]
+    assert facts['open']['rows'] == facts['cleared']['rows'] == expected, facts
+    assert facts['filtered']['rows'] == pins, facts
+    assert set(facts['open']['moving']) == set(facts['cleared']['moving']) == set(live), facts
+    assert facts['filtered']['moving'] == [pins[1]], facts
+    # DESIGN Navigation: Projects take the free room; sections and the foot keep the bottom edge even for two hits.
+    for phase in ('open', 'filtered', 'cleared'):
+        side = facts[phase]
+        assert side['retired'] == 0 and 0 <= side['gapToTools'] <= 24, (phase, facts)
+        assert 0 <= side['footTop'] - side['toolsBottom'] <= 24, (phase, facts)
+        assert abs(side['toolsTop'] - facts['open']['toolsTop']) <= 1, (phase, facts)
+        assert side['footBelowTools'], (phase, facts)
         if not side['columnScrolls']:
-            assert abs(side['footGap']) <= 1, (state, facts)
-    assert facts['open']['expanded'] == 'true' and len(facts['open']['rows']) == len(PROJECTS), facts
-    assert facts['expanded']['expanded'] == 'true' and len(facts['expanded']['rows']) == len(PROJECTS), facts
+            # The current desk foot has --space-2 (8px) below its metadata; the drawer has no bottom margin.
+            assert abs(side['footGap'] - (8 if width >= 720 else 0)) <= 1, (phase, facts)
 
 
 DOT_FACTS = """() => {
@@ -1013,86 +1038,116 @@ FOCUS = """() => { const a = document.activeElement;
 
 
 def test_a_row_that_hides_gives_the_keyboard_to_the_projects_toggle(shell_ui, tmp_path):
+    """The retired toggle's keyboard home is Find; an unpin keeps its row, an absent row hands focus there."""
     page = seed_page(shell_ui, 1108, 680)
     pins = [PROJECTS[3]['id'], PROJECTS[7]['id']]
     current = {'state': live_state([], pins)}
     facts = {'engine': shell_ui['engine']}
-    hidden = "id => document.querySelector(`[data-project-id=\"${id}\"]`).closest('[hidden]') !== null"
+    gone = "id => !document.querySelector(`[data-project-id=\"${id}\"]`)"
 
-    def unpin(still):  # another window unpins: the next snapshot says so
-        current['state'] = live_state([], still)
+    def snapshot(projects):  # another window changes the feed
+        current['state'] = dict(live_state([]), projects=projects)
         page.evaluate("() => window.__ouroWs.emit('projects_changed', {})")
 
     try:
         page.route('**/api/state', lambda route: route.fulfill(json=current['state']))
         boot(page, shell_ui)
-        page.locator('#nav-projects-toggle').click()
-        settle(page)
-        facts['collapsed'] = page.evaluate(ROWS)
-        # The keyboard in a pinned row's menu, then that Project is unpinned: its row and its menu go, the keyboard
-        # lands on the Projects toggle instead of the page.
+        assert page.locator('#nav-projects-toggle').count() == 0
+        facts['initial'] = page.evaluate(ROWS)
+        # Unpinning no longer hides a row: both the node and its open menu keep the keyboard.
         page.locator(f'[data-nav-project-id="{pins[0]}"] .nav-project-kebab').focus()
         page.keyboard.press('Enter')
         page.locator('body > .project-row-menu:not([data-leaving])').wait_for()
         facts['in_menu'] = page.evaluate("() => document.activeElement.dataset.prm || ''")
-        unpin(pins[1:])
-        page.wait_for_function(hidden, arg=pins[0], timeout=20_000)
+        page.evaluate('id => { window.keptProjectRow = document.querySelector(`[data-project-id="${id}"]`); }', pins[0])
+        snapshot(live_state([], pins[1:])['projects'])
+        page.wait_for_function('id => !document.querySelector(`[data-nav-project-id="${id}"]`).hasAttribute("data-pinned")', arg=pins[0])
+        facts['unpin'] = page.evaluate("""() => ({same: window.keptProjectRow.isConnected,
+            menu: document.querySelectorAll('.project-row-menu:not([data-leaving])').length,
+            focus: document.activeElement.dataset.prm})""")
+        # Once its row really leaves the feed, the menu closes and hands the keyboard to the list's first control.
+        snapshot([p for p in live_state([], pins[1:])['projects'] if p['id'] != pins[0]])
+        page.wait_for_function(gone, arg=pins[0], timeout=20_000)
         settle(page)
         facts['menus_after'] = page.locator('.project-row-menu:not([data-leaving])').count()
-        facts['focus_after_menu'] = page.evaluate(FOCUS)
-        # The keyboard on the other pinned row, which is unpinned too: the list empties, the toggle keeps the keyboard.
+        facts['focus_after_menu'] = page.locator('.nav-find-input').evaluate('el => el === document.activeElement')
+        # The keyboard on a row itself: an empty feed must hand it to Find too, never drop it on the body.
         page.locator(f'[data-project-id="{pins[1]}"]').focus()
-        unpin([])
-        page.wait_for_function(hidden, arg=pins[1], timeout=20_000)
+        snapshot([])
+        page.wait_for_function(gone, arg=pins[1], timeout=20_000)
         settle(page)
-        facts['focus_after_row'] = page.evaluate(FOCUS)
-        facts['list_hidden'] = page.evaluate("() => document.getElementById('nav-projects-list').hidden")
-        page.keyboard.press('Enter')
+        facts['focus_after_row'] = page.locator('.nav-find-input').evaluate('el => el === document.activeElement')
+        facts['empty_rows'] = page.evaluate(ROWS)
+        setup_browser.capture(page, f'shell-sidebar-empty-focus-{shell_ui["engine"]}')
+        snapshot(live_state([])['projects'])
+        page.wait_for_function('n => (' + ROWS + ')().length === n', arg=len(PROJECTS))
+        page.keyboard.press('ArrowDown')
         settle(page)
-        facts['expanded_rows'] = len(page.evaluate(ROWS))
+        facts['restored_rows'] = page.evaluate(ROWS)
+        facts['reentered'] = page.evaluate(FOCUS)
+        # A state read with the keyboard elsewhere must not steal it into the list.
+        page.locator('#chat-input').focus()
+        snapshot([])
+        page.wait_for_function('() => (' + ROWS + ')().length === 0')
+        facts['elsewhere'] = page.evaluate(FOCUS)
     finally:
         evidence(tmp_path, f'shell-sidebar-collapse-focus-{shell_ui["engine"]}', facts)
         page.close()
-    assert facts['collapsed'] == pins and facts['in_menu'] == 'pin', facts
-    assert facts['menus_after'] == 0 and facts['focus_after_menu'] == 'nav-projects-toggle', facts
-    assert facts['focus_after_row'] == 'nav-projects-toggle' and facts['list_hidden'] is True, facts
-    assert facts['expanded_rows'] == len(PROJECTS), 'the keyboard expands the list again from where it was left'
+    assert facts['initial'] == pins + [p['id'] for p in PROJECTS if p['id'] not in pins], facts
+    assert facts['in_menu'] == 'pin' and facts['unpin'] == {'same': True, 'menu': 1, 'focus': 'pin'}, facts
+    assert facts['menus_after'] == 0 and facts['focus_after_menu'] is True, facts
+    assert facts['focus_after_row'] is True and facts['empty_rows'] == [], facts
+    assert facts['restored_rows'] == [p['id'] for p in PROJECTS] and facts['reentered'] == 'project:gate-0', facts
+    assert facts['elsewhere'] == 'chat-input', facts
 
 
 ROWS = "() => [...document.querySelectorAll('#nav-projects-list > .nav-project-item')].filter((e) => !e.hidden).map((e) => e.querySelector('[data-project-id]').dataset.projectId)"
 
 
 def test_collapsed_projects_ignore_the_census_and_the_open_one(shell_ui, tmp_path):
+    """Find keeps only matching names through census changes and opening another room; their marks still update."""
     page = seed_page(shell_ui, 1108, 680)
-    current = {'state': live_state([PROJECTS[3]['id']])}
+    matched = [PROJECTS[3]['id'], PROJECTS[9]['id']]
+
+    def state_for(live):
+        state = live_state(live)
+        for project in state['projects']:
+            if project['id'] in matched:
+                project['name'] = 'Match fixture: ' + project['name']
+        return state
+
+    current = {'state': state_for([matched[0]])}
     facts = {'engine': shell_ui['engine']}
-    header = "() => document.querySelector('.nav-projects-facts .status-mark').dataset.shape"
     try:
         page.route('**/api/state', lambda route: route.fulfill(json=current['state']))
+        page.route('**/api/projects*', lambda route: answer_projects(route, current['state']['projects']))
         boot(page, shell_ui)
         page.wait_for_function(MOVING, arg=1, timeout=20_000)
-        page.locator('#nav-projects-toggle').click()
+        page.locator('.nav-find-input').fill('match fixture')
+        page.wait_for_function('wanted => JSON.stringify((' + ROWS + ')()) === JSON.stringify(wanted)', arg=matched)
         facts['one'] = page.evaluate(ROWS)
-        facts['one_header'] = page.evaluate(header)
         for name, ids_now in (('three', [PROJECTS[3]['id'], PROJECTS[5]['id'], PROJECTS[9]['id']]), ('none', [])):
-            current['state'] = live_state(ids_now)
+            current['state'] = state_for(ids_now)
             page.evaluate("() => window.__ouroWs.emit('projects_changed', {})")
-            page.wait_for_function(MOVING, arg=len(ids_now), timeout=20_000)
+            page.wait_for_function(MOVING, arg=len(set(ids_now) & set(matched)), timeout=20_000)
             settle(page)
             facts[name] = page.evaluate(ROWS)
-            facts[f'{name}_header'] = page.evaluate(header)
-        # The open Project keeps no row in a collapsed list either: the room itself is open beside it.
+        # Opening a room by id does not change the field's words or force its row into the results.
         open_project(page, 12)
         settle(page)
         facts['open'] = page.evaluate(ROWS)
-        facts['list_hidden'] = page.evaluate("() => document.getElementById('nav-projects-list').hidden")
+        facts['query'] = page.locator('.nav-find-input').input_value()
+        facts['retired'] = page.locator('#nav-projects-toggle, #nav-projects-count, .nav-projects-facts').count()
+        assert page.locator('#project-panel').is_visible()
+        page.locator('.nav-find-clear').click()
+        page.wait_for_function('n => (' + ROWS + ')().length === n', arg=len(PROJECTS))
+        facts['cleared'] = page.evaluate(ROWS)
     finally:
         evidence(tmp_path, f'shell-sidebar-collapse-census-{shell_ui["engine"]}', facts)
         page.close()
-    assert facts['one'] == facts['three'] == facts['none'] == facts['open'] == [], facts
-    assert facts['list_hidden'] is True, facts
-    # Work under the collapsed header shows as its one mark: moving while any works, nothing once none does.
-    assert (facts['one_header'], facts['three_header'], facts['none_header']) == ('moving', 'moving', 'none'), facts
+    assert facts['one'] == facts['three'] == facts['none'] == facts['open'] == matched, facts
+    assert facts['query'] == 'match fixture' and facts['retired'] == 0, facts
+    assert facts['cleared'] == [p['id'] for p in PROJECTS], facts
 
 
 # Selection dismissal regression coverage: kept in this module so browser fixtures remain

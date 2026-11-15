@@ -82,8 +82,9 @@ export function measurePinnedBars(sidebar, { Observer = globalThis.ResizeObserve
         sidebar.style.setProperty('--sidebar-head-h', `${headH}px`);
         sidebar.style.setProperty('--sidebar-foot-h', `${footH}px`);
         const row = sidebar.querySelector('.nav-project-row')?.getBoundingClientRect().height || 48;
+        const clearance = parseFloat(sidebar.ownerDocument?.defaultView?.getComputedStyle(sidebar).getPropertyValue('--space-4')) || 0;
         const room = Number(sidebar.clientHeight) || 0;
-        sidebar.toggleAttribute?.('data-bars-crowd', room > 0 && headH + row + footH > room);
+        sidebar.toggleAttribute?.('data-bars-crowd', room > 0 && headH + row + footH + 2 * clearance > room);
     };
     const observer = new Observer(write);
     observer.observe(head, { box: 'border-box' });

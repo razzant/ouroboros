@@ -165,7 +165,7 @@ def test_browser_tools_launch_real_chromium(tmp_path, static_page_url, monkeypat
             pytest.skip(screenshot)
         raw = base64.b64decode(ctx.browser_state.last_screenshot_b64 or "")
         assert raw.startswith(b"\x89PNG\r\n\x1a\n")
-        cleanup_browser(ctx)  # Independent Sync API contexts cannot nest on one thread.
+        cleanup_browser(ctx)  # one actor's session closes before the next actor opens its own
         local = tmp_path / "outside-start" / "index.html"
         local.parent.mkdir()
         local.write_text("<h1>Parent-readable local artifact</h1>", encoding="utf-8")

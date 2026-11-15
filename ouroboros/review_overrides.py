@@ -7,17 +7,19 @@ outcome: the ``review_advisory_override`` event, the counter ``state/advisory_ov
 ``review_status``) and the work's card fact ``review_overrides`` on its root task's document, a count and the latest,
 never a row per decision. A wave still open is no outcome yet: the call that collects it counts how it ended, and
 an author who goes on over it unread or unsettled counts it then, once per review record.
-``note_author_continuation`` adds its ``continued`` part and ``note_override_landing`` its ``landed`` part. The card
-shows each part only when recorded (absent is unknown, not zero), in the app (``web/modules/review_gate_card.js``,
-live from the event) and in its Telegram completion message (``card_line``).
+``note_author_continuation`` adds its ``continued`` part, ``note_override_landing`` its ``landed`` part and
+``note_skill_over_review`` its ``skills`` part (a skill left on in this work although no review passed its current
+files). The card shows each part only when recorded (absent is unknown, not zero), in the app
+(``web/modules/review_gate_card.js``, live from the event) and in its Telegram completion message (``card_line``).
 
 Every outcome returns to the author before Git, so a commit usually lands from a later call naming the
 reviewed attempt, which keeps the reason (``review_override_reason``); a wave handed back still open stands at what
 its review record holds when the author goes on (nothing once it passed). After Git recorded the commit,
 ``note_override_landing`` adds it to the counter's ``landed`` list (the newest 64, under the install's data root, with
 the author's disposition when it continued) when that attempt or this call met such an outcome. ``landed_line`` names those commits in a restart's or
-an adoption's notice ("running" only on an adoption record's word), and ``landed_outcome`` one in an evolution cycle's
-notice. These rows know only FAIL or no verdict: none says PASS.
+an adoption's notice ("running" only on an adoption record's word), ``landed_outcome`` one in an evolution cycle's
+notice, and ``landed_in`` those an official update brings back (``update_letter``: the range's check facts). These rows
+know only FAIL or no verdict: none says PASS.
 """
 from __future__ import annotations
 
@@ -38,6 +40,9 @@ _FAIL_REASONS = frozenset({"critical_findings", "parse_failure"})  # the panel's
 _CHECK_REASONS = frozenset({"preflight", "tests_preflight_blocked"})  # the free checks ahead of the panel
 _OPEN = "review_late_result_pending"  # a wave still open: no outcome yet (``review_ledger.reduce_verdict``)
 _SPACE = " \t\n\r\f\v"  # the cut drops only these, as ``headOf`` does in the app
+# What a skill was left on over, in the card line's words (``SKILL_OVER`` and ``SKILL_EITHER`` in review_gate_card.js).
+_SKILL_OVER = {"review_problems": "over review problems", "no_review_verdict": "with no review verdict"}
+_SKILL_EITHER = "over review problems or no verdict"
 
 
 def _head(text: Any, limit: int = 300) -> str:
@@ -65,9 +70,12 @@ def _keep_on_attempt(ctx: Any, reason: str, row: Any = None) -> None:
         key = {name: getattr(row, name, None) for name in ("repo_key", "task_id", "tool_name", "attempt")}
     if type(key["attempt"]) is not int or key["attempt"] < 1:
         return  # no reviewed attempt yet: only a commit of this call goes over it
+    record = str(getattr(row, "review_record_id", "") or "")  # a rebuilt source's number may name another wave now
 
     def stamp(state: Any) -> None:
-        if (found := state.latest_attempt_for(**key)) is not None and not (reason == _OPEN and found.review_override_reason):
+        found = state.latest_attempt_for(**key)
+        if found is not None and not (reason == _OPEN and found.review_override_reason) and (
+                not record or found.review_record_id == record):
             found.review_override_reason = reason
 
     update_state(pathlib.Path(ctx.drive_root), stamp)
@@ -166,9 +174,12 @@ def _went_on_over(ctx: Any, source: Any) -> str:
     FAIL or no verdict): the reason the gate kept on it, except where that reason was kept before the panel's outcome
     was known (a wave handed back still open, or a failed free check ahead of the panel): then its review record says
     what it holds now. A panel FAIL on the record, or a counted seat's FAIL on a record still open, is gone over as
-    that FAIL; otherwise a failed check stands, and an open wave stands at its record's outcome (nothing once passed)."""
+    that FAIL; otherwise a failed check stands, and an open wave stands at its record's outcome (nothing once passed).
+    An attempt the gate kept no reason on stands at no verdict only when its record dispatched no review (a free replay
+    at a spent paid ceiling or over a pending wave, a wave that failed before its send): the refusal's kind, else the
+    record's reason, since no call counted that outcome (one that did kept its reason, also on a rebuilt row)."""
     kept, record_id = (str(getattr(source, name, "") or "") for name in ("review_override_reason", "review_record_id"))
-    if not record_id or (kept != _OPEN and kept not in _CHECK_REASONS):
+    if not record_id or (kept and kept != _OPEN and kept not in _CHECK_REASONS):
         return kept
     try:
         from ouroboros.review_ledger import ledger_root, load_record
@@ -181,6 +192,9 @@ def _went_on_over(ctx: Any, source: Any) -> str:
     if not (isinstance(verdict, dict) and verdict.get("aggregate")):
         return kept
     reason = str(verdict.get("reason") or "")
+    if not kept:  # every other outcome was counted, or left uncounted, by the call that met it
+        refusal = record.get("dispatch_refusal") if isinstance(record.get("dispatch_refusal"), dict) else {}
+        return (str(refusal.get("kind") or "") or reason) if verdict["aggregate"] == "NOT_DISPATCHED" else ""
     counted = {str(row.get("seat_id") or "") for row in record.get("rows") or []
                if isinstance(row, Mapping) and not row.get("additional")}
     if reason == _OPEN and any(seat in counted and value == "FAIL"
@@ -248,6 +262,29 @@ def note_override_landing(ctx: Any, commit_sha: str) -> None:
         log.warning("The landing of %s over a review outcome was not recorded", commit_sha, exc_info=True)
 
 
+def note_skill_over_review(ctx: Any, skill: str, gate: Any, door: str) -> None:
+    """A skill that is on in this work although no review passed its current files (``skill_review_status.runs_over``):
+    the work's ``skills`` part, each skill once, the latest with what it was left on over and how (``door``: the mind
+    turned it on, it was on after its review, or its author accepted its files). Without a work nothing is written:
+    the owner's own switch and a review started from the Skills page leave the skill's card and the audit row. Best
+    effort like every record here; it never changes the skill."""
+    from ouroboros.skill_review_status import runs_over
+
+    reason = runs_over(gate)
+    if not (reason and skill):
+        return
+    noted = {"skill": str(skill), "reason": reason, "door": str(door), "task_id": str(getattr(ctx, "task_id", "") or "")}
+
+    def keep(fact: Dict[str, Any]) -> Dict[str, Any]:
+        part = fact.get("skills") if isinstance(fact.get("skills"), dict) else {}
+        seen = [name for name in part.get("seen") or [] if name != noted["skill"]] + [noted["skill"]]
+        # Timed at the write: a skill left on again keeps its count, so its time is what tells the open card that
+        # the part changed, also after another task's outcome landed while this note waited for the store.
+        return {**fact, "skills": {"count": len(seen), "latest": {**noted, "at": utc_now_iso()}, "seen": seen}}
+
+    _keep_on_work(ctx, keep)
+
+
 def _counted(part: Any) -> int:
     count = part.get("count") if isinstance(part, dict) else None
     return count if type(count) is int and count > 0 else 0  # an absent or malformed part is unknown: no line shows it
@@ -277,6 +314,11 @@ def card_line(fact: Any) -> str:
     if landed := _counted(fact.get("landed")):
         over = "it" if parts else "a FAIL or no verdict"
         parts.append(f"landed over {over}: {landed} commit{'' if landed == 1 else 's'}")
+    if skills := _counted(fact.get("skills")):
+        last = fact["skills"].get("latest") if isinstance(fact["skills"].get("latest"), dict) else {}
+        name = f'"{last.get("skill") or "unknown"}"'
+        parts.append(f"skill {name} left on {_SKILL_OVER.get(str(last.get('reason') or ''), _SKILL_EITHER)}" if skills == 1
+                     else f"{skills} skills left on {_SKILL_EITHER} (latest: {name})")
     return "Review: " + " · ".join(parts) if parts else ""
 
 
@@ -301,6 +343,18 @@ def _landed_rows(data_dir: Any) -> Optional[Dict[str, Dict[str, Any]]]:
         log.debug("Commits landed over a review outcome cannot be read", exc_info=True)
         return None
     return {str(row.get("sha")): row for row in rows if isinstance(row, dict)} if isinstance(rows, list) else {}
+
+
+def landed_in(data_dir: Any, commits: Any) -> Optional[list]:
+    """The ``commits`` (``{sha, subject}``, in their order) this install's ``landed`` rows name, each with its recorded
+    reason and its outcome in a notice's words; [] when the kept rows name none of them, so [] never means PASS, and
+    None when the rows cannot be read."""
+    rows = _landed_rows(data_dir)
+    if rows is None:
+        return None
+    return [{"sha": commit["sha"], "subject": str(commit.get("subject") or ""),
+             "reason": str(rows[commit["sha"]].get("reason") or "unknown"), "outcome": _outcome(rows[commit["sha"]])}
+            for commit in commits or [] if isinstance(commit, dict) and commit.get("sha") in rows]
 
 
 def landed_outcome(data_dir: Any, commit_sha: str) -> Optional[str]:

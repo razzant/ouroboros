@@ -489,7 +489,8 @@ own; then the name is that source. Closed, it always shows the room's choice, ne
 wears no mark for one; open, its hint adds one fact line when works here run on other
 models, over `Applies to new work here; running work keeps its model.` In the Main chat the capsule is Main itself:
 a pick asks first in the shared confirm dialog (what Main becomes and was, the route's facts,
-`model_roles.MAIN_FOLLOW_NOTE`, and in one line the pinned account and manual window it resets), then writes Main.
+`model_roles.MAIN_FOLLOW_NOTE`, `composer_model.MAIN_CACHE_NOTE` with the catalog's cache-write price where it
+states one (§7), and in one line the pinned account and manual window it resets), then writes Main.
 **The sheet also says what the change does not move**: how many running works follow Main (said as unknown, never as zero, while the list
 of works is incomplete), then what is not on Main now — running and queued works on other models, each with why
 (`you chose it`, `its room's model`, `Ouroboros switched to it`, `fallback since 02:14` in amber) and its room, and
@@ -687,7 +688,7 @@ runtime; known queued, active or finalizing work keeps its own factual label. A
 durably accepted incoming message likewise proves acceptance, not that its task
 has begun or a model has read it.
 
-The Update indicator names the real stage, then a failed or unconfirmed outcome until the owner hides it with the close beside it (this browser, that attempt; the record is untouched). It opens the existing Updates panel, never a second apply flow. A confirmed success never wears the indicator (owner 1B): the panel retains it until the next admitted attempt, with actual saved-local-work references and accessible diagnostics, and it never masks a newer available version. A pre-admission refusal stays with the request. A busy-work refusal offers explicit retry, never a delayed automatic restart. Connection or version alone proves no successful update. Unknown remains neutral and a failed/refused/rolled-back attempt takes the error triple; a needed restart keeps its words, without a close. The Update and Replace confirmations say in fixed words, before the engine and interpreter facts, what the restart does to this installation's tasks (what returns by itself, what stays paused or held, what is not continued); the engine's admission count is labelled engine work, never tasks. The Restart confirmation's Details name what that door does differently: sleeping tasks wait for Resume and the runs its tasks started in Claudexor end. After a start that restored queue rows, the startup notice says how many of them continue by themselves, wait for Resume or stay paused, read as the work projection reads them; when a row cannot be read it keeps the count alone.
+The Update indicator names the real stage, then a failed or unconfirmed outcome until the owner hides it with the close beside it (this browser, that attempt; the record is untouched). It opens the existing Updates panel, never a second apply flow. A confirmed success never wears the indicator (owner 1B): the panel retains it until the next admitted attempt, with actual saved-local-work references and accessible diagnostics, and it never masks a newer available version. A pre-admission refusal stays with the request. A busy-work refusal offers explicit retry, never a delayed automatic restart. Connection or version alone proves no successful update. Unknown remains neutral and a failed/refused/rolled-back attempt takes the error triple; a needed restart keeps its words, without a close. The Update and Replace confirmations say in fixed words, before the engine and interpreter facts, what the restart does to this installation's tasks (what returns by itself, what stays paused or held, what is not continued); the engine's admission count is labelled engine work, never tasks. Above the description, in the panel for the update on offer and at the top of that confirmation, one host line counts what the range brings over a review FAIL or no verdict (`Went in over a review FAIL or no verdict: 2 merges, 3 commits Ouroboros made on this computer.`): merges whose receipt observed one and this install's own commits it recorded so, shown with or without a description and only from that range's check facts; the items are named in Details, a PASS on earlier code and a commit without a receipt are not counted, a range whose older receipts were not read says how many (`The review receipts of 41 older commits were not read.`), and when nothing is named there is no line (unknown, never clean). The Restart confirmation's Details name what that door does differently: sleeping tasks wait for Resume and the runs its tasks started in Claudexor end. After a start that restored queue rows, the startup notice says how many of them continue by themselves, wait for Resume or stay paused, read as the work projection reads them; when a row cannot be read it keeps the count alone.
 
 Status, owner action, and urgent notification are separate product concepts:
 
@@ -695,7 +696,12 @@ Status, owner action, and urgent notification are separate product concepts:
   owner can or must act. Task status uses one factual word family, `Working`,
   `Done`, `Done with warnings`, `Failed`, `Stopped`, shared by host task rows in
   Main and the Project thread (`OUTCOME_PHASE_HEADLINE`). `Done` says the turn ended, not that its goal was
-  met. Stop now reads `Stopped` whatever it kept (answer and files stay shown);
+  met. A model's final answer delivered before a stop cut its task's finalization
+  is not a failure of the work (owner 15.11, A): its status is `Done` unless another
+  fact of the record fails or warns, with no warning mark; the cause sentence, on the
+  collapsed line like any cause, names what was not stored, and the record stays
+  failed. An answer the host salvaged, one not yet delivered when the record was
+  written and one whose origin was not recorded keep `Failed`. Stop now reads `Stopped` whatever it kept (answer and files stay shown);
   a Wrap up reads `Done` over its final answer and `Stopped` without one; failed
   file preservation beside Wrap up reads `Failed`; the cause names the button.
   Explicit `task_completion/author_stop` reads `Stopped`, keeping its cause and Continue, including saved records.
@@ -897,7 +903,7 @@ not move them into the migrated set in section 8.
 
 Every surface that says what a work or a room is doing draws one small family of
 marks (`web/modules/status_mark.js`, the `.status-mark` recipe in `web/ui.css`): a
-Project row, Ouroboros's card (Main's), Ouroboros's picture where it opens the drawer, a room's status, a work-list row, a
+Project row, Ouroboros's card (Main's), Ouroboros's picture (on his card and where it opens the drawer), a room's status, a work-list row, a
 task card's chip, a question's head, a skill's job. A mark carries two facts in two
 channels, and nothing else draws a work's or a room's status dot, bar or ring (a
 status sentence's or a composer chip's dot is its tone, §4).
@@ -928,7 +934,9 @@ status sentence's or a composer chip's dot is its tone, §4).
   owner's move comes first, then an outcome beside its word, then new messages,
   then the work's shape in ink. A lone dot in a list is only new messages or the
   owner's move where nothing moves; Ouroboros's picture, which stands for many rooms
-  while the drawer is closed, shows the owner's move as the dot.
+  (Main and the Projects, on his card and where it opens the drawer), shows the owner's
+  move as the dot. His card can so carry two amber marks while Main itself waits: the
+  picture's for the rooms, the trailing one Main's own.
 - **Words carry the meaning.** A mark is decorative (`aria-hidden`); the word
   beside it or the place's accessible name says the same fact ("Working · new
   messages", "Something here waits for you"), so colour is never the only channel.
@@ -954,11 +962,12 @@ status sentence's or a composer chip's dot is its tone, §4).
   value — is never amber; the fallback above is amber because the work then runs on a model nobody chose for it.
 
 In a Project row the mark owns one reserved trailing column, so it sits at one x
-across rows whatever the name length and, with a fine pointer, while the ⋯ is
-hovered, focused or open (on touch a focused ⋯ brings back its own column);
-Ouroboros's card puts Main's mark at the same x, its count just before it. A deleting row draws only `Deleting…`, its
+across rows whatever the name length; while the row's controls are drawn (a pointer's hover or the keyboard in the
+row, on touch a focused ⋯ or its open menu, the Pin with the keyboard) it gives way as the time does, and its words
+stay in the row's name. Ouroboros's card puts Main's mark at the same x, its count just before it. A deleting row draws only `Deleting…`, its
 census fact kept in the accessible name. The Projects have no header and no mark of their own: each row
-carries its own. An activity repaint keeps the row and menu
+carries its own, and what waits for the owner in any of them also shows as the amber dot on Ouroboros's
+picture (§10 "Navigation"). An activity repaint keeps the row and menu
 nodes. A mark never carries a counter, percent or text animation.
 
 Enforcement: `web/tests/status_marks.test.js` pins the mapping and that only
@@ -974,8 +983,9 @@ Main's on Ouroboros's card: the standalone messages not read yet (below), shown 
 another destination is (a Project open over Main included, which reads none of Main's
 messages meanwhile), a crimson pill just before the card's mark. A Project row says it
 with its mark's crimson tint (its work's shape, or a dot where nothing works), never a
-count, and the Projects have no total; Ouroboros's picture carries a crimson dot while
-Main or a Project hidden in the drawer has some. Project names keep one ink, read or not. Main's count is kept as a Project's
+count, and the Projects have no total; where it opens the drawer, Ouroboros's picture carries a
+crimson dot while Main or a Project hidden in the drawer has some, and on his card it never does:
+Main's count and each row's own mark say it. Project names keep one ink, read or not. Main's count is kept as a Project's
 is, its room's revision against a shared read cursor read the same way (below), so
 every window and device shows the same number; a cursor no client has set yet starts
 at what Main holds.
@@ -1031,6 +1041,12 @@ revision, so this counter guarantees no delivery durability.
 - **Several clients** share one read cursor that only moves forward: a room read
   on one client stops showing the crimson mark on the others at their next state
   refresh, and nothing read is shown unread again.
+- **Observer views** (`?observer=1`) show unread without creating or moving read
+  cursors or recording message reads. The builtin browser uses this mode for
+  this installation's UI; scripts opt in. Session storage keeps it across reloads
+  until `?observer=0`, and passes it to windows with an opener. Without storage
+  it lasts only for the current document: reload needs `?observer=1` again.
+  Intentional writes and human views are unchanged.
 - **One message in two rooms** counts in each until read, then is read in both
   (owner 28.10, A): shown whole in either room, every part on screen at some moment
   (a long one by scrolling, a wide block by panning it; a folded or hidden part, or
@@ -1647,15 +1663,19 @@ reviews create child tasks or prove execution.
 - A work whose review returned FAIL or no verdict carries one quiet phrase on
   its card's line, `Review: FAIL or no verdict N× (latest: <reason>) · author
   continued M× (latest: <disposition> — "<head>") · landed over it: K
-  commits`, a part only when recorded (unknown is not zero; a part with no
-  count before it names what it went over), the first live,
+  commits · skill "<name>" left on over review problems`, a part only when
+  recorded (unknown is not zero; a part with no count before it names what it
+  went over; a skill left on although no review passed its current files
+  reads `over review problems` or `with no review verdict`, several as a count
+  with the latest), the first live,
   all on a page load before Details open, running ones too (a Project work's
   portal in Main shows it live and once its Details open), and one Details
-  row, `Review returned FAIL or no verdict`, with the stored heads (300
+  row, `Review returned FAIL or no verdict` (`Skill left on without a passed
+  review` when that part stands alone), with the stored heads (300
   characters, an ellipsis when cut; `review_gate_card.js`): counts, never a
   row per decision, no Main row or Telegram message of its own; the Telegram
-  completion carries it. It never says merged or running; a child's outcome
-  counts on its root's card, naming the child.
+  completion carries it. It never says merged or running, nor that a skill is
+  on now; a child's outcome counts on its root's card, naming the child.
 - Read opens the selected saved answer in the document reader (Markdown, Source
   exact; a failure note as plain text) and never regenerates a review or
   switches sources after an update; limits, Download, timeout and focus follow
@@ -2364,7 +2384,9 @@ tool of unknown kind that ran and failed (MCP and extension tools included), a c
 failed read named in `PURE_READ_TOOLS`, a command that ran and failed or timed out, and a call the tool refused for
 its arguments or because it named no tool stay in the details, in the evidence row below. The clause names the first loud failure in plain words (a noun for the step and
 what happened, never a tool name, its result text or a path) and counts the rest of those (`tool_error_words`); a record written before the
-flags keeps its stored word. Successful tool calls are not rows: they fold
+flags keeps its stored word. A check that did not pass is said by its cause, in the words of its "Check did not pass" row where the card has
+one and the receipt holds the same fact, and with how many checks passed after it; its command is in that row. A
+record without that fact says what it cannot tell. Successful tool calls are not rows: they fold
 into ONE evidence row per block (`N tool calls`, `N tool calls · M errors` once
 a call failed) at the first call's position and time, patched in place; Expand
 shows per-tool counts (`read_file ×3 · web_search`), and the phase (`calling`
@@ -2789,10 +2811,15 @@ Models and Agents edit assignments; a new connection adds choices without
 replacing them. A model role reads as a current choice (§7 "Settings") and opens one compact
 Source / Model / Account row to change it. Under Main, Settings (not the wizard or a wait
 picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the Main chat's Model capsule, whose
-confirming sheet says it before it writes Main. A model suggestion and the line under a role show the catalog's
+confirming sheet says it before it writes Main, with one more fact (`composer_model.MAIN_CACHE_NOTE`: what follows
+Main may write its start to the new model's cache again) and, where the catalog states it for the install's cache
+tier, the price of a cache write. A model suggestion and the line under a role show the catalog's
 published price per 1M tokens where it states a whole one and the role pays it (not on Fast or Economy), which never
-sorts or filters the list; the line under an API role whose price is not that says `Price unknown`;
-nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
+sorts or filters the list; the line under an API role whose price is not that says `Price unknown`. The line under a
+role also says the model's window in the list's words (`$4 in / $20 out per 1M tokens · 1M window`): the one its
+route is sized with when known, else the catalog's; an unknown window is omitted. In setup the catalog is the draft's
+own (a key typed there lists and prices its models before anything is saved), and the limits step names what its
+limits cannot count, as Dashboard › Costs does (`Not counted: …`). Nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
 independently. Fallbacks use the same row in their saved order, with adjacent
@@ -2912,7 +2939,8 @@ with every row, the limits warning and Continue in view: subscriptions
 are equal rows, two columns where they fit, the warning under them in every state,
 before any connection. A narrow or short window, expanded keys, a sign-in or a long
 error may scroll; Continue, Back and the reason stay on the bottom edge, and focus
-stops clear of them.
+stops clear of them. On Windows the desktop setup window opens no larger than its
+screen's working area, so that edge is on screen.
 
 - Step title `--type-page`; card titles `--type-section`; field labels and
   notes `--type-meta`. No display size above `--type-page`.
@@ -2927,11 +2955,14 @@ stops clear of them.
 ### Settings
 
 **A row is a question with its current answer, and a setting has one row** (§6); its one line says what it
-means and what a change did, and a paragraph waits behind `More`. Settings is a section with pages (§10): its
+means and what a change did, and a paragraph waits behind `More`; before its value is first read the line says
+Reading… (Could not be read after a failed read) and the control waits. Settings is a section with pages (§10): its
 list is search, Ouroboros's card and groups of navigation rows (§10), each a page's name over its current answer;
 the list and an open page stand together, and a page is always open, Models the first time and later the last
 one. A row opens its page or is a door: what lives elsewhere (a Dashboard page beside its live state, Main's
-composer) shows its value here and leads there with ↗. A list of entries (agents, MCP servers, keys, fallbacks)
+composer) shows its value here and leads there with ↗; there, in every layout, the destination's header starts
+with the round Back named Back to Settings, which returns to the Settings page the row stood on and goes when used or
+when another place is chosen (owner 14.11). A list of entries (agents, MCP servers, keys, fallbacks)
 is heads: a press opens the entry's page, Add an unsaved one. The card speaks in Ouroboros's voice: what it has
 read that waits for the owner here, each with its one action; a fact it has not read is said by the row it concerns,
 never on the card.
@@ -3246,7 +3277,8 @@ and Add"); a destination is a room or a section.
 
 Destinations come from one registry (`web/modules/pages.js`): it renders the navigation rows, names the titles and
 feeds the shell gate, so a new page is a registry row and its module, checked at phone widths with no further work.
-The column reads from the top: Ouroboros's card, which is Main (its picture, its name with a quiet `Main Chat`,
+The column reads from the top: Ouroboros's card, which is Main (its picture, with one 7 px amber dot on its rim
+while Main or a Project in the list waits for the owner, the card's words for readers saying so, its name with a quiet `Main Chat`,
 Main's count and its room's mark in the Project rows' mark column, and under them what Main is doing now, nothing
 while it rests), in the Ouroboros voice and in the strong crimson while Main is where you are; then Find a project,
 with + (New project) at the end of its row; then the Projects, the column's only scroller; then the six sidebar
@@ -3255,9 +3287,12 @@ their names whole (three in a wide sidebar, two at its default width and in the 
 each its glyph and its word, the one where you are the strong crimson capsule; and under them the
 foot, the version and the update, above the safe area. The Projects take all the free room between the field and
 the sections; there is no Projects heading, no collapse and no unread total. A Project row is two lines: the name
-and its time, then its newest line with the row's mark (a name with no such line may take both). The list stands
-beside the room and is never louder than the room's own text: a name is the meta ink at the regular weight, its
-newest line the secondary ink, and only the chosen row is strong. Its menu opens
+and its time, then one line with the row's mark (a name with no such line may take both): the opening words of the
+question that waits for the owner, or the sentence that says what waits where it has no words of its own (an action
+only the owner can take, an answer whose delivery is unknown), else what its work is doing; the row's name for
+readers ends with the same words. The list stands beside the room and is never louder than the room's own text: a
+name is the meta ink at the regular weight, its line the secondary ink, or the primary ink of the room's own text
+while it says what waits for the owner, and only the chosen row is strong. Its menu opens
 from its ⋯ (a fine pointer), a right-click, Shift+F10 or a long press; it first says the row's state as its mark
 and words, then offers Pin or Unpin; pinning neither opens nor reads it. Pins lead the one list, one `--space-2`
 of air before the next shown row their only boundary: no caption, tint, rule or column, and no glyph, so nothing
@@ -3309,7 +3344,8 @@ steps aside with the others while an open capsule has the line alone; at a secti
 (on a section's page Back leads instead). While the drawer is
 closed the picture carries one 7 px dot for Main and the Projects, the room on screen
 included: amber while one of them waits for the owner, else crimson while one has
-unread messages; its accessible name says which. The
+unread messages; its accessible name says which. The picture on his card carries the amber
+dot by the same rule in both layouts, never the crimson one. The
 drawer's × sits in its head, where the picture was. The room's quarter,
 ×, Escape, Back and choosing a place close it. A drag only speeds this up: a
 sideways finger anywhere on the room, from the screen's very edge and over its

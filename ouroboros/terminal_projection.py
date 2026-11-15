@@ -275,7 +275,7 @@ def _project_row(tid: str, row: dict, event: dict, ready: dict, *, delivery: dic
         "_result_text_present": (isinstance(row.get("result"), str) and bool(row["result"]))
         if "result" in row else row.get("_result_text_present") is True,
         "terminal_origin": str(row.get("terminal_origin") or ""),
-        **({"cancel_origin": dict(row["cancel_origin"])} if isinstance(row.get("cancel_origin"), dict) else {}),
+        **{key: dict(row[key]) for key in ("cancel_origin", "finalization_recovery") if isinstance(row.get(key), dict)},
         "result_ref": {"kind": "task_result", "task_id": tid, "reader": "get_task_result"}, "text": text, **work_label(row),
         **({"reason_detail": verdict} if verdict else {}),
         "completion_notice": notice,
@@ -770,9 +770,9 @@ def part_stamp(page_stamps: Iterable[Any]) -> dict:
     """A part's stamp from its member pages' stamps, losing no failure.
 
     ``counts`` holds how many tasks there are per ``(source, outcome_phase)``;
-    ``tasks`` keeps in full every task whose phase is not ``done`` or whose stamp
-    did not come from a terminal projection. A task stamped on two pages counts
-    once, by its later stamp.
+    ``tasks`` keeps in full every task whose phase is not ``done``, whose stored status is
+    ``failed`` (an adopted delivered answer reads ``done``) or whose stamp did not come
+    from a terminal projection. A task stamped on two pages counts once, by its later stamp.
     """
     latest: dict[str, dict] = {}
     for stamp in page_stamps:
@@ -782,7 +782,8 @@ def part_stamp(page_stamps: Iterable[Any]) -> dict:
     counts = Counter((str(entry.get("source") or ""), str(entry.get("outcome_phase") or ""))
                      for entry in latest.values())
     kept = [entry for entry in latest.values()
-            if entry.get("outcome_phase") != "done" or entry.get("source") not in _TERMINAL_SUMMARIES]
+            if entry.get("outcome_phase") != "done" or entry.get("status") == "failed"
+            or entry.get("source") not in _TERMINAL_SUMMARIES]
     return {"tasks": kept,
             "counts": [{"source": source, "outcome_phase": phase, "tasks": n}
                        for (source, phase), n in sorted(counts.items())],

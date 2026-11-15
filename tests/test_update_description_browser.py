@@ -53,6 +53,8 @@ dashboard.activateTab('updates');
 </script>"""
 TASK = "d3adb33f"
 INK = "el => [getComputedStyle(el).fontSize, getComputedStyle(el).color]"
+# The host's own line for the large range: two of its merges carry a receipt that observed no bound review.
+OVER_LINE = "Went in over a review FAIL or no verdict: 2 merges."
 PIN = {"action": "keep", "direction": "forward", "serving": {"version": "4.8.0"}, "target": {"version": "4.8.0"}}
 EFFECTS = {"engine": PIN, "replacement_engine": PIN, "active_work": {"status": "known", "model": 0, "non_model": 1},
            "runtime": {"installed": {"python": "3.10.19", "sqlite": "3.50.4"},
@@ -183,6 +185,10 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
                 assert write.is_visible() and write.inner_text() == "Write description" and write.is_enabled()
                 assert page.locator("#updates-letter-refresh-label").inner_text() == "Check"
                 assert page.locator("#btn-update-primary").inner_text() == "Update to 7.8.1"
+                # The host's line about the range stands with no description too, as a warn status sentence.
+                over = page.locator("#updates-letter-over")
+                assert over.is_visible() and over.inner_text() == OVER_LINE
+                assert over.get_attribute("data-tone") == "warn" and "ui-status" in over.get_attribute("class").split()
                 shot(page, "01-empty")
 
                 # 2. Write posts the exact offered range once; the request's own task shows as writing.
@@ -235,6 +241,8 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
                 dialog = page.get_by_role("dialog")
                 dialog.wait_for()
                 assert "No description is available for this exact preflight range." in dialog.inner_text()
+                assert dialog.locator("[data-confirm-content] .updates-letter-over").inner_text() == OVER_LINE, (
+                    "the confirmation carries the line with no description")
                 current["status"] = _status(large, _letter(large, "ready"))
                 for frame in ("window.__wsHandlers.get('update_progress_changed')()",
                               f"window.__wsHandlers.get('log')({{data: {{type: 'task_done', task_id: '{TASK}'}}}})"):
@@ -250,6 +258,8 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
                 assert "Что будет заметно сразу" in rendered and "Telegram." in rendered
                 assert "##" not in rendered and "**" not in rendered, "Markdown renders, never shows raw"
                 assert body.locator("li").count() >= 12
+                assert over.is_visible() and over.inner_text() == OVER_LINE
+                assert over.bounding_box()["y"] < body.bounding_box()["y"], "the line stands above the description"
                 assert page.locator("#updates-letter-label").inner_text() == "What's new"
                 # The range the text covers is its provenance, in the letter's Details (the heading keeps its date).
                 covers = page.locator("#updates-letter-provenance").text_content()
@@ -267,6 +277,9 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
                 page.locator("#updates-letter-details summary").click()
                 provenance = page.locator("#updates-letter-provenance").inner_text()
                 assert f"in task {TASK}" in provenance and "at your request" in provenance
+                named = page.locator("#updates-letter-over-names").inner_text()  # Details name what the line counts
+                assert named.startswith("Went in over a review FAIL or no verdict: ") and named.count("(merge; no review verdict recorded)") == 2
+                assert "Made on this computer: Not read for this range" in named, "rows that were not read are unknown, never none"
                 page.locator("#updates-letter-details summary").click()
 
                 # 4. Check is facts only: a refreshed run leaves the read text's very DOM node in place.
@@ -290,6 +303,9 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
                 region_text = region.inner_text()
                 assert "Что будет заметно сразу" in region_text and "##" not in region_text and "**" not in region_text
                 assert region.locator("li").count() >= 12
+                line = region.locator(".updates-letter-over")
+                assert line.inner_text() == OVER_LINE and line.get_attribute("data-tone") == "warn"
+                assert line.bounding_box()["y"] < region.locator(".updates-letter-body").bounding_box()["y"]
                 plain = dialog.locator(".marketplace-modal-body > p").inner_text()
                 for fact in ("Git applies this update directly", "Claudexor: 4.8.0 → 4.8.0", "forward-only"):
                     assert fact in plain, fact
@@ -308,7 +324,10 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
                 shot(page, "04-apply-large")
                 details.locator("summary").click()
                 rows = details.locator(".confirm-dialog-detail-row")
-                assert rows.count() == len(large["qualification"]["commits"]) + 1 + len(large["qualification"]["github"]["runs"]) + 1
+                # Two rows lead them for this range: its own landed rows were not read, and 7 of its 17 commits carry a receipt.
+                assert rows.count() == 2 + len(large["qualification"]["commits"]) + 1 + len(large["qualification"]["github"]["runs"]) + 1
+                assert rows.nth(0).inner_text().replace("\n", " ").startswith("Made on this computer Not read for this range")
+                assert "7 of the 17 commits listed here carry one" in rows.nth(1).inner_text()
                 assert "Merge pull request #2384" in details.inner_text() and "No matching run observed" in details.inner_text()
                 rows.nth(3).scroll_into_view_if_needed()
                 shot(page, "05-apply-large-details")
@@ -344,6 +363,8 @@ def test_write_check_and_apply_read_the_description_as_prose(engine, width, heig
                 dialog.wait_for()
                 small_text = dialog.locator("[data-confirm-content]").inner_text()
                 assert "Небольшое исправление Dashboard" in small_text and "**" not in small_text
+                # A range whose receipts all passed has no line, in the panel and in the confirmation alike.
+                assert page.locator("#updates-letter-over").is_hidden() and dialog.locator(".updates-letter-over").count() == 0
                 shot(page, "06-apply-small")
                 dialog.get_by_role("button", name="Cancel", exact=True).click()
                 dialog.wait_for(state="detached")
@@ -616,7 +637,9 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     ui, engine = letter_ui, letter_ui["engine"]
     output = diagnostic_directory(tmp_path, "update-description-away", publish=True)
     large = FIXTURE["large"]
-    short = "\n\n".join(FIXTURE["small"]["text"].split("\n\n")[:2])  # about five lines at the owner's width
+    # About four lines in the Updates page's column at the owner's width: with Dashboard's list beside the open page
+    # (PR #3369) that column is narrower than the whole content area the first two paragraphs were sized for.
+    short = FIXTURE["small"]["text"].split("\n\n")[0]
     current = {"status": _status(large, {**_letter(large, "ready"), "text": short})}
     sockets = []
 
@@ -708,8 +731,15 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     assert back["more"] is None and back["content"] <= back["height"] + 1, back
 
     # 6. A narrower window (or interface size) folds some of it: Read all comes, and goes at the owner's width again.
-    page.set_viewport_size({"width": 860, "height": OWNER_WINDOW["height"]})
+    # A phone's column folds it. There a Dashboard brought back by the sidebar may give its page up for its list (each
+    # showing resets the open page, dashboard.js onPageShown; only a row pressed in the visit keeps it); the owner then
+    # opens Updates from the list. Either way the letter is read on Updates.
+    page.set_viewport_size({"width": 320, "height": OWNER_WINDOW["height"]})
     page.evaluate(FRAMES)
+    if not page.locator("#dashboard-panel-updates").is_visible():
+        page.click('[data-dashboard-tab="updates"]')
+        page.wait_for_selector("#dashboard-panel-updates", state="visible")
+        page.evaluate(FRAMES)
     shot("04-short-narrow")
     narrow = letter("short-narrow")
     assert narrow["more"] == "Read all" and narrow["content"] > narrow["height"], narrow

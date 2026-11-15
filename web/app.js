@@ -8,7 +8,7 @@ import { bindScrollFade } from './modules/scroll_fade.js';
 import { initChat, createChatInstance } from './modules/chat.js';
 import { bindChatSearchKeys } from './modules/chat_search.js';
 import { createStateSnapshotSequencer, heldProjectChatIds, readStateSnapshot } from './modules/state_snapshots.js';
-import { IDLE_SUMMARY, buildProjectActivityIndex, markWords, reconcileProjectRooms } from './modules/project_activity.js';
+import { IDLE_SUMMARY, buildProjectActivityIndex, markWords, pictureOwner, reconcileProjectRooms } from './modules/project_activity.js';
 import { markView, paintStatusMark, syncMarkPhases } from './modules/status_mark.js';
 import { createProjectsNav } from './modules/projects_nav.js';
 import { bindRowMenuGesture } from './modules/row_menu_gesture.js';
@@ -23,7 +23,7 @@ import { startVoice } from './modules/voice_controls.js';
 import { projectRoomOptions, startConversations } from './modules/conversation_controls.js';
 import { createNotificationActivation, getNotifier } from './modules/notifications.js';
 import { showToast } from './modules/toast.js';
-import { noteReadAhead, onReadAheadChange, readAheadFor, unreadCount } from './modules/read_ahead.js';
+import { captureObserverMode, noteReadAhead, onReadAheadChange, ownerReads, readAheadFor, unreadCount } from './modules/read_ahead.js';
 import { openNewProjectDialog, openProjectRowMenu, repositionProjectRowMenu } from './modules/project_create.js';
 
 import { initLogs } from './modules/logs.js';
@@ -40,7 +40,7 @@ import { getInterfaceSize } from './modules/interface_size.js';
 import { initDashboard } from './modules/dashboard.js';
 import { initStorage } from './modules/storage.js';
 import { SHELL_ICONS } from './modules/page_icons.js';
-import { renderNavRows, renderProjectsHeader } from './modules/pages.js';
+import { pageById, renderNavRows, renderProjectsHeader } from './modules/pages.js';
 import { renderPageHeader } from './modules/page_header.js';
 import { createRoomHeader, panicButtonHtml } from './modules/chat_header.js';
 import { isCoarsePointer, isStackLayout, measurePinnedBars, onLayoutChange, pinchMagnified, roomCoversMain } from './modules/layout.js';
@@ -59,6 +59,9 @@ import { initOnboardingOverlay } from './modules/onboarding_overlay.js';
 import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from './modules/ui_helpers.js';
 import { bindDocumentSelectionDismissal, ordinaryPress } from './modules/selection_lifecycle.js';
 import { watchSegmentFills } from './modules/segment_fill.js';
+
+// A view opened with `?observer=1` reads nothing for the owner (read_ahead.js; DESIGN "Unread"): taken before any read.
+captureObserverMode();
 
 const state = {
     messages: [],
@@ -171,7 +174,13 @@ let projectRooms = new Map();
 let projectActivityIndex = buildProjectActivityIndex();
 let activitySocketDisconnected = false;
 const navToggleNames = new WeakMap();  // each ☰'s last written name (paintNavToggles)
+const MAIN_ROW_TITLE = pageById('chat').hint;  // the card's own tooltip (pages.js), under what its dot adds
+let mainRowTitle = MAIN_ROW_TITLE;  // the tooltip last written on Ouroboros's card (paintMainRow)
 let shownProjectId = null;  // the Project the last navigation sync showed, so a close is told from no change
+let focusedProjectRow = null;
+document.addEventListener('focusin', (event) => {
+    focusedProjectRow = event.target.closest?.('[data-nav-project-id]') ? event.target : null;
+});
 // The place the last navigation sync showed: the room a handover leaves (shell_motion.js).
 let lastScene = { page: 'chat', project: null };
 let panelExits = 0;  // the latest close of the Project panel; a reopen voids an older one's put-away
@@ -210,8 +219,9 @@ async function showPage(name, options = {}) {
             const canLeave = await handler({ from: state.activePage, to: pageName });
             if (canLeave === false) return false;
         }
-        // Main behind another page: a document it opened closes rather than sit over that page; what it plays goes on.
-        if (state.activePage === 'chat') { mainChat?.closeTransient?.(); rooms.suspend(mainChat); }
+        // Main behind another page: a document it opened closes, what it plays goes on; a Project over it keeps its
+        // selection now, as the page shown next takes focus (which ends a selection in WebKit).
+        if (state.activePage === 'chat') { mainChat?.closeTransient?.(); rooms.suspend(mainChat); rooms.rememberSelection(projectInstances.get(navState.activeProjectId)); }
         document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
         document.getElementById(`page-${pageName}`)?.classList.add('active');
         state.activePage = pageName;
@@ -231,10 +241,12 @@ async function openSettings(path = '', options = {}) {
 }
 
 async function openDashboardTab(tabName, options = {}) {
-    if (!await showPage('dashboard')) return false;
-    if (dashboardControls && typeof dashboardControls.activateTab === 'function') {
-        dashboardControls.activateTab(tabName, options);
-    }
+    if (!await showPage('dashboard', { closeDrawer: false })) return false;
+    // The chosen page replaces the drawer's layer in one commit, keeping its one browser Back entry.
+    layers.batch(() => {
+        dashboardControls?.activateTab(tabName, options);
+        setMobileDrawerOpen(false);
+    });
 }
 // A line elsewhere that points at a Dashboard tab (a quiet place's sheet at Consciousness) asks for it by this event.
 window.addEventListener('ouro:open-dashboard', (event) => { void openDashboardTab(String(event.detail?.tab || 'activity')); });
@@ -315,6 +327,7 @@ function mergeMainSeenRevision(prefs) {
 }
 
 async function markMainViewed(revision) {
+    if (!ownerReads()) return false;  // the observer mode: nothing is the owner's read
     try {
         const prefs = await fetchJson('/api/ui/preferences', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -369,6 +382,7 @@ function handoverBetween(from, to) {
 }
 
 function syncNavigationState() {
+    const focused = document.activeElement; // before a closing layer hides or restores its focus
     const activeProjectId = navState.activeProjectId;
     syncMainLifetime();
     const drawerOpen = Boolean(navState.mobileDrawerOpen);
@@ -463,22 +477,25 @@ function syncNavigationState() {
     });
     // Last: the list's pin group and an open row menu settle, and a closed Project's focus finds its place.
     projectsNav.markPinGroup();
-    if (shownProjectId && !activeProjectId) focusAfterProjectClosed(shownProjectId);
+    if (shownProjectId && !activeProjectId) focusAfterProjectClosed(shownProjectId, focused);
     shownProjectId = activeProjectId;
     // Main's count and ☰'s dot follow whether Main is the room on screen, which an open or a close just changed; a
     // room's composer mounted since the last paint carries its ☰ too.
     updateUnreadBadge();
 }
 
-// A closed Project hands the focus back to its row (layers.js). Where that row is gone (deleted, archived, or no longer
-// in a find's result) and the focus with it, the list's first control takes it (projects_nav.js `keyboardHome`), unless
-// the sidebar is inert (the stack layout's closed drawer). With the row still listed the focus is left alone: a Project
-// opened with a pointer has no opener in WebKit, and a search field taking the focus there would light its ring and
-// raise a tablet's keyboard.
-function focusAfterProjectClosed(closedId) {
+// Only a lost row focus or a closing panel control without its row needs the list's keyboard home. Body focus alone
+// proves nothing: WebKit leaves it there when a pointer opens a reference to an unlisted Project and presses ×.
+function focusAfterProjectClosed(closedId, focused) {
     const at = document.activeElement;
-    const lost = !at || at === document.body || projectPanel?.contains(at) || at.closest?.('[hidden]');
-    if (!lost || [...(navProjectsList?.children || [])].some((el) => el.dataset?.navProjectId === closedId)) return;
+    const previous = focused === document.body ? focusedProjectRow : focused;
+    const row = previous?.closest?.('[data-nav-project-id]');
+    const lostRow = row?.dataset.navProjectId === closedId && (!previous.isConnected || previous.closest('[hidden]'));
+    const lostPanel = projectPanel?.contains(previous)
+        && ![...(navProjectsList?.children || [])].some((el) => el.dataset?.navProjectId === closedId);
+    if (!lostRow && !lostPanel) return;
+    if (at && at !== document.body && at.isConnected && !projectPanel?.contains(at) && !at.closest('[hidden]')) return;
+    focusedProjectRow = null;
     const home = projectsNav.keyboardHome();
     if (home && !home.closest('[inert]')) home.focus({ preventScroll: true });
 }
@@ -751,6 +768,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
     if (!project?.id) return;
     const navigation = ++projectNavigationGeneration;
     if (navState.activeProjectId === project.id) {
+        if (closeDrawer && navState.mobileDrawerOpen) setMobileDrawerOpen(false);
         if (!openOnly) closeProjectPanel();
         else if (taskId && quizId) await revealProjectQuestion(freshProjectRow(project), projectInstances.get(project.id), taskId, quizId);
         return;
@@ -1040,14 +1058,24 @@ function patchProjectActivityMarkers(activityIndex = projectActivityIndex) {
 }
 
 // Main's row carries its room's mark in the ink of the row; its own new messages stay its number badge
-// (updateUnreadBadge). Its words are a text for readers inside the row, so the row keeps the name the interface's
-// language gives its label (a Project row is named by its owner, so its name is an attribute).
+// (updateUnreadBadge). Ouroboros's picture on it carries the amber dot while Main or a Project the list holds waits
+// for the owner (owner 15.11, 6A: the list may hold that Project's row out of sight), never the crimson of new
+// messages: Main's count and each row's own mark say those. Its words are a text for readers inside the row, so the
+// row keeps the name the interface's language gives its label (a Project row is named by its owner, so its name is
+// an attribute); they say a Project's wait too, since the dot is decorative.
 function paintMainRow() {
     const summary = projectRooms.get('1') || IDLE_SUMMARY;
+    const waits = pictureOwner(projectRooms, projectActivityIndex);
     paintStatusMark(navMainRow?.querySelector('.nav-mark'), markView({ mark: summary.mark, owner: summary.owner }));
+    paintStatusMark(navMainRow?.querySelector('.nav-ava-mark'), markView({ owner: waits.any }));
     const words = navMainRow?.querySelector('.nav-row-words');
-    const text = summary.label ? ` · ${summary.label}` : '';
+    const said = [summary.label, waits.projects ? tr('nav.projects_wait', 'Something in a project waits for you') : '']
+        .filter(Boolean);
+    const text = said.length ? ` · ${said.join(' · ')}` : '';
     if (words && words.textContent !== text) words.textContent = text;
+    // The card's tooltip says what the dot stands for, as the ☰'s name does; written only when it changes.
+    const title = waits.any ? `${MAIN_ROW_TITLE} · something waits for you` : MAIN_ROW_TITLE;
+    if (navMainRow && mainRowTitle !== title) navMainRow.title = mainRowTitle = title;
     // The card's second line: what Main is doing now, the title of its running work; none while it rests.
     const work = navMainRow?.querySelector('.nav-ouro-work');
     if (work) {
@@ -1063,7 +1091,7 @@ function paintMainRow() {
 // crimson dot while one has new messages, else nothing; its name says the same. Both placements (a page header's, a
 // room's composer row) are painted; a composer that mounted later is painted by the navigation sync that shows it.
 function paintNavToggles() {
-    const owner = (projectRooms.get('1') || IDLE_SUMMARY).owner || projectActivityIndex.aggregate.owner;
+    const owner = pictureOwner(projectRooms, projectActivityIndex).any;
     const unread = (!mainOnScreen() && mainUnreadCount() > 0) || projectsNav.unreadRows().length > 0;
     const view = markView({ owner, unread });
     const name = owner ? 'Open navigation · something waits for you' : unread ? 'Open navigation · new messages' : 'Open navigation';
@@ -1081,7 +1109,7 @@ function paintNavToggles() {
 // so stale tabs cannot move it backwards or acknowledge unseen future output; the
 // cursors it answers with, never the requested number, become this client's.
 async function markProjectViewed(projectId, revision) {
-    if (!projectId) return false;
+    if (!projectId || !ownerReads()) return false;  // the observer mode reads nothing
     const seen = Math.max(0, Number(revision) || 0);
     let prefs;
     try {

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros.utils import append_jsonl, iter_jsonl_chain_objects
+from ouroboros.utils import append_jsonl, iter_jsonl_chain_objects, machine_json
 from supervisor import state
 from tests.test_jsonl_rotation import ROTATED_LOG_NAMES
 from tests.test_server_shutdown import _run, _supervisor_harness
@@ -33,7 +33,7 @@ def _append(path, event):
     assert append_jsonl(path, {"event": event}, require_lock=True, lock_timeout_sec=0)
     # append_jsonl writes LF on every platform (a binary descriptor and a binary fallback),
     # so the oracle is byte-exact everywhere, the LF seeds included.
-    return (json.dumps({"event": event}) + "\n").encode()
+    return (machine_json({"event": event}) + "\n").encode()
 
 
 def _recover(root, path, expected):
@@ -327,7 +327,7 @@ def test_rotation_oserror_keeps_real_supervisor_dispatching(
         phases.append("assign")
         row = {"event": f"tick {len(attempts)}"}
         assert append_jsonl(path, row, require_lock=True, lock_timeout_sec=0)
-        expected += (json.dumps(row) + "\n").encode()
+        expected += (machine_json(row) + "\n").encode()
         if len(attempts) == 4:
             rec.stop.set()
 

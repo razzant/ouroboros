@@ -73,6 +73,25 @@ def _room_reading_routes(data_dir: pathlib.Path) -> list[BaseRoute]:
             Route("/api/chat/search", endpoint=make_chat_search_endpoint(data_dir))]
 
 
+def _setup_routes() -> list[BaseRoute]:
+    """What the setup wizard asks before and at its Finish: the preview of its draft and the draft's own model
+    catalog (neither saves), the one atomic owner-scoped completion (D-8: it replaced the wizard's old
+    POST /api/settings + POST /api/owner/runtime-mode pair) and the read-back of one completion attempt."""
+    from ouroboros.gateway.onboarding import (
+        api_onboarding_complete,
+        api_onboarding_model_catalog,
+        api_onboarding_subagents_preview,
+    )
+    from ouroboros.gateway.onboarding_host import api_onboarding_attempt
+
+    return [
+        Route("/api/onboarding/subagents/preview", endpoint=api_onboarding_subagents_preview, methods=["POST"]),
+        Route("/api/onboarding/model-catalog", endpoint=api_onboarding_model_catalog, methods=["POST"]),
+        Route("/api/onboarding/complete", endpoint=api_onboarding_complete, methods=["POST"]),
+        Route("/api/onboarding/complete", endpoint=api_onboarding_attempt, methods=["GET"]),
+    ]
+
+
 def collect_routes(
     *,
     data_dir: pathlib.Path,
@@ -133,10 +152,6 @@ def collect_routes(
     )
     from ouroboros.gateway.claudexor_quota import api_claudexor_account_reset, api_claudexor_quota_refresh
     from ouroboros.gateway.harness_maintenance import harness_maintenance_routes
-    from ouroboros.gateway.onboarding import (
-        api_onboarding_complete,
-        api_onboarding_subagents_preview,
-    )
     from ouroboros.gateway.settings import api_review_pool
     from ouroboros.gateway.mcp import mcp_routes
     from ouroboros.gateway.models import (
@@ -188,7 +203,7 @@ def collect_routes(
         api_tasks_list,
     )
     from ouroboros.gateway import desktop_autostart as desktop_host
-    from ouroboros.gateway.onboarding_host import api_onboarding_attempt, api_onboarding_bootstrap, onboarding_page
+    from ouroboros.gateway.onboarding_host import api_onboarding_bootstrap, onboarding_page
     from ouroboros.gateway.owner_effort import owner_composer_routes
     from ouroboros.gateway.safety_settings import api_owner_safety_rules, api_owner_safety_model, api_owner_safety_mode
     from ouroboros.gateway.settings import (
@@ -261,12 +276,7 @@ def collect_routes(
         Route("/api/onboarding", endpoint=onboarding),
         # The same wizard bootstrap as JSON, for a client that renders its own setup.
         Route("/api/onboarding/bootstrap", endpoint=api_onboarding_bootstrap, methods=["GET"]),
-        # ONE atomic owner-scoped completion (D-8): replaces the wizard's old
-        # POST /api/settings + POST /api/owner/runtime-mode pair.
-        Route("/api/onboarding/subagents/preview", endpoint=api_onboarding_subagents_preview, methods=["POST"]),
-        Route("/api/onboarding/complete", endpoint=api_onboarding_complete, methods=["POST"]),
-        # Reads back one completion attempt by the id its client sent; writes nothing.
-        Route("/api/onboarding/complete", endpoint=api_onboarding_attempt, methods=["GET"]),
+        *_setup_routes(),
         Route("/api/settings", endpoint=settings_get, methods=["GET"]),
         Route("/api/settings", endpoint=settings_post, methods=["POST"]),
         Route("/api/settings/secret", endpoint=api_settings_secret, methods=["POST"]),

@@ -21,7 +21,7 @@ import { createStartFailure, startFailureCause } from './host_starting_status.js
 import { compareHistoryPosition } from './chat_history_replay.js';
 import { createHistoryReveal } from './chat_history_reveal.js';
 import { fmt, tr } from './i18n.js';
-import { questionPresentation } from './question_presentation.js';
+import { questionPresentation, questionWords } from './question_presentation.js';
 import { taskCancelPending } from './log_events.js';
 import { desiredLiveCardPhase, replayTerminalPhase } from './task_phase_chip.js';
 import { createStatusMark, markView, paintStatusMark } from './status_mark.js';
@@ -266,7 +266,7 @@ export function createRoomWork({
         if (item.kind === 'question') {
             // The question's own words name its row; a row that carries none (Main's own question) keeps a plain name.
             // Its opening words, plain and bounded: the card it leads to holds the whole question.
-            const words = clip(clean(item.said?.question).replace(/\*\*|__|`/g, ''), REPLY_CHARS);
+            const words = questionWords(item.said?.question, REPLY_CHARS);
             return words ? { text: words, full: words, source: 'question' }
                 : named(tr('room_work.name.question', 'Question'), 'neutral');
         }

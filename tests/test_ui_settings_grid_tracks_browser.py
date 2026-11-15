@@ -116,7 +116,9 @@ def test_action_results_reflow_before_their_text_is_squeezed(role_ui, theme):
     ui, seen = role_ui, {}
     roles.configure_mixed(ui)
     page = ui['page']
-    page.set_viewport_size({'width': 1100, 'height': 750})
+    # Settings' list stands beside the page from 40rem (docs/DESIGN.md "Settings"): the window leaves the editor's
+    # column at least the 640 px the widest step asks for.
+    page.set_viewport_size({'width': 1440, 'height': 750})
     page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
     form = roles.open_agent(ui, 'native')
     form.locator('[data-subagent-field="recommended_use"]').fill('An edited description.')
@@ -137,6 +139,7 @@ def test_action_results_reflow_before_their_text_is_squeezed(role_ui, theme):
         row.evaluate("(e, w) => { e.style.width = w + 'px'; e.style.maxWidth = '100%'; }", width)
         page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
         row.scroll_into_view_if_needed()
+        assert row.evaluate("e => e.getBoundingClientRect().width") == pytest.approx(width, abs=1), "the step is the row's width"
         seen[str(width)] = row.evaluate("""e => {
             const box = e.getBoundingClientRect(), action = e.firstElementChild.getBoundingClientRect();
             const text = e.querySelector('.ui-result').getBoundingClientRect();

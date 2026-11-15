@@ -32,19 +32,22 @@ test('rows render from the registry, in order, with the label verbatim and the i
     const ids = [...rows.matchAll(/data-nav-page="([a-z]+)"/g)].map((m) => m[1]);
     assert.deepEqual(ids, ['circles', 'files', 'skills', 'widgets', 'dashboard', 'settings']);
     const main = renderNavRow(pageById('chat'));
-    // Main's place is this Ouroboros's own card (owner 12.11, fifth round): its picture instead of the chat icon, its
-    // name with the place's label, Main's count and its room's one status mark (app.js paints it, at rest hidden), the
-    // mark's words for readers, which the interface language's overlay leaves to their own translation, and under them
-    // the line of what Main is doing now.
+    // Main's place is this Ouroboros's own card (owner 12.11, fifth round): its picture instead of the chat icon, with
+    // the picture's own dot for the owner's move in Main or a Project (owner 15.11, 6A; a mark of its own class, there
+    // from the first paint and hidden at rest), its name with the place's label, Main's count and its room's one
+    // status mark (app.js paints it, at rest hidden), the mark's words for readers, which the interface language's
+    // overlay leaves to their own translation, and under them the line of what Main is doing now.
     assert.match(main, /^<button class="nav-row nav-row-main nav-ouro" type="button" data-nav-page="chat" title="Main Ouroboros chat">/);
     assert.equal(main, '<button class="nav-row nav-row-main nav-ouro" type="button" data-nav-page="chat" title="Main Ouroboros chat">'
-        + '<span class="nav-ouro-ava" aria-hidden="true"></span>'
+        + `<span class="nav-ouro-ava" aria-hidden="true">${statusMarkHtml('nav-ava-mark')}</span>`
         + '<span class="nav-ouro-text"><span class="nav-ouro-line1">'
         + '<span class="nav-ouro-name" data-i18n-skip>Ouroboros</span>'
         + `<span class="nav-row-label">Main Chat</span><span class="nav-row-words" data-i18n-skip></span><span class="nav-mark-slot">${statusMarkHtml('nav-mark')}</span></span>`
         + '<span class="nav-ouro-work" data-i18n-skip hidden></span></span></button>');
     assert.match(statusMarkHtml('nav-mark'), /aria-hidden="true" data-shape="none" data-hue="ink" hidden>/);
     assert.equal((main.match(/class="nav-ouro-ava"/g) || []).length, 1, 'the card shows its picture once');
+    assert.deepEqual(main.match(/class="status-mark [\w-]+"/g), ['class="status-mark nav-ava-mark"', 'class="status-mark nav-mark"'],
+        'two marks, each of its own class: the picture\'s dot and Main\'s room mark');
     assert.equal((main.match(/<svg/g) || []).length, 0, 'the picture stands where the chat icon was');
     const files = renderNavRow(pageById('files'));
     assert.doesNotMatch(files, /nav-row-main|status-mark|nav-row-words/, 'a tool has no status of its own');
@@ -72,4 +75,17 @@ test('the Projects header is the New project button alone, with the shell\'s plu
     const shell = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
     const section = shell.match(/<section id="nav-projects"[^>]*>/)?.[0] || '';
     assert.match(section, / aria-label="Projects"/);
+});
+
+test('section names wrap whole in the existing one, two and three column steps', () => {
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.match(css, /\.nav-tools\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\)/);
+    assert.match(css, /@container \(min-width: 226px\)\s*\{\s*\.nav-tools\s*\{\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+    assert.match(css, /@container \(min-width: 328px\)\s*\{\s*html:not\(\[data-layout="stack"\]\) \.nav-tools\s*\{\s*grid-template-columns: repeat\(3, minmax\(0, max-content\)\)/);
+    assert.match(css, /\.nav-tools > \.nav-row\s*\{[^}]*max-width: 100%/);
+    const label = css.match(/\.nav-tools > \.nav-row > \.nav-row-label\s*\{([^}]+)\}/)?.[1];
+    for (const declaration of ['white-space: normal', 'hyphens: auto', 'overflow-wrap: break-word', 'overflow: visible', 'text-overflow: clip']) {
+        assert.ok(label?.includes(declaration), declaration);
+    }
+    assert.doesNotMatch(readFileSync(new URL('../modules/pages.js', import.meta.url), 'utf8'), /measureNavTools|ResizeObserver|MutationObserver|createRange/);
 });

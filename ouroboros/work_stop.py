@@ -53,6 +53,7 @@ STOP_TEXT = {
     "spending_limit": "Spending limit reached", "technical_pause": "After a technical problem",
     "awaiting_selection": "Waiting for Ouroboros or you to resume it",
     "restore_failed": "Its saved state could not be restored", "held": "Held",
+    "start_unconfirmed": "Its last start is unconfirmed, or its saved work could not be read",
     "sleeping": "Sleeping until it is woken",
     "earlier_work_unconfirmed": "Continue starts when the earlier attempt's work is confirmed finished",
 }
@@ -171,8 +172,9 @@ def stop_presentation(task: dict, fences: dict | None = None) -> dict:
     wait = record_policy(hold_fact(task)) if not stop else {}
     sleeping = not stop and record_policy(pause_marker(task) or task.get("budget_pause")).get("cause") == "wait"
     if not stop:
-        code = ("earlier_work_unconfirmed" if wait.get("wait_for") else "restore_failed" if refusal
-                else "sleeping" if sleeping else "held")
+        unknown_start = refusal and reason_policy(str(refusal.get("reason") or "")).get("dispatch_unknown")
+        code = ("earlier_work_unconfirmed" if wait.get("wait_for") else "start_unconfirmed" if unknown_start
+                else "restore_failed" if refusal else "sleeping" if sleeping else "held")
     # An interrupted, consumed handoff can still need addressed Resume even
     # though its stop was already released; the census names that existing door.
     needs_resume = refusal or task.get("can_resume")

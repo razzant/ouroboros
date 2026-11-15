@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { computeHydratedDirectActivities } from '../modules/chat_activity.js';
-import { IDLE_SUMMARY, summarizeRoom } from '../modules/project_activity.js';
+import { IDLE_SUMMARY, pictureOwner, summarizeRoom } from '../modules/project_activity.js';
+import { tr } from '../modules/i18n.js';
 import { markView, paintStatusMark } from '../modules/status_mark.js';
 import { censusTaskPhase, desiredLiveCardPhase, setHistoricalUnavailable, setLiveCardPhase, syncParkedPhase } from '../modules/task_phase_chip.js';
 import { emptyWorkState, roomStatusView, workRowView } from '../modules/work_status.js';
@@ -296,12 +297,13 @@ test("a named work with a focus line: the summary carries its name and focus, an
     const from = app.indexOf('\nfunction paintMainRow(');
     assert.ok(from >= 0, 'paintMainRow is a top-level function in app.js');
     const nodes = { '.nav-mark': { dataset: { shape: 'none', hue: 'ink' }, hidden: true }, '.nav-row-words': { textContent: '' },
-        '.nav-ouro-work': { textContent: '', hidden: true } };
+        '.nav-ava-mark': { dataset: { shape: 'none', hue: 'ink' }, hidden: true }, '.nav-ouro-work': { textContent: '', hidden: true } };
     // A Project room stands before Main in the map: the card reads Main's room ('1'), never the first one.
     const project = summarizeRoom({ ...room('waiting'), works: ['elsewhere'] }, [elsewhere]);
-    const context = vm.createContext({ IDLE_SUMMARY, markView, paintStatusMark, projectRooms: new Map([['9', project]]),
-        navMainRow: { querySelector: (selector) => nodes[selector] || null } });
-    vm.runInContext(`${app.slice(from + 1, app.indexOf('\n}\n', from + 1) + 2)}\nglobalThis.paint = paintMainRow;`, context);
+    const context = vm.createContext({ IDLE_SUMMARY, markView, paintStatusMark, pictureOwner, tr, MAIN_ROW_TITLE: 'Main Ouroboros chat',
+        projectRooms: new Map([['9', project]]), projectActivityIndex: { aggregate: { owner: false } },
+        navMainRow: { title: 'Main Ouroboros chat', querySelector: (selector) => nodes[selector] || null } });
+    vm.runInContext(`let mainRowTitle = MAIN_ROW_TITLE;\n${app.slice(from + 1, app.indexOf('\n}\n', from + 1) + 2)}\nglobalThis.paint = paintMainRow;`, context);
     const second = (main) => {
         if (main) context.projectRooms.set('1', main); else context.projectRooms.delete('1');
         context.paint();
@@ -315,4 +317,21 @@ test("a named work with a focus line: the summary carries its name and focus, an
     assert.equal(second({ ...summary, mark: 'ring' }), null, 'unconfirmed: no line');
     assert.equal(second(null), null, 'at rest: no line');
     assert.equal(nodes['.nav-ouro-work'].textContent, '');
+
+    // The card's picture says the owner's move for Main and the Projects the feed can show: its own dot (never the
+    // mark of Main's room), the card's words for readers and its tooltip. Without such a wait all three rest.
+    const picture = () => [nodes['.nav-ava-mark'].hidden ? 'none' : `${nodes['.nav-ava-mark'].dataset.shape}/${nodes['.nav-ava-mark'].dataset.hue}`,
+        nodes['.nav-row-words'].textContent, context.navMainRow.title];
+    assert.deepEqual(picture(), ['none', '', 'Main Ouroboros chat']);
+    context.projectActivityIndex = { aggregate: { owner: true } };
+    second(summary);
+    assert.deepEqual(picture(), ['dot/owner', ` · ${summary.label} · Something in a project waits for you`,
+        'Main Ouroboros chat · something waits for you']);
+    assert.equal(nodes['.nav-mark'].dataset.hue, 'ink', "Main's own mark keeps Main's room");
+    context.projectActivityIndex = { aggregate: { owner: false } };
+    second({ ...summary, owner: true });
+    assert.deepEqual(picture(), ['dot/owner', ` · ${summary.label}`, 'Main Ouroboros chat · something waits for you']);
+    assert.equal(nodes['.nav-mark'].dataset.hue, 'owner');
+    second(null);
+    assert.deepEqual(picture(), ['none', '', 'Main Ouroboros chat']);
 });
