@@ -100,13 +100,16 @@ test('the SDK present at boot: ready, expand, swipes off, chrome painted, insets
     assert.equal(w.rootStyle.get('--tg-safe-area-inset-bottom'), '0px');
     // Back is hidden with an empty stack, shown while a layer is open, and its click is the stack's Back.
     assert.equal(sdk.app.BackButton.isVisible, false);
+    assert.equal(w.doc.documentElement.dataset.telegramBack, 'close');
     w.stack.count = 2; w.stack.emit();
     assert.equal(sdk.app.BackButton.isVisible, true);
+    assert.equal(w.doc.documentElement.dataset.telegramBack, 'back', 'a return is a layer: Telegram owns its visible Back');
     sdk.app.BackButton.handler();
     assert.deepEqual(w.stack.popped, ['host-back']);
     assert.equal(sdk.app.BackButton.isVisible, true, 'one layer left');
     w.stack.pop('scrim');
     assert.equal(sdk.app.BackButton.isVisible, false);
+    assert.equal(w.doc.documentElement.dataset.telegramBack, 'close');
     // Telegram's scheme is the System source; its change re-settles the theme and repaints the chrome.
     assert.equal(w.theme.source(), 'light');
     sdk.app.colorScheme = 'dark';
@@ -119,6 +122,7 @@ test('the SDK present at boot: ready, expand, swipes off, chrome painted, insets
     w.listeners.get('ouro:theme-changed')();
     assert.ok(sdk.calls.length > before + 2);
     adapter.dispose();
+    assert.equal(w.doc.documentElement.dataset.telegramBack, undefined);
     assert.equal(w.theme.source, null, 'dispose releases the System source');
     assert.equal(sdk.app.BackButton.handler, null);
     assert.equal(sdk.app.BackButton.isVisible, false);

@@ -456,7 +456,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
     }
 
     async function loadCosts() {
-        renderLead({ state: 'loading' });
+        if (!lastBreakdown) renderLead({ state: 'loading' });
         try {
             const resp = await apiFetch('/api/cost-breakdown');
             const d = await resp.json();
@@ -483,7 +483,19 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
             payload = await resp.json();
         } catch (error) { transportError = String(error?.message || error || 'unreachable'); }
         if (read !== subscriptionsRead) return;
-        page.querySelector('[data-costs-subscriptions]').innerHTML = subscriptionDoors(payload, { transportError }).map(subscriptionDoorHtml).join('');
+        const host = page.querySelector('[data-costs-subscriptions]');
+        const focused = host.contains(document.activeElement) ? document.activeElement : null;
+        const kept = new Map([...host.children].map((row) => [row.dataset.costsAccount, row]));
+        const desired = document.createElement('div');
+        desired.innerHTML = subscriptionDoors(payload, { transportError }).map(subscriptionDoorHtml).join('');
+        for (const [index, next] of [...desired.children].entries()) {
+            const row = kept.get(next.dataset.costsAccount) || next;
+            kept.delete(next.dataset.costsAccount);
+            if (row !== next && row.innerHTML !== next.innerHTML) row.replaceChildren(...next.children);
+            if (host.children[index] !== row) host.insertBefore(row, host.children[index] || null);
+        }
+        for (const row of kept.values()) row.remove();
+        if (focused) (host.contains(focused) ? focused : host.querySelector('[data-costs-account="accounts"]'))?.focus({ preventScroll: true });
     }
 
     // What the limits cannot count, one line under them (pricing.known_spend_gaps). The words are composed here,
@@ -515,7 +527,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
     // Each door opens its Settings page, which leads back here.
     page.querySelector('.costs-subscriptions').addEventListener('click', (event) => {
         const path = event.target.closest?.('[data-costs-account]')?.dataset.costsAccount;
-        if (path !== undefined) void openSettings?.(path, { back: { label: 'Costs', go: () => openDashboardTab?.('costs') } });
+        if (path !== undefined) void openSettings?.(path);
     });
     // The allowance's doors: a held wake's card in Main, and the Consciousness tab.
     page.querySelector('.costs-meters').addEventListener('click', (event) => {

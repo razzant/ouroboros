@@ -1,7 +1,7 @@
 import { APP_SETTINGS_ORIGIN, apiClient, fetchJson } from './api_client.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { saveCheckerSettings, saveSafetyLevel, saveSafetyRules } from './consciousness_api.js';
-import { isDoorId } from './settings_pages.js';
+import { isDoorId, settingsDoorName } from './settings_pages.js';
 import { rowById } from './settings_rows.js';
 import { errorWords, escapeHtmlAttr, setResult, setRowMeta } from './ui_primitives.js';
 import { API_CHOICE_PREFIX, connectionParts, parseModelSource, routeChoiceGroups, selectHtml } from './route_editor_primitives.js';
@@ -696,7 +696,7 @@ export function settingsRow(row, ctx = {}) {
     const wide = !['door', 'switch', 'secret', 'choices'].includes(kind) && (kind !== 'number' || control.noLimit);
     const attrs = `class="ui-row settings-row" data-setting-row="${escapeHtmlAttr(row.id)}" data-kind="${escapeHtmlAttr(kind)}"${control.noLimit ? ' data-no-limit' : ''}${wide ? ' data-wide' : ''}${row.meta ? '' : ' data-no-meta'}`;
     if (control.kind === 'door') {  // the whole row is the press: phrasing content only
-        return `<button type="button" ${attrs} data-setting-door><span class="ui-row-title">${name}</span>`
+        return `<button type="button" ${attrs} data-setting-door${isDoorId(control.to) ? ` aria-label="${escapeHtmlAttr(settingsDoorName(row.name, control.to))}"` : ''}><span class="ui-row-title">${name}</span>`
             + `<span class="ui-row-meta">${meta}</span><span class="ui-row-actions">${controlHtml(row, control, ctx)}</span></button>`;
     }
     const labelled = ['number', 'text', 'secret', 'select'].includes(control.kind);

@@ -952,10 +952,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .chat-messages,
 #log-entries,
 .log-entry,
-.log-main,
-.log-body,
-.log-headline,
-.log-task-summary,
+.log-line,
 .log-task-timeline,
 .chat-bubble,
 .chat-bubble .message,
@@ -966,9 +963,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
     min-width: 0;
 }
 
-.log-body,
-.log-headline,
-.log-pill,
 .log-raw,
 .chat-bubble .message,
 .skills-card,
@@ -1012,7 +1006,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
     flex-direction: column;
     min-width: 0;
     min-height: 0;
-    overflow: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     border-right: 1px solid var(--divider);
     background: rgba(var(--neutral-rgb), 0.02);
 }
@@ -1087,9 +1082,9 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
 }
 
 .files-list {
-    flex: 1;
+    flex: none;
     min-height: 0;
-    overflow: auto;
+    overflow: visible;
     overscroll-behavior: contain;
     padding: 8px;
 }
@@ -1273,13 +1268,11 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
 
 /* The folder's list and the chosen file side by side while the page has room for the list's widest column and a
    working file beside it (360 + 340); a narrower page (a phone, a narrow window) shows the list first and the file
-   once one is chosen, with Back to folder above it (files.js). Only there does a row say its edits are unsaved and
+   once one is chosen, with the folder's named Back in the band (files.js). Only there does a row say its edits are unsaved and
    a new file's draft keep a row of its own, the two ways back to a draft. */
 .files-layout { container: files / inline-size; }
-.files-preview-back,
 .files-entry.is-draft,
 .files-entry-unsaved { display: none; }
-.files-back svg { display: block; width: 16px; height: 16px; }
 .files-entry-untitled {
     min-width: 0;
     overflow: hidden;
@@ -1294,7 +1287,6 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
     .files-sidebar { border-right: 0; }
     .files-layout:not([data-files-view="file"]) .files-preview,
     .files-layout[data-files-view="file"] .files-sidebar { display: none; }
-    .files-preview-back { display: flex; padding: var(--space-3) 20px 0; }
     .files-entry.is-draft { display: grid; }
     .files-entry:is(.is-draft, [data-unsaved]) .files-entry-unsaved { display: inline; color: var(--status-warn-fg); }
     .files-entry[data-unsaved] .files-entry-size { display: none; }
@@ -1365,28 +1357,38 @@ html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title 
     clip-path: inset(50%);
     white-space: nowrap;
 }
-html[data-layout="docked"] .app-page-header[data-empty] {
-    display: none;
+html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
 }
 /* In the macOS desktop window the band under the transparent title bar is the window's handle
    (launcher_window_chrome.py: a plain press there moves the window, a press on a control stays the page's). The band
    is the window's, not a row of the page: a header with nothing to show lies over the top of its page as that handle
    (clear of the scrollbar, as a room's strip is), the page's first row starts below the band, and scrolled content
    passes under it with crisp edges, as a room's feed does. */
-:root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-empty] {
+:root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
     display: block;
     position: absolute;
     inset: 0 6px auto 0;
     z-index: 2;
     height: var(--window-chrome-top);
+    width: auto;
+    margin: 0;
+    overflow: visible;
+    clip-path: none;
     padding: 0;
 }
-:root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-empty] ~ .widgets-scroll {
+:root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-empty]:not([data-return]) ~ .widgets-scroll {
     padding-top: calc(var(--space-4) + var(--window-chrome-top));
 }
 /* While a card is dragged the band lets the pointer through to the board, whose top edge is where the engine scrolls
    a drag upward; at rest the band is the window's handle. */
-:root[data-window-chrome="integrated"][data-layout="docked"] #page-widgets .app-page-header[data-empty]:has(~ .widgets-scroll .widgets-card[data-widget-lifted]) {
+:root[data-window-chrome="integrated"][data-layout="docked"] #page-widgets .app-page-header[data-empty]:not([data-return]):has(~ .widgets-scroll .widgets-card[data-widget-lifted]) {
     pointer-events: none;
 }
 
@@ -1437,53 +1439,22 @@ html[data-layout="docked"] .app-page-header[data-empty] {
 .app-page-lead > * { min-width: 0; }
 .app-page-lead:empty,
 .app-page-tabs:not(:has(> *)) { display: none; }
-/* The Back slot (page_header.js placePageBack): one control, never part of a lead that scrolls. On a desk it stands
-   before the lead in the bar's start; in the stack layout it starts the row under ☰: the page's tab strip when it
-   has one, else a row of the header's own. Each `:has()` asks for the control itself (`> *`): WebKit does not
-   re-match `:empty` there when Back comes after the header was painted (14.11: Back alone at the window's top edge). */
-.app-page-back { display: flex; flex: none; align-items: center; }
-.app-page-back:empty { display: none; }
-html[data-layout="docked"] .app-page-title-block:has(> .app-page-back > *) {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
-}
-html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) ~ .app-page-lead { flex: 1 1 auto; }
-/* Back takes the header's start inset (a step from the column's edge) and the hidden title takes no place in the row,
-   so the tabs or the location after it keep the room they have without Back. */
-html[data-layout="docked"] .app-page-header[data-sidebar-names] .app-page-title-block > .app-page-title-row:has(~ .app-page-back > *) {
-    position: absolute;
-}
-html[data-layout="docked"] .app-page-title-block > .app-page-back:not(:empty) {
-    margin-inline-start: calc(var(--space-2) - var(--page-header-padding-x));
-}
-/* A phone page that leads back (Circles or Skills opened from Settings): Back stands where the places control stood,
-   in the header's one row, as on a Settings page (DESIGN "Page header": one leading control, no second header row). */
-html[data-layout="stack"] .app-page-header[data-back]:has(> .app-page-title-block > .app-page-back > *) {
-    grid-template-areas: "back title toolbar";
-}
-html[data-layout="stack"] .app-page-header[data-back] > .app-page-leading:has(~ .app-page-title-block > .app-page-back > *) {
-    display: none;
-}
-html[data-layout="stack"] .app-page-header[data-back] > .app-page-title-block:has(> .app-page-back > *) { display: contents; }
-html[data-layout="stack"] .app-page-header[data-back] .app-page-title-row { grid-area: title; }
-html[data-layout="stack"] .app-page-header[data-back] .app-page-back { grid-area: back; }
-.app-page-tabs[data-back] { display: flex; align-items: center; gap: var(--space-1); }
-.app-page-tabs[data-back] > :not(.app-page-back) { flex: 1 1 auto; min-width: 0; }
-/* Back starts the tabs' row at ☰'s inset and is centred on the tabs, not on the strip, which lends its tabs their
-   shadow room below them (.app-tab-strip: var(--space-2) above, var(--space-5) below). */
-.app-page-tabs[data-back] { padding-inline-start: var(--space-3); }
-.app-page-tabs[data-back] > .app-page-back { margin-bottom: calc(var(--space-5) - var(--space-2)); }
-/* A narrow content column gives the existing toolbar its own wrapping row; navigation lives below it. */
-html[data-layout="docked"] .app-page-header[data-narrow] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "toolbar"; }
-html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-leading { display: none; }
-html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-title-block { position: absolute; }
-html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-toolbar { flex-wrap: wrap; }
-/* A narrow header's actions wrap a long label instead of leaving the column (a translation, or a wider platform font:
-   "Update 2 trusted" in a 160 px column on Linux); like the Evolution verbs, the box comes from the tokens; a fixed
-   16 px line keeps one line at the small capsule's 28 px (1 + 5 + 16 + 5 + 1) on every platform font. */
-html[data-layout="docked"] .app-page-header[data-narrow] > .app-page-toolbar > button { flex: none; max-width: 100%;
-    white-space: normal; overflow-wrap: anywhere; line-height: 16px; --control-h: auto; --control-pad-y: 5px; }
+/* Levels and returns share the shell's leading capsule. The writer supplies presence and placement. */
+.app-page-return { display: flex; align-items: center; flex-shrink: 100; min-width: calc(20px + var(--space-2) + var(--space-2) + var(--space-1) + 1em); max-width: 40%; order: -1; }
+.app-page-return:empty { display: none; }
+html[data-telegram-back="back"] .app-page-return { display: none; }
+.shell-back { width: auto; max-width: 100%; gap: var(--space-1); padding-inline: var(--space-2);
+    font: 600 var(--type-body) / var(--line-title) var(--font-sans); }
+.shell-back > svg { flex: none; }
+.shell-back-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+html[data-layout="stack"] .shell-back { width: auto; }
+.app-page-header[data-return] > .app-page-title-block { display: flex; align-items: center; gap: var(--space-2); }
+.app-page-header[data-return] .app-page-lead { flex: 1; }
+html[data-layout="stack"] .app-page-header[data-return] { grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto; grid-template-areas: "back title toolbar"; }
+html[data-layout="stack"] .app-page-header[data-return] > .app-page-leading { display: none; }
+html[data-layout="stack"] .app-page-header[data-return] > .app-page-title-block { display: contents; }
+html[data-layout="stack"] .app-page-header[data-return] .app-page-title-row { grid-area: title; }
+html[data-layout="stack"] .app-page-header[data-return] > .app-page-title-block > .app-page-return { grid-area: back; max-width: 36vw; }
 html[data-layout="docked"] .app-page-header[data-lead] {
     grid-template-columns: minmax(0, 1fr) auto;
     grid-template-areas: "title toolbar";
@@ -1509,23 +1480,18 @@ html[data-layout="docked"] .app-page-header[data-lead] > .app-page-toolbar butto
     min-height: var(--control-h-float);
     padding-block: 0;
 }
-/* In the bar the tabs wrap and never scroll (DESIGN "Page header"): a strip longer than the bar's start takes a second
-   line of tabs, which grows the bar, instead of hiding tabs behind a fade. */
+/* The band keeps one sideways rail. Its existing strip reveals the chosen control. */
 html[data-layout="docked"] .app-page-lead .app-tab-strip {
     flex: 1 1 auto;
-    flex-wrap: wrap;
-    row-gap: var(--space-1);
-    overflow-x: visible;
-    padding: 10px var(--space-1) 26px;
-    margin: 0 0 -16px calc(-1 * var(--space-1));
-    scroll-padding-inline: var(--space-1);
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding: 10px var(--space-4) 26px;
+    margin: 0 0 -16px;
+    scroll-padding-inline: var(--space-4);
     pointer-events: none;
 }
 html[data-layout="docked"] .app-page-lead { --control-h: var(--control-h-float); }
-html[data-layout="docked"] .app-page-lead .app-tab { pointer-events: auto; }
-/* A pane too narrow for the bar keeps the strip under the row (page_header.js bindPageHeader): there too it wraps and
-   never scrolls; only the phone's strip, at the top of its page, scrolls. */
-html[data-layout="docked"] .app-page-tabs > .app-tab-strip { flex-wrap: wrap; row-gap: var(--space-1); overflow-x: visible; }
+html[data-layout="docked"] .app-page-lead .app-tab-strip > button { pointer-events: auto; flex: none; }
 /* Files: the folder's location starts the bar at reading size, each folder by its name, the one you are in in primary
    ink. A location longer than the bar's start scrolls inside it as a tab strip does, fading where folders hide: it
    rests at its end (files.js), so the folders above give way first, and no folder is wider than the strip less one
@@ -1725,7 +1691,7 @@ html[data-layout="stack"] .chat-find {
     background: var(--surface-tray);
     transition: var(--motion-tone);
 }
-.chat-find-bar:has(> .chat-find-input:focus) {
+.chat-find-bar[data-focused] {
     box-shadow: inset 0 0 0 1px var(--focus-accent-border), 0 0 0 3px var(--focus-accent-ring);
 }
 .chat-find-glyph { display: inline-flex; flex: 0 0 18px; color: var(--text-secondary); pointer-events: none; }
@@ -2892,29 +2858,6 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
 
 .chat-live-phase[data-chip-tone="failed"] {
     color: var(--status-error-fg);
-    background: var(--status-error-bg);
-}
-
-/* Logs phase pills name the status triples by class (DESIGN "The tone primitive"); the
-   saturated --green/--amber/--red are dot-and-indicator hues, not small-text hues. A Logs task headline that settled
-   is its task's outcome and takes the cards' tone (logs.js writes data-chip-tone): Done with warnings green, Stopped
-   neutral. A warn-level log event stays amber: a warning worth reading. */
-.log-entry .log-phase:is(.done, .ready, .ok, .result, .usage, .metrics),
-.log-entry .log-phase[data-chip-tone="ok"] {
-    color: var(--status-ok-fg);
-    border-color: var(--status-ok-border);
-    background: var(--status-ok-bg);
-}
-
-.log-entry .log-phase:is(.warn, .empty):not([data-chip-tone]) {
-    color: var(--status-warn-fg);
-    border-color: var(--status-warn-border);
-    background: var(--status-warn-bg);
-}
-
-.log-entry .log-phase:is(.error, .timeout, .lifecycle_error) {
-    color: var(--status-error-fg);
-    border-color: var(--status-error-border);
     background: var(--status-error-bg);
 }
 
@@ -6138,47 +6081,25 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     padding: 0;
 }
 
-/* Logs (U026-U035, U140): the tab body scrolls; its filters stay at its top on the room's colour (the stream lives
-   at its newest end, the filters must stay in reach) while the list, one card whose events are trays, scrolls under
-   them. A task's event is the same tray with its kind and its timeline. The system face reads the sentences;
-   monospace keeps only the time and the raw record. */
-/* The body's top inset rides on the bar, so the bar sticks flush at the scroller's edge (a sticky box keeps clear of
-   its scroller's padding, which let rows show above it). */
-#page-logs {
-    padding-top: 0;
-    overflow-anchor: none; /* logs.js owns the entry anchor while chunks are inserted or moved */
-}
-.logs-filters {
-    --control-h: var(--control-h-sm);
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--space-2);
-    align-items: center;
-    padding: var(--space-4) 0 var(--space-2);
-    background: var(--bg-primary);
-}
-
-/* The filter chips wrap on a phone: under a finger they take the touch minimum as their own height. */
-@media (pointer: coarse) {
-    .logs-filters { --control-h: var(--touch-target-min); }
-}
-
-.logs-inline-clear {
-    margin-left: auto;
-}
-/* A pane narrower than the six chips and Clear at their usual spacing draws them closer, so they still keep to one
-   line beside a section's list (owner's window: a 455 px tab body); where even that line does not fit, they stand
-   in two even rows of three, Clear at the end of the first, never one chip alone on a row of its own. */
-@container dashboard (max-width: 34rem) {
-    .logs-filters { gap: var(--space-1); }
-    .logs-filters > .filter-chip { --control-pad-x: var(--space-2); }
-}
-@container dashboard (max-width: 27.75rem) {
-    .logs-filters { display: grid; grid-template-columns: repeat(3, auto) minmax(0, 1fr); justify-items: start; }
-    .logs-filters > .logs-inline-clear { grid-column: 4; grid-row: 1; justify-self: end; }
+/* Logs keeps its one list scroller plain. The shared filter rail and Clear stand in the page column's band. */
+#page-logs { overflow-anchor: none; }
+.logs-filters { display: flex; align-items: center; flex: 1; min-width: 0; gap: var(--space-2); }
+.logs-filters[hidden] { display: none; }
+.logs-kinds { flex: 1; }
+.logs-clear-list { flex: none; color: var(--text-secondary); }
+@container sectionplace (max-width: calc(40rem - 0.02px)) {
+    #page-dashboard .app-page-header[data-controls] .section-lead-page {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        column-gap: var(--space-2);
+    }
+    #page-dashboard .section-lead-page > .app-page-return { grid-area: 1 / 1; max-width: 36vw; }
+    #page-dashboard .section-lead-page > [data-dashboard-lead-name] { grid-area: 1 / 2; }
+    #page-dashboard .logs-filters:not([hidden]) { display: contents; }
+    #page-dashboard .logs-kinds { grid-area: 2 / 1 / auto / -1; padding-block: var(--space-2); margin: 0; }
+    #page-dashboard .logs-clear-list { grid-area: 1 / 3; }
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-lead { grid-area: lead; }
 }
 
 .logs-card { display: grid; gap: var(--space-2); min-width: 0; }
@@ -6189,104 +6110,70 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     display: grid;
     gap: var(--space-2);
     min-width: 0;
+}
+
+/* An event is a tray inside the Logs object: the soft neutral fill, the inner radius, no outline; its head fills the
+   tray, so it opens from anywhere on it. Inside a task's tray its timeline rows part by space alone: a tray inside a
+   tray drops its fill. */
+.log-entry {
+    min-width: 0;
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
+}
+.log-entry > .log-head { padding: var(--space-3); }
+.log-entry[open] > .log-head { padding-bottom: 0; }
+.log-entry > :not(summary) { margin-inline: var(--space-3); }
+.log-entry[open] { padding-bottom: var(--space-3); }
+.log-task-timeline { display: flex; flex-direction: column; gap: var(--space-2); }
+
+/* The head is the shared summary laid out as a grid (it outranks the summary's own flex row). */
+.log-fold > .log-head {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: baseline;
+    align-content: center;
+    gap: 2px var(--space-2);
+}
+.log-head [hidden] { display: none; }
+.log-title { grid-area: 1 / 2; display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--space-2); min-width: 0; }
+.log-name {
+    min-width: 0;
+    color: var(--text-primary);
+    font-size: var(--type-body);
+    line-height: var(--line-title);
+    overflow-wrap: anywhere;
+}
+:is(.log-task, .log-count, .log-ts) { color: var(--text-meta); font-weight: 400; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.log-ts { grid-area: 1 / 3; }
+
+/* The words' line reads: body size, regular weight, primary ink, three lines at most while closed, a failure's chip first. */
+.log-line {
+    grid-area: 2 / 2 / 3 / -1;
+    color: var(--text-primary);
     font-size: var(--type-body);
     line-height: var(--line-body);
+    font-weight: 400;
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    overflow: hidden;
 }
+.log-line > .log-failure { margin-inline-end: var(--space-2); }
+.log-title[hidden] ~ .log-line { grid-area: 1 / 2; }  /* a head without a name: its line stands in the name's place */
+.log-fold[open] > .log-head > .log-line { display: block; overflow: visible; }
 
-/* A log row is a tray inside the Logs object: the soft neutral fill, the inner radius, no outline. */
-.log-entry {
-    padding: 10px 12px;
-    border-radius: var(--radius-inner);
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    border: 1px solid transparent;
-    background: var(--surface-tray);
-    min-width: 0;
-}
-
-.log-main {
-    display: flex;
-    gap: 8px;
-    align-items: baseline;
-    flex-wrap: wrap;
-}
-
-.log-entry .log-ts {
-    color: var(--text-muted);
-    flex-shrink: 0;
-    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+/* The fold's sections: facts and notes in the meta ink, then the raw record. */
+:is(.log-facts, .log-note) {
+    color: var(--text-meta);
     font-size: var(--type-meta);
-    font-variant-numeric: tabular-nums;
+    line-height: var(--line-meta);
+    overflow-wrap: anywhere;
 }
-
-.log-entry .log-type {
-    font-weight: 700;
-    flex-shrink: 0;
-    font-size: var(--type-meta);
-}
-
-/* A level chip lies flat; the default `info` level says nothing and is not drawn (U028). */
-.log-entry .log-phase {
-    padding: 1px 8px;
-    border-radius: 999px;
-    font-size: var(--type-meta);
-    border: 1px solid transparent;
-    color: var(--text-secondary);
-    background: rgba(var(--neutral-rgb), 0.04);
-}
-.log-entry .log-phase.info { display: none; }
-
-.log-entry .log-phase:is(.start, .calling, .context, .progress, .thought, .boot, .working, .thinking) {
-    color: var(--accent-light);
-    background: var(--accent-10);
-}
-
-.log-entry .log-headline {
-    color: var(--text-primary);
-    font-weight: 600;
-    word-break: break-word;
-    flex: 1 1 auto;
-    min-width: 0;
-}
-/* The headline, its count and Raw are one lead (logs.js logMainHtml): it shares the time's line where it fits whole,
-   else it takes the next line, and the headline wraps inside it only when it is longer than a line. Raw stays at the
-   end of the headline's own line instead of dropping to a line of its own. */
-.log-main > .log-lead { display: flex; flex: 1 1 auto; align-items: baseline; gap: 8px; min-width: 0; }
-
-.log-entry .log-repeat {
-    margin-left: auto;
-    color: var(--text-muted);
-    font-size: var(--type-meta);
-}
-
-/* Raw is the line's last, quiet control (.btn.btn-ghost.btn-sm); after a count it follows it, else it takes the end.
-   Its word stands on the headline's baseline, as the line's other words do. */
-.log-raw-toggle { flex: none; }
-.log-lead > .log-repeat[hidden] + .log-raw-toggle { margin-left: auto; }
-
-.log-meta {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-}
-
-.log-pill {
-    display: inline-flex;
-    align-items: center;
-    padding: 1px 8px;
-    border-radius: 999px;
-    background: rgba(var(--neutral-rgb), 0.05);
-    color: var(--text-secondary);
-    border: 1px solid transparent;
-    font-size: var(--type-meta);
-}
-
-.log-body {
-    color: var(--text-secondary);
-    word-break: break-word;
-    white-space: pre-wrap;
-}
+.log-note { white-space: pre-wrap; }
+.log-facts > .log-executor-chip { margin-right: var(--space-2); }
 
 .log-raw {
     margin: 0;
@@ -6302,37 +6189,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     overflow-y: auto;
 }
 
-.log-raw-tools { margin-top: var(--space-2); }
 .log-raw-status { overflow-wrap: anywhere; }
-.log-raw-pages { display: flex; flex-wrap: wrap; gap: var(--space-2); }
-
-.log-type.tools { color: var(--status-info-fg); }
-.log-type.llm { color: var(--accent); }
-.log-type.errors { color: var(--status-error-fg); }
-.log-type.tasks { color: var(--status-warn-fg); }
-.log-type.system { color: var(--text-muted); }
-.log-type.consciousness { color: var(--project); }
-
-.log-task-summary {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-}
-
-.log-task-review { margin-top: var(--space-2); }
-
-/* Inside the task's tray its timeline rows part by space alone: a tray inside a tray drops its fill. */
-.log-task-timeline {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-}
-
-.log-task-event {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
+.log-raw-pages { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-2); }
+/* Download is a link (the browser streams the file) in the capsule's look: the shared .btn leaves a link's underline. */
+.log-raw-download { text-decoration: none; }
 
 /* `width` is the vertical bar, `height` the horizontal one: without the height
    a horizontal bar falls back to the 16-17px UA default and paints thick. */
@@ -6913,21 +6773,44 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 /* The Dashboard's shell is the section shell (ui.css), which bounds its columns. A page that borrows this class
    without a section's list (Circles) keeps the bounded column of its own, so its body is the page's scroller. */
 .dashboard-shell:not(.section-shell) { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.dashboard-lead-back { display: flex; flex: none; align-items: center; }
-.dashboard-lead-back:empty { display: none; }
 .dashboard-row-mark[hidden] { display: none; }
 @container sectionplace (min-width: 40rem) {
     .dashboard-shell[data-section-view="page"] .dashboard-body { padding-inline-start: var(--space-4); }
+    /* The chosen list row names its pane; the heading remains available to readers. */
+    .section-lead-page > [data-dashboard-lead-name],
+    #page-settings[data-settings-depth="1"] .section-lead-page > [data-settings-lead-name] {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+    }
+}
+:root[data-window-chrome="integrated"][data-layout="docked"] #page-dashboard > .app-page-header[data-empty]:not([data-return]) ~ .section-shell :is(.section-rail, .dashboard-body) {
+    padding-top: calc(var(--window-chrome-top) + var(--space-4));
 }
 /* A phone: the list's screen keeps `☰ Dashboard`, with nothing under it; a page's screen is one row, Back (to the
    list, or to Settings) and the page's name in the header's title style, where ☰ and the place's name stood. Only a
    page that REPLACED the list gives ☰ up: a drawer-width window that still holds the list beside its page (40rem up
    to the shell's switch) has no Back, so there ☰ stays the way to every other destination. */
 html[data-layout="stack"] #page-dashboard[data-section-view="home"] > .app-page-header .app-page-lead { display: none; }
+html[data-layout="stack"] #page-dashboard > .app-page-header[data-empty]:not([data-return]) { grid-template-areas: "leading title toolbar"; }
+html[data-layout="stack"] #page-dashboard > .app-page-header[data-empty]:not([data-return]) .app-page-lead,
+html[data-layout="stack"] #page-settings > .app-page-header:not([data-return]) .app-page-lead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    min-height: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+}
 @container sectionplace (max-width: calc(40rem - 0.02px)) {
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header > .app-page-leading,
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
-    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title toolbar"; }
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
+    html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-lead { grid-area: lead; }
 }
 
 .dashboard-panels,
@@ -7041,11 +6924,6 @@ html[data-layout="stack"] #page-dashboard[data-section-view="home"] > .app-page-
 .dashboard-settings[data-solo] .ui-row-meta { font-size: var(--type-body); line-height: var(--line-body); }
 .dashboard-settings[data-solo] .ui-row-actions { margin-top: var(--space-2); justify-content: flex-start; }
 .dashboard-settings[data-solo] > .settings-row > .ui-row-actions > .ui-control { width: 100%; }
-/* A place opened from Settings leads back there with the app's one Back (dashboard.js settingsReturn): first in its
-   header's lead, before the tabs or the location; a page whose header has no lead keeps it as a first row at its own
-   gutter. */
-.dashboard-back { flex: none; display: flex; margin: var(--space-2) 0 var(--space-1); padding: 0 20px; }
-html[data-layout="stack"] .dashboard-back { padding-inline: var(--space-3); }
 /* On a phone the tab body's own gutter is the page's: with the shell's added to it a card lost 40 px of a 320 px
    screen, and a three-way choice wrapped two and one (ui.css "On a phone a card keeps 18 px at its sides"). */
 html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
@@ -7211,7 +7089,7 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 .skills-search-chrome {
     flex: 0 0 auto;
     margin: 2px 0 12px;
-    padding: 0 var(--space-5);
+    padding: 0;
     container: skillschrome / inline-size;
 }
 
@@ -8794,7 +8672,6 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
     .widget-table th[scope="row"] { display: block; padding: 6px 0; }
 
     .dashboard-body { padding: var(--space-3); }
-    .logs-filters { padding-top: var(--space-3); }
 
 }
 
@@ -9056,7 +8933,7 @@ body.keyboard-open :is(#chat-input-area, .chat-input-area) .chat-text-row {
     transition: var(--motion-tone);
 }
 .nav-projects-find[hidden] { display: none; }
-.nav-projects-find:has(> .nav-find-input:focus) {
+.nav-projects-find[data-focused] {
     outline-width: 2px;
     outline-offset: -2px;
     box-shadow: inset 0 0 0 1px var(--focus-accent-border), 0 0 0 3px var(--focus-accent-ring), var(--elev-rest);
@@ -9461,7 +9338,7 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
 }
 @media (pointer: coarse) {
     /* The row asks of the ⋯ after it (:has() stays in its own compound) and its end reads the answer. */
-    .nav-project-row:has(~ .nav-project-kebab:is(:focus, [aria-expanded="true"])) {
+    .nav-project-row:has(~ .nav-project-kebab:is([data-focused], [aria-expanded="true"])) {
         --nav-row-end: hidden;
     }
     .nav-project-row :is(.nav-mark-slot, .nav-project-time) { visibility: var(--nav-row-end, visible); }
@@ -12250,3 +12127,21 @@ html[data-telegram-fullscreen][data-layout="docked"] .app-page-header {
 html[data-telegram-fullscreen][data-layout="docked"] .app-page-header[data-lead] { padding-top: var(--inset-top); }
 html[data-telegram-fullscreen][data-layout="docked"] .project-panel-bar { padding-top: calc(10px + var(--inset-top)); }
 html[data-telegram-fullscreen][data-layout="docked"] .sidebar-head { padding-top: calc(var(--space-4) + var(--inset-top)); }
+
+/* A section shares Telegram's own row. The host reports heights, never capsule rectangles: fixed safe sides keep
+   the name and one page action in its gap. A rail belongs on the next line. Rooms retain their own placement. */
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header {
+    --telegram-header-start: 96px;
+    --telegram-header-end: 88px;
+    padding: calc(var(--inset-top) - var(--tg-content-safe-area-inset-top)) var(--telegram-header-end) 0 var(--telegram-header-start);
+    min-height: calc(var(--inset-top) - var(--tg-content-safe-area-inset-top) + var(--touch-target-min));
+    column-gap: var(--space-2);
+}
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header .app-page-toolbar { flex: none; }
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header > .app-page-leading { display: none; }
+html[data-telegram-fullscreen="active"] #page-dashboard .logs-kinds {
+    margin-inline: calc(var(--space-3) - var(--telegram-header-start)) calc(var(--space-3) - var(--telegram-header-end));
+    max-width: none;
+}
+/* Update all remains available at the list's start while Refresh occupies the shared row. */
+.skills-scroll > #skills-update-all { margin-bottom: var(--space-3); }

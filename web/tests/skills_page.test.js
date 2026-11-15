@@ -3,20 +3,49 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import vm from 'node:vm';
 import { createMySkillsDestination } from '../modules/skill_dialogs.js';
 import { publicationDisclosure } from '../modules/skill_presentation.js';
 import { browseCardState } from '../modules/skill_browse.js';
 import { installedSkillModel } from '../modules/skill_card_renderer.js';
+import { Stub } from './helpers/settings_dom.js';
 
 import {
     buildHealPrompt, destinationFromChoice, inFlightCount, installedFilterCounts, lifecycleEventsFromQueue,
-    matchesInstalledFilter, mergeLifecycleEvents, publishDestinations, updateAllCandidates,
+    matchesInstalledFilter, mergeLifecycleEvents, publishDestinations, updateAllCandidates, skillsPageTemplate,
 } from '../modules/skills.js';
 
 const LISTING = JSON.parse(readFileSync(new URL('./fixtures/skills_v4/extensions_v4.json', import.meta.url), 'utf8'));
 const SOURCES = JSON.parse(readFileSync(new URL('./fixtures/skills_v4/skill_sources.json', import.meta.url), 'utf8')).sources;
 const rows = () => structuredClone(LISTING.skills);
 const byName = (name) => rows().find((skill) => skill.name === name);
+
+test('search and chips belong to the scrolling list; tabs and actions stay above it', () => {
+    const page = new Stub('div');
+    page.innerHTML = skillsPageTemplate();
+    const scroll = page.querySelector('.skills-scroll');
+    for (const selector of ['#skills-installed-search', '#skills-installed-filters', '#skills-browse-chrome', '#skills-pane-sources']) {
+        assert.ok(scroll.contains(page.querySelector(selector)), selector);
+    }
+    for (const selector of ['.skills-tabs', '#skills-refresh', '#skills-update-all']) {
+        assert.equal(scroll.contains(page.querySelector(selector)), false, selector);
+    }
+});
+
+test('a skill opens Widgets as a jump; a nested visit cannot replace the tab saved by an earlier return', async () => {
+    const source = readFileSync(new URL('../modules/skills.js', import.meta.url), 'utf8');
+    const shown = [], selected = [];
+    const context = vm.createContext({ ctx: { showPage: (...args) => shown.push(args) }, activeTab: 'installed',
+        selectTab: (tab) => { context.activeTab = tab; selected.push(tab); } });
+    vm.runInContext(source.match(/    async function runInstalledAction\([\s\S]+?\n    \}/)[0], context);
+    await context.runInstalledAction('example', 'open_widgets');
+    assert.deepEqual(shown, [['widgets']], 'the action does not press a primary map row');
+    const capture = vm.runInContext('({' + source.match(/capture\(\) \{\n        const tab[\s\S]+?\n    \}/)[0] + '})', context).capture;
+    const restore = capture();
+    restore(); assert.deepEqual(selected, [], 'an unchanged retained view is left alone');
+    context.activeTab = 'sources';
+    restore(); assert.deepEqual(selected, ['installed']);
+});
 
 test('the active lifecycle job joins the event stream once', () => {
     const active = { id: 'j2', target: 'b', status: 'running', kind: 'install' };

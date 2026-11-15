@@ -149,5 +149,32 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
     restore.forget = (root) => {
         for (const box of places.keys()) if (!box.isConnected || root?.contains(box)) places.delete(box);
     };
+    // A return owns a snapshot of the retained place, not a second navigation stack. The room's feed and Logs
+    // still restore through their reading owners. Keep nearby anchors too: a row may disappear while away.
+    restore.capture = (root, opener) => {
+        const boxes = [root, ...(root?.querySelectorAll('*') || [])].filter((box) => box && !box.matches(OWN_PLACE)
+            && (box.scrollHeight > box.clientHeight || box.scrollWidth > box.clientWidth));
+        const saved = boxes.map((box) => [box, box.scrollTop, box.scrollLeft]);
+        const anchors = [];
+        const popup = opener?.closest?.('[role="dialog"], [role="menu"], .ui-popup');
+        if (popup?.id) anchors.push(...Array.from(doc.querySelectorAll('[aria-controls]'))
+            .filter((node) => node.getAttribute('aria-controls').split(' ').includes(popup.id)));
+        if (opener) anchors.unshift(opener);
+        for (let at = root?.contains(opener) ? opener : null; at && at !== root; at = at.parentElement) {
+            anchors.push(at, at.nextElementSibling, at.previousElementSibling);
+        }
+        return () => {
+            for (const [box, top, left] of saved) {
+                if (!box.isConnected) continue;
+                box.scrollTop = top;
+                box.scrollLeft = left;
+                remember(box);
+            }
+            const anchor = anchors.find((el) => el?.isConnected && el.getClientRects().length && !el.closest('[hidden], [inert]')) || root;
+            if (!anchor || !anchor.isConnected) return;
+            if (!anchor.matches('button, a, input, select, textarea, [tabindex]')) anchor.tabIndex = -1;
+            anchor.focus?.({ preventScroll: true });
+        };
+    };
     return restore;
 }

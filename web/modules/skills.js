@@ -1,9 +1,5 @@
-// The Skills page: three views of one page — Installed (what Ouroboros can do
-// now), Browse (what else it could do, from every connected source) and Sources
-// (where skills come from and how much each place is trusted). Installed is the
-// default and never waits for a source or GitHub: it reads the local listing and
-// the serialized lifecycle queue, and every owner action keeps its own words,
-// confirmation and refusal. Browse and Sources live in their own modules.
+// Skills' Installed view reads the local listing and lifecycle queue without waiting for a source.
+// Browse and Sources own their views; every action keeps its words, confirmation and refusal.
 import { bindPageHeader, bindTabStrip, renderPageHeader, renderTabStrip } from './page_header.js';
 import { bindMenu } from './ui_interactions.js';
 import { openConfirmDialog } from './confirm_dialog.js';
@@ -46,7 +42,7 @@ const NOTHING_NEEDS_YOU = 'Nothing needs you now.';
 const WORK_POLL_MS = 3000;
 const REVIEW_POLL_MS = 15000;
 
-function skillsPageTemplate() {
+export function skillsPageTemplate() {
     return `
         <section class="page app-page-glass" id="page-skills">
             ${renderPageHeader({
@@ -57,12 +53,12 @@ function skillsPageTemplate() {
                     ariaLabel: 'Skills views', stripClass: 'skills-tabs', tabClass: 'skills-tab',
                 }),
             })}
-            <div class="skills-search-chrome" data-chrome-pane="installed">
+            <div class="skills-scroll scroll-fade-y">
+                <div class="skills-search-chrome" data-chrome-pane="installed">
                 <input type="search" class="ui-control skills-search" id="skills-installed-search" placeholder="Find an installed skill" aria-label="Find an installed skill" autocomplete="off">
                 <div class="skills-filter-strip" id="skills-installed-filters" role="group" aria-label="Show" data-scroll-x></div>
             </div>
             <div class="skills-search-chrome" data-chrome-pane="browse" id="skills-browse-chrome" hidden></div>
-            <div class="skills-scroll scroll-fade-y">
                 <div class="skills-tab-panel" id="skills-pane-installed" data-pane="installed" role="tabpanel" aria-labelledby="skills-tab-installed">
                     <div id="skills-status" class="ui-status skills-list-status" role="status" aria-live="polite"></div>
                     <div id="skills-org-requirements" hidden></div>
@@ -284,7 +280,6 @@ async function fetchSkills() {
 
 export function initSkills(ctx = {}) {
     // A Settings page opened from here leads back to Skills, where it was opened.
-    const skillsBack = { label: 'Skills', go: () => ctx.showPage?.('skills') };
     const page = document.createElement('div');
     page.innerHTML = skillsPageTemplate();
     document.getElementById('content').appendChild(page.firstElementChild);
@@ -819,13 +814,13 @@ export function initSkills(ctx = {}) {
             return false;
         }
         if (action === 'open_detail') { openInstalledSheet(name, options.node); return false; }
-        if (action === 'open_widgets') { document.querySelector('[data-nav-page="widgets"]')?.click(); return false; }
+        if (action === 'open_widgets') { void ctx.showPage?.('widgets'); return false; }
         if (action === 'open_secrets') {
             // Accounts and keys reveals the row of the first key the button names (a stored key's row is its name).
-            void ctx.openSettings?.('accounts', { row: String(options.keys || '').split(',')[0].trim(), back: skillsBack });
+            void ctx.openSettings?.('accounts', { row: String(options.keys || '').split(',')[0].trim() });
             return false;
         }
-        if (action === 'open_settings') { void ctx.openSettings?.(`skill/${encodeURIComponent(name)}`, { back: skillsBack }); return false; }
+        if (action === 'open_settings') { void ctx.openSettings?.(`skill/${encodeURIComponent(name)}`); return false; }
         if (action === 'read_findings') { openFindings(name); return false; }
         if (action === 'find_in_browse') { selectTab('browse'); browse?.searchFor(name); return false; }
         if (action === 'review' || action === 'rereview') {
@@ -1010,7 +1005,7 @@ export function initSkills(ctx = {}) {
         pageModuleFacts,
         showInstalled: (name) => { selectTab('installed'); searchInput.value = name; applyInstalledFilter(); },
         showMadeHere: () => { filter = 'made'; selectTab('installed'); },
-        openSettings: (path, options = {}) => ctx.openSettings?.(path, { back: skillsBack, ...options }),
+        openSettings: (path, options = {}) => ctx.openSettings?.(path, options),
     };
     const browse = createSkillBrowse({ pane: document.getElementById('skills-pane-browse'), chrome: document.getElementById('skills-browse-chrome'), host });
     const sourcesView = createSkillSources({ pane: document.getElementById('skills-pane-sources'), host });
@@ -1043,7 +1038,8 @@ export function initSkills(ctx = {}) {
         onChange(tabName) { closeMenus(); activeTab = tabName; activateTab(tabName); paintChrome(); showActive(); },
     });
     // On a desk Installed, Browse and Sources start the bar that Update all and Refresh end (DESIGN "Page header").
-    const disposeBar = bindPageHeader(root.querySelector('.app-page-header'));
+    const disposeBar = bindPageHeader(root.querySelector('.app-page-header'), {
+        secondary: updateAllBtn, overflow: root.querySelector('.skills-scroll') });
 
     const onRefresh = async () => {
         refreshBtn.disabled = true;
@@ -1105,7 +1101,10 @@ export function initSkills(ctx = {}) {
     window.addEventListener('ouro:open-skills', onOpenSkills);
     paintFilters(null);
 
-    return { destroy() {
+    return { capture() {
+        const tab = activeTab;
+        return () => { if (activeTab !== tab) selectTab(tab); };
+    }, destroy() {
         destroyed = true;
         renderGeneration += 1;
         clearTimeout(pollTimer);

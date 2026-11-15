@@ -444,9 +444,10 @@ test('one precedence rule: the deprecated alias wins a diverged pair, in every r
         { cost_usd_with_children: 2, accounted_upper_bound_usd_with_children: 7 }), 2);
 });
 
-test('log events read the shared cost names and stop hiding a real $0', () => {
-    // F13: log_events read ONLY the deprecated names, with falsy coercion — a
-    // genuine $0.0000 round rendered as nothing, indistinguishable from unknown.
+test('log events read the shared cost names; in Logs a cost of nothing says nothing and a real one reads as on the Dashboard', () => {
+    // F13: log_events read ONLY the deprecated names, with falsy coercion. The shared names are read; a zero is now
+    // left out of the event's facts on purpose (owner, 14.11: "$0.0000" under a delegated run said nothing), as an
+    // absent amount is, and the record in the event's fold keeps the field.
     assert.equal(formatUsd4(0), '$0.0000');
     assert.equal(formatUsd4(null), '');
     assert.equal(formatUsd4(undefined), '');
@@ -456,14 +457,19 @@ test('log events read the shared cost names and stop hiding a real $0', () => {
         accounted_upper_bound_usd_with_children: 1.5,
         post_task_status: 'completed',
     });
-    assert.ok(finalized.meta.includes('$0.0000'), JSON.stringify(finalized.meta));
-    assert.ok(finalized.meta.includes('subtree=$1.5000'), JSON.stringify(finalized.meta));
+    assert.deepEqual(finalized.meta, ['with children $1.50', 'completed']);
     const done = summarizeLogEvent({
         type: 'task_done', status: 'completed',
-        accounted_upper_bound_usd: 0, cost_final: true,
+        accounted_upper_bound_usd: 0, cost_final: false,
         cost_accounting_status: 'available',
     });
-    assert.ok(done.meta.includes('$0.0000'), JSON.stringify(done.meta));
+    assert.ok(!done.meta.some((fact) => /\$|pending/.test(fact)), JSON.stringify(done.meta));
+    const settled = summarizeLogEvent({ type: 'task_done', status: 'completed', accounted_upper_bound_usd: 2.783827, cost_final: true });
+    assert.ok(settled.meta.includes('$2.78'), JSON.stringify(settled.meta));
+    const pending = summarizeLogEvent({ type: 'task_done', status: 'completed', accounted_upper_bound_usd: 0.0004, cost_final: false });
+    assert.ok(pending.meta.includes('$0.0004 (pending)'), JSON.stringify(pending.meta));
+    const delegated = summarizeLogEvent({ type: 'delegate_run_settled', task_id: 't', model: 'claude-opus-5-5', cost_usd: 0 });
+    assert.deepEqual([delegated.headline, delegated.meta], ['Delegate run settled · claude-opus-5-5', []], 'its model is its subject');
 });
 
 test('llm round rows show money from BOTH the honest backfill name and the live frame', () => {
@@ -475,21 +481,21 @@ test('llm round rows show money from BOTH the honest backfill name and the live 
         type: 'llm_round_finished', round: 2, model: 'm',
         accounted_upper_bound_usd: 0.1234,
     });
-    assert.ok(backfill.meta.includes('$0.1234'), JSON.stringify(backfill.meta));
+    assert.ok(backfill.meta.includes('$0.12'), JSON.stringify(backfill.meta));
     const live = summarizeLogEvent({
         type: 'llm_round_finished', round: 2, model: 'm', cost: 0.5,
     });
-    assert.ok(live.meta.includes('$0.5000'), JSON.stringify(live.meta));
+    assert.ok(live.meta.includes('$0.50'), JSON.stringify(live.meta));
     const usage = summarizeLogEvent({
         type: 'llm_usage', model: 'm', accounted_upper_bound_usd: 0.25,
     });
-    assert.ok(usage.meta.includes('$0.2500'), JSON.stringify(usage.meta));
+    assert.ok(usage.meta.includes('$0.25'), JSON.stringify(usage.meta));
     // Diverged stored pair keeps the ONE precedence rule (deprecated wins).
     const diverged = summarizeLogEvent({
         type: 'llm_round_finished', round: 1, model: 'm',
         cost_usd: 0.9, accounted_upper_bound_usd: 0.1,
     });
-    assert.ok(diverged.meta.includes('$0.9000'), JSON.stringify(diverged.meta));
+    assert.ok(diverged.meta.includes('$0.90'), JSON.stringify(diverged.meta));
 });
 
 test('#498 the scoped carrier answers the whole money question from one bucket', () => {

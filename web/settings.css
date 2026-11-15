@@ -47,14 +47,16 @@ html[data-layout="stack"] .settings-page { padding-inline: 12px; }
     .settings-shell[data-section-view="page"] .settings-door-glyph.settings-overview-glyph { width: 20px; height: 20px; margin-inline-end: var(--space-2); }
 }
 
-/* A phone's two panes keep the columns' lead under the place's band. One column (below) has one band: the
-   home puts its search in the scrolling list, and a page replaces the place's name with Back and its own name. */
+/* A phone keeps Search in the list, including when it holds two panes. Its one header row shows the place,
+   or the named Back and its level; an empty page column adds no caption row. */
 html[data-layout="stack"] #page-settings > .app-page-header {
-    grid-template-areas: "leading title toolbar" "lead lead lead";
+    grid-template-areas: "leading title toolbar";
 }
 html[data-layout="stack"] #page-settings > .app-page-header > .app-page-title-block { display: contents; }
 html[data-layout="stack"] #page-settings > .app-page-header .app-page-title-row { grid-area: title; }
-html[data-layout="stack"] #page-settings > .app-page-header .app-page-lead { grid-area: lead; min-height: var(--touch-target-min); }
+html[data-layout="stack"] #page-settings > .app-page-header .app-page-lead { display: flex; grid-area: lead; min-height: var(--touch-target-min); }
+html[data-layout="stack"] #page-settings > .app-page-header[data-return] { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
+html[data-layout="stack"] #page-settings > .app-page-header[data-return] .app-page-title-row { display: none; }
 html[data-layout="stack"] #page-settings .settings-lead-col { gap: var(--space-2); }
 /* A page's or a level's screen is one row: Back and the name, where the places control and "Settings" stood (one
    leading control on a screen). Only a page that replaced the list gives the places control up: with the list beside
@@ -67,7 +69,7 @@ html[data-layout="stack"] #page-settings .settings-lead-col { gap: var(--space-2
     html[data-layout="stack"] #page-settings[data-section-view="home"] > .app-page-header[data-search-in-home] + .settings-shell > .settings-home { padding-top: 2px; }
     html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header > .app-page-leading,
     html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
-    html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header { grid-template-areas: "lead lead lead"; }
+    html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header { grid-template-areas: "lead"; }
 }
 
 /* The landing (settings.js): from 40rem Settings always shows two panes.

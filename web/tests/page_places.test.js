@@ -28,7 +28,7 @@ function world() {
         node.scrollLeft = left;
         listeners.doc.get('scroll')({ target: node });
     };
-    return { listeners, page, box, scrolled, restore };
+    return { doc, listeners, page, box, scrolled, restore };
 }
 
 test('a box scrolled on a page goes back when the page or its tab is shown again; another page is untouched', () => {
@@ -70,6 +70,27 @@ test('disposal releases a room\'s places even before another page restore', () =
     assert.equal(box.scrollTop, 0);
 });
 
+test('each return restores its own nested scrolls and pressed row, falling back when that row is removed', () => {
+    const w = world(), root = w.page('page-skills');
+    const box = w.box(root);
+    Object.assign(root, { matches: () => false, querySelectorAll: () => [box] });
+    Object.assign(box, { scrollHeight: 1000, clientHeight: 100, scrollWidth: 700, clientWidth: 100 });
+    let focused;
+    const anchor = (name) => ({ isConnected: true, parentElement: root, matches: () => true,
+        closest: () => null, getClientRects: () => [1], focus: () => { focused = name; } });
+    const row = anchor('pressed'), next = anchor('next');
+    root.boxes.add(row); row.nextElementSibling = next;
+    box.scrollTop = 320; box.scrollLeft = 80;
+    const restore = w.restore.capture(root, row);
+    box.scrollTop = 640; box.scrollLeft = 180;
+    const later = w.restore.capture(root, row);
+    restore();
+    assert.deepEqual([box.scrollTop, box.scrollLeft, focused], [320, 80, 'pressed']);
+    row.isConnected = false;
+    later();
+    assert.deepEqual([box.scrollTop, box.scrollLeft, focused], [640, 180, 'next']);
+});
+
 test('Logs owns its actual scroller; generic page restoration still restores other boxes', () => {
     const w = world(), tab = w.page('dashboard-panel-logs');
     // Match the real IDs against the production selector rather than pre-answering `matches` as owned.
@@ -81,6 +102,22 @@ test('Logs owns its actual scroller; generic page restoration still restores oth
     logs.scrollTop = 0; other.scrollTop = 0;
     w.listeners.win.get('ouro:dashboard-subtab-shown')({ detail: { tab: 'logs' } });
     assert.deepEqual([logs.scrollTop, other.scrollTop], [0, 40], 'only logs.js restores #page-logs');
+});
+
+test('a jump from a closed popup returns focus to its surviving trigger, not a hidden row', () => {
+    const w = world(), root = w.page('page-chat');
+    Object.assign(root, { matches: () => false, querySelectorAll: () => [] });
+    const popup = { id: 'room-shade' };
+    let open = true, focused;
+    const row = { isConnected: true, closest: (selector) => selector.includes('role=') ? popup : open ? null : popup,
+        getClientRects: () => open ? [1] : [], focus: () => { focused = 'row'; }, matches: () => true };
+    const trigger = { isConnected: true, getAttribute: () => 'room-shade', getClientRects: () => [1],
+        closest: () => null, matches: () => true, focus: () => { focused = 'trigger'; } };
+    w.doc.querySelectorAll = () => [trigger];
+    const restore = w.restore.capture(root, row);
+    restore(); assert.equal(focused, 'row');
+    open = false;
+    restore(); assert.equal(focused, 'trigger');
 });
 
 // A repaint keeps the reading place: WebKit holds a box in a size container to what remains while a part with an <svg>

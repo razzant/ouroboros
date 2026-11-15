@@ -92,6 +92,13 @@ export function hostNoticeDisplayText(text, systemType, shown = text) {
     return display.startsWith(mark) ? display.slice(mark.length) : display;
 }
 
+// A tool call the host typed as failed (`is_error`) opens its result with its warning mark before the error's code
+// (loop_tool_execution.py "⚠️ TOOL_ERROR (tool): …", mcp_client.py "⚠️ MCP_…"): the failure is said by its chip, so
+// the mark is hidden at display, as a known host prefix is; the record keeps it.
+const TOOL_ERROR_MARK = '⚠️ ';
+export const toolErrorDisplayText = (evt, text) => (evt?.is_error === true && String(text ?? '').startsWith(TOOL_ERROR_MARK)
+    ? String(text).slice(TOOL_ERROR_MARK.length) : text);
+
 // A pause notice's heads before the words its press recorded, which run up to the notice's retained clause
 // (ouroboros/pause_notices.py notice_text; web/tests/fixtures/pause_notice_parity.json pins both sides). The words
 // are their author's: never translated (DESIGN "Language").

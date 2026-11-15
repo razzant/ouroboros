@@ -9,12 +9,12 @@ import { summarizeChatLiveEvent, summarizeLogEvent } from '../modules/log_events
 test('a tool start reads as started, its wait end as a timeout, its result as a result', () => {
     const base = { task_id: 't', tool: 'run_command', invocation_id: 'i1', args: { cmd: 'make' } };
     const started = summarizeLogEvent({ ...base, type: 'tool_call_started', timeout_sec: 60 });
-    assert.equal(started.headline, 'Started run_command');
+    assert.equal(started.headline, 'Run command started');
     assert.doesNotMatch(started.headline, /Running/);
     assert.equal(summarizeLogEvent({ ...base, type: 'tool_call_timeout', timeout_sec: 60 }).headline,
-        'run_command timed out');
+        'Run command timed out');
     assert.equal(summarizeLogEvent({ ...base, type: 'tool_call', result_preview: 'ok' }).headline,
-        'run_command result');
+        'Run command result');
 });
 
 // #1316: providers reuse their call ids across rounds (GigaChat always says "call_0"),

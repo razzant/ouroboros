@@ -9,6 +9,7 @@ function harness() {
     const calls = [], notices = [];
     const context = {
         projectNavigationGeneration: 0, state: { activePage: 'chat' }, canShow: true,
+        pageNavigation: { capture: () => ({}) },
         page: { anchor: { state: 'found', task_id: '214a31b6', history_id: 'chat:42' } },
         window: { addEventListener: (name, fn) => { assert.equal(name, 'ouro:open-task'); context.listener = fn; } },
         showPage: async name => { calls.push(name); return context.canShow; },
@@ -28,7 +29,7 @@ function harness() {
 test('the Dashboard door lands through the real task anchor and keeps the pre-read page', async () => {
     const { context, calls, notices, press } = harness();
     await press();
-    assert.deepEqual(calls, ['chat', ['read', 1, 'task:214a31b6'], 'main', ['reveal', 'task:214a31b6', true]]);
+    assert.deepEqual(calls, ['chat', ['read', 1, 'task:214a31b6'], 'chat', ['reveal', 'task:214a31b6', true]]);
     assert.deepEqual(notices, []);
     calls.length = 0;
     await press('focus', 1099511627777);
@@ -45,7 +46,7 @@ test('a card Main already draws is the destination without a read; Main lands on
         calls.push(['reveal', address, current(), page]); return { state: 'found' };
     };
     await press();
-    assert.deepEqual(calls, ['chat', 'main', ['reveal', 'task:214a31b6', true, null]]);
+    assert.deepEqual(calls, ['chat', 'chat', ['reveal', 'task:214a31b6', true, null]]);
     assert.deepEqual(notices, []);
 });
 

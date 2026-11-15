@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { bindHeaderControlPlacement, bindPageHeader, placePageBack, renderMobileNavToggle, renderPageHeader } from '../modules/page_header.js';
+import { bindHeaderControlPlacement, bindPageBack, bindPageHeader, renderMobileNavToggle, renderPageHeader } from '../modules/page_header.js';
+import { NodeStub, setup } from './dashboard_dom_fixture.js';
 import { createRoomHeader } from '../modules/chat_header.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 
@@ -27,14 +28,14 @@ test('one header: no icon, no caption line, the tabs are written under the row, 
     // On a desk the tabs take the hidden title's place (bindPageHeader): the bar is not empty (owner 19.10, A).
     assert.match(tabbed, /data-sidebar-names>/);
     assert.doesNotMatch(tabbed, /data-empty/);
-    // The Back slot (placePageBack) stands before the lead, both after the hidden title.
-    assert.match(tabbed, /<\/h2>\s*<\/div><div class="app-page-back" data-page-back><\/div><div class="app-page-lead"><\/div>/, 'the Back slot, then the lead slot, follow the hidden title');
+    // The shell return slot stands before the lead, both after the hidden title.
+    assert.match(tabbed, /<\/h2>\s*<\/div><span class="app-page-return" data-page-return><\/span><div class="app-page-lead"><\/div>/, 'the Back slot, then the lead slot, follow the hidden title');
     const acting = renderPageHeader({ title: 'Files', actionsHtml: '<button>Refresh</button>' });
     assert.match(acting, /data-sidebar-names>/);
     assert.doesNotMatch(acting, /data-empty/);
     const project = renderPageHeader({ title: '', titleId: 'project-panel-title', named: false, trailingHtml: '<button>×</button>' });
     assert.match(project, /<h2 class="app-page-title" id="project-panel-title"><\/h2>/);
-    assert.doesNotMatch(project, /data-sidebar-names|data-empty|"app-page-lead"|data-page-back/, 'a Project is named by its owner: its name stays');
+    assert.doesNotMatch(project, /data-sidebar-names|data-empty|"app-page-lead"/, 'a Project is named by its owner: its name stays');
     assert.match(project, /app-page-trailing/);
     assert.match(project, /data-mobile-nav-toggle/, 'a header shows ☰ unless its room carries it in the composer');
     assert.match(renderPageHeader({ title: 'x', titleId: '"><i>' }), /id="&quot;&gt;&lt;i&gt;"/);
@@ -87,6 +88,17 @@ test('Restart and the budget are the same nodes, placed by layout: the row on a 
     const bar = { clientWidth: 500 };
     const narrow = bindHeaderControlPlacement({ headerActions: actions, budgetPill: budget, shade, bar });
     assert.deepEqual(shade.extras.children.map((c) => c.name), ['restart', 'budget'], 'a 500px bar: in the Shade');
+    for (const width of [0, 500]) {
+        bar.clientWidth = width;
+        listeners.get('ouro:layout-changed')({ detail: { layout: 'docked' } });
+        assert.deepEqual(shade.extras.children.map((c) => c.name), ['restart', 'budget'], 'hidden and returned: no move that could strand restored focus');
+    }
+    bar.clientWidth = 900;
+    listeners.get('ouro:layout-changed')({ detail: { layout: 'docked' } });
+    assert.deepEqual(shade.extras.children, [], 'a visible wider bar still moves its controls');
+    bar.clientWidth = 0;
+    listeners.get('ouro:layout-changed')({ detail: { layout: 'docked' } });
+    assert.deepEqual(toolbar.children.map((c) => c.name), ['actions', 'budget', 'status'], 'a hidden wide bar keeps its row too');
     narrow();
     const wideToolbar = node('toolbar');
     const wideActions = node('actions', wideToolbar);
@@ -206,29 +218,18 @@ test('a page\'s own navigation starts its bar on a desk and goes back under the 
         const toolbar = el('app-page-toolbar', el('refresh'));
         const filesHeader = el('app-page-header', el('app-page-title-block', filesLead), toolbar);
         el('page', filesHeader, el('files-layout', home));
-        let resized, disconnected = false;
-        doc.defaultView = { ResizeObserver: class {
-            constructor(callback) { resized = callback; }
-            observe(target) { assert.equal(target, filesHeader); }
-            disconnect() { disconnected = true; }
-        }, requestAnimationFrame: (callback) => { callback(); return 1; }, cancelAnimationFrame() {} };
         filesHeader.clientWidth = 440;
         const off = bindPageHeader(filesHeader, { lead: location, actions });
         assert.deepEqual([names(filesLead), names(toolbar), names(home)], [['files-breadcrumb'], ['files-browser-actions', 'refresh'], []]);
         actions.focus();
         filesHeader.clientWidth = 175;
-        resized([]);
-        assert.deepEqual([names(home), names(toolbar)], [['files-breadcrumb', 'files-browser-actions'], ['refresh']],
-            'a sidebar resize returns the same controls to their home, even while the window stays docked');
-        assert.equal(doc.activeElement, actions);
-        filesHeader.clientWidth = 440;
-        resized([]);
-        assert.equal(location.parentNode, filesLead);
+        layout('docked');
+        assert.deepEqual([names(home), names(toolbar)], [[], ['files-browser-actions', 'refresh']],
+            'a narrow column keeps the same one band; the navigation rail yields to actions');
         assert.equal(doc.activeElement, actions);
         layout('stack');
         assert.deepEqual([names(home), names(toolbar)], [['files-breadcrumb', 'files-browser-actions'], ['refresh']]);
         off();
-        assert.ok(disconnected);
         // A header with nothing of its own to place (Widgets) binds nothing.
         assert.equal(typeof bindPageHeader(el('app-page-header', el('app-page-title-block', el('app-page-lead')))), 'function');
         assert.equal(listeners.size, 0);
@@ -236,11 +237,6 @@ test('a page\'s own navigation starts its bar on a desk and goes back under the 
         // every named page, and goes back to the base header in the stack layout.
         const barOnly = el('app-page-header', el('app-page-title-block', el('app-page-lead')), el('app-page-toolbar', el('new')));
         barOnly.clientWidth = 900;
-        let barReleased = false;
-        doc.defaultView = { ResizeObserver: class {
-            observe(target) { assert.equal(target, barOnly); }
-            disconnect() { barReleased = true; }
-        }, requestAnimationFrame: (callback) => { callback(); return 1; }, cancelAnimationFrame() {} };
         const offBar = bindPageHeader(barOnly);
         assert.ok(barOnly.attrs.has('data-lead'), 'a desk: the desk band');
         layout('stack');
@@ -248,8 +244,20 @@ test('a page\'s own navigation starts its bar on a desk and goes back under the 
         layout('docked');
         assert.ok(barOnly.attrs.has('data-lead'));
         offBar();
-        assert.ok(barReleased, 'its disposer releases the observer it took');
         assert.equal(listeners.size, 0);
+        doc.documentElement = { dataset: { telegramFullscreen: 'active' } };
+        const update = el('update'), overflow = el('list'), telegramActions = el('app-page-toolbar', update, el('refresh'));
+        const telegram = el('app-page-header', el('app-page-title-block', el('app-page-lead')), telegramActions);
+        el('page', telegram, overflow);
+        update.focus();
+        const offTelegram = bindPageHeader(telegram, { secondary: update, overflow });
+        assert.deepEqual(names(telegramActions), ['refresh'], 'fullscreen: one page action in the host row');
+        assert.deepEqual(names(overflow), ['update'], 'the other action stays reachable in the list');
+        assert.equal(doc.activeElement, update);
+        doc.documentElement.dataset.telegramFullscreen = 'expanded';
+        layout('stack');
+        assert.deepEqual(names(telegramActions), ['update', 'refresh'], 'leaving fullscreen restores the same controls');
+        offTelegram();
     } finally { delete globalThis.window; delete globalThis.document; }
 });
 
@@ -261,31 +269,26 @@ test('the optional toolbar class cannot create an HTML attribute or node', () =>
     assert.match(html, /&lt;img/);
 });
 
-test('a page that leads back keeps Back in its header\'s slot in every layout: one leading control, its tabs as they were', () => {
-    const listeners = new Map();
-    const before = { window: globalThis.window, document: globalThis.document };
-    globalThis.window = { ouroLayout: { layout: 'stack' }, addEventListener: (type, fn) => listeners.set(type, fn),
-        removeEventListener: (type) => listeners.delete(type) };
-    globalThis.document = { documentElement: { dataset: { layout: 'stack' } } };
-    try {
-        // Skills opened from Settings on a phone: its header (☰, the name, the Back slot before the lead) and its tabs under it.
-        const attrs = new Set();
-        const lead = { name: 'lead' };
-        const block = { querySelector: () => lead, insertBefore() {} };
-        const slot = { parentElement: block, children: [], replaceChildren(...nodes) { this.children = nodes; } };
-        const tabs = { prepended: [], marks: new Set(), classList: { contains: (name) => name === 'app-page-tabs' },
-            prepend(node) { this.prepended.push(node); }, toggleAttribute(name, on) { if (on) this.marks.add(name); else this.marks.delete(name); },
-            removeAttribute(name) { this.marks.delete(name); } };
-        const header = { nextElementSibling: tabs, querySelector: (selector) => (selector === '[data-page-back]' ? slot : null),
-            setAttribute: (name) => attrs.add(name), removeAttribute: (name) => attrs.delete(name) };
-        const control = { name: 'Back to Settings' };
-        const dispose = placePageBack(header, control);
-        // The sheet puts a header's Back where ☰ stood and hides ☰ (style.css `.app-page-header[data-back]`): Back stays.
-        assert.deepEqual([slot.children, attrs.has('data-back'), tabs.prepended, [...tabs.marks]], [[control], true, [], []],
-            'the stack layout: Back in the header\'s slot, never a second leading control in the tabs row');
-        dispose();
-        assert.deepEqual([slot.children, attrs.has('data-back'), listeners.size], [[], false, 0]);
-    } finally {
-        Object.assign(globalThis, before);
+test('a named return occupies one shell slot in both layouts, and clearing releases it', (t) => {
+    const { mount, window } = setup(t);
+    const page = new NodeStub(); page.className = 'page';
+    page.innerHTML = renderPageHeader({ page: 'skills', tabsHtml: '<div role="tablist"></div>' });
+    mount.append(page);
+    const header = page.querySelector('.app-page-header');
+    header.toggleAttribute = (name, on) => on ? header.setAttribute(name, '') : header.removeAttribute(name);
+    let notify, top = { back: { label: 'Settings', title: 'Settings › Tools' } }, presses = 0;
+    const off = bindPageBack({ layers: { page: () => top, onChange: fn => { notify = fn; return () => {}; }, back: () => presses++ },
+        currentHeader: () => header });
+    t.after(off);
+    const button = header.querySelector('[data-shell-back]');
+    for (const layout of ['docked', 'stack', 'docked']) {
+        window.ouroLayout = { layout }; notify();
+        assert.equal(header.querySelector('[data-shell-back]'), button, 'one retained control, never in the tab rail');
+        assert.equal(button.getAttribute('aria-label'), 'Back to Settings › Tools');
+        assert.equal(button.querySelector('.shell-back-name').textContent, 'Settings');
     }
+    button.dispatchEvent({ type: 'click' }); assert.equal(presses, 1);
+    top = null; notify();
+    assert.equal(header.querySelector('[data-shell-back]'), null);
+    assert.equal(header.hasAttribute('data-return'), false);
 });

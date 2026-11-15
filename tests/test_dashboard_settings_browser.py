@@ -6,10 +6,8 @@ The real SPA in headless Chromium and WebKit over the shared fixture's endpoints
 tab a field the owner is in keeps its text and caret through the tab's own periodic refresh and a settings read, and
 leaving it shows the row's result line; the Updates channel keeps its focused choice through a status read; the
 Evolution choice "Every N tasks" posts both keys in one body and says itself in its own sentence; the doors of
-Consciousness and Costs lead where they say, share a row with a long model name while keeping their chevron beside it,
-and Settings leads back. Every one of the five tabs opened from the Settings home has Back in the header; Escape, Back
-itself and the system's Back return to Settings at its scroll position in both layouts. At the 320 x 640 floor each
-page's own Back reaches the list, and every choice fits.
+Consciousness and Costs lead where they say. The named shell capsule, Escape and the system's Back return each tab to Settings at every width, with the list's scroll preserved. At the 320 x 640 floor
+each page's own Back reaches the list, and every tab and three-way choice fits.
 
 The settings endpoint is answered here the way the server answers it: `_meta.effects` on a read, the receipt
 (`changes`: old, new, token) on a save. Undo's precondition and its refusal are the node test's
@@ -255,10 +253,9 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     _serve(page, "models")
     _serve(page, "permissions")
     page.click(row("consciousness-model"))
-    page.locator('#page-settings [data-settings-page="models/role/consciousness"]').wait_for(state="visible")
-    back = page.locator('#page-settings > .app-page-header [data-settings-back]')
+    back = page.locator('#page-settings > .app-page-header [data-shell-back]')
     back.wait_for()
-    assert back.inner_text().strip() == "" and back.get_attribute("aria-label") == "Back to Consciousness"
+    assert back.inner_text().strip() == "Consciousness" and back.get_attribute("aria-label") == "Back to Consciousness"
     assert back.get_attribute("title") == "Back to Consciousness"
     back.click()
     page.wait_for_selector("#dashboard-panel-consciousness.active")
@@ -269,23 +266,23 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
         "Model | gpt-6-astra (Main model)", f"Its actions are checked | {_scale_word(page, 'light')}", "Where it lives |", "Improving itself | Off"]
     # The Safety door opens its row's page in Settings, whose Back names this tab and returns to it.
     page.click(row("consciousness-safety"))
-    page.locator('#page-settings [data-settings-page="permissions"]').wait_for(state="visible")
+    back = page.locator('#page-settings > .app-page-header [data-shell-back]')
     back.wait_for()
-    assert back.inner_text().strip() == "" and back.get_attribute("aria-label") == "Back to Consciousness"
+    assert back.inner_text().strip() == "Consciousness" and back.get_attribute("aria-label") == "Back to Consciousness"
     assert back.get_attribute("title") == "Back to Consciousness"
     back.click()
     page.wait_for_selector("#dashboard-panel-consciousness.active")
     # The evolution door opens its row on the Evolution tab, and the allowance door its row in Costs: a door inside
-    # the Dashboard leaves no Back.
+    # the Dashboard leaves its named return in the same slot.
     page.click(row("consciousness-evolution"))
     page.wait_for_selector("#dashboard-panel-evolution.active")
     page.wait_for_function("() => document.activeElement?.dataset.evoWhen === 'off'")
-    assert page.locator("#dashboard-panel-evolution > .dashboard-back").count() == 0
+    assert page.locator("#page-dashboard [data-shell-back]").inner_text().strip() == "Consciousness"
     page.click('[data-dashboard-tab="consciousness"]')
     page.click(row("consciousness-allowance"))
     page.wait_for_selector("#dashboard-panel-costs.active")
     page.wait_for_function("(id) => document.activeElement?.id === id", arg=f"setting-{ALLOWANCE}")
-    assert page.locator("#dashboard-panel-costs > .dashboard-back").count() == 0
+    assert page.locator("#page-dashboard [data-shell-back]").inner_text().strip() == "Consciousness"
 
 
 def test_costs_shows_subscriptions_from_the_passive_view_alone_and_its_doors_open_accounts(ui):
@@ -299,10 +296,9 @@ def test_costs_shows_subscriptions_from_the_passive_view_alone_and_its_doors_ope
     assert not [path for path, _ in ui["posts"] if "/api/claudexor/" in path], "nothing is woken or refreshed"
     _serve(page, "accounts")
     door.click()
-    page.locator('#page-settings [data-settings-page="accounts/codex"]').wait_for(state="visible")
-    back = page.locator('#page-settings > .app-page-header [data-settings-back]')
+    back = page.locator('#page-settings > .app-page-header [data-shell-back]')
     back.wait_for()
-    assert back.inner_text().strip() == "" and back.get_attribute("aria-label") == "Back to Costs"
+    assert back.inner_text().strip() == "Costs" and back.get_attribute("aria-label") == "Back to Costs"
     assert back.get_attribute("title") == "Back to Costs"
     back.click()
     page.wait_for_selector("#dashboard-panel-costs.active")
@@ -326,16 +322,14 @@ def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, widt
         return top
 
     def check_back(tab, leave):
-        back = page.locator("#page-dashboard > .app-page-header [data-dashboard-back]")
+        back = page.locator("#page-dashboard > .app-page-header [data-shell-back]")
         assert page.locator(f"#dashboard-panel-{tab} > .dashboard-back").count() == 0
         assert _sideways(page) == [], (tab, leave)
         back.wait_for(state="visible")
-        assert back.get_attribute("aria-label") == "Back to Settings"
-        assert back.inner_text().strip() == ""
-        assert page.locator("#page-dashboard [data-dashboard-list-back]").is_hidden()
-        assert page.evaluate("() => window.__ouroLayers.ids().includes('dashboard-back')") is True
-        if width < 720:
-            assert page.locator("#page-dashboard [data-mobile-nav-toggle]").is_hidden()
+        assert back.get_attribute("aria-label").startswith("Back to Settings")
+        assert back.inner_text().strip() == "Settings"
+        assert page.locator("#page-dashboard [data-shell-back]").count() == 1
+        assert page.evaluate("() => Boolean(window.__ouroLayers.returnPage())")
         if leave == "Escape":
             page.keyboard.press("Escape")
         elif leave == "Back":
@@ -356,21 +350,21 @@ def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, widt
         check_back("storage", leave)
         assert top > 0
         assert page.evaluate("(s) => document.querySelector(s).scrollTop", HOME) == top, f"{leave} returns where Settings was"
-    # A tab reached any other way has no Back.
+    # The primary map clears returns and opens the section list.
     _nav(page, "dashboard", width)
-    assert page.locator("#page-dashboard [data-dashboard-back]").count() == 0
+    assert page.locator("#page-dashboard [data-shell-back]").count() == 0
 
 
 def test_no_tab_scrolls_sideways_at_the_floor_and_a_three_way_choice_keeps_one_line(ui):
     page, _ = _open(ui, tab="consciousness", width=320, height=640)
     for tab in TABS:
         if not page.locator(f'[data-dashboard-tab="{tab}"]').is_visible():
-            page.locator('#page-dashboard [data-dashboard-list-back]').click()
+            page.locator('#page-dashboard [data-shell-back]').click()
         page.click(f'[data-dashboard-tab="{tab}"]')
         page.wait_for_selector(f"#dashboard-panel-{tab}.active")
         page.wait_for_timeout(200)
         assert _sideways(page) == [], tab
-    page.locator('#page-dashboard [data-dashboard-list-back]').click()
+    page.locator('#page-dashboard [data-shell-back]').click()
     page.click('[data-dashboard-tab="consciousness"]')
     tops = page.locator('#page-dashboard [data-setting-row="OUROBOROS_CONSCIOUSNESS_AUTONOMY"] [data-setting-value]').evaluate_all(
         "(buttons) => buttons.map((button) => Math.round(button.getBoundingClientRect().top))")

@@ -3,7 +3,7 @@
 
 Real server and real page. Main left reading an older passage returns to it, left at its end follows it. Settings keeps
 its page, a value being typed and its place across other pages. Logs takes a burst while hidden: no node, no history read; shown,
-it draws the newest entries at once and the rest in chunks, keeps its filters, Raw is written when opened, and a live
+it draws the newest entries at once and the rest in chunks, keeps its filters, a record is written when its fold opens, and a live
 event for the card holding the selection and the focus leaves them where they were. A live event for the open card the
 owner reads inside, already the newest entry, keeps them on the row they were reading.
 """
@@ -201,37 +201,37 @@ def test_hidden_logs_take_a_burst_without_drawing_and_shown_keep_filters_raw_sel
             body = page.locator("#page-logs")  # the tab body is the Logs scroller (style.css .dashboard-body)
             assert body.evaluate("box => box.scrollHeight - box.scrollTop - box.clientHeight") <= 48, "following the newest"
 
-            # Raw is written when opened and released when closed.
-            entry = entries.locator(".log-entry:not(.log-task-card)").filter(has_text="burst_note_").last
+            # A record is written when its fold opens and released when it closes.
+            entry = entries.locator(".log-entry:not(.log-task-card)").filter(has_text="Burst note ").last
             raw = entry.locator(".log-raw")
             assert raw.evaluate("pre => pre.textContent") == ""
-            entry.get_by_role("button", name="Raw", exact=True).click()
-            expect(entry.locator(".log-raw-status")).to_contain_text("bytes")
+            entry.locator(":scope > summary").click()
+            expect(entry.locator(".log-raw-status")).to_contain_text("Received event")
             assert json.loads(raw.inner_text())["type"].startswith("burst_note_")
-            entry.get_by_role("button", name="Hide raw", exact=True).click()
+            entry.locator(":scope > summary").click()
             assert raw.evaluate("pre => pre.textContent") == ""
 
             # The owner's filter stays across another page; so does a card's open Timeline.
-            chip = page.locator(".filter-chip", has_text="System")
-            chip.click()
-            expect(chip).not_to_have_class(re.compile(r"\bactive\b"))
-            expect(chip).to_have_attribute("aria-pressed", "false")  # off (quiet chips: none is toned while all are on)
             card = entries.locator(".log-task-card").last
-            card.locator("summary").click()
+            card.locator(":scope > summary").click()
             rows = card.locator(".log-task-event")
             assert rows.count() >= 1
+            chip = page.locator(".filter-chip", has_text="System")
+            chip.click()
+            expect(chip).to_have_class(re.compile(r"\bactive\b"))
+            expect(chip).to_have_attribute("aria-pressed", "true")  # chosen: System's events alone are shown
             _nav(page, "settings")
             _nav(page, "dashboard")
-            expect(chip).not_to_have_class(re.compile(r"\bactive\b"))
-            expect(chip).to_have_attribute("aria-pressed", "false")
-            assert card.locator("details").evaluate("d => d.open")
+            expect(chip).to_have_class(re.compile(r"\bactive\b"))
+            expect(chip).to_have_attribute("aria-pressed", "true")
+            assert card.evaluate("d => d.open")
             chip.click()
 
             # A live event for the card holding the selection and the focus moves the card, not them.
             group = card.get_attribute("data-task-group")
-            card.locator(".log-raw-toggle").first.focus()
+            card.locator(".log-task-event summary").first.focus()
             page.evaluate("""group => {
-                const row = document.querySelector(`[data-task-group="${group}"] .log-task-event .log-headline`);
+                const row = document.querySelector(`[data-task-group="${group}"] .log-task-event .log-name`);
                 const range = document.createRange();
                 range.setStart(row.firstChild, 0);
                 range.setEnd(row.firstChild, Math.min(5, row.firstChild.length));
@@ -287,7 +287,7 @@ def test_logs_reader_inside_the_newest_open_card_keeps_their_place_when_that_car
             steps = 20
             page.evaluate(_TASK_STEPS, [group, 0, steps])
             card = page.locator(f'#log-entries [data-task-group="{group}"]')
-            card.locator("summary").click()
+            card.locator(":scope > summary").click()
             expect(card.locator(".log-task-event")).to_have_count(steps)
             body = page.locator("#page-logs")  # the tab body is the Logs scroller (style.css .dashboard-body)
             box = body.bounding_box()
@@ -366,8 +366,8 @@ def test_received_raw_shown_again_keeps_its_page_scroll_and_selection_and_a_page
             page.evaluate("""() => window.__testSockets[0].dispatchEvent(new MessageEvent('message', {data: JSON.stringify({type: 'log',
                 data: {type: 'raw_return_probe', ts: '2026-11-04T02:00:00.000Z', payload: 'x'.repeat(200000), sentinel: 'RAW-END'}})}))""")
             _nav(page, "dashboard")
-            entry = page.locator("#log-entries .log-entry:not(.log-task-card)").filter(has_text="raw_return_probe").last
-            entry.get_by_role("button", name="Raw", exact=True).click()
+            entry = page.locator("#log-entries .log-entry:not(.log-task-card)").filter(has_text="Raw return probe").last
+            entry.locator(":scope > summary").click()
             status = entry.locator(".log-raw-status")
             expect(status).to_contain_text("Received event")
             download = entry.get_by_role("link", name="Download full")

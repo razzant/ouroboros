@@ -7,8 +7,7 @@
  * the home opens with the address's last part searched, its hyphens and underscores read as spaces (`local-model`
  * searches "local model"), and search says where the thing lives now. Pages open in levels. One opened from the
  * home, a search result or outside Settings is the first level; one opened from a page lies over that page. The
- * header's Back names where it leads: the level under it, the home ("Settings"), or the place outside Settings that
- * opened it (`back: { label, go }`).
+ * shell names the top page layer's Back: the parent level, Settings, or a jump's origin.
  *
  * The page box's width decides the layout (settings.css `@container sectionplace`). Narrow: one level alone, each one
  * `page: true` layer of the shell's stack (layers.js), so Escape, the browser's or Android's Back and Telegram's Back
@@ -20,9 +19,8 @@
  * Settings is shown, after a reconnect and when the window is seen again. A page reads and repaints on it for its own
  * path; the row helper never rewrites a field that holds focus or typed text. */
 
-import { settingsReturn } from './dashboard.js';
 import { currentLayout, sectionHoldsTwoPanes } from './layout.js';
-import { renderBackControl, renderPageHeader, setBackControlTarget } from './page_header.js';
+import { renderPageHeader } from './page_header.js';
 import { revealPastFade, bindScrollFade } from './scroll_fade.js';
 import { readSettings } from './settings_controls.js';
 import { isDoorId, mountSettingsHome, settingsTitle } from './settings_home.js';
@@ -60,7 +58,7 @@ export function initSettings(ctx = {}) {
     // lead on the shell's own columns). A phone's home has one band, `☰ Settings`; its search starts the list.
     const leadHtml = `<div class="settings-lead section-lead" data-settings-lead>
             <span class="settings-lead-col settings-lead-rail section-lead-col section-lead-rail" data-settings-search-slot></span>
-            <span class="settings-lead-col settings-lead-page section-lead-col section-lead-page">${renderBackControl({ to: 'Settings', attrs: 'data-settings-back' })}<span class="app-page-lead-title" data-settings-lead-name></span></span>
+            <span class="settings-lead-col settings-lead-page section-lead-col section-lead-page"><span class="app-page-return" data-page-return></span><h2 class="app-page-lead-title" data-settings-lead-name></h2></span>
         </div>`;
     page.dataset.sectionView = 'home';
     page.innerHTML = `${renderPageHeader({ page: 'settings', leadHtml })}
@@ -73,11 +71,9 @@ export function initSettings(ctx = {}) {
     const header = page.querySelector('.app-page-header');
     const homeEl = page.querySelector('[data-settings-home]');
     const levelsEl = page.querySelector('.settings-levels');
-    const headerBack = page.querySelector('.app-page-header [data-settings-back]');
     const leadName = page.querySelector('[data-settings-lead-name]');
-    headerBack?.addEventListener('click', () => { const level = top(); if (level) backFrom(level); });
     const levels = [];
-    const aside = new Map();  // path → a level put aside with unsaved words
+    const aside = new Map();  // path → a retained level, including its drafts and reading place
     const layered = new Set();
     const places = new WeakMap();  // a column → where it was scrolled while visible
     let opening = false;
@@ -129,7 +125,8 @@ export function initSettings(ctx = {}) {
     }
     const panes = () => sectionHoldsTwoPanes(page);
     function placeSearch() {
-        const inHome = currentLayout() === 'stack' && !panes();
+        const inHome = currentLayout() === 'stack';
+        page.dataset.searchPlace = inHome ? 'list' : 'band';
         const parent = inHome ? cardHome : searchSlot;
         if (!searchField || !parent) return;
         header.toggleAttribute('data-search-in-home', inHome);
@@ -180,54 +177,33 @@ export function initSettings(ctx = {}) {
         return showing;
     }
 
-    // A door out of Settings. Pressed inside Settings (`back`: the path it was pressed on), it gives where it leads a
-    // Back to that path (dashboard.js settingsReturn): in the header's Back slot before the page's name (the
-    // Dashboard's band, a page of its own such as Circles or Skills); only a page without that slot takes it as its
-    // first row. Leaving that page any other way drops it (onPageShown). A door asked for from
-    // outside Settings (a capsule's `dashboard:costs`) gets no Back: nobody came from Settings. `main:context` shows
-    // Main and does nothing else: the Context capsule is the room's.
-    const doorBack = settingsReturn({ layers, openSettings: (path) => openFromOutside(path), id: 'settings-door-back' });
-    let leavingDoor = false;
-    async function leave(door, { row = '', back } = {}) {
+    // A door uses the shell's ordinary jump: no return callback belongs to a link.
+    async function leave(door, { row = '', ...options } = {}) {
         const [kind, name] = door.split(':');
-        const inside = typeof back === 'string';
-        leavingDoor = inside;
-        try {
-            if (kind === 'dashboard') return await openDashboardTab?.(name, inside ? { row, back } : { row });
-            const left = await showPage?.(kind === 'main' ? 'chat' : name);
-            const landed = left !== false && kind === 'page' && inside ? document.getElementById(`page-${name}`) : null;
-            let first = landed && [...landed.children].find((part) => part.matches('.app-page-header'))?.nextElementSibling;
-            if (first?.matches('.app-page-tabs')) first = first.nextElementSibling;
-            if (first?.matches('.dashboard-shell')) doorBack.show(first, back);
-            else if (first) doorBack.show(landed, back, first);
-            return left;
-        } finally {
-            // The destination's return replaces the Settings levels without consuming their browser Back entry.
-            leavingDoor = false;
-            syncLayers();
-        }
+        if (kind === 'dashboard') return openDashboardTab?.(name, { row, ...options });
+        return showPage?.(kind === 'main' ? 'chat' : name, options);
     }
 
     // `view` is what a door asks its page to show first (Permissions' Reviewers: the Agents list on its reviewers).
-    function go(path = '', { row = '', back = null, fresh = false, opener = null, view = '' } = {}) {
+    function go(path = '', { row = '', fresh = false, opener = null, view = '' } = {}) {
         const target = String(path || '');
-        if (isDoorId(target)) return leave(target, { row, back: state.settingsPath });
+        if (isDoorId(target)) return leave(target, { row });
         if (target && !settingsPageFor(target)) {
             ownChosen = true; // an explicit unknown address keeps its search, rather than re-entering landing
             closeLevels(0);
             home.search((target.split('/').filter(Boolean).pop() || '').replace(/[-_]+/g, ' ').trim());
             return true;
         }
-        const at = back || fresh ? -1 : levels.findIndex((level) => level.path === target);
+        const at = fresh ? -1 : levels.findIndex((level) => level.path === target);
         if (!target) closeLevels(0);
         else if (at >= 0) closeLevels(at + 1, { row });
-        else open(target, { row, back, under: back || fresh ? 0 : levels.length, opener, view });
+        else open(target, { row, under: fresh ? 0 : levels.length, opener, view });
         return true;
     }
 
     // `opener` is the control that opened the level, where focus returns: WebKit does not focus a pressed button.
-    // A level put aside with unsaved words (`close`) comes back as it was left; any other is drawn anew.
-    function open(path, { row, back, under, opener, view = '', remember = true }) {
+    // A retained level comes back as it was left; a path not visited yet is drawn once.
+    function open(path, { row, under, opener, view = '', remember = true }) {
         if (remember && !under && path !== lastFirst) {
             lastFirst = path;
             try { globalThis.localStorage?.setItem(LAST_PAGE_KEY, path); } catch { /* storage blocked: kept for this load */ }
@@ -236,7 +212,7 @@ export function initSettings(ctx = {}) {
         const focused = document.activeElement === document.body ? null : document.activeElement;
         const kept = aside.get(path);
         aside.delete(path);
-        const level = Object.assign(kept || { path, id: `settings-level-${++serial}`, view }, { back, opener: opener || focused });
+        const level = Object.assign(kept || { path, id: `settings-level-${++serial}`, view }, { opener: opener || focused });
         if (!kept) {
             level.el = document.createElement('section');
             level.el.className = 'settings-page scroll-fade-y';
@@ -275,19 +251,14 @@ export function initSettings(ctx = {}) {
         } catch (err) { failed(err); }
     }
 
-    // A level closes: the field it holds is left first (its row commits on that change), then its page is let go. A
-    // page that says it holds unsaved words (an editor with its own Save) is put aside whole instead: its path opens
-    // it again as it was left, while the app is open.
+    // A level put aside keeps its nodes, drafts and reading place until page teardown, like the other places.
     function close(level) {
         const at = document.activeElement;
         if (at && level.el.contains(at)) at.blur?.();
         level.watch?.disconnect();
         level.el.remove();
         if (layered.delete(level.id)) layers?.remove(level.id);
-        if (level.handle?.unsaved?.()) { aside.set(level.path, level); return; }
-        level.closed = true;
-        level.disposeFade?.();
-        try { level.handle?.unmount?.(); } catch (err) { console.error('settings: a page failed to let go', level.path, err); }
+        aside.set(level.path, level);
     }
 
     function closeLevels(keep, { row = '', quiet = false } = {}) {
@@ -311,27 +282,18 @@ export function initSettings(ctx = {}) {
     }
 
     // The header's lead follows the open level: its name, and Back only where it leads to a level not on screen (one
-    // column: always; two panes: a level below the first, or a first level opened from outside Settings), named for
-    // where it leads.
+    // column: its open page; two panes: a deeper level). The shell paints Back from the layer stack.
     function paintLead() {
         const level = top();
         const overview = !level && Boolean(overviewEl && !overviewEl.hidden);
         page.dataset.sectionView = level || overview ? 'page' : 'home';
         // Ouroboros's own pane is named by its card: the band over it holds no title.
         if (leadName) leadName.textContent = level ? settingsTitle(level.path) : '';
-        const leadsTo = !level ? 'Settings'
-            : levels.length > 1 ? settingsTitle(levels[levels.length - 2].path) : level.back?.label || 'Settings';
-        setBackControlTarget(headerBack, leadsTo);
-        if (headerBack) headerBack.hidden = !level || (beside() && levels.length === 1 && !level.back);
+        page.dataset.settingsDepth = String(levels.length);
     }
 
     function backFrom(level) {
         if (level !== top()) return;
-        if (levels.length === 1 && level.back) {
-            closeLevels(0, { quiet: true });
-            level.back.go?.();
-            return;
-        }
         closeLevels(levels.length - 1);
     }
 
@@ -376,10 +338,10 @@ export function initSettings(ctx = {}) {
         if (!quiet) {
             if (row && level) revealRow(level, row);
             else if (opened) {  // beside the home too: a keyboard reaches the page at once, and Back returns to the row
-                (visible(headerBack) ? headerBack : opened.el).focus({ preventScroll: true });
+                opened.el.focus({ preventScroll: true });
             } else if (returned) {
                 const to = visible(returned.opener) ? returned.opener
-                    : level ? (visible(headerBack) ? headerBack : level.el)
+                    : level ? level.el
                         : homeEl.querySelector(`[data-settings-open="${quoted(returned.path.split('/')[0])}"]`);
                 to?.focus?.({ preventScroll: true });
             }
@@ -398,8 +360,8 @@ export function initSettings(ctx = {}) {
     // top one: in one column every level; in two panes every level below the first (the first stands beside the list,
     // which is not hidden). Settings put away: none.
     function syncLayers() {
-        if (!layers || leavingDoor) return;
-        const wanted = !shown() ? [] : beside() ? levels.slice(1) : levels;
+        if (!layers) return;
+        const wanted = !shown() ? [] : beside() || layers.returnPage?.() ? levels.slice(1) : levels;
         layers.batch(() => {
             for (const id of [...layered]) {
                 if (wanted.some((level) => level.id === id)) continue;
@@ -408,6 +370,7 @@ export function initSettings(ctx = {}) {
             }
             for (const level of wanted) {
                 layers.push({ id: level.id, el: level.el, page: true, modal: false, focus: false, opener: null,
+                    back: { label: levels.indexOf(level) > 0 ? settingsTitle(levels[levels.indexOf(level) - 1].path) : 'Settings' },
                     onClose: () => backFrom(level) });
                 layered.add(level.id);
             }
@@ -432,17 +395,17 @@ export function initSettings(ctx = {}) {
 
     // From outside Settings (app.js `openSettings`): Settings is shown first, and refused when the page left vetoes.
     // A path already open keeps its level and its place (a Dashboard tab's Back returns there); any other starts anew.
-    async function openFromOutside(path = '', { row = '', back = null } = {}) {
+    async function openFromOutside(path = '', { row = '', ...options } = {}) {
         const target = String(path || '');
-        if (isDoorId(target)) return leave(target, { row });
+        if (isDoorId(target)) return leave(target, { row, ...options });
         opening = true;
         try {
-            if (!await showPage('settings')) return false;
+            return await showPage('settings', { ...options, key: `settings:${target}`, enter: () => {
+                const at = levels.findIndex((level) => level.path === target);
+                if (!target || at >= 0) closeLevels(target ? at + 1 : 0, { row });
+                else go(target, { row, fresh: true });
+            } });
         } finally { opening = false; }
-        const at = levels.findIndex((level) => level.path === target);
-        if (!target || (at >= 0 && !back)) closeLevels(target ? at + 1 : 0, { row });
-        else go(target, { row, back, fresh: true });
-        return true;
     }
 
     // Settings pressed in the sidebar while it is shown (app.js). Two panes: the list beside a first-level page (or
@@ -460,7 +423,6 @@ export function initSettings(ctx = {}) {
         if (box === homeEl || (overviewEl && box === overviewEl) || levels.some((level) => level.el === box)) places.set(box, box.scrollTop);
     };
     const onPageShown = (event) => {
-        doorBack.clear();  // a door's page was left (its own showing came before its row was drawn)
         syncLayers();
         if (event.detail?.page !== 'settings') look();
         else if (!opening) { announce(); ensurePage(); }
@@ -506,7 +468,7 @@ export function initSettings(ctx = {}) {
         disposeFade();
         disposeOverviewFade?.();
         offReconnect?.();
-        doorBack.clear();
+        for (const level of [...levels, ...aside.values()]) { level.closed = true; level.disposeFade?.(); level.handle?.unmount?.(); }
         window.removeEventListener('ouro:page-shown', onPageShown);
         document.removeEventListener('visibilitychange', onVisible);
         home.dispose();
@@ -514,5 +476,15 @@ export function initSettings(ctx = {}) {
 
     // Loopback-only debug hook, like app.js's __ouroWs: Settings has no URL, so browser tests open a path through it.
     window.__ouroSettings = { open: openFromOutside };
-    return { page, open: openFromOutside, pressedAgain };
+    return { page, open: openFromOutside, pressedAgain,
+        capture() {
+            const paths = levels.map((level) => level.path), own = ownChosen;
+            return { title: ['Settings', ...levels.map((level) => settingsTitle(level.path))].join(' › '),
+                restore() {
+                    closeLevels(0, { quiet: true });
+                    ownChosen = own;
+                    paths.forEach((path, under) => open(path, { under, remember: false }));
+                    paint({ quiet: true });
+                } };
+        } };
 }
