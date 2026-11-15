@@ -540,6 +540,33 @@ test('a card first bound after a disconnect takes nothing from the census read b
     } finally { f.close(); }
 });
 
+test('a complete census read before a disconnect proves no work gone after it', async () => {
+    // A work started during the outage is absent from the complete census read before it. A replay after the close
+    // binds its card: the old census does not drop its line or send it to the missing-work read.
+    const history = [{ role: 'user', text: 'audit the projects', ts: '2026-10-10T11:59:00Z', chat_id: 1, source: 'web',
+        history_id: 'h-1', row_address: 'row:1@h#1' }];
+    const f = fixture({ history });
+    const reads = () => f.reads.filter((id) => id === 'w-2').length;
+    try {
+        await f.instance.refreshHistory({ revision: 1 });
+        await settle();
+        f.state({ active_chat_activities: [] });  // complete, and w-2 has not started yet
+        await settle();
+        f.emit('close');
+        await settle();
+        f.narrate('w-2', 'Started during the outage.');
+        await settle();
+        const before = reads();
+        history.push({ role: 'system', system_type: 'project_started', chat_id: 1, task_id: 'w-2', project_id: 'p-1',
+            project_name: 'Audit', task_name: 'Audit the projects', text: 'Audit › Audit the projects · Started',
+            ts: '2026-10-10T12:00:00Z', history_id: 'h-2' });
+        await f.instance.refreshHistory({ revision: 2 });
+        await settle();
+        assert.equal(f.card('w-2')?.dataset.portal, '1', 'the replay binds the work\'s card');
+        assert.equal(reads(), before, 'no missing-work read: the old census proves no absence');
+    } finally { f.close(); }
+});
+
 test('a history replay retries no failed successor read; the next census does', async () => {
     // A followed successor whose record read failed is read again at the next census (sync), never by a history read,
     // whose answer may land while Main is away.
