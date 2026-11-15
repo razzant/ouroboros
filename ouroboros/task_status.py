@@ -1347,9 +1347,10 @@ def find_child_tasks(
     Subtree includes direct children OR members of the named root; direct scope
     includes only children of parent_task_id. A leaf must not absorb siblings.
     ``settled`` names tasks the caller needs no row of (a sleeper's readiness check: its cursor holds their
-    terminals): a lineage row of one that no retry or supersession pointer redirects is not fetched, and each of
-    them the store or the queue names comes back as ``{"task_id": id, "settled_unread": True}`` alone, never
-    projected (unread, so its role and parent are unproven: only its own row is that proof).
+    terminals): a lineage row of one that no retry or supersession pointer redirects (its effective row is its own) is
+    not fetched, nor overlaid by a queued row of it, and comes back as ``{"task_id": id, "settled_unread": True}``
+    unless another row projects that id; unread, its role and parent are unproven (only its own row is that proof).
+    Every other row, a redirected one and its queued row included, is projected as without ``settled``.
     """
     parent = str(parent_task_id or "").strip()
     root = str(root_task_id or "").strip()
@@ -1404,9 +1405,8 @@ def find_child_tasks(
             row = dict(task)
         else:
             continue
-        if tid in unread:
-            skipped.add(tid)
-            continue
+        if tid in skipped:
+            continue  # its own row, which no pointer redirects, was not read: it is the child the queue names
         row.setdefault("task_id", tid)
         row["status"] = status
         existing = rows.get(tid, {})
@@ -1426,7 +1426,7 @@ def find_child_tasks(
             elif not combined.get(key) and value:
                 combined[key] = value
         rows[tid] = combined
-    for tid in (skipped | (unread & set(rows))) - {excluded}:
+    for tid in skipped - set(rows) - {excluded}:
         rows[tid] = {"task_id": tid, "settled_unread": True}
     return sorted(rows.values(), key=lambda item: (str(item.get("ts") or ""), str(item.get("task_id") or "")))
 

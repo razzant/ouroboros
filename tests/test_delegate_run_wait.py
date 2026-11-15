@@ -381,7 +381,8 @@ def test_a_sleepers_tick_reads_no_child_whose_end_its_last_wake_showed(tmp_path,
     """Every assignment tick asks each sleeper on runs whether a direct child ended or asks for attention. An end the
     last acknowledged wake already showed ends no sleep, so the tick reads neither that child's row nor its replica (a
     nanny with dozens of ended children decoded them all on every tick). The running child is read and wakes it when it
-    ends; a beacon of an ended child still wakes it, and so does the end of a retry an ended child is redirected to."""
+    ends; a beacon of an ended child still wakes it, and so does the end of a retry an ended child is redirected to,
+    even one that names no parent and is a child only through the ended child's queued row."""
     from ouroboros import delegate_supervision as ds, model_sleep, task_status, task_store
     from ouroboros.task_results import write_task_result
     from ouroboros.task_tree_ledger import tree_ledger_append
@@ -421,6 +422,14 @@ def test_a_sleepers_tick_reads_no_child_whose_end_its_last_wake_showed(tmp_path,
     child("retry-1", "completed")
     task_store.patch_document(tmp_path, "ended-1", lambda current: {**current, "retry_task_id": "retry-1"})
     assert model_sleep.wake_reason(ctx, chosen) == "coordination:retry-1"
+    acknowledged()
+    # a retry that names no parent is this nanny's child only through the queued row of the ended child it redirects
+    write_task_result(tmp_path, "retry-3", "completed", chat_id=0)
+    task_store.patch_document(tmp_path, "ended-3", lambda current: {**current, "retry_task_id": "retry-3"})
+    queued = {"id": "ended-3", "parent_task_id": _NANNY, "delegation_role": "subagent"}
+    (tmp_path / "state" / "queue_snapshot.json").write_text(
+        json.dumps({"pending": [], "running": [{"id": "ended-3", "task": queued}]}), encoding="utf-8")
+    assert model_sleep.wake_reason(ctx, chosen) == "coordination:retry-3", "the queue still recovers a redirected child"
     acknowledged()
     read.clear()
     assert model_sleep.wake_reason(ctx, chosen) == "" and "busy" not in read

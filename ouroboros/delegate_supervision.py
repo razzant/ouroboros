@@ -388,8 +388,8 @@ def _coordination_wakes(
 
     cursor = _coordination_cursor(state)
     prior_children = cursor.get("children") if isinstance(cursor.get("children"), dict) else {}
-    held = [child_id for child_id, previous in prior_children.items() if isinstance(previous, dict)
-            and str(previous.get("status") or "") in SETTLED_STATUSES] if readiness else []
+    held = {child_id for child_id, previous in prior_children.items() if isinstance(previous, dict)
+            and str(previous.get("status") or "") in SETTLED_STATUSES} if readiness else set()
     metadata = getattr(ctx, "task_metadata", {})
     root_id = str(metadata.get("root_task_id") or "").strip() if isinstance(metadata, dict) else ""
     root_id = root_id or str(getattr(ctx, "task_id", "") or "").strip()
@@ -411,12 +411,13 @@ def _coordination_wakes(
         return [row for row in attention if tree_ledger_row_id(row) not in seen]
 
     children = _direct_children(ctx, not readiness, held)
+    unread = {child_id for child_id, child in children.items() if child_id in held and child.get("settled_unread")}
     new_attention = beacons(children)
-    if any(children.get(str(row.get("task_id") or ""), {}).get("settled_unread") for row in new_attention):
-        children = _direct_children(ctx, False)
+    if any(str(row.get("task_id") or "") in unread for row in new_attention):
+        children, unread = _direct_children(ctx, False), set()
         new_attention = beacons(children)
     markers = {
-        child_id: _child_marker(child) for child_id, child in children.items() if not child.get("settled_unread")
+        child_id: _child_marker(child) for child_id, child in children.items() if child_id not in unread
     }
     terminal_events: list[dict[str, Any]] = []
 
