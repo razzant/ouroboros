@@ -142,6 +142,45 @@ def test_owner_text_is_published_once_and_every_reader_sees_it_whole(published):
     assert task_status.queue_snapshot_observation(view)["fresh"]
 
 
+def test_a_publication_encodes_each_large_value_once_and_writes_the_encoders_own_bytes(published, monkeypatch):
+    """The value's one text decides sharing and is spliced into the document: neither the table nor the
+    written text is encoded again (cost law L5), and the bytes are those ``machine_json`` gives the document,
+    rows exactly as captured, even beside data spelled like this publication's own placeholder."""
+    root, _now = published
+    once = "<<a value published once>>" + " kept whole" * 300
+    for index in range(3):
+        queue.PENDING.append(_task(f"p{index}"))
+    queue.RUNNING["r0"] = {"task": _task("r0", context=once, note={"kept": {"$shared": "0" * 64}}),
+                           "attempt": 1, "started_at": 1.0}
+    texts, dumps = [], json.dumps
+
+    def encode(value, *args, **kwargs):
+        texts.append(text := dumps(value, *args, **kwargs))
+        return text
+
+    def published_exactly():
+        raw = (root / "state/queue_snapshot.json").read_text(encoding="utf-8")
+        assert raw == queue_publication.machine_json(json.loads(raw)), "the encoder's own bytes"
+        with queue._queue_lock:
+            captured = queue_publication._capture("expected")
+        rows = queue_observation.expand_shared(json.loads(raw))
+        assert all(queue_publication.machine_json(rows[lane]) == queue_publication.machine_json(captured[lane])
+                   for lane in ("pending", "running")), "every row as captured, types and order"
+
+    monkeypatch.setattr(json, "dumps", encode)
+    assert queue.persist_queue_snapshot("burst") is True
+    assert sum(text.count("<<a value published once>>") for text in texts) == 1, "encoded once, written as encoded"
+    assert sum(text.count(SENTINEL) for text in texts) == 8, "once per place: four rows, two places each"
+    published_exactly()
+    # Data spelled like a placeholder of this publication: the splice cannot place each text exactly once,
+    # so the document is encoded whole instead, and the data stays data.
+    monkeypatch.setattr(queue_publication, "uuid", SimpleNamespace(uuid4=lambda: SimpleNamespace(hex="0" * 32)))
+    queue.RUNNING["r0"]["task"]["focus"] = "moved"
+    assert queue.persist_queue_snapshot("focus") is True
+    published_exactly()
+    assert queue_observation.load_queue_document(root)["running"][0]["task"]["note"] == {"kept": {"$shared": "0" * 64}}
+
+
 def test_alive_is_written_without_fsync_and_only_on_change(published, monkeypatch):
     root, now = published
     writes, fsyncs = _writes(monkeypatch)
