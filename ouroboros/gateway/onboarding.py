@@ -759,15 +759,16 @@ async def api_onboarding_subagents_preview(request: Request) -> JSONResponse:
         available = normalize_configured_subagents(catalog)[0]
     except ValueError as exc:
         return unsaved_error(str(exc), 400, code="invalid_onboarding_settings")
-    from ouroboros.pricing import known_spend_gaps
+    from ouroboros.pricing import spend_coverage
 
     shown = configured_subagents_dict(available)
+    gaps, partial = spend_coverage(current, shown)
     return JSONResponse({
         "ok": True,
         "model_settings": dict(preset.model_settings),
         "available_subagents": shown,
         # What the limits of this draft cannot count, as Dashboard › Costs names it after the save.
-        "known_spend_gaps": known_spend_gaps(current, shown),
+        "known_spend_gaps": gaps, "partly_counted_spend": partial,
         "source": preset.source,
         "diagnostics": list(preset.diagnostics),
     })

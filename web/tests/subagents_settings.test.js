@@ -1311,6 +1311,11 @@ test('a reviewer says its model\'s published tariff until a review is measured, 
     assert.equal(modelTariffText(api, catalog), tariff);
     assert.equal(modelTariffText(apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'vendor/unpriced' } }), catalog), 'Price unknown');
     assert.equal(modelTariffText(apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'vendor/unlisted' } }), catalog), 'Price unknown');
+    // The role line's own words for an entry priced only under a condition: the same helper, never a figure.
+    const deepseek = apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'deepseek::deepseek-v4-pro' } });
+    assert.equal(modelTariffText(deepseek, { read_state: 'ok', items: [{ value: 'deepseek::deepseek-v4-pro',
+        price_condition: 'off_peak_usd' }] }), 'Estimated for text, off-peak · USD only');
+    assert.equal(reviewMoneyLine(deepseek, null, 'Estimated for text, off-peak · USD only'), 'Estimated for text, off-peak · USD only');
     // A row its own source listed keeps its tariff when another source of the read failed (a partial catalog, or a
     // failed read that kept the earlier rows); a model no read listed is unknown only once the catalog is read whole.
     for (const state of ['partial', 'transport']) {

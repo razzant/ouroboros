@@ -4,7 +4,7 @@
 // lists stays a route of its own source, never dropped or rewritten. A route's identity is its whole string, source
 // included, so one model through two sources is two rows.
 import {
-    API_PROVIDER_ORDER, apiProviderLabel, cacheWriteWords, composeModelSource, connectionParts, parseModelSource, priceWords,
+    API_PROVIDER_ORDER, apiProviderLabel, cacheWriteWords, composeModelSource, connectionParts, parseModelSource, modelPriceWords,
     unavailableConnectionState,
 } from './route_editor_primitives.js';
 import { harnessPresentation } from './harness_presentation.js';
@@ -136,13 +136,14 @@ export function buildModelIndex({ catalog = {}, connections = null, cacheTier = 
         if (!rows.has(key)) {
             rows.set(key, { key, route, id: modelPart(route), name: String(item?.name || '') || modelPart(route),
                 source: own.id, lane: own.lane, window: 0, available: null, states: new Set(), prices: new Map(),
-                modes: null });
+                conditions: new Set(), modes: null });
             own.count += 1;
         }
         const row = rows.get(key);
         row.window = Math.max(row.window, Number(item?.max_context_window) || Number(item?.context_window) || 0);
         if (typeof item?.availability === 'string') row.states.add(item.availability);
         row.prices.set(JSON.stringify(item?.price ?? null), item?.price ?? null);
+        row.conditions.add(String(item?.price_condition || ''));
         // The tiers an account lists for this model: one that lists any makes the row's list known.
         if (Array.isArray(item?.processing?.modes)) {
             row.modes ||= new Set();
@@ -160,8 +161,11 @@ export function buildModelIndex({ catalog = {}, connections = null, cacheTier = 
         row.price = row.prices.size === 1 ? [...row.prices.values()][0] : null;
         priced ||= Boolean(row.price);
         cacheFigures ||= Boolean(row.price?.cache_write_ttl);
+        // The condition a published entry prices it under (`price_condition`), on the same terms as the figures.
+        row.price_condition = row.conditions.size === 1 ? [...row.conditions][0] : '';
         delete row.states;
         delete row.prices;
+        delete row.conditions;
     }
     for (const error of errors) {
         const id = error?.source_id ? `${SUBSCRIPTION}${error.source_id}`
@@ -228,9 +232,10 @@ export function describeRoute(index, raw, { tier = '' } = {}) {
         ? harnessPresentation(id.slice(SUBSCRIPTION.length)).label : apiProviderLabel(id, {}, index?.connections || []));
     const sourceLabel = cannotSend ? `${base} (${unavailableConnectionState(id, index.connections)})` : base;
     const window = windowWords(listed?.window);
-    // A catalog figure is Standard's: a context on another tier is told neither its price nor its cache write.
+    // A catalog figure is Standard's: a context on another tier is told neither its price, nor the condition its
+    // published entry prices it under, nor its cache write.
     const tierPriced = tier === 'fast' || tier === 'economy' || tier === 'ultrafast';
-    const price = tierPriced ? '' : priceWords(listed?.price);
+    const price = tierPriced ? '' : modelPriceWords(listed);
     return {
         route, key: routeKey(route), id: modelPart(route), short: shortName(route), source: id, lane,
         // Said only while the settings name the cache tier the figure is of (`cacheTier`, model_catalog_store.js).
