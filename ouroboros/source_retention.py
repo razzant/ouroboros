@@ -763,8 +763,8 @@ class RetentionWalk:
         from ouroboros.task_custody import PublicationClosed
 
         held = None  # (member, node, data): one member, for the carriers that name it: they sort adjacently
-        while True:
-            _check_open()
+        while self.queue or self.sweep or self.next_sweep or self.after_packed:
+            _check_open()  # before each node, as when this loop ran over the queue alone; an empty drain asks nothing
             node, position = self._next_node()
             if node is None:
                 return
