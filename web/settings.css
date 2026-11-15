@@ -1293,6 +1293,11 @@ html[data-layout="stack"] .settings-search { height: 44px; }
    a button with the value in the semibold weight; a path or an address has a longer field. */
 .settings-row,
 .settings-head { box-sizing: border-box; min-height: 52px; }
+/* Keep the same minimum on the content tracks when a result adds a track. The spanning item distributes the
+   spare room exactly as the resting grid does; subtract the tray's insets (a card's only row has none). */
+.settings-row::before { content: ""; grid-area: 1 / 1 / 3 / -1; min-height: calc(52px - 2 * (var(--space-3) + 1px)); pointer-events: none; }
+.ui-card > .settings-row:only-child::before { min-height: 52px; }
+.dashboard-settings[data-solo] > .settings-row::before { content: none; }  /* this row is a flex column */
 .settings-row > .ui-row-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--space-2); text-wrap: pretty; }
 /* Main, a fallback or a role whose key cannot send: its line says so in the warning colour (these rows have no tinted
    body, so the light theme's unset warning word would leave it unmarked). */
@@ -1363,6 +1368,7 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
    words 16rem whatever its own width: a wider one (Evolution's strip with its N field) wraps its own parts there. */
 .settings-row[data-wide] { grid-template-columns: minmax(min(100% - var(--space-3), 16rem), 1fr) auto; }
 @container (max-width: 36rem) {
+    .settings-row[data-wide]::before { grid-row: 1 / 4; }
     .settings-row[data-wide] > :is(.ui-row-title, .ui-row-meta, .ui-row-actions) { grid-column: 1 / -1; }
     .settings-row[data-wide] > .ui-row-actions { grid-row: 3; justify-content: flex-start; }
 }
@@ -1371,6 +1377,7 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
    do go there). A row that leads with a mark says its value as a third line and keeps its sign at the end. */
 @container (max-width: 28rem) {
     .settings-row:is([data-kind="door"], [data-kind="switch"], [data-kind="secret"], [data-kind="number"]:not([data-no-limit])):not([data-lead]) > :is(.ui-row-title, .ui-row-meta) { grid-column: 1; }
+    .settings-row:not([data-kind="door"], [data-kind="switch"], [data-kind="secret"], [data-kind="number"]:not([data-no-limit]))::before { grid-row: 1 / 4; }
     .settings-row:is([data-kind="door"], [data-kind="switch"], [data-kind="secret"], [data-kind="number"]:not([data-no-limit])):not([data-lead]) > .ui-row-actions { grid-column: 2; grid-row: 1 / span 2; flex-wrap: nowrap; justify-content: flex-end; }
     .settings-row[data-lead] > :is(.ui-row-title, .ui-row-meta) { grid-column: 2; }
     .settings-row[data-lead] > .ui-row-actions { display: contents; }
@@ -1441,6 +1448,7 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
     background: none;
 }
 .settings-row[data-kind="choices"] > .ui-row-actions { display: block; margin-top: var(--space-2); }
+.settings-row[data-kind="choices"]::before { grid-row: 1 / 4; }
 .settings-row[data-kind="choices"] > .settings-row-result { grid-row: 4; }  /* under the options, as every row's */
 .settings-rows > .settings-row[data-kind="choices"]:only-child > .ui-row-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .settings-rows > .settings-row[data-kind="choices"]:only-child > .ui-row-meta { margin-top: calc(-1 * var(--space-3)); font-size: var(--type-body); line-height: var(--line-body); }
