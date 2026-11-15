@@ -334,13 +334,13 @@ test('a level shows only the owed jump, then its own parent, in either layout', 
         assert.equal(header.querySelector('[data-shell-level]'), null, 'the jump is the only back control');
     }
     first.dispatchEvent({ type: 'click' });
-    assert.deepEqual(calls, [['control', 'jump']]);
+    assert.deepEqual(calls, [['keyboard', 'jump']]);
     jump = null; notify();
     assert.equal(header.querySelector('[data-shell-back]'), first);
     assert.equal(first.getAttribute('aria-label'), 'Back to Models');
     assert.equal(header.querySelector('[data-shell-level]'), null, 'one control when the jump is spent');
     first.dispatchEvent({ type: 'click' });
-    assert.deepEqual(calls.at(-1), ['control', 'level']);
+    assert.deepEqual(calls.at(-1), ['keyboard', 'level']);
 });
 
 test('outside a section column a file or room level above a jump keeps its own Back', (t) => {

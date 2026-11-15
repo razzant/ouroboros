@@ -28,7 +28,7 @@ export function createPageNavigation({ layers, capture, canLeave, land = () => {
                 const id = `page-return-${++serial}`;
                 layers.push({ id, page: true, modal: false, focus: false, opener: null,
                     returnTo: origin, destination: key, back: { label: origin.label, title: origin.title },
-                    onClose: async () => {
+                    onClose: async (reason) => {
                         if (await canLeave(origin.key) === false) return false;
                         doc.activeElement?.blur?.();
                         const restored = layers.batch(() => {
@@ -36,7 +36,7 @@ export function createPageNavigation({ layers, capture, canLeave, land = () => {
                             return origin.restore();
                         });
                         origin.release?.();
-                        restored?.();
+                        restored?.({ keyboard: ['keyboard', 'escape', 'shortcut'].includes(reason) });
                         return true;
                     } });
             }
@@ -76,7 +76,7 @@ export function capturePagePlace({ state, navState, settingsControls, dashboardC
                     rooms.show(projectId);
                 }
             } });
-            return () => { reading(); feed?.(); };
+            return (input) => { reading(input); feed?.(); };
         } };
 }
 

@@ -5,6 +5,18 @@ import { capturePagePlace, createPageNavigation, canLeavePage, openInitialPage }
 
 const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 
+test('only keyboard dismissals ask the returned place to show its focus ring', async () => {
+    const layers = createLayerStack({ win: null, doc: null }), restored = [];
+    const doc = { addEventListener() {}, removeEventListener() {} };
+    const nav = createPageNavigation({ layers, doc, canLeave: () => true,
+        capture: () => ({ key: 'chat', label: 'Main', restore: () => input => restored.push(input) }) });
+    for (const reason of ['pointer', 'keyboard', 'escape', 'shortcut', 'telegram', 'history']) {
+        await nav.go('skills', () => {}); layers.back(reason); await settle();
+        assert.deepEqual(restored.at(-1), { keyboard: ['keyboard', 'escape', 'shortcut'].includes(reason) });
+    }
+    nav.destroy(); layers.destroy();
+});
+
 test('only a forward jump without a named row lands at the top; vetoes, map choices and returns keep their place', async () => {
     const layers = createLayerStack({ win: null, doc: null });
     const calls = [], doc = { addEventListener() {}, removeEventListener() {} };

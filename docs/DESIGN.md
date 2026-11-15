@@ -381,7 +381,7 @@ A wizard-only layout token is fine; a second value for a shared role is not.
 
 ### Focus
 
-Keyboard focus has **one** appearance:
+Keyboard focus, including a return, has **one** appearance:
 
 ```css
 outline: 2px solid var(--focus-accent-border);
@@ -392,7 +392,7 @@ outline-offset: 2px;
 A Project transcript uses two gutter corners (owner 28.10), quiet after a
 pointer until a key; forced colours use an inset system-colour ring. No blue
 or green ring in ordinary themes, no `box-shadow` outline or colour matched
-to the control: a focus ring is the reader's cursor, consistent across surfaces.
+to the control. Pointer returns restore focus without a ring.
 
 **Hover paint is not a focus ring.** A rule written as
 `.x:hover, .x:focus-visible { background: … }` gives a keyboard user exactly

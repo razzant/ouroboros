@@ -605,6 +605,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
    outer ring (docs/DESIGN.md "Focus"). */
 .nav-row:focus-visible,
 .app-tab:focus-visible,
+.chat-budget-pill:focus-visible,
 .chat-header-btn:focus-visible {
     outline: 2px solid var(--focus-accent-border);
     outline-offset: -2px;
@@ -12203,3 +12204,7 @@ html[data-telegram-fullscreen="active"] #page-dashboard .logs-kinds {
 }
 /* Update all remains available at the list's start while Refresh occupies the shared row. */
 .skills-scroll > #skills-update-all { margin-bottom: var(--space-3); }
+
+/* A return always restores focus. Its input determines whether that cursor is visible. */
+[data-return-focus="keyboard"]:focus { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
+[data-return-focus="pointer"]:focus { outline: none; }

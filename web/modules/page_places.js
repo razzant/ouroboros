@@ -172,7 +172,7 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
         for (let at = root?.contains(opener) ? opener : null; at && at !== root; at = at.parentElement) {
             anchors.push(at, at.nextElementSibling, at.previousElementSibling);
         }
-        return () => {
+        return ({ keyboard = false } = {}) => {
             for (const [box, top, left] of saved) {
                 if (!box.isConnected) continue;
                 box.scrollTop = top;
@@ -182,6 +182,14 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
             const anchor = anchors.find((el) => el?.isConnected && el.getClientRects().length && !el.closest('[hidden], [inert]')) || root;
             if (!anchor || !anchor.isConnected) return;
             if (!anchor.matches('button, a, input, select, textarea, [tabindex]')) anchor.tabIndex = -1;
+            anchor.setAttribute?.('data-return-focus', keyboard ? 'keyboard' : 'pointer');
+            const clear = () => {
+                anchor.removeAttribute?.('data-return-focus');
+                anchor.removeEventListener?.('blur', clear);
+                anchor.removeEventListener?.('keydown', clear);
+            };
+            anchor.addEventListener?.('blur', clear);
+            anchor.addEventListener?.('keydown', clear);
             anchor.focus?.({ preventScroll: true });
         };
     };

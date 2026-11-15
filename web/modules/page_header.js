@@ -120,7 +120,7 @@ export function bindPageBack({ layers, currentHeader, doc = document, win = wind
             holder.innerHTML = renderBackControl({ attrs: 'data-shell-back' });
             button = holder.firstElementChild;
             slot.append(button);
-            button.addEventListener('click', () => layers.back('control', button.dataset.pageLayer));
+            button.addEventListener('click', event => layers.back(event.detail ? 'pointer' : 'keyboard', button.dataset.pageLayer));
         }
         button.dataset.pageLayer = primary.id;
         const title = `Back to ${back.title || back.label}`;

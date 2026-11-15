@@ -108,6 +108,26 @@ test('each return restores its own nested scrolls and pressed row, falling back 
     assert.deepEqual([box.scrollTop, box.scrollLeft, focused], [640, 180, 'next']);
 });
 
+test('a returned row takes focus for either input, but only a keyboard return paints its ring', () => {
+    const w = world(), root = w.page('page-skills');
+    Object.assign(root, { matches: () => false, querySelectorAll: () => [] });
+    const handlers = new Map(), attrs = new Map();
+    let focused = 0;
+    const row = { isConnected: true, parentElement: root, matches: () => true, closest: () => null,
+        getClientRects: () => [1], focus: () => focused++, setAttribute: (key, value) => attrs.set(key, value),
+        removeAttribute: key => attrs.delete(key), addEventListener: (key, fn) => handlers.set(key, fn),
+        removeEventListener: key => handlers.delete(key) };
+    root.boxes.add(row);
+    const restore = w.restore.capture(root, row);
+    for (const keyboard of [false, true, false]) {
+        restore({ keyboard });
+        assert.equal(attrs.get('data-return-focus'), keyboard ? 'keyboard' : 'pointer');
+        handlers.get('blur')();
+        assert.equal(attrs.has('data-return-focus'), false);
+    }
+    assert.equal(focused, 3);
+});
+
 test('Logs owns its actual scroller; generic page restoration still restores other boxes', () => {
     const w = world(), tab = w.page('dashboard-panel-logs');
     // Match the real IDs against the production selector rather than pre-answering `matches` as owned.
