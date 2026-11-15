@@ -141,6 +141,15 @@ export function attachChatInputSizing(input) {
     fonts?.addEventListener('loading', fontsLoading);
     // A loading period already running sent its `loading` before this listener.
     if (fonts?.status === 'loading') fontsLoading();
+    // The first measurement waits for no report: an engine may send none for a field already laid out at attach (Linux
+    // WebKit left Main's field at its unmeasured 33.2 px until the model strip opened). It is asked once the caller has
+    // finished building (a microtask), since its write reaches the caller's layout hook, and only where frames exist and
+    // the field is laid out then: a hidden one (or a host without either) measures on its first report or edit, as before.
+    if (measured) {
+        queueMicrotask(() => {
+            if (!disposed && typeof requestAnimationFrame === 'function' && input.clientWidth > 0) remeasure();
+        });
+    }
 
     return {
         mode,

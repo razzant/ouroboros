@@ -279,6 +279,26 @@ test('a hidden field pins nothing and its reveal measures; only a new width re-m
     assert.ok(parseFloat(field.style.getPropertyValue('--chat-input-height')) > 80);
 });
 
+test('a field laid out at attach is measured in its first frame, with no observer report', async (t) => {
+    // An engine may send no first report for a field already laid out: Linux WebKit left Main's empty field at its
+    // unmeasured 33.2 px until the model strip opened, and the composer moved 0.2 px then. Attach asks one frame itself,
+    // once its caller has finished building.
+    const engine = installEngine();
+    t.after(engine.restore);
+    const field = new Field();
+    attachChatInputSizing(field);
+    assert.equal(field.borderBox, 33.2, 'unmeasured, one row is its line height and padding');
+    assert.equal(engine.pending(), 0, 'nothing is asked while the caller is still building');
+    await null;
+    assert.equal(engine.pending(), 1, 'attach asks one frame');
+    engine.flush();
+    assert.equal(field.style.getPropertyValue('--chat-input-height'), '33px', 'the first frame writes the whole-pixel height');
+    engine.report();
+    engine.flush();
+    assert.equal(field.writes.filter(([name]) => name === '--chat-input-height').length, 1,
+        'a later report at the same width writes nothing');
+});
+
 test('a font that finishes loading re-measures the same width once, in a frame', async (t) => {
     const engine = installEngine();
     t.after(engine.restore);
