@@ -25,7 +25,8 @@ def startup_tree_exclusions(root):
                 return None, f"{identity}: no task id"
             pending.add(str(facts["task_id"]))
         while pending:
-            task_id = pending.pop()
+            task_id = min(pending)  # one order: the link a closed gate names is the same from pass to pass
+            pending.discard(task_id)
             if task_id in protected:
                 continue
             protected.add(task_id)

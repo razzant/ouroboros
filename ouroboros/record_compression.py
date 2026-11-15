@@ -41,17 +41,18 @@ is neither a candidate nor reaped. A folder it cannot list is counted (``unreada
 records where compression is supported; that staging copies task drives and artifact folders, never ``archive/``.
 
 Pacing: at most ``FILES_PER_RUN`` files read a run (a file ``artifact_storage.UNREAD_SKIPS`` keeps costs none), a stop
-check between files, the cursor durable in the job row; a run reads and rewrites at the utility disk tier (its own thread, its ``ditto``).
-The first pass walks every task folder and seat home (the backlog); later passes look at the rows written
-terminal since the counter the last one covered, the seat homes changed since it looked and what still
-waits for its task (a task written again, or a home changed, is walked from its start). ``COVERAGE`` names
-the scope and floor a position was earned under: a row from another one, done or stopped partway, walks
-every task folder and seat home again from its first, since no terminal write will name an old task and a
-record the floor kept is not asked again; what it already compressed costs one stat. The log plane walks once a server generation, after the other two: the row's
-``generation`` is the ``startup_recovery`` generation its walk ended under, ``witness`` what it listed
-then. Due while a pass is unfinished, new terminal writes arrived, the server generation is another, the
-coverage differs or another platform's ``unsupported`` is on the row, never by elapsed time or a rotation;
-Linux, Docker and Colab record ``unsupported`` once. Totals are kept per plane and are the job's own
+check between files, the cursor durable in the job row; a run reads and rewrites at the utility disk tier (its own
+thread, its ``ditto``). The first pass walks every task folder and seat home (the backlog); later passes look at the
+rows written terminal since the counter the last one covered, the seat homes changed since it looked and what still
+waits for its task (a task written again, or a home changed, is walked from its start). ``COVERAGE`` names the scope
+and floor a position was earned under: a row from another one, done or stopped partway, walks every task folder and
+seat home again from its first, since no terminal write will name an old task and a record the floor kept is not asked
+again; what it already compressed costs one stat, and what the floor reads before it refuses (an incompressible file's
+first block, a whole file on a Windows volume without NTFS compression) is read once more. The log plane walks once a
+server generation, after the other two: the row's ``generation`` is the ``startup_recovery`` generation its walk ended
+under, ``witness`` what it listed then. Due while a pass is unfinished, new terminal writes arrived, the server
+generation is another, the coverage differs or another platform's ``unsupported`` is on the row, never by elapsed time
+or a rotation; Linux, Docker and Colab record ``unsupported`` once. Totals are kept per plane and are the job's own
 record: the Storage count stays the ground truth.
 """
 from __future__ import annotations

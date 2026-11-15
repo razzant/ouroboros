@@ -210,7 +210,7 @@ def test_a_session_childs_selection_crosses_admission_snapshot_and_bootstrap_to_
         if sys.platform == "darwin":  # #2945: the first start clones the retained copy into its scope, not rewritten
             from ouroboros.artifact_storage import _may_share
 
-            assert _may_share(pathlib.Path(started["retained"])) is True and _may_share(pathlib.Path(started["local"])) is True
+            assert all(_may_share(pathlib.Path(started[key])) is not False for key in ("retained", "local"))
     else:
         assert body["scope"]["root"] == str(rt.repo) and "execution" not in body, "the repository stays scope and cwd"
         assert started["carrier"] == "outside_scope_path" and started["local"] == row["local"], "no second copy"

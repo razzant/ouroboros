@@ -424,9 +424,9 @@ def test_frozen_evidence_reaches_a_git_copy_through_clones_and_an_edit_stays_the
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="real APFS clones and compression")
-def test_named_evidence_stays_a_stream_because_a_clone_would_be_refused_compression_for_good(tmp_path):
-    """Why ``retain_files`` does not clone: APFS keeps a clone's may-share mark after its peer is gone, so the
-    ``record_compression`` floor would refuse this record for as long as it is kept."""
+def test_named_evidence_stays_a_stream_because_a_clone_would_be_refused_compression(tmp_path):
+    """Why ``retain_files`` does not clone: the ``record_compression`` floor refuses a record while a clone of it
+    lives, and for good where the volume counts no clones (APFS keeps the may-share mark after the peer is gone)."""
     from ouroboros import artifact_storage
     from ouroboros.delegate_named_evidence import retain_named_evidence
 

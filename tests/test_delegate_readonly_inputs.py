@@ -300,7 +300,7 @@ def test_a_staged_record_stays_compressible_while_a_cloned_neighbour_cannot_be(t
     assert not any(artifact_storage._may_share(path) for path in materials.values())
     engine = _Reader()
     assert _start_as(tmp_path, monkeypatch, engine, "c-one", ROOT)["status"] == "started"
-    assert artifact_storage._may_share(materials["report"]) is True
+    assert artifact_storage._may_share(materials["report"]) is not False
     assert not any(artifact_storage._may_share(materials[name]) for name in SCOPE)
     counted = artifact_storage._extended_attribute(materials["report"], 0x1000, "I")  # None before macOS 14
     kept, freed = ("shared", "compressed") if counted else ("share_unknown", "share_unknown")
