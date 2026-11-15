@@ -322,7 +322,8 @@ def test_logs_reader_inside_the_newest_open_card_keeps_their_place_when_that_car
     with sync_playwright() as pw:
         browser = getattr(pw, engine).launch()
         try:
-            page, _logs, errors = _page(browser, direct_server_with_data["url"])
+            # Compact Timeline rows must still leave a passage beyond the viewport, within the 30-row bound.
+            page, _logs, errors = _page(browser, direct_server_with_data["url"], {"width": 1187, "height": 420})
             _nav(page, "dashboard")
             page.wait_for_function("() => !document.querySelector('.logs-history-status')?.textContent.includes('Loading')")
             page.evaluate(_BURST, [24, "earlier"])
