@@ -244,7 +244,7 @@ def test_the_downgrade_note_names_restart_claudexor_as_the_engine_stop():
 
     text = (pathlib.Path(__file__).resolve().parents[1] / "docs" / "PERSISTENCE.md").read_text(encoding="utf-8")
     text = " ".join(text.split())
-    assert "Once it stops (Restart Claudexor in Accounts, Panic, exit), the older engine refuses the store" in text
+    assert "Once it stops (Quit, Restart Claudexor in Accounts, Panic, exit), the older engine refuses the store" in text
     assert "manual Restart" not in text
 
 

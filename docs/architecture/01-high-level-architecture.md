@@ -320,7 +320,7 @@ ouroboros/ — agent core and shared runtime (§6)
   owner_mailbox.py — per-task user message mailbox: revocation-aware drain, proven-empty peek, closed provenance set
   peer_roster.py — listed queue/direct roots and moved live Presence, hidden included; recorded waits and source-bound `forward_to_worker` mailboxes (§12; §6 Owner routing verbs)
   launcher_bootstrap.py, runtime_venv.py, launcher_onboarding.py — Bootstrap/sync, source-shell handoff and compatibility probe, native host and body interpreter; desktop onboarding on the gateway /onboarding page (§2)
-  launcher_server_reaper.py — Startup stray-server discovery; recorded-owner close/Panic cleanup (§9)
+  launcher_server_reaper.py — Startup strays; close/Panic cleanup; Windows generation Job drain; Quit's engine stop (§9)
   launcher_readiness.py — Launcher `/api/health` probe (§2 Boot order)
   launcher_windows_runtime.py — Windows runtime; pre-import legacy GUI handoff (§2)
   launcher_background.py — Desktop close/quit, consent, second-launch activation (§9); `DesktopApi` supplies `MainApi` alerts, shell facts and Panic (§3)
@@ -635,7 +635,7 @@ Host sign-in startup is an owner opt-in (This computer, §3) whose only authorit
 
 Admission: every server entry (`server.main`, an imported app's lifespan) holds `<data>/state/server.lock` for life (`server_entrypoint.admit_data_root`): one server per data root, whatever its repository, PID file or port; records and bindings stay evidence; a running pre-lock server goes undetected.
 
-Same-install reaper (`launcher_server_reaper.py`): under the PID lock, each generation first reaps strays proven by three live facts (the exact `<REPO_DIR>/server.py` argv token, `OUROBOROS_DATA_DIR`, `OUROBOROS_MANAGED_BY_LAUNCHER=1`) read byte-exact from /proc; `ps -E` mixes argv into the environment and authorizes no kill, so non-/proc hosts stay report-only. A missing custody row is the defect being repaired, not a reason to skip; never on panic or window close.
+Same-install reaper (`launcher_server_reaper.py`; proof: its docstring): under the PID lock, each generation first reaps this install's launcher-started strays; it kills only on /proc hosts (elsewhere report-only), never on panic or window close.
 
 Durable process custody (`process_custody.py`): `spawn_supervised()` ledgers long-lived children in `process_ledger.jsonl` (scope `task|session|daemon`), and the reaper (startup, sweep) kills only entries whose generation or task owner died, by strict `(pid, start_time, cmd_sha256)` fingerprint or launch identity (§9), never command-line class, so dev and packaged installs coexist; daemon rows stay, skill companions are reaped on owner uninstall or foreign generation (log-only default: `process_would_reap`), and worker tree-kills (`kill_worker_tree`) spare retained daemon subtrees. `start_parent_lifeline()` group-suicides a Python entrypoint on spawner death; multiprocessing children await the parent sentinel; ppid 1 at start is live only for a spawn/fork child of PID 1 or under `OUROBOROS_PARENT_PID`.
 

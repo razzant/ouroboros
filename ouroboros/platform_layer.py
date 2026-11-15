@@ -18,7 +18,7 @@ import time
 from typing import Any, Callable, List, Optional
 from ouroboros.platform_peer import local_connection_peer  # noqa: F401 — platform facade
 from ouroboros.platform_process_target import (  # noqa: F401 — platform facade
-    capture_process_stop_target, observe_child_exit, retained_child_group,
+    capture_process_stop_target, observe_child_exit, retained_child_group, job_members_running, release_job_members,
 )
 
 log = logging.getLogger(__name__)
@@ -1455,9 +1455,11 @@ def await_process_handle(handle: int) -> dict:
 
 
 def _windows_breakaway_flags() -> int:
-    """Request breakaway from a permitting immediate Job; retain old-launcher spawn.
+    """Request breakaway from an immediate Job that permits it, silently or on request; retain old-launcher spawn.
 
-    This reads Job capability, never psutil/stop readiness (ARCHITECTURE §1/§9)."""
+    Silence alone (a venv redirector's Job) frees the child only up to the first Job that is not silent, there the
+    launcher's generation Job that recycle ends; the request also leaves each Job permitting it, never one that
+    refuses (Microsoft "Nested Jobs"). This reads Job capability, never psutil/stop readiness (ARCHITECTURE §1/§9)."""
     in_job = ctypes.wintypes.BOOL()
     if _kernel32.IsProcessInJob(_kernel32.GetCurrentProcess(), None, ctypes.byref(in_job)):
         if not in_job.value:
@@ -1465,10 +1467,8 @@ def _windows_breakaway_flags() -> int:
         info = _ExtendedLimitInfo()
         if _kernel32.QueryInformationJobObject(None, _JOBOBJECTINFOCLASS_EXTENDED, ctypes.byref(info),
                                                ctypes.sizeof(info), None):
-            flags = info.BasicLimitInformation.LimitFlags
-            if flags & _JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK:
-                return 0
-            if flags & _JOB_OBJECT_LIMIT_BREAKAWAY_OK:
+            if info.BasicLimitInformation.LimitFlags & (_JOB_OBJECT_LIMIT_BREAKAWAY_OK
+                                                        | _JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK):
                 return getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0x01000000)
     log.warning("The current Windows Job does not confirm breakaway; shared daemon survival "
                 "after launcher close requires an updated launcher or a permitting Job")
