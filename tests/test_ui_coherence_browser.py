@@ -273,26 +273,32 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
     # ONE scroller, the Projects list shows every row in flow (no inner scroller) and the sections stay on the bottom
     # edge. Where the card, one Project row and the sections still fit between the two bars, Main is pinned at the
     # top (400 px); a column shorter still lets the card scroll away with the list, one scroll up, since two pinned
-    # bars there would cover every row (320 px; style.css `data-bars-crowd`, PRs #3393 and #3489).
+    # bars there would cover every row (320 px; style.css `data-bars-crowd`, PRs #3393 and #3489). Each step waits for
+    # the window to have its size and for two frames, in which the bars' observer (layout.js) has measured it.
+    frames = lambda: page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+    settings_reachable = lambda: hit_box(page.locator('[data-nav-page="settings"]'))["reachable"]
     for height, pinned in [(320, False), (400, True)]:
         page.set_viewport_size({"width": 844, "height": height})
-        page.wait_for_timeout(200)
+        page.wait_for_function("h => window.innerHeight === h", arg=height)
+        frames()
         assert set(sidebar.evaluate(scrollers)) == set(), (height, sidebar.evaluate(scrollers))
         assert sidebar.evaluate("el => el.scrollHeight > el.clientHeight + 1"), ("the column is the fallback scroller", height)
         scroll_to(0)
-        page.wait_for_timeout(100)
+        frames()
+        assert settings_reachable(), ("the sections stand on the edge at the top of the column", height)
         top_before = main_top()
         scrolled = scroll_to(10 ** 6)
-        page.wait_for_timeout(100)
+        frames()
         moved = top_before - main_top()
+        assert scrolled > 1, ("the column scrolled", height, scrolled)
         if pinned:
             assert abs(moved) <= 1, ("Main stays pinned while the column scrolls", height, moved)
         else:
-            assert scrolled > 1 and abs(moved - scrolled) <= 1, ("the card is the list's top there", height, moved, scrolled)
-        assert hit_box(page.locator('[data-nav-page="settings"]'))["reachable"], ("the sections stay on the edge", height)
+            assert abs(moved - scrolled) <= 1, ("the card is the list's top there", height, moved, scrolled)
+        assert settings_reachable(), ("the sections stay on the edge at its bottom", height)
         setup_browser.capture(page, f"shell-sidebar-short-bottom-{height}")
         scroll_to(0)
-        page.wait_for_timeout(100)
+        frames()
         assert abs(main_top() - top_before) <= 1, ("Main is back at the top", height)
     # A window tall enough for the zones: the Projects list is the ONE scroller and the column does not scroll.
     page.set_viewport_size({"width": 1280, "height": 720})
