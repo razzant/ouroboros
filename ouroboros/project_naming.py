@@ -178,7 +178,7 @@ def llm_project_name(
     """SYNC bounded LLM-first project title. On ANY failure returns the heuristic
     fallback over ``fallback_candidates`` then ``owner_text``. Never raises.
 
-    ``use_local=None`` (the default) routes via the runtime ``USE_LOCAL_LIGHT`` flag so a
+    ``use_local=None`` (the default) takes the Light slot's lane (``route_choice.following_route``) so a
     local-only / local-light deployment names with its configured local model instead of a
     remote provider. The provider call is wrapped in the #4 per-model concurrency slot so a
     flurry of namers cannot storm one model's rate limit. One absolute deadline covers
@@ -252,7 +252,7 @@ async def llm_project_name_async(
     """ASYNC variant for the gateway (Starlette) path: runs the bounded sync call off
     the event loop with a HARD timeout. ``timeout_sec=None`` (default) uses the config SSOT
     ``OUROBOROS_PROJECT_NAMING_ASYNC_TIMEOUT_SEC``. On timeout/failure returns the heuristic
-    fallback. ``use_local=None`` defers to ``USE_LOCAL_LIGHT`` inside the sync helper.
+    fallback. ``use_local=None`` defers to the Light slot's lane inside the sync helper.
     Never raises."""
     import asyncio
 

@@ -523,11 +523,11 @@ def _role_routes(settings: Mapping[str, Any], role: str) -> List[Tuple[str, bool
     """The ``(model, local)`` routes a role's calls may take by this document, as the runtime resolves them: the
     one rule of a role's slot asked over the document (``route_choice.following_route``; a model labelled
     `` (local)`` parses as the local lane). The fallback chain runs its entries on its own box."""
-    from ouroboros.route_choice import _checked, following_route
+    from ouroboros.route_choice import box_checked, following_route
 
     read = settings.get
     if role == "fallback":
-        local = _checked(read("USE_LOCAL_FALLBACK"))
+        local = box_checked(read("USE_LOCAL_FALLBACK"))
         return [(entry.strip(), local) for entry in str(read("OUROBOROS_MODEL_FALLBACKS") or "").split(",") if entry.strip()]
     return [following_route(role, read=read)]
 

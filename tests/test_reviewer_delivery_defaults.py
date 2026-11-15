@@ -252,25 +252,31 @@ def notice_world(monkeypatch, tmp_path):
     return SimpleNamespace(state=state, sent=sent, notices=upgrade_notices)
 
 
-LIGHT_BOX = ("⚙️ An empty Light model now follows its “Use the local model” box everywhere. Here the box is ticked and "
-             "Main is a cloud model, so {moved} now run on the local model instead of openai/main.{safety}{absent} "
+LIGHT_BOX = ("⚙️ An empty Light model now follows its “Use the local model for this role” box everywhere. Here the box is ticked and "
+             "Main is a cloud model, so {moved} now run on the local model too, instead of openai/main.{safety}{absent} "
              "Untick the box under Light in Settings › Models to keep them on Main.")
+_SAFETY_HOLD = " A Safety check the local model does not answer holds the action."
 _SAFETY_WALK = " A Safety check the local model does not answer goes to your Fallback models and holds the action if none answers."
-_ALL_MOVED, _LIGHT_MOVED = "Safety checks, memory consolidation and other Light calls", "memory consolidation and other Light calls"
+_LIGHT_MOVED = "memory consolidation, Light helper agents, review verdict reading and duplicate checks"
+_ALL_MOVED = f"Safety checks, {_LIGHT_MOVED}"
 
 
 @pytest.mark.parametrize("changes, said", [
     # The install the 15.11 rule moves: a cloud Main, an empty Light, its box ticked, a local model configured.
-    ({}, LIGHT_BOX.format(moved=_ALL_MOVED, safety=_SAFETY_WALK, absent="")),
+    ({}, LIGHT_BOX.format(moved=_ALL_MOVED, safety=_SAFETY_HOLD, absent="")),
+    # The walk over the Fallback models is said only where a chain is set.
+    ({"OUROBOROS_MODEL_FALLBACKS": "openai/spare"}, LIGHT_BOX.format(moved=_ALL_MOVED, safety=_SAFETY_WALK, absent="")),
     # A Supervisor with its own model, or asked by no Safety mode, does not move: its sentences are left out.
     ({"OUROBOROS_MODEL_SAFETY": "openai/checker"}, LIGHT_BOX.format(moved=_LIGHT_MOVED, safety="", absent="")),
     ({"OUROBOROS_SAFETY_MODE": "off", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE": "off"},
      LIGHT_BOX.format(moved=_LIGHT_MOVED, safety="", absent="")),
     ({"LOCAL_MODEL_SOURCE": ""}, LIGHT_BOX.format(
-        moved=_ALL_MOVED, safety=_SAFETY_WALK, absent=" No local model is configured: until you add one or untick the "
-        "box, every Safety check goes that way and the other Light calls get no answer.")),
-    # Nothing moves, nothing is said: the box unticked, a Light model of its own, a local Main.
+        moved=_ALL_MOVED, safety=_SAFETY_HOLD, absent=" No local model is configured: until you add one or untick the "
+        "box, every Safety check goes that way and these calls get no answer.")),
+    # Nothing moves, nothing is said: the box unticked, a Light model of its own, a local Main (by its box or by
+    # the local label its model is stored with).
     ({"USE_LOCAL_LIGHT": False}, ""), ({"OUROBOROS_MODEL_LIGHT": "openai/light"}, ""), ({"USE_LOCAL_MAIN": True}, ""),
+    ({"OUROBOROS_MODEL": "qwen3 (local)"}, ""),
 ])
 def test_an_install_whose_light_box_now_decides_hears_once_which_calls_moved(notice_world, changes, said):
     """Owner, 15.11: an empty Light model follows its own local box for every call. An install with that box ticked
@@ -287,6 +293,27 @@ def test_an_install_whose_light_box_now_decides_hears_once_which_calls_moved(not
     assert [(text, kw["system_type"]) for _chat, text, kw in notice_world.sent] == (
         [(said, "light_local_box_notice")] if said else [])
     assert notice_world.state["light_local_box_notified"]
+
+
+def test_the_light_rule_is_judged_at_the_first_start_even_with_no_owner_to_tell_yet(notice_world):
+    """With no owner chat bound, an install the rule moves nothing for (a first start before setup too) is judged at
+    once: the box its wizard or its owner ticks later is their own act, never told as news of an update. An install
+    the rule does move stays owed and hears it when there is an owner to tell. The other notices stay owed."""
+    moved = {"OUROBOROS_MODEL": "openai/main", "USE_LOCAL_LIGHT": True, "LOCAL_MODEL_SOURCE": "org/model"}
+    said = notice_world.notices.light_local_notice(moved)
+    owner_chat = notice_world.state.pop("owner_chat_id")
+    notice_world.notices.startup_upgrade_notices(moved)
+    assert "light_local_box_notified" not in notice_world.state and not notice_world.sent, "owed: nobody to tell yet"
+    notice_world.notices.startup_upgrade_notices({})
+    assert notice_world.state["light_local_box_notified"] and not notice_world.sent
+    assert "optional_bounds_notified" not in notice_world.state
+    notice_world.state["owner_chat_id"] = owner_chat
+    notice_world.notices.startup_upgrade_notices(moved)
+    assert said and "light_local_box_notice" not in [kw["system_type"] for _chat, _text, kw in notice_world.sent]
+    # The owed one is told once an owner is bound.
+    del notice_world.state["light_local_box_notified"]
+    notice_world.notices.startup_upgrade_notices(moved)
+    assert (said, "light_local_box_notice") in [(text, kw["system_type"]) for _chat, text, kw in notice_world.sent]
 
 
 def test_an_upgraded_untouched_install_hears_each_notice_once(notice_world):

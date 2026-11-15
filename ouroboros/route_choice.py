@@ -215,9 +215,10 @@ def follows(choice: Any) -> str:
     return str(choice.get("role") or "main") if isinstance(choice, dict) and choice.get("kind") == "following" else ""
 
 
-def _checked(value: Any) -> bool:
-    """A local box as this module and the Safety routing read it: a stored ``True`` or ``true``/``1``."""
-    return str(value or "").strip().lower() in ("true", "1")
+def box_checked(value: Any) -> bool:
+    """A local box as the settings loader types it (``config.py``: ``true``/``1``/``yes``/``on``), so a settings
+    document read raw answers as the runtime does after its load (a hand-written ``"yes"`` runs local)."""
+    return str(value or "").strip().lower() in ("true", "1", "yes", "on")
 
 
 def _runtime(key: str) -> Any:
@@ -247,9 +248,9 @@ def model_role_slot_override(task_metadata: Mapping, read: Callable[[str], Any] 
         role, key = "light", MODEL_ROLE_SETTINGS["light"]  # the Supervisor has no box: an empty slot checks on Light's route
     model = str(read(key) or "").strip()
     box = f"USE_LOCAL_{role.upper()}"  # Vision, the Supervisor's own slot and the helper roles have none
-    use_local = box in SETTINGS_DEFAULTS and _checked(read(box))
+    use_local = box in SETTINGS_DEFAULTS and box_checked(read(box))
     if not model:
-        if not use_local or _checked(read("USE_LOCAL_MAIN")):
+        if not use_local or box_checked(read("USE_LOCAL_MAIN")):
             return None
         return _main_of(read), True
     return model, use_local
@@ -272,11 +273,11 @@ def following_route(role: str, llm: Any = None, read: Callable[[str], Any] = _ru
     slot = model_role_slot_override({"model_role": role}, read)
     if slot is not None:
         return slot
-    return str(llm.default_model() if llm is not None else _main_of(read)), _checked(read("USE_LOCAL_MAIN"))
+    return str(llm.default_model() if llm is not None else _main_of(read)), box_checked(read("USE_LOCAL_MAIN"))
 
 
 def _local_flag(key: str) -> bool:
-    return _checked(runtime_setting(key, ""))
+    return box_checked(runtime_setting(key, ""))
 
 
 def configured_references() -> dict:

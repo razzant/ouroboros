@@ -275,8 +275,8 @@ export function initConsciousnessDashboard({ mount, ws, state, openSettings, ope
     readFallback = readConsciousnessFromState, readPlacesFn = readPlaces, openSheet = openPlaceSheet,
     markdown = { mount: mountChatMarkdown, enhance: enhanceChatMarkdown, destroy: destroyChatMarkdown } } = {}) {
     if (!mount) return { refresh: () => {}, destroy() {} };
-    // The tab's one root and scroller (style.css "The Dashboard tab body"); the settings cards are drawn once and no
-    // repaint of the tab touches them.
+    // The tab's one root and scroller (style.css "The Dashboard tab body"); the settings cards are drawn once, and a
+    // repaint of the tab only paints their rows' words again (the Model door reads the route this read published).
     mount.innerHTML = `<div class="dashboard-body scroll-fade-y consciousness-root">
             <p class="ui-status consciousness-read-status" role="status" data-cx-status></p>
             <section class="ui-card" aria-label="Consciousness" data-cx-summary><p class="consciousness-copy">Reading…</p></section>

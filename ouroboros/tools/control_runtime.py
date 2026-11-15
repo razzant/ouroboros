@@ -917,11 +917,18 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "", primary: 
 
         changes.append(primary_action(ctx, requested_primary))
     elif model:
-        if model not in available:
+        from ouroboros.model_slots import local_lane_label
+
+        # Main's or Light's route as `resolve_model` prints it names that role's own lane: an empty Light on the
+        # local runtime shares Main's id, so only its ` (local)` label tells the two apart.
+        printed = {local_lane_label(*route): route for route in map(route_choice.following_route, ("light", "main"))}
+        if model not in available and model not in printed:
             return _publish_tool_result(ctx, ToolResult(status="error", code="TOOL_ARG_ERROR", text=(f"⚠️ Unknown model: {model}. Available: {', '.join(available)}")))
 
         use_local = False
-        if model == runtime_setting("OUROBOROS_MODEL") and runtime_setting("USE_LOCAL_MAIN", "").lower() in ("true", "1"):
+        if model in printed:
+            model, use_local = printed[model]
+        elif model == runtime_setting("OUROBOROS_MODEL") and runtime_setting("USE_LOCAL_MAIN", "").lower() in ("true", "1"):
             use_local = True
         elif model == runtime_setting("OUROBOROS_MODEL_LIGHT") and runtime_setting("USE_LOCAL_LIGHT", "").lower() in ("true", "1"):
             use_local = True

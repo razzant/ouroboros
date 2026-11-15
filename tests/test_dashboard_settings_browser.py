@@ -69,8 +69,9 @@ def _quota():
             "quota": [window("work", 0.2, 2), window("home", 1, 5)]}
 
 
-def _open(ui, *, tab=None, width=1087, height=740):
-    """The app with the stored settings above; a save stores its body and answers the receipt."""
+def _open(ui, *, tab=None, width=1087, height=740, consciousness=None):
+    """The app with the stored settings above; a save stores its body and answers the receipt. ``consciousness`` is
+    what ``GET /api/consciousness`` answers where a test reads its facts."""
     ui["settings"].update(STORED)
     ui["settings"]["_meta"] = {**ui["settings"]["_meta"], "effects": EFFECTS}
     page = ui["new_page"](viewport={"width": width, "height": height})
@@ -94,6 +95,9 @@ def _open(ui, *, tab=None, width=1087, height=740):
     page.route("**/api/storage", lambda route: route.fulfill(content_type="application/json", body=json.dumps(
         {"count": None, "counting": COUNTING, "error": None, "volume": VOLUME, "retention_days": 7})))
     page.route("**/api/claudexor/status?view=quota", quota)
+    if consciousness is not None:
+        page.route("**/api/consciousness", lambda route: route.fulfill(
+            content_type="application/json", body=json.dumps(consciousness)) if route.request.method == "GET" else route.fallback())
     page.clock.install()
     page.goto(ui["url"] + "/")
     page.wait_for_selector("#page-chat")
@@ -234,7 +238,9 @@ def test_every_n_tasks_shows_its_count_and_saves_both_keys_in_one_body(ui):
 
 
 def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(ui):
-    page, _ = _open(ui, tab="consciousness")
+    # The Model door says the route the server publishes (an empty slot follows Main), never a guess from the slot.
+    page, _ = _open(ui, tab="consciousness", consciousness={
+        "model_route": {"value": "claudexor::codex=gpt-6-astra", "layer": "main", "local": False}})
     row = lambda name: f'#page-dashboard [data-setting-row="{name}"]'
     # The allowance door carries the name its limit has on Costs (a rolling 24 hours, never "a day") and the sum alone.
     page.wait_for_function("(s) => document.querySelector(s)?.querySelector('[data-row-value]')?.textContent === '$20'", arg=row("consciousness-allowance"))
@@ -257,7 +263,7 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     around = page.locator('#page-dashboard [data-cx-settings] > section[aria-label="Around it"] [data-setting-door]')
     assert [" ".join(text.split()) for text in around.evaluate_all(
         "(doors) => doors.map((door) => [door.querySelector('.ui-row-title').textContent, door.querySelector('[data-row-value]')?.textContent ?? ''].join(' | '))")] == [
-        "Model | Main model", f"Its actions are checked | {_scale_word(page, 'light')}", "Where it lives |", "Improving itself | Off"]
+        "Model | gpt-6-astra (Main model)", f"Its actions are checked | {_scale_word(page, 'light')}", "Where it lives |", "Improving itself | Off"]
     # The Safety door opens its row's page in Settings, whose Back names this tab and returns to it.
     page.click(row("consciousness-safety"))
     back = page.locator('#page-settings [data-settings-page="permissions"] [data-settings-back]')

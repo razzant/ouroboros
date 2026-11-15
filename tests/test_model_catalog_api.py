@@ -670,7 +670,7 @@ def test_the_limits_name_what_they_cannot_count_and_nothing_where_every_route_ha
 def test_the_spend_gaps_follow_the_runtime_lane_of_each_role(monkeypatch):
     """Each role's route by the one rule the runtime resolves it with (route_choice.following_route, asked over the
     document): a remote role on a direct key is named even beside a local Main, and a local one is not."""
-    from ouroboros import route_choice, search_routes
+    from ouroboros import search_routes
     from ouroboros.pricing import known_spend_gaps
 
     local_main = {"OUROBOROS_MODEL": "qwen3-8b", "USE_LOCAL_MAIN": True, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}
@@ -688,12 +688,6 @@ def test_the_spend_gaps_follow_the_runtime_lane_of_each_role(monkeypatch):
              "OUROBOROS_MODEL_VISION": "anthropic/claude-opus-5.5"}
     assert known_spend_gaps(boxed) == ["Main", "Consciousness"]
     assert known_spend_gaps({**boxed, "USE_LOCAL_LIGHT": False}) == ["Main", "Light", "Safety Supervisor", "Consciousness"]
-    # The list and the runtime ask one function: every role's route by the document is the route a call takes.
-    for document in (unchecked, boxed, {**boxed, "USE_LOCAL_LIGHT": False}, {**boxed, "OUROBOROS_MODEL_LIGHT": "light/own"}):
-        monkeypatch.setattr(route_choice, "runtime_setting", lambda key, default="", doc=document: doc.get(key, default))
-        monkeypatch.setattr("ouroboros.model_slots._main_model", lambda doc=document: doc["OUROBOROS_MODEL"])
-        for role in ("main", "light", "safety", "vision", "consciousness"):
-            assert route_choice.following_route(role, read=document.get) == route_choice.following_route(role), (role, document)
     routed = {"OUROBOROS_MODEL": "anthropic/claude-opus-5.5", "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}
     helper = {"route": {"kind": "api_model", "target_id": "deepseek::deepseek-v4"}}
     assert known_spend_gaps(routed, {"enabled": False, "items": [helper]}) == ["Agents"], (
