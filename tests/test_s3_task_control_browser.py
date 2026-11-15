@@ -153,27 +153,31 @@ def _assert_menu_geometry(metrics: dict, *, placement: str | None = None) -> Non
         assert rect["bottom"] <= metrics["trigger"]["top"] - 3, metrics
 
 
-def _scrolls_settled(page, frames: int = 5) -> None:
+def _scrolls_settled(page, frames: int = 5, limit_ms: int = 10_000) -> None:
     """Return once ``frames`` animation frames pass with no scroll anywhere on the page. A viewport change and a
     restyled card re-place the chat feed (its reader stays at the newest message, chat_reading_position.js), and
     that scroll's event arrives a frame or two after the write. A scroll of the feed holding the trigger closes an
-    open menu (owner decision 1D, asserted below), so a press before it lands proves that race, not the portal."""
+    open menu (owner decision 1D, asserted below), so a press before it lands proves that race, not the portal.
+    A page that still scrolls after ``limit_ms`` fails here, at once, rather than at the test's own ceiling."""
     page.evaluate(
         """
-        (frames) => new Promise((resolve) => {
+        ([frames, limit]) => new Promise((resolve, reject) => {
             let quiet = 0;
+            const started = performance.now();
             const scrolled = () => { quiet = 0; };
             document.addEventListener('scroll', scrolled, true);
             const frame = () => {
                 quiet += 1;
-                if (quiet < frames) { requestAnimationFrame(frame); return; }
+                const late = performance.now() - started > limit;
+                if (quiet < frames && !late) { requestAnimationFrame(frame); return; }
                 document.removeEventListener('scroll', scrolled, true);
-                resolve();
+                if (quiet < frames) reject(new Error(`the page still scrolled ${Math.round(limit)} ms after the change`));
+                else resolve();
             };
             requestAnimationFrame(frame);
         })
         """,
-        frames,
+        [frames, limit_ms],
     )
 
 
@@ -411,6 +415,7 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                 # Narrow viewports must shrink the menu instead of allowing the
                 # historical 220px minimum to overflow the page.
                 page.set_viewport_size({"width": 320, "height": 700})
+                _scrolls_settled(page)
                 trigger.click()
                 menu.wait_for(state="visible", timeout=10_000)
                 _assert_menu_geometry(_menu_metrics(page, menu, trigger))
@@ -504,6 +509,7 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                     """,
                 )
                 page.set_viewport_size({"width": 1440, "height": 1000})
+                _scrolls_settled(page)
 
                 # 2) "Hurry up": typed control + LOCAL toast; the chat DOM
                 #    gains ZERO bubbles (HQ1's no-chat contract, live DOM).
