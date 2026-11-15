@@ -4,6 +4,8 @@ and opens its page at that row, the Ask line leaves the words in Main as a draft
 Skills page leads back there."""
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
@@ -23,13 +25,20 @@ def _paths(ui):
 
 
 # The list's own read of the roster (settings_home.js READS.roster): the engine's passive view, the one Costs reads,
-# which starts and refreshes nothing. Any other read of the status is an explicit check.
+# which starts and refreshes nothing. Any other read of the status is an explicit check, one with more or other
+# words in its query too.
 PASSIVE_ROSTER = "/api/claudexor/status?view=quota"
+
+
+def _passive_roster(url):
+    """That exact request: its path and its whole query."""
+    parts = urlsplit(url)
+    return f"{parts.path}?{parts.query}" == PASSIVE_ROSTER
 
 
 def _starts(ui):
     """The reads that start or refresh something (a daemon, a catalogue, a poll): every STARTS read but the passive roster."""
-    return [url for url in ui["reads"] if PASSIVE_ROSTER not in url
+    return [url for url in ui["reads"] if not _passive_roster(url)
             and any(("/" + url.split("?")[0].split("://", 1)[1].split("/", 1)[1]).startswith(start) for start in STARTS)]
 
 
@@ -53,7 +62,7 @@ def test_the_home_answers_from_passive_reads_and_the_card_lists_what_waits(subsc
     assert home_answer(page, "agents") == "1 of 1 on"
     assert home_answer(page, "accounts").startswith("2 accounts")
     assert home_answer(page, "dashboard:storage") == "Not measured"
-    assert [url for url in ui["reads"] if PASSIVE_ROSTER in url], "the list asks the engine's passive roster"
+    assert [url for url in ui["reads"] if _passive_roster(url)], "the list asks the engine's passive roster"
     assert not _starts(ui), ui["reads"]
 
     # The card: who it is, its state, and what waits for the owner. A fact nobody read is said by its own row, never
