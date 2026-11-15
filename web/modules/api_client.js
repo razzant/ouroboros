@@ -49,18 +49,34 @@ export function withinRequestLifetime(read, { signal = null, lifetimeMs = STATE_
     });
 }
 
+// The `task_bindings_revision` the newest state body this page read was answered with ('' until one names it, after
+// a failed bindings read and for a server without the field). A reader that opens nothing in the bindings map names
+// it, as the contract lets it (CLIENT_CONTRACT "Task bindings"), so every such read stays a fresh read of the other
+// fields without the map riding along; the map's own reader (state_snapshots.js) names the revision of the map it
+// holds in its own path. This is the server's token, not a kept answer: an outdated one costs one whole map.
+let bindingsSeen = '';
+const noteBindings = (state) => {
+    if (state && typeof state === 'object') {
+        bindingsSeen = typeof state.task_bindings_revision === 'string' ? state.task_bindings_revision : '';
+    }
+    return state;
+};
+const statePath = () => (bindingsSeen ? `/api/state?bindings_since=${encodeURIComponent(bindingsSeen)}` : '/api/state');
+
 /**
  * One `/api/state` read that settles within its lifetime: `{response, state}`, where `state` is the parsed body
  * of an OK answer and `undefined` for a non-OK answer or a body that does not parse. It rejects with the
  * transport's own error, or with a `StateReadEnded` whose `reason` is `expired` (the lifetime ran out, request or
- * body) or `aborted` (the caller's `signal`; an already aborted one sends nothing).
+ * body) or `aborted` (the caller's `signal`; an already aborted one sends nothing). Without a `path` the read names
+ * the bindings revision this page last saw, so its body may carry `task_bindings: null`: a reader of the map passes
+ * its own path.
  */
-export function readState(path = '/api/state', { signal = null, lifetimeMs = STATE_READ_LIFETIME_MS } = {}) {
+export function readState(path = statePath(), { signal = null, lifetimeMs = STATE_READ_LIFETIME_MS } = {}) {
     return withinRequestLifetime(async (transport) => {
         const response = await apiFetch(path, { cache: 'no-store', signal: transport });
         if (!response.ok) return { response, state: undefined };
         try {
-            return { response, state: await response.json() };
+            return { response, state: noteBindings(await response.json()) };
         } catch (error) {
             if (transport.aborted) throw error;
             return { response, state: undefined };
@@ -69,13 +85,16 @@ export function readState(path = '/api/state', { signal = null, lifetimeMs = STA
 }
 
 /**
- * `fetchJson('/api/state')` within the same lifetime, for readers that keep its contract: the body, or its typed
+ * `fetchJson` of `/api/state` within the same lifetime, for readers that keep its contract: the body, or its typed
  * error (`status`, `body`, `payload`; `isStoreMigrating`) for a non-OK answer. The caller's `init.signal` ends it
- * as fetch would (its abort reason, an `AbortError`); a read that outlives the lifetime is a `StateReadEnded`.
+ * as fetch would (its abort reason, an `AbortError`); a read that outlives the lifetime is a `StateReadEnded`. It
+ * names the bindings revision this page last saw (see `readState`): a fresh read of every other field, for readers
+ * that open nothing in `task_bindings`.
  */
 export function readStateJson(init = {}) {
     const { signal = null, ...rest } = init;
-    return withinRequestLifetime((transport) => fetchJson('/api/state', { cache: 'no-store', ...rest, signal: transport }),
+    return withinRequestLifetime((transport) => fetchJson(statePath(), { cache: 'no-store', ...rest, signal: transport })
+        .then(noteBindings),
         { signal, aborted: () => signal.reason ?? new DOMException('This operation was aborted', 'AbortError') });
 }
 

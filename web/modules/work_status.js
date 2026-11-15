@@ -43,7 +43,7 @@ export function emptyWorkState() {
 }
 
 // One question's key across the turn, the census rows and the work list: its task and its quiz.
-const questionKey = (item) => `${item.task_id}:${item.quiz_id || ''}`;
+export const questionKey = (item) => `${item.task_id}:${item.quiz_id || ''}`;
 
 // What an incomplete body did not list again: still shown, never as confirmed work and never with controls or a line;
 // its mark is the ring of unconfirmed state.
@@ -258,6 +258,17 @@ export const turnAmber = (turn) => {
     const open = items.filter((item) => item?.kind === 'open_question');
     if (items.some((item) => item?.kind === 'action') || !open.length) return 'action';
     return open.every((item) => item.code === 'delivery_unknown') ? 'delivery' : 'unanswered';
+};
+
+/** The addressed question whose own words can say a `turn`, by turnAmber's rule: the first one a task waits on, else
+ *  the first still unanswered; null where what waits is an action or only an answer whose delivery is unknown (their
+ *  sentence says it) and for a bare wait without a quiz. The order is the server's; nothing here ranks questions. */
+export const turnQuestion = (turn) => {
+    const kind = turnAmber(turn);
+    const named = (item) => Boolean(item?.task_id && item.quiz_id);
+    if (kind === 'question') return list(turn).find((item) => item?.kind === 'question' && named(item)) || null;
+    if (kind !== 'unanswered') return null;
+    return list(turn).find((item) => item?.kind === 'open_question' && item.code !== 'delivery_unknown' && named(item)) || null;
 };
 
 /** What waits for the owner in a room (turnAmber), '' when nothing does or its own word says so. */

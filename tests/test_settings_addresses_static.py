@@ -18,14 +18,14 @@ RELEASE_ROW = re.compile(r"^\| \d+\.\d+\.\d+\S* \| \d{4}-\d{2}-\d{2} \|")
 # them, so no release date is promised: they stay dead text until a skill release rewrites them.
 _TELEGRAM_DEBT = "dead text in the Telegram skill, wording only; stays until a skill release rewrites it"
 PROTECTED_KNOWN = {
-    ('skills/telegram/lib/telegram_api.py', 1027): _TELEGRAM_DEBT,
-    ('skills/telegram/lib/telegram_api.py', 1032): _TELEGRAM_DEBT,
+    ('skills/telegram/lib/telegram_api.py', 1075): _TELEGRAM_DEBT,
+    ('skills/telegram/lib/telegram_api.py', 1080): _TELEGRAM_DEBT,
     ('skills/telegram/lib/telegram_connection.py', 1): _TELEGRAM_DEBT,
-    ('skills/telegram/lib/telegram_connection.py', 137): _TELEGRAM_DEBT,
-    ('skills/telegram/lib/telegram_connection.py', 190): _TELEGRAM_DEBT,
-    ('skills/telegram/lib/telegram_connection.py', 211): _TELEGRAM_DEBT,
-    ('skills/telegram/lib/telegram_token.py', 210): _TELEGRAM_DEBT,
-    ('skills/telegram/plugin.py', 1469): _TELEGRAM_DEBT,
+    ('skills/telegram/lib/telegram_connection.py', 139): _TELEGRAM_DEBT,
+    ('skills/telegram/lib/telegram_connection.py', 192): _TELEGRAM_DEBT,
+    ('skills/telegram/lib/telegram_connection.py', 242): _TELEGRAM_DEBT,
+    ('skills/telegram/lib/telegram_token.py', 214): _TELEGRAM_DEBT,
+    ('skills/telegram/plugin.py', 1473): _TELEGRAM_DEBT,
     ('skills/telegram/scripts/companion.py', 496): _TELEGRAM_DEBT,
 }
 ADDRESS = re.compile(r"\bSettings\s*(?:→|›|->|>)\s*(?=[A-Za-z])")
