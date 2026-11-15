@@ -153,7 +153,7 @@ test('pressing an already open Project closes its drawer, while callers may keep
 // older server) leaves the number unsaid. A find with no match offers its two different ways back each with its own
 // glyph: Clear search the field's ×, Show all projects the chevron Show more opens the list with.
 function listOf(t, { listableCount = 3, reserved = [] } = {}) {
-    setup(t);
+    const { document } = setup(t);
     // What the list's painting asks of a node beyond the shared stub, for this test's life.
     const added = {
         insertAdjacentHTML(_where, html) {
@@ -183,8 +183,38 @@ function listOf(t, { listableCount = 3, reserved = [] } = {}) {
     t.after(() => nav.destroy());
     const commands = () => list.children.filter((node) => node.className.includes('nav-projects-more'))
         .map((node) => [node.textContent.trim(), node.firstElementChild?.html || ''].filter(Boolean));
-    return { nav, header, commands };
+    return { nav, header, commands, document, list, feed };
 }
+
+test('a row leaving the feed hands lost keyboard focus to Find, while kept rows and live focus retain it', (t) => {
+    const { nav, header, document, list, feed } = listOf(t);
+    const elsewhere = new NodeStub('textarea');
+    document.body.append(header, list, elsewhere);
+    nav.paint();
+    const input = header.querySelector('input');
+    const first = list.querySelector('.nav-project-row');
+    first.focus();
+    nav.paint();
+    assert.equal(document.activeElement, first, 'an unchanged feed keeps its row and keyboard');
+
+    for (const movedTo of [document.body, elsewhere]) {
+        const item = list.children.find((node) => node.dataset.navProjectId);
+        const button = item.querySelector('.nav-project-row');
+        Object.defineProperty(button, 'isConnected', { get: () => document.body.contains(button) });
+        button.focus();
+        const remove = item.remove.bind(item);
+        item.remove = () => { remove(); document.activeElement = movedTo; };
+        feed.splice(feed.findIndex((row) => row.id === item.dataset.navProjectId), 1);
+        nav.paint();
+        assert.equal(button.isConnected, false);
+        assert.equal(document.activeElement, movedTo === document.body ? input : elsewhere,
+            movedTo === document.body ? 'the removed row must not leave focus on the body' : 'live focus wins');
+    }
+    elsewhere.focus();
+    feed.length = 0;
+    nav.paint();
+    assert.equal(document.activeElement, elsewhere, 'a read never steals the keyboard from another control');
+});
 
 test('Show more names how many it adds before the list is read, as after', (t) => {
     const count = (options) => { const { nav, commands } = listOf(t, options); nav.paint(); return commands().map(([words]) => words); };

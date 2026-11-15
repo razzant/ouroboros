@@ -474,6 +474,7 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
         const keyed = new Map([...list.children].filter((el) => el.dataset.navProjectId)
             .map((el) => [el.dataset.navProjectId, el]));
         const focused = document.activeElement;
+        const ownedFocus = focused && list.contains(focused);
         const nodes = [...shown.map((project) => itemFor(project, keyed)), ...after];
         nodes.forEach((node, index) => {
             if (list.children[index] !== node) list.insertBefore(node, list.children[index] || null);
@@ -486,6 +487,11 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
         if (anchor?.isConnected) keepOnScreen(anchor, anchorTop);
         // Moving an existing node can blur it even though its identity survives.
         if (focused?.isConnected && list.contains(focused) && focused !== document.activeElement) focused.focus({ preventScroll: true });
+        // A removed row hands its lost keyboard to Find; a control that already took it keeps it.
+        else if (ownedFocus && !focused.isConnected &&
+            (!document.activeElement || document.activeElement === document.body || document.activeElement === focused)) {
+            keyboardHome()?.focus({ preventScroll: true });
+        }
         if (state.handoff && !waiting) handOff(state.handoff, nodes);
         repositionProjectRowMenu();  // anchoring may have scrolled its row after visibility settled
         if (relisted) onShown();  // app.js says its marks and ☰ again, in place: no read, no render
