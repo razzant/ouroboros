@@ -419,6 +419,9 @@ def review_wave_admission(
                         # The captured preference projected onto the provider-neutral reservation mode.
                         submitted_processing_mode={"standard": "default", "fast": "priority", "economy": "flex"}.get(
                             str(seat_processing[index] or "").strip().lower(), ""),
+                        # A tier no price table knows (Ultrafast) is unknown, never priced as Standard.
+                        force_unknown_reservation=str(seat_processing[index] or "").strip().lower()
+                        not in {"", "standard", "fast", "economy"},
                         allow_live_fetch=allow_live_fetch,
                     )
                 )

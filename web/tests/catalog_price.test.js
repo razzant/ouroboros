@@ -156,11 +156,13 @@ test('in the composer list a priced model says its price where "paid by key" sto
     assert.equal(describeRoute(index, { model: OPUS.value }).price, '$4 in / $20 out');
     assert.equal(describeRoute(index, { model: 'openai::gpt-6' }).price, '', 'a direct key states no price');
     assert.equal(describeRoute(index, { model: 'z-ai/glm-5.3' }).facts, 'OpenRouter · paid by key');
-    const markup = (query) => {
+    const markup = (query, { mainRow = 'follow', open = false } = {}) => {
         const [el, input] = [new ElementStub('div'), new ElementStub('input')];
-        const list = createModelList({ el, input, id: 'models', store: { index: () => index, status: () => ({ read: true }) },
-            main: () => ({ model: OPUS.value, use_local: false }), current: () => null, recents: () => [], onRoute() {} });
+        const list = createModelList({ el, input, id: 'models', store: { index: () => index, status: () => ({ read: true }), pins: () => [], isPinned: () => false },
+            main: () => ({ model: OPUS.value, use_local: false }), current: () => null, recents: () => [], mainRow, onRoute() {} });
         list.paint();
+        // A press on `All sources` opens the fold: each source is a row of its own.
+        if (open) for (const listener of el.listeners.get('click') || []) listener({ target: { closest: (selector) => (selector === '.chat-model-row' ? { dataset: { row: 'sources' } } : null) } });
         input.value = query;
         for (const listener of input.listeners.get('input') || []) listener();
         list.destroy();
@@ -174,9 +176,12 @@ test('in the composer list a priced model says its price where "paid by key" sto
         'route|z-ai/glm-5.3': 'OpenRouter · paid by key',
         'route|openai::gpt-6': 'OpenAI · paid by key',
     });
-    // Main's own row and the source rows: the price stands with a model, a source still says how it is paid.
-    assert.deepEqual(markup(''), {
-        [`route|${OPUS.value}`]: 'OpenRouter · $4 in / $20 out',
+    // The price stands with a model (Main's own row in the Main chat); a room's Main row says what it follows; the sources
+    // fold under one row and, opened, each still says how it is paid.
+    assert.deepEqual(markup('', { mainRow: 'main' }), { main: 'OpenRouter · $4 in / $20 out', sources: 'OpenRouter, OpenAI' });
+    assert.deepEqual(markup('', { open: true }), {
+        main: 'Follows Main · claude-opus-5.5',
+        sources: 'OpenRouter, OpenAI',
         'source:openrouter': '3 models · paid by key',
         'source:openai': '1 model · paid by key',
     });
@@ -185,7 +190,7 @@ test('in the composer list a priced model says its price where "paid by key" sto
 
 test('one rule decides where a processing tier prices the call instead of the catalog', async () => {
     const { tierPriced } = await import('../modules/route_editor_primitives.js');
-    assert.deepEqual(['', 'standard', 'fast', 'economy', undefined].map(tierPriced), [false, false, true, true, false]);
+    assert.deepEqual(['', 'standard', 'fast', 'economy', 'ultrafast', undefined].map(tierPriced), [false, false, true, true, true, false]);
 });
 
 test('the Agents chooser of an OpenRouter row shows the price too; a direct key reads as before', () => {
@@ -312,10 +317,12 @@ test('the capsule strip and the Change Main sheet say the price where "paid by k
     // name another tier than the figure's (or none), or where another processing tier prices the call.
     assert.equal(said.cacheWrite, '');
     const cached = { ...OPUS, price: { ...OPUS.price, cache_write: 6.4, cache_write_ttl: '1h' } };
-    const sheet = (options) => describeRoute(buildModelIndex({ catalog: { items: [cached] }, ...options }), { model: OPUS.value }).cacheWrite;
+    const sheet = (options, tier = '') => describeRoute(buildModelIndex({ catalog: { items: [cached] }, ...options }), { model: OPUS.value },
+        { tier }).cacheWrite;
     assert.equal(sheet({ cacheTier: '1h' }), 'Cache write: $6.40 per 1M tokens.');
-    assert.deepEqual([sheet({ cacheTier: '5m' }), sheet({ cacheTier: 'default' }), sheet({}), sheet({ cacheTier: '1h', tierPriced: true })],
-        ['', '', '', '']);
+    assert.equal(sheet({ cacheTier: '1h' }, 'standard'), 'Cache write: $6.40 per 1M tokens.');
+    assert.deepEqual([sheet({ cacheTier: '5m' }), sheet({ cacheTier: 'default' }), sheet({}), sheet({ cacheTier: '1h' }, 'fast'),
+        sheet({ cacheTier: '1h' }, 'economy'), sheet({ cacheTier: '1h' }, 'ultrafast')], ['', '', '', '', '', '']);
     for (const none of [undefined, {}, { cache_write: 0, cache_write_ttl: '1h' }, { cache_write: 0.00001, cache_write_ttl: '1h' },
         { cache_write: -1, cache_write_ttl: '1h' }, { cache_write: '6.4', cache_write_ttl: '1h' }, { cache_write: 6.4 }]) {
         assert.equal(cacheWriteWords(none, '1h'), '', JSON.stringify(none));
@@ -371,22 +378,27 @@ test('the Agents editor paints again for another language, and for its dictionar
     assert.equal(paint(), english, 'the same language and dictionary: nothing to paint again');
 });
 
-test('while Main or the default tier is on Fast or Economy the composer list names no catalog price; on Standard it does', async () => {
-    assert.equal(describeRoute(buildModelIndex({ catalog: { items: [OPUS] }, tierPriced: true }), { model: OPUS.value }).price, '');
+test('where a row\'s context runs on Fast, Ultrafast or Economy the composer list names no catalog price; on Standard it does', async () => {
+    // The catalog's price is Standard's: the context's tier decides (model_list.js asks it per row, `tierOf`).
+    const index = buildModelIndex({ catalog: { items: [OPUS] } });
+    const price = (tier) => describeRoute(index, { model: OPUS.value }, { tier }).price;
+    assert.deepEqual(['', 'standard', 'fast', 'ultrafast', 'economy'].map(price), ['$4 in / $20 out', '$4 in / $20 out', '', '', '']);
     const { createModelCatalogStore } = await import('../modules/model_catalog_store.js');
-    const shown = async (settings) => {
+    const read = async (settings) => {
         const store = createModelCatalogStore({ readCatalog: async () => ({ items: [OPUS] }), readPreferences: async () => ({}),
             readSettings: async () => settings });
         await store.read();
         await store.readConnections();
-        return describeRoute(store.index(), { model: OPUS.value }).price;
+        return { kept: describeRoute(store.index(), { model: OPUS.value }).price, main: store.tierPriced('main'), lead: store.tierPriced('lead') };
     };
-    assert.equal(await shown({}), '$4 in / $20 out');
-    assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'standard' }), '$4 in / $20 out');
-    assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'fast' }), '');
-    assert.equal(await shown({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"economy"}' }), '');
-    // The list serves Main and its rooms alike: a room's new work, a lead, would pay the default tier's price.
-    assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'fast', OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'standard' } }), '');
+    // The window's index keeps the price whatever the tiers; the tiers say where a role pays another tier's.
+    assert.deepEqual(await read({}), { kept: '$4 in / $20 out', main: false, lead: false });
+    assert.deepEqual(await read({ OUROBOROS_PROCESSING_PREFERENCE: 'standard' }), { kept: '$4 in / $20 out', main: false, lead: false });
+    assert.deepEqual(await read({ OUROBOROS_PROCESSING_PREFERENCE: 'fast' }), { kept: '$4 in / $20 out', main: true, lead: true });
+    assert.deepEqual(await read({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"economy"}' }), { kept: '$4 in / $20 out', main: true, lead: false });
+    // A room's new work, a lead, pays the default tier's price whatever Main's own one is.
+    assert.deepEqual(await read({ OUROBOROS_PROCESSING_PREFERENCE: 'fast', OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'standard' } }),
+        { kept: '$4 in / $20 out', main: false, lead: true });
 });
 
 test('a local role says the local model\'s window, never the window of a cloud id its slot still holds', async () => {
