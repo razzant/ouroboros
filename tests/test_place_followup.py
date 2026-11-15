@@ -12,11 +12,17 @@ from tests.test_place_focus import focus as focus
 
 @pytest.fixture
 def client(focus, monkeypatch):
+    from ouroboros.presence_carrier import set_presence_runner
+    from tests.conversation_carrier_support import host_lane, join_host_lane_carriers
+
+    host_lane(monkeypatch, focus[0])  # its Host serves alone over the focus root: no supervisor queue of its own
     async def authenticated(*_args):
         return 'bridge', {}
     monkeypatch.setattr(host_service, '_authenticated', authenticated)
     with TestClient(host_service.create_host_service_app(focus[0])) as value:
         yield value
+        join_host_lane_carriers()  # its carriers settle after the waiters: that tail stays in this world
+    set_presence_runner(focus[0], None)  # a consumer assigns its runner after construction; it leaves with the root
 
 
 @pytest.mark.parametrize('binding', [None, '', 'legacy'])
