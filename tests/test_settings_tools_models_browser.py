@@ -351,6 +351,8 @@ def test_models_from_search_a_role_saves_through_its_writer_and_the_context_door
     level = _settled(page, "models")
     page.wait_for_function("() => document.querySelector('#page-settings [data-setting-row=\"OUROBOROS_PROMPT_CACHE_TTL\"]')?.closest('details')?.open")
     assert [url for url in subscription_ui["reads"] if "/api/model-catalog" in url], "the catalogue is read when Models is shown"
+    # The recorder saw that read too, so its silence over the home's reads above was a real "none".
+    assert len(page.evaluate("() => window.__catalogueReaders")) > len(readers), "the recorder sees Models' catalogue read"
     # The roles in the picture's order, each with its route.
     page.wait_for_function("() => document.querySelector('#page-settings [data-setting-row=\"models:light\"] [data-row-value]')?.textContent")
     assert level.locator("[data-entry-id]").evaluate_all("rows => rows.map((row) => row.dataset.entryId)") == [
