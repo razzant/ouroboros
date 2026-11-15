@@ -2475,6 +2475,7 @@ export function createChatInstance({
             _historyAppending = false;
             replayKeys = null; replaySelection = null;
         }
+        portals.refresh();
         syncChatStatus();
     }
 

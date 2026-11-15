@@ -416,6 +416,27 @@ test('after a Main reload the start row binds the work and its record names the 
     } finally { f.close(); }
 });
 
+test('after a Main reload whose census arrives before the history draws the card, that census still decides it', async () => {
+    // The page's state read can land before its history replay mounts the start row's card; the next census is a
+    // poll away, so the card drawn later meets the census already read (both directions: before and after the replay).
+    const history = [
+        { role: 'user', text: 'audit the projects in their own room', ts: '2026-10-10T11:59:00Z', chat_id: 1, source: 'web',
+            history_id: 'h-1', row_address: 'row:1@h#1' },
+        { role: 'system', system_type: 'project_started', chat_id: 1, task_id: 'w-1', project_id: 'p-1', project_name: 'Audit',
+            task_name: 'Audit the projects', text: 'Audit › Audit the projects · Started', ts: '2026-10-10T12:00:00Z',
+            history_id: 'h-2' },
+    ];
+    const f = fixture({ history, details: { 'w-1': failedDetail(continuedBy()) } });
+    try {
+        f.state({ task_bindings: bindings, projects: [{ id: 'p-1', name: 'Audit' }], active_chat_activities: [successorRow()] });
+        await settle();
+        assert.equal(f.card('w-1'), null, 'no card before the history is read');
+        await f.instance.refreshHistory({ revision: 1 });
+        await settle();
+        assertFollowed(f, f.card('w-1'));
+    } finally { f.close(); }
+});
+
 test('a bound claim stays pending: Retry Continue on the work\'s own card, nothing folds until the host admits it', async () => {
     const details = {};
     const f = fixture({ details });
