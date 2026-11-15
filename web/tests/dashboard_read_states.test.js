@@ -374,6 +374,12 @@ test('Activity preserves disclosure and current focus as of render, not request 
     assert.equal(section(mount, 'schedules').querySelector('[data-schedule-text]').hasAttribute('open'), true);
     assert.equal(globalThis.document.activeElement, moved,
         'a render must not steal focus the owner moved while its request was pending');
+    const returning = activity.refresh();
+    mount.querySelector('[data-act="bg-open"]').focus();
+    finishSchedules(response({ tasks: lifecycleSchedules }));
+    await returning;
+    assert.equal(globalThis.document.activeElement, mount.querySelector('[data-act="bg-open"]'),
+        'a return that focuses its door during the read keeps that focus through the repaint');
 });
 
 test('Activity invalid success payload is unavailable and stale requests cannot replace newer state', async (t) => {

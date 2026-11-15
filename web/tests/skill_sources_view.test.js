@@ -4,8 +4,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { renderSourceRow, sourceHealthHtml, unconfirmedHubRows } from '../modules/skill_sources_view.js';
+import { createSkillSources, renderSourceRow, sourceHealthHtml, unconfirmedHubRows } from '../modules/skill_sources_view.js';
 import { choiceCardsHtml, trustChoices } from '../modules/skill_dialogs.js';
+import { NodeStub, setup } from './dashboard_dom_fixture.js';
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/skills_v4/${name}`, import.meta.url), 'utf8'));
 const SOURCES = fixture('skill_sources.json').sources;
@@ -17,6 +18,30 @@ const text = (html) => html.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
 // The fixtures' sources were last read on 17 Oct 2026, 13:00–15:00 UTC; a test that shows
 // their age holds the clock at 15:10 that day, so it says the same whatever day it runs.
 const FIXTURE_NOW = Date.parse('2026-10-17T15:10:00Z');
+
+test('Sources keeps a door focused during a pending return read, without taking focus from elsewhere', async (t) => {
+    const { mount, document } = setup(t);
+    let read = async () => SOURCES;
+    const view = createSkillSources({ pane: mount, host: { sources: () => read(), catalog: async () => CATALOG,
+        installedSkills: () => [] } });
+    await view.show({});
+    let finish;
+    read = () => new Promise((resolve) => { finish = resolve; });
+    for (const action of ['auto_grant', 'skill_sources']) {
+        const pending = view.show({});
+        mount.querySelector(`[data-source-action="${action}"]`).focus();
+        finish(SOURCES);
+        await pending;
+        assert.equal(document.activeElement, mount.querySelector(`[data-source-action="${action}"]`));
+    }
+    const pending = view.show({});
+    const elsewhere = new NodeStub('button');
+    document.body.append(elsewhere); elsewhere.focus();
+    finish(SOURCES);
+    await pending;
+    assert.equal(document.activeElement, elsewhere, 'a late read leaves another focused control alone');
+    view.destroy();
+});
 
 test('the official hub row carries the Official glyph; the folder row says Folder; counts come from the catalog', (t) => {
     t.mock.timers.enable({ apis: ['Date'], now: FIXTURE_NOW });
