@@ -348,9 +348,9 @@ At receipt, `owner_relay` mails every live tree member and `delegate_interaction
 
 #### Supervision, activity and recovery
 
-**Supervision.** `delegate_wait` uses the model's own sleep (`run_wait`), yielding acting capacity until sources wake its nanny; the body observes independently (§5). Immediate/owed delivery, replay, in-process fallback and retired wait-window semantics: `delegate_supervision.py` docstring.
+**Supervision.** `delegate_wait` uses the model's own sleep (`run_wait`), yielding acting capacity until sources wake its nanny; the body observes independently (§5). Immediate/owed delivery, replay and in-process fallback: `delegate_supervision.py` docstring.
 
-Selected terminal, any owned ordinary run's new question, a direct child's attention/terminal, addressed mail, owner input, cancel/deadline or a chosen checkpoint wakes it; progress does not. Deadline/ceiling/budget/cancel stay outer rails. ACK/coverage, unknown-outcome holds, save failures and coordination/pacing facts: `delegate_supervision.py` docstring.
+Selected terminal, any owned ordinary run's new question, a direct child's attention/terminal, addressed mail, owner input, cancel/deadline or a chosen checkpoint wakes it; progress does not. Deadline/ceiling/budget/cancel stay outer rails. Mail left to the drain, ACK/coverage, unknown-outcome holds, save failures and coordination/pacing facts: `delegate_supervision.py` docstring.
 
 **Delegated activity.** `delegate_activity.py` emits message/thinking/problem parts per engine-keyed utterance in `progress_meta.delegated_activity`, apart from the final answer. Observation (`narration=False`) proves neither authorship nor execution. `source_handles/delegated_activity/` keeps redacted ranges, size/digest and loss disclosure. Unnumbered SSE errors keep partial events and code/retryability; a permanent gap ends futile reads, not execution, and Python/web promise no missing journal. Unshown ranges replay locally; cursor/framing/speech: module docstrings. Task-file `?source=`: §4; UI/replay: §3.
 

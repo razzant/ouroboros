@@ -62,34 +62,6 @@ def test_supervisor_preserves_peer_relation_for_live_and_durable_events(tmp_path
     assert recorded[0]["source_task_id"] == "a"
 
 
-def test_addressed_wakes_carry_the_peer_relation_the_drain_projected(tmp_path):
-    """A child's contribution to its parent (S29: C → P, relation ``parent``) and a
-    sibling's across-message wake the parked supervised wait WITH the sender's typed
-    place beside provenance and id, so a wake never signs a peer as an ancestor or
-    owner; an ancestor's steering carries no relation, as the drain wrote none."""
-    from ouroboros.delegate_supervision import _addressed_wakes
-    from ouroboros.owner_mailbox import PROVENANCE_PEER_TASK, write_task_message
-
-    assert write_task_message(tmp_path, "C's original", "parent-p", source_task_id="child-c",
-                              provenance=PROVENANCE_PEER_TASK, relation="parent", msg_id="c-1")
-    assert write_task_message(tmp_path, "across", "parent-p", source_task_id="sib-s",
-                              provenance=PROVENANCE_PEER_TASK, relation="sibling", msg_id="s-1")
-    assert write_task_message(tmp_path, "steer", "parent-p", source_task_id="root-r",
-                              provenance="ancestor_task", msg_id="a-1")
-    ctx = SimpleNamespace(task_id="parent-p", task_attempt=1, drive_root=tmp_path,
-                          budget_drive_root=str(tmp_path), task_metadata={})
-
-    wakes = {row["msg_id"]: row for row in _addressed_wakes(ctx, {})}
-
-    assert wakes["c-1"] == {
-        "type": "addressed_message", "msg_id": "c-1", "kind": "task_message",
-        "provenance": "peer_task", "source_task_id": "child-c", "relayed_from_task_id": "",
-        "relation": "parent", "text": "C's original", "ts": wakes["c-1"]["ts"],
-    }
-    assert (wakes["s-1"]["provenance"], wakes["s-1"]["relation"]) == ("peer_task", "sibling")
-    assert wakes["a-1"]["provenance"] == "ancestor_task" and "relation" not in wakes["a-1"]
-
-
 def test_outer_wake_spill_keeps_sender_attribution_in_the_reduced_projection(tmp_path, monkeypatch):
     """When the exact wake spills to an artifact, the fitted summaries still name WHO
     wrote each addressed message and in what place (provenance, source, relayed-from

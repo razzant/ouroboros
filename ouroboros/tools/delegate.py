@@ -1312,7 +1312,8 @@ def get_tools() -> List[ToolEntry]:
             "name": "delegate_wait",
             "description": (
                 "Sleep on delegated runs until one ends, asks a question or needs you. What is already there (its "
-                "terminal, a new question, mail, an unacknowledged earlier wake) answers in this result at once. "
+                "terminal, a new question, an unacknowledged earlier wake) answers in this result at once; mail ends "
+                "it at once too and reaches your next request as its sender's own row, not inside this result. "
                 "Otherwise it returns sleep_armed: the sleep starts after this tool batch and yields acting capacity; your "
                 "process is released after state/obligations save unless named live custody keeps it warm. The body "
                 "observes the runs; their progress streams to the human without waking you, and an unreachable "

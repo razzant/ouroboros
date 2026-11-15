@@ -887,7 +887,7 @@ def append_startup_receipt(
 
     if seen is not None:
         ctx._loop_mailbox_seen_ids = seen
-    stage_pending_wake_exposure(ctx, delivered)
+    stage_pending_wake_exposure(ctx, delivered, mail=False)  # its old wake's mail stays the first drain's
     # The canonical receipt, not its narrowed view, names every id the ACK covers.
     defer_content_ack(ctx, lambda: acknowledge_pending_wake(ctx, startup_wake))
     ctx._configured_startup_wake = ""
