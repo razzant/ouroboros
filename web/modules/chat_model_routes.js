@@ -92,7 +92,7 @@ export function compareNewerFirst(a, b) {
  * `connections` (`apiConnections()` of a settings read, when one was made) names an API source that cannot send.
  * @param {{catalog?: object, connections?: ?Array}} input
  */
-export function buildModelIndex({ catalog = {}, connections = null, tierPriced = false, cacheWriteKnown = true } = {}) {
+export function buildModelIndex({ catalog = {}, connections = null, tierPriced = false, cacheTier = null } = {}) {
     const sources = new Map();
     const rows = new Map();
     const descriptors = Array.isArray(catalog.model_sources) ? catalog.model_sources : [];
@@ -185,7 +185,7 @@ export function buildModelIndex({ catalog = {}, connections = null, tierPriced =
         firstOfKind.add(kindKey);
     }
     return {
-        problems, connections, priced, cacheWriteKnown,
+        problems, connections, priced, cacheTier,
         sources: sorted,
         source: (id) => sources.get(id) || null,
         rows: ordered,
@@ -217,8 +217,8 @@ export function describeRoute(index, raw) {
     const price = priceWords(listed?.price);
     return {
         route, key: routeKey(route), id: modelPart(route), short: shortName(route), source: id, lane,
-        // Said only while the catalog was read under the cache tier the install now sends (model_catalog_store.js).
-        sourceLabel, pay: PAY_WORDS[lane], price, cacheWrite: index?.cacheWriteKnown === false ? '' : cacheWriteWords(listed?.price),
+        // Said only while the settings name the cache tier the figure is of (`cacheTier`, model_catalog_store.js).
+        sourceLabel, pay: PAY_WORDS[lane], price, cacheWrite: cacheWriteWords(listed?.price, index?.cacheTier),
         window, listed: Boolean(listed),
         available: listed?.available ?? null,
         harness: own?.harness || (lane === 'subscription' ? id.slice(SUBSCRIPTION.length) : ''),

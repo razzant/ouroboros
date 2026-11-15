@@ -131,10 +131,12 @@ def openrouter_catalog_price(model: Any, cache_ttl: str = "") -> Optional[Dict[s
     ``{"input", "output"}``, plus ``tiers`` (``[{"min_prompt_tokens", "input",
     "output"}]``) when the price changes with input length: the row accounting
     reads (``openrouter_price_row``). ``cache_write`` is the record's own figure for
-    the prompt-cache tier this install sends (``cache_ttl``: ``1h`` reads
-    ``input_cache_write_1h``, anything else ``input_cache_write``), only for a price
-    without length tiers and only where the record states that field: never the other
-    tier's figure and never a derived one. None, so a picker shows no price rather than
+    the prompt-cache tier the caller names (``cache_ttl``, the install's resolved
+    setting: ``1h`` reads ``input_cache_write_1h``, any other named tier
+    ``input_cache_write``), only for a price without length tiers and only where the
+    record states that field: never the other tier's figure, never a derived one, none
+    when no tier is named. ``cache_write_ttl`` carries that tier with the figure, so a
+    reader says it only while the settings still name it. None, so a picker shows no price rather than
     a partial or false one, when the record states no complete token price, adds a
     per-request fee or bills reasoning at another rate, is free by tokens yet charges for
     something else, varies its price by anything but input length (a time window),
@@ -174,11 +176,12 @@ def openrouter_catalog_price(model: Any, cache_ttl: str = "") -> Optional[Dict[s
         return None  # free by tokens, yet another part of the call is charged: "free" would be false
     price = {"input": row[0], "output": row[3], **({"tiers": [
         {"min_prompt_tokens": minimum, "input": tier[0], "output": tier[3]} for minimum, tier in tiers]} if tiers else {})}
-    stated = pricing.get("input_cache_write_1h" if str(cache_ttl or "").strip() == "1h" else "input_cache_write")
-    if not tiers and stated is not None and not isinstance(stated, bool) and _number(stated) and float(stated) >= 0:
+    tier = str(cache_ttl or "").strip()
+    stated = pricing.get("input_cache_write_1h" if tier == "1h" else "input_cache_write")
+    if tier and not tiers and stated is not None and not isinstance(stated, bool) and _number(stated) and float(stated) >= 0:
         write = round(float(stated) * 1_000_000, 4)
         if write or float(stated) == 0:  # a charge below four decimals would read as free
-            price["cache_write"] = write
+            price["cache_write"], price["cache_write_ttl"] = write, tier
     return price
 
 

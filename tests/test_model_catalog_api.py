@@ -523,20 +523,21 @@ def test_an_openrouter_row_without_a_complete_token_price_has_no_price_field(pri
 
 
 @pytest.mark.parametrize("pricing, cache_ttl, expected", [
-    # The record's own figure for the cache tier the install sends: 1h reads the 1-hour field, anything else the base.
-    ({"input_cache_write": "0.000005", "input_cache_write_1h": "0.000008"}, "", 5.0),
+    # The record's own figure for the cache tier the install sends: 1h reads the 1-hour field, any other named tier the base.
+    ({"input_cache_write": "0.000005", "input_cache_write_1h": "0.000008"}, "default", 5.0),
     ({"input_cache_write": "0.000005", "input_cache_write_1h": "0.000008"}, "5m", 5.0),
     ({"input_cache_write": "0.000005", "input_cache_write_1h": "0.000008"}, "1h", 8.0),
-    ({"input_cache_write": "0"}, "", 0.0),
-    # Never the other tier's figure, and never one derived from the input price.
+    ({"input_cache_write": "0"}, "5m", 0.0),
+    # Never the other tier's figure, never one derived from the input price, and none when no tier is named.
     ({"input_cache_write": "0.000005"}, "1h", None),
-    ({"input_cache_write_1h": "0.000008"}, "", None),
+    ({"input_cache_write_1h": "0.000008"}, "5m", None),
     ({}, "1h", None),
+    ({"input_cache_write": "0.000005", "input_cache_write_1h": "0.000008"}, "", None),
     # A figure that cannot be read, or would print a charge as zero, is not stated; the price itself stays.
-    ({"input_cache_write": "-0.000001"}, "", None), ({"input_cache_write": True}, "", None),
-    ({"input_cache_write": "0.00000000001"}, "", None),
+    ({"input_cache_write": "-0.000001"}, "5m", None), ({"input_cache_write": True}, "5m", None),
+    ({"input_cache_write": "0.00000000001"}, "5m", None),
     # A price that changes with input length states no single cache-write figure.
-    ({"input_cache_write": "0.000005", "overrides": [{"min_prompt_tokens": 200000, "prompt": "0.000008"}]}, "", None),
+    ({"input_cache_write": "0.000005", "overrides": [{"min_prompt_tokens": 200000, "prompt": "0.000008"}]}, "5m", None),
 ])
 def test_a_price_states_the_cache_write_figure_of_the_installs_cache_tier_or_none(pricing, cache_ttl, expected):
     from ouroboros.llm_pricing import openrouter_catalog_price
@@ -546,6 +547,8 @@ def test_a_price_states_the_cache_write_figure_of_the_installs_cache_tier_or_non
     assert (price["input"], price["output"]) == (4.0, 20.0)
     assert price.get("cache_write") == expected
     assert ("cache_write" in price) is (expected is not None), "absent, never null"
+    # The figure carries the tier it is of: whoever holds it later says it only while the settings still name that tier.
+    assert price.get("cache_write_ttl") == (cache_ttl if expected is not None else None)
 
 
 @pytest.mark.parametrize("stored, tier", [("1h", "1h"), ("5m", "5m"), ("1H", "1h"), ("", "1h"), ("weekly", "1h")])
@@ -669,9 +672,20 @@ def test_a_draft_read_binds_a_kept_key_to_its_own_saved_row_or_pair(monkeypatch,
     # Both built-in compatible pairs saved; the draft clears the dedicated one and so reaches the legacy pair.
     saved = {"OPENAI_COMPATIBLE_API_KEY": "sk-kept-dedicated-123456", "OPENAI_COMPATIBLE_BASE_URL": "https://dedicated.example/v1",
              "OPENAI_API_KEY": "sk-kept-legacy-1234567890", "OPENAI_BASE_URL": "https://legacy.example/v1"}
-    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, {"OPENAI_COMPATIBLE_API_KEY": "", "OPENAI_COMPATIBLE_BASE_URL": ""})
+    from ouroboros.secret_masking import mask_settings_secret
+
+    kept = mask_settings_secret("OPENAI_API_KEY", saved["OPENAI_API_KEY"])  # the legacy field posts its marker back
+    cleared = {"OPENAI_COMPATIBLE_API_KEY": "", "OPENAI_COMPATIBLE_BASE_URL": "", "OPENAI_API_KEY": kept}
+    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, cleared)
     assert response.json()["errors"] == [], response.json()["errors"]
-    assert [call[2] for call in asked] == ["https://legacy.example/v1"], "the pair the draft reaches, at its own saved address"
+    assert [call for call in asked if call[2] == "https://legacy.example/v1"] == [
+        ("openai-compatible", "sk-kept-legacy-1234567890", "https://legacy.example/v1", False)], \
+        "the kept legacy key goes to the pair the draft reaches, at its own saved address"
+    assert "sk-kept-dedicated-123456" not in [call[1] for call in asked]
+    # The legacy address is no draft field: a draft that names another one moves nothing, and the kept key still
+    # goes only where it was saved for.
+    response, moved = _draft_catalog(monkeypatch, tmp_path, saved, {**cleared, "OPENAI_BASE_URL": "https://elsewhere.example/v1"})
+    assert moved == asked and "https://elsewhere.example/v1" not in [call[2] for call in moved]
 
 
 def test_the_shown_price_is_the_catalog_row_fetch_openrouter_pricing_reads():

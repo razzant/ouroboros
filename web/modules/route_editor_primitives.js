@@ -355,10 +355,14 @@ function usd(value) {
 }
 
 /** What writing 1M tokens to the prompt cache costs on the install's cache tier, as the catalog states it
- *  (`ModelPrice.cache_write`): `Cache write: $16 per 1M tokens.`; '' when it states none or the figure would print
- *  as zero. Words only, never a forecast: how much a call writes is not known before it is sent. */
-export function cacheWriteWords(price) {
+ *  (`ModelPrice.cache_write`): `Cache write: $16 per 1M tokens.`; '' when it states none, when the figure would print
+ *  as zero, or when `tier` (the settings' `OUROBOROS_PROMPT_CACHE_TTL`) is not the tier the figure is of
+ *  (`ModelPrice.cache_write_ttl`): however late, or from whichever reader, a catalog came, another tier's figure is
+ *  never said. Words only, never a forecast: how much a call writes is not known before it is sent. */
+export function cacheWriteWords(price, tier) {
     const figure = price?.cache_write;
+    const named = typeof tier === 'string' && tier.trim().toLowerCase();
+    if (!named || price?.cache_write_ttl !== named) return '';
     if (!Number.isFinite(figure) || figure <= 0 || usd(figure) === '$0') return '';
     return fmt('Cache write: {price} per 1M tokens.', { price: usd(figure) });
 }

@@ -307,15 +307,18 @@ test('the capsule strip and the Change Main sheet say the price where "paid by k
     assert.equal(said.facts, 'OpenRouter · $4 in / $20 out');
     assert.equal(routeFacts(describeRoute(index, { model: 'z-ai/glm-5.3' })), 'OpenRouter · paid by key');
     // The sheet's cache-write price (composer_model.test.js) is the catalog's own figure for the install's cache tier
-    // (`price.cache_write`, chosen by the server): said as stated, never derived from the input price, and not said
-    // where the catalog states none, where the figure would print as zero, or where another tier prices the call.
+    // (`price.cache_write`, chosen and stamped with its tier by the server): said as stated, never derived from the
+    // input price, and not said where the catalog states none, where the figure would print as zero, where the settings
+    // name another tier than the figure's (or none), or where another processing tier prices the call.
     assert.equal(said.cacheWrite, '');
-    const cached = { ...OPUS, price: { ...OPUS.price, cache_write: 6.4 } };
-    assert.equal(describeRoute(buildModelIndex({ catalog: { items: [cached] } }), { model: OPUS.value }).cacheWrite,
-        'Cache write: $6.40 per 1M tokens.');
-    assert.equal(describeRoute(buildModelIndex({ catalog: { items: [cached] }, tierPriced: true }), { model: OPUS.value }).cacheWrite, '');
-    for (const none of [undefined, {}, { cache_write: 0 }, { cache_write: 0.00001 }, { cache_write: -1 }, { cache_write: '6.4' }]) {
-        assert.equal(cacheWriteWords(none), '', JSON.stringify(none));
+    const cached = { ...OPUS, price: { ...OPUS.price, cache_write: 6.4, cache_write_ttl: '1h' } };
+    const sheet = (options) => describeRoute(buildModelIndex({ catalog: { items: [cached] }, ...options }), { model: OPUS.value }).cacheWrite;
+    assert.equal(sheet({ cacheTier: '1h' }), 'Cache write: $6.40 per 1M tokens.');
+    assert.deepEqual([sheet({ cacheTier: '5m' }), sheet({ cacheTier: 'default' }), sheet({}), sheet({ cacheTier: '1h', tierPriced: true })],
+        ['', '', '', '']);
+    for (const none of [undefined, {}, { cache_write: 0, cache_write_ttl: '1h' }, { cache_write: 0.00001, cache_write_ttl: '1h' },
+        { cache_write: -1, cache_write_ttl: '1h' }, { cache_write: '6.4', cache_write_ttl: '1h' }, { cache_write: 6.4 }]) {
+        assert.equal(cacheWriteWords(none, '1h'), '', JSON.stringify(none));
     }
 });
 
