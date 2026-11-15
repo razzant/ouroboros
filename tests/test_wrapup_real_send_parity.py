@@ -277,6 +277,41 @@ def test_the_budget_rail_delivers_the_models_wrapup_as_a_best_effort_answer(monk
     assert OUTCOME_PHASE_HEADLINE[phase] == "Done with warnings"   # not "Failed": the answer was delivered
 
 
+@pytest.mark.parametrize("carrier,tier", [
+    ({"source": "owner", "tier": "fast"}, "fast"),
+    ({"source": "room", "tier": "economy"}, "economy"),
+    ({"source": "owner", "tier": "standard"}, "standard"),
+])
+def test_a_tiered_works_admitted_forced_send_is_the_priced_candidate(monkeypatch, tmp_path, carrier, tier):
+    """The forced final asks the tier the work's rounds and its priced copy ask (task_pacing): its identity predicate
+    admits it on the first attempt, never refusing it as drift to resend it without the tier."""
+    from ouroboros import loop_forced_finalization as forced
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "unused")
+    owner_ctx = SimpleNamespace(task_metadata={"processing": carrier}, model_turn_state=None)
+    sent = []
+
+    def execute(request, send, before_dispatch):
+        before_dispatch(SimpleNamespace(attempt_id=f"a{len(sent) + 1}", drive_root=tmp_path))  # the predicate runs here
+        sent.append(request)
+        return _completion("Done so far.")
+
+    _patch_execute_candidate(monkeypatch, llm_module, execute)
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    ctx = _ctx(drive_logs=logs, llm=LLMClient(api_key="unused"), active_model="openai/gpt-test",
+               tools=SimpleNamespace(_ctx=owner_ctx), messages=[dict(message) for message in _MESSAGES])
+    with usage_accounting.usage_scope(usage_accounting.UsageScope(
+        drive_root=tmp_path, task_id="task1", root_task_id="task1",
+    )):
+        request, prepared = task_pacing.prepared_wrapup_candidate(ctx, copy.deepcopy(_MESSAGES), allow_server_web_search=False)
+        assert request.processing_preference == tier
+        forced._call_forced_model_once(ctx, initial_messages=prepared, admitted_request=request)
+    [admitted] = sent
+    assert admitted.processing_preference == tier
+    assert admitted.candidate_clock_free_sha256 == request.candidate_clock_free_sha256 is not None
+
+
 def test_a_drifted_admitted_candidate_is_sent_once_more_instead_of_losing_the_answer(monkeypatch, tmp_path):
     """The predicate refuses before dispatch; the refusal must not cost the owner the final answer."""
     import ouroboros.loop as loop_module

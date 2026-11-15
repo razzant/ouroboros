@@ -180,4 +180,5 @@ class UiPreferencesResponse(TypedDict):
     read_ahead_revisions: dict[str, list[list[int]]]  # per chat id: revisions read in full in another room (host-owned)
     welcome: dict[str, str]  # install-wide empty-Main UI copy: mode default|hidden|custom and plain text
     model_recents: list[ChatModelRoute]  # server-written, newest first, at most four distinct routes
+    model_pins: list[ChatModelRoute]  # owner-pinned routes in pin order; POST changes them by model_pins.pin/unpin only
 

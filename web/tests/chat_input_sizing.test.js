@@ -279,6 +279,55 @@ test('a hidden field pins nothing and its reveal measures; only a new width re-m
     assert.ok(parseFloat(field.style.getPropertyValue('--chat-input-height')) > 80);
 });
 
+test('a field laid out at attach is measured in its first frame, with no observer report', async (t) => {
+    // An engine may send no first report for a field already laid out: Linux WebKit left Main's empty field at its
+    // unmeasured 33.2 px until the model strip opened, and the composer moved 0.2 px then. Attach asks one frame itself,
+    // once its caller has finished building.
+    const engine = installEngine();
+    t.after(engine.restore);
+    const field = new Field();
+    attachChatInputSizing(field);
+    assert.equal(field.borderBox, 33.2, 'unmeasured, one row is its line height and padding');
+    assert.equal(engine.pending(), 0, 'nothing is asked while the caller is still building');
+    await null;
+    assert.equal(engine.pending(), 1, 'attach asks one frame');
+    engine.flush();
+    assert.equal(field.style.getPropertyValue('--chat-input-height'), '33px', 'the first frame writes the whole-pixel height');
+    engine.report();
+    engine.flush();
+    assert.equal(field.writes.filter(([name]) => name === '--chat-input-height').length, 1,
+        'a later report at the same width writes nothing');
+});
+
+test('a draft measured at attach is not written again by the first frame', async (t) => {
+    // A restored draft is measured by sync() before the microtask: the first frame then finds the same width and cap.
+    const engine = installEngine();
+    t.after(engine.restore);
+    const field = new Field();
+    const sizing = attachChatInputSizing(field);
+    field.type(lines(3));
+    sizing.sync();
+    await null;
+    engine.flush();
+    assert.equal(field.writes.filter(([name]) => name === '--chat-input-height').length, 1, 'one write for the draft');
+});
+
+test('a content-sized field and a hidden one ask no first frame', async (t) => {
+    // The first frame is the measured mode's alone: in content mode a measurement would pin a height the engine keeps
+    // growing, and a hidden field has no width to wrap at until its reveal reports.
+    for (const [label, options, field] of [['content', { fieldSizing: true }, new Field()],
+        ['hidden', {}, new Field({ width: 0 })]]) {
+        const engine = installEngine(options);
+        try {
+            attachChatInputSizing(field);
+            await null;
+            assert.equal(engine.pending(), 0, `${label}: no frame is asked`);
+            engine.flush();
+            assert.deepEqual(field.writes, [], `${label}: nothing is written`);
+        } finally { engine.restore(); }
+    }
+});
+
 test('a font that finishes loading re-measures the same width once, in a frame', async (t) => {
     const engine = installEngine();
     t.after(engine.restore);

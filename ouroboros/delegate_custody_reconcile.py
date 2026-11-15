@@ -534,7 +534,8 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
                 "project_retired": retired, "reason": f"recovery_refused_{exc.code}",
                 "invocation_id": invocation_id, "definite": True,
                 **session_request_facts(record["request"], selected_subagent_id=record.get("selected_subagent_id", ""),
-                    task_id=task_id, route=record.get("route", ""), processing=record.get("processing") or {}),
+                    task_id=task_id, route=record.get("route", ""), processing=record.get("processing") or {},
+                    row_processing=record.get("row_processing")),
             })
             result = {"invocation_id": invocation_id, "task_id": task_id,
                       "action": "invocation_retired"}
@@ -600,6 +601,7 @@ def recovered_custody(drive_root: Any, gateway: Any, record: Dict[str, Any], run
         profile_id=str(body.get("credentialProfileId") or ""),
         effort=body.get("effort"),
         processing_preference=(record.get("processing") or {}).get("requested"),
+        row_processing=record.get("row_processing"),
         project_id=record["project_id"], project_owned=bool(record["project_owned"]),
         project_persistent=_record_persistent(record),
         root_task_id=str(record.get("root_task_id") or ""),
