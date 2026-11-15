@@ -219,8 +219,9 @@ async function showPage(name, options = {}) {
             const canLeave = await handler({ from: state.activePage, to: pageName });
             if (canLeave === false) return false;
         }
-        // Main behind another page: a document it opened closes rather than sit over that page; what it plays goes on.
-        if (state.activePage === 'chat') { mainChat?.closeTransient?.(); rooms.suspend(mainChat); }
+        // Main behind another page: a document it opened closes, what it plays goes on; a Project over it keeps its
+        // selection now, as the page shown next takes focus (which ends a selection in WebKit).
+        if (state.activePage === 'chat') { mainChat?.closeTransient?.(); rooms.suspend(mainChat); rooms.rememberSelection(projectInstances.get(navState.activeProjectId)); }
         document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
         document.getElementById(`page-${pageName}`)?.classList.add('active');
         state.activePage = pageName;
