@@ -551,12 +551,52 @@ test('Back to Settings: a first row and one page layer; the press, Escape or Bac
     assert.equal(layers.length, 0);
     // Escape and the system's Back pop the layer: its onClose goes the same way.
     back.show(panel, '');
-    layers[0].onClose('escape');
+    await layers[0].onClose('escape');
     assert.deepEqual(order.at(-1), 'open ');
     assert.equal(panel.querySelector('.dashboard-back'), null);
     back.show(panel, 'accounts');
     back.clear();
     assert.deepEqual([panel.querySelector('.dashboard-back'), layers.length, order.length], [null, 0, 3], 'clearing opens nothing');
+});
+
+test('returning to a Settings level preserves its history entry, including a refused return', async (t) => {
+    const { createLayerStack } = await import('../modules/layers.js');
+    for (const trigger of ['button', 'escape']) for (const allowed of [true, false]) {
+        await t.test(`${trigger}/${allowed}`, async (sub) => {
+            const { mount } = setup(sub);
+            const calls = [];
+            const layers = createLayerStack({ win: null, doc: null, history: {
+                pushState: () => calls.push('push'), back: () => calls.push('back'),
+            } });
+            sub.after(() => layers.destroy());
+            let decide;
+            const decision = new Promise(resolve => { decide = resolve; });
+            const back = settingsReturn({ layers, openSettings: async () => {
+                if (!await decision) return false;
+                layers.push({ id: 'settings-level-1', page: true, focus: false });
+                return true;
+            } });
+            const panel = new NodeStub('section'); mount.append(panel);
+            back.show(panel, 'tools');
+            await settle();
+            const button = panel.querySelector('[data-dashboard-back]');
+            if (trigger === 'button') button.dispatchEvent({ type: 'click' });
+            else layers.pop('escape');
+            await settle();
+            assert.deepEqual(calls, ['push'], 'a pending leave retains the return entry');
+            assert.equal(panel.querySelector('[data-dashboard-back]'), button);
+            decide(allowed);
+            await settle();
+            assert.deepEqual(calls, ['push'], 'a return never consumes and replaces the entry');
+            assert.deepEqual(layers.ids(), [allowed ? 'settings-level-1' : 'dashboard-back']);
+            assert.equal(panel.querySelector('[data-dashboard-back]'), allowed ? null : button);
+            if (allowed) {
+                layers.pop('escape');
+                await settle();
+                assert.deepEqual(calls, ['push', 'back'], 'the Settings level consumes only its own entry');
+            }
+        });
+    }
 });
 
 test('Settings returns stay in place on pointer-only events in both layouts', (t) => {
@@ -677,7 +717,7 @@ test('openDashboardTab: back gives the tab its Back, a row is brought into view 
     assert.deepEqual(scrolled, { block: 'center' });
     assert.equal(document.activeElement, row.querySelector('[data-setting-control]'));
     // The system's Back returns to the Settings path the tab was opened from: '' is its home.
-    layers[0].onClose('history');
+    await layers[0].onClose('history');
     assert.deepEqual(opened, ['']);
     dashboard.activateTab('costs', { back: 'accounts' });
     assert.equal(layers.length, 1);

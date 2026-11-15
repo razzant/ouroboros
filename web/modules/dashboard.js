@@ -164,11 +164,14 @@ export function settingsReturn({ layers = null, openSettings = null, id = BACK_L
         scope = null;
         layers?.remove(id);
     };
-    const go = (path) => {
+    const go = async (path) => {
         const field = document.activeElement;
         if (field && scope?.contains(field)) field.blur?.();
-        clear();
-        void openSettings?.(path);
+        const returning = control;
+        const opened = await openSettings?.(path);
+        // Settings installs its levels before this return retires; a refused leave keeps the way back.
+        if (opened !== false && control === returning) clear();
+        return opened;
     };
     const show = (host, path, before = host.firstChild) => {
         clear();

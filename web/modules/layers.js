@@ -37,6 +37,7 @@ const LAYER_STATE = { ouroLayers: 1 };
 
 export function createLayerStack({ win = globalThis.window, doc = globalThis.document, history = win?.history } = {}) {
     const stack = [];
+    const closing = new WeakSet();
     const listeners = new Set();
     const inerted = new Set();
     const hist = { armed: false, skip: 0, queued: false };
@@ -248,12 +249,21 @@ export function createLayerStack({ win = globalThis.window, doc = globalThis.doc
         });
     }
 
-    /** THE dismiss: exactly one layer, the top one, through its owner's onClose. */
+    /** THE dismiss: exactly one layer, the top one, through its owner's onClose. An asynchronous owner keeps its
+     * layer until it has arrived (or returns false to stay), so a page return can replace it without losing Back. */
     function pop(reason = 'close') {
         const layer = top();
         if (!layer) return false;
-        try { layer.onClose?.(reason); } finally {
-            if (has(layer.id)) remove(layer.id);  // an owner that did not call remove
+        if (closing.has(layer)) return true;
+        let result;
+        try { result = layer.onClose?.(reason); } finally {
+            if (result?.then) {
+                closing.add(layer);
+                reconcileHistory(); // a browser Back consumed the entry; keep it while navigation is pending
+                Promise.resolve(result).then((closed) => {
+                    if (closed !== false && get(layer.id) === layer) remove(layer.id);
+                }, (error) => console.error('layers: close failed', error)).finally(() => closing.delete(layer));
+            } else if (has(layer.id)) remove(layer.id);  // a synchronous owner that did not call remove
         }
         return true;
     }
