@@ -3443,16 +3443,16 @@ The shared header (`web/modules/page_header.js`) draws one row, without decorati
 owed jump's origin (‹ Tools, ‹ Main), then the level's parent when spent. Tooltip and accessible name give its full path.
 Two panes put it over the page column; one column replaces the leading picture. A model role names its destination
 (Consciousness model), distinct from its return. Docked, the sidebar names a section without pages: tabs or Files' location lead its
-band, actions end it, on Main's line. If the actions and navigation cannot fit beside the widest sidebar, the same
-row scrolls sideways, keeping every control reachable. Tabs, filters and location use the shared fade; location reveals the current
+band, actions end it, at one height and shape. Controls keep 18px above and the content's leading inset with or without
+native chrome. A narrow row scrolls sideways, keeping controls reachable. Tabs, filters and location use the shared fade; location reveals the current
 folder, none wider than the rail. Section headings follow
 “A section with pages”; a Project shows its name.
 An empty band draws nothing. Its scroller reaches the window's top; its first row starts below the macOS band,
 which stays the window's (owner 22.10). Widgets cards pass under it with crisp edges (owner 20.10); moving content
 fades by principle 9. Empty band space still drags the window. In stack layout the header row is at most 56 px: one
 leading control (the picture on a room or section list, the named Back when owed), destination name, status, then a
-room's consciousness chip and Panic. Tabs or filters occupy at most one line below; Logs keeps Clear at the row's
-end. A short row drops the status word whole after its start step, keeping its mark; Main's title ellipsizes before
+room's consciousness chip and Panic. Tabs or filters occupy one line below; Logs fades its rail short of Clear,
+with no outer events panel on a phone. A short row drops the status word whole after its start step, keeping its mark; Main's title ellipsizes before
 its chip or Panic yields.
 A Project's name keeps one line inside its capsule, at the controls' size and weight (`--type-body`, 600), and ends
 in an ellipsis, so its capsule keeps the bar's height (owner 2026-11-01, A·14; it replaces the second line of
@@ -3462,9 +3462,9 @@ title opens even in an empty Project, starts with it, wrapped. Where the room co
 column) a name still cut leaves the consciousness chip its brain and mark, its accessible name keeping the whole
 state; a desk's panel beside Main keeps the chip's word. Panic and ×
 never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
-Skills keeps its capsule whole, tabs beside it and actions at the end. Below 44rem of page width, tabs sit below;
-search follows with a 2px inset. Files keeps location and actions in the band; its filter heads the list and shares
-its fade. Circles ends the band with New circle; Widgets has no controls.
+Skills keeps its capsule, tabs and short actions in one row; below 36rem with a return, 30rem without, tabs sit below. Search follows at 2px.
+Files keeps location and actions in the band, its divider at the window top; the filter heads the list, which
+scrolls under the shared fade. Circles ends the band with New circle; Widgets has no controls.
 Files shows the folder's list and the chosen file side by side while its own width holds both (the `files`
 container, 700 px); narrower, the list comes first and a chosen file replaces it with its folder's named Back, which
 keeps an unsaved draft: the file's row says `unsaved` (a new file's draft has its own row at the top) and reopens
@@ -3560,9 +3560,9 @@ opens and holds the field, the row and the pressed control still.
 Inside Telegram the page announces readiness, fills the screen (fullscreen if granted, the owner's to leave),
 and disables swipe-down so lists scroll. Telegram owns Back while a layer is open, Close otherwise; the page
 then draws no Back. Its bars take the room's colour; System appearance follows Telegram's theme. Safe areas apply
-on all sides (`web/modules/host_telegram.js`). In fullscreen a section shares Telegram's row: its name and one
-action between fixed safe sides (96 px, 88 px), its rail below. Skills' other action starts its list. Rooms keep
-their bar placement.
+on all sides (`web/modules/host_telegram.js`). Fullscreen sections share one title baseline beside the drawer
+picture, 12px clear of both host buttons (108px, 100px safe sides). Rails and actions stay together below.
+Rooms keep their bar placement.
 
 Enforcement: `tests/test_design_system_gate_browser.py` visits every registered
 page and Settings' home and pages in WebKit and Chromium at 320, 360, 390, a Telegram-like

@@ -4,6 +4,7 @@
 // dashboard DOM fixture.
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 
 import { initLogs } from '../modules/logs.js';
 import { setup } from './dashboard_dom_fixture.js';
@@ -49,6 +50,12 @@ test('the section owns the filter rail and Clear; the list has no sticky chrome'
     assert.ok(band.querySelector('#log-filters').classList.contains('app-tab-strip'));
     assert.equal(band.querySelector('#btn-clear-logs').textContent, 'Clear');
     assert.ok(mount.querySelector('#log-entries'), 'the events stay in their scroller');
+    assert.ok(band.querySelector('#btn-clear-logs').classList.contains('btn-default'));
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.match(css, /\.logs-kinds\[data-scroll-end\] \{ --tab-fade-end: var\(--space-4\); \}/);
+    assert.match(css, /\.logs-kinds\[data-scroll-start\] \{ --tab-fade-start: var\(--space-4\); \}/);
+    assert.match(css, /html\[data-layout="stack"\] \.logs-card \{[^}]*background: none;[^}]*box-shadow: none;/);
+    assert.ok(mount.querySelector('.logs-card').classList.contains('ui-card'), 'the desk retains the object');
 });
 
 test('Clear cancels a pending backfill without accepting its late rows or leaving Loading behind', async (t) => {

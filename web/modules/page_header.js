@@ -142,7 +142,7 @@ export function bindPageBack({ layers, currentHeader, doc = document, win = wind
  * start. Nodes move and are never re-rendered, so their listeners, selection and focus stay theirs; the selected
  * tab is revealed again by its strip's own observer. Returns the disposer.
  */
-export function bindPageHeader(header, { lead = null, actions = null, secondary = null, overflow = null } = {}) {
+export function bindPageHeader(header, { lead = null, actions = null } = {}) {
     const doc = header?.ownerDocument;
     const under = header?.nextElementSibling?.classList?.contains('app-page-tabs') ? header.nextElementSibling : null;
     const moves = [[lead || under?.firstElementChild, header?.querySelector('.app-page-lead'), 'append'],
@@ -161,13 +161,8 @@ export function bindPageHeader(header, { lead = null, actions = null, secondary 
     let docked = null;
     const place = (layout) => {
         const active = doc.activeElement;
-        // Telegram's shared row has room for one page action. The page names where its other action belongs.
-        if (secondary && overflow) {
-            const target = doc.documentElement.dataset.telegramFullscreen === 'active' ? overflow : toolbar;
-            if (secondary.parentElement !== target) target.prepend(secondary);
-            if (active?.isConnected && doc.activeElement !== active) active.focus?.({ preventScroll: true });
-        }
-        const next = (typeof layout === 'string' ? layout : currentLayout()) === 'docked';
+        const next = (typeof layout === 'string' ? layout : currentLayout()) === 'docked'
+            || doc.documentElement?.dataset.telegramFullscreen === 'active';
         if (next === docked) return;
         docked = next;
         for (const { node, bar, how, home } of moves) {

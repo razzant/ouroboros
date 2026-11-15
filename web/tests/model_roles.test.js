@@ -6,7 +6,7 @@ import { MAIN_FOLLOW_NOTE, composeModelSource, createModelRolesEditor, inheritTa
 import { configuredApiProviders, routeChoiceGroups } from '../modules/route_editor_primitives.js';
 import { settingsTitle } from '../modules/settings_home.js';
 
-const { contract } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url)));
+const { contract } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url), 'utf8'));
 
 test('a model role names its destination without repeating the source section, while the parent stays Models', () => {
     assert.equal(settingsTitle('models'), 'Models');

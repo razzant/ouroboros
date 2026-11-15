@@ -976,7 +976,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
    only pushes that pane's header, location and actions out past the column that holds them (DESIGN "Page header":
    folder names fit and actions wrap). */
 .files-layout {
-    position: relative;
+    position: absolute;
+    inset: 0;
     display: grid;
     grid-template-columns: minmax(min(280px, 100%), 360px) minmax(0, 1fr);
     grid-template-areas: "sidebar preview";
@@ -1010,13 +1011,17 @@ html[data-layout="stack"] .resize-handle { display: none; }
     overflow-y: auto;
     overscroll-behavior: contain;
     border-right: 1px solid var(--divider);
-    background: rgba(var(--neutral-rgb), 0.02);
 }
+
+#page-files > :is(.app-page-header, .files-band) { position: relative; z-index: 2; pointer-events: none; }
+#page-files > :is(.app-page-header, .files-band) :is(button, input) { pointer-events: auto; }
+.files-layout .files-sidebar[data-scroll-above] { --scroll-fade-top-clear: var(--files-band-h); --scroll-fade-top: calc(var(--files-band-h) + var(--scroll-fade-edge)); }
+.files-preview { padding-top: var(--files-band-h); }
 
 .files-toolbar {
     display: flex;
     gap: 8px;
-    padding: 12px 16px 10px;
+    padding: calc(var(--files-band-h, 0px) + 12px) var(--page-header-padding-x) 10px;
     flex-shrink: 0;
 }
 
@@ -1406,6 +1411,12 @@ html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
     max-width: 100%;
 }
 
+.app-page-header .btn, .files-band .btn {
+    --control-h: var(--control-h-float);
+    --button-font-size: var(--type-meta);
+    --control-pad-x: var(--space-3);
+}
+
 .app-page-trailing {
     max-width: 100%;
 }
@@ -1447,6 +1458,7 @@ html[data-telegram-back="back"] .app-page-return { display: none; }
 .shell-back-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 html[data-layout="stack"] .shell-back { width: auto; }
 .app-page-header[data-return] > .app-page-title-block { display: flex; align-items: center; gap: var(--space-2); }
+.app-page-header[data-return="column"] > .app-page-title-block { display: block; }
 .app-page-header[data-return] .app-page-lead { flex: 1; }
 html[data-layout="stack"] .app-page-header[data-return] { grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto; grid-template-areas: "back title toolbar"; }
 html[data-layout="stack"] .app-page-header[data-return] > .app-page-leading { display: none; }
@@ -1456,7 +1468,7 @@ html[data-layout="stack"] .app-page-header[data-return] > .app-page-title-block 
 html[data-layout="docked"] .app-page-header[data-lead] {
     grid-template-columns: minmax(8rem, 1fr) auto;
     grid-template-areas: "title toolbar";
-    min-height: 50px;
+    min-height: var(--page-header-row-h);
     padding-block: 0;
     overflow-x: auto;
     scrollbar-width: none;
@@ -1477,7 +1489,7 @@ html[data-layout="docked"] .app-page-header[data-scroll-end] { --band-fade-end: 
    control the row grows below the band). */
 :root[data-window-chrome="integrated"][data-layout="docked"] .app-page-header[data-lead] {
     --lead-inset: min(10px, max(0px, calc((var(--window-chrome-top) - var(--control-h-float)) / 2)));
-    min-height: var(--window-chrome-top);
+    min-height: var(--page-header-row-h);
 }
 :root[data-window-chrome="integrated"][data-layout="docked"] .app-page-lead .app-tab-strip {
     padding-top: var(--lead-inset);
@@ -1499,7 +1511,7 @@ html[data-layout="docked"] .app-page-lead .app-tab-strip {
     flex: 1 1 auto;
     flex-wrap: nowrap;
     overflow-x: auto;
-    padding: 10px var(--space-4) 26px;
+    padding: 10px 0 26px;
     margin: 0 0 -16px;
     scroll-padding-inline: var(--space-4);
     pointer-events: none;
@@ -1581,11 +1593,12 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 .scroll-fade-y {
     --scroll-fade-edge: 32px;
     --scroll-fade-top: 0px;
+    --scroll-fade-top-clear: 0px;
     --scroll-fade-bottom: 0px;
     --scroll-fade-bottom-clear: 0px;
-    -webkit-mask-image: linear-gradient(180deg, transparent 0,
+    -webkit-mask-image: linear-gradient(180deg, transparent var(--scroll-fade-top-clear),
         black var(--scroll-fade-top), black calc(100% - var(--scroll-fade-bottom)), transparent calc(100% - var(--scroll-fade-bottom-clear)));
-    mask-image: linear-gradient(180deg, transparent 0,
+    mask-image: linear-gradient(180deg, transparent var(--scroll-fade-top-clear),
         black var(--scroll-fade-top), black calc(100% - var(--scroll-fade-bottom)), transparent calc(100% - var(--scroll-fade-bottom-clear)));
 }
 .scroll-fade-y[data-scroll-above] { --scroll-fade-top: var(--scroll-fade-edge); }
@@ -4705,6 +4718,7 @@ html[data-layout="stack"] #content {
         border-radius var(--drawer-settle, var(--motion-close)) var(--ease-sheet),
         box-shadow var(--drawer-settle, var(--motion-close)) ease;
 }
+html[data-layout="stack"] { --page-header-padding-x: var(--space-3); }
 html[data-layout="stack"] #content > .page:not(#page-chat) {
     padding-bottom: var(--inset-bottom);
 }
@@ -6113,6 +6127,8 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .logs-filters { display: flex; align-items: center; flex: 1; min-width: 0; gap: var(--space-2); }
 .logs-filters[hidden] { display: none; }
 .logs-kinds { flex: 1; }
+.logs-kinds[data-scroll-end] { --tab-fade-end: var(--space-4); }
+.logs-kinds[data-scroll-start] { --tab-fade-start: var(--space-4); }
 .logs-clear-list { flex: none; color: var(--text-secondary); }
 @container sectionplace (max-width: calc(40rem - 0.02px)) {
     html[data-layout="stack"] #page-dashboard .app-page-header[data-controls] .section-lead-page {
@@ -6123,13 +6139,14 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     html[data-layout="stack"] #page-dashboard .section-lead-page > .app-page-return { grid-area: 1 / 1; max-width: 36vw; }
     html[data-layout="stack"] #page-dashboard .section-lead-page > [data-dashboard-lead-name] { grid-area: 1 / 2; }
     html[data-layout="stack"] #page-dashboard .logs-filters:not([hidden]) { display: contents; }
-    html[data-layout="stack"] #page-dashboard .logs-kinds { grid-area: 2 / 1 / auto / -1; padding-block: var(--space-2); margin: 0; }
+    html[data-layout="stack"] #page-dashboard .logs-kinds { grid-area: 2 / 1 / auto / -1; padding: var(--space-2) 0; margin: 0; }
     html[data-layout="stack"] #page-dashboard .logs-clear-list { grid-area: 1 / 3; }
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-lead { grid-area: lead; }
 }
 
 .logs-card { display: grid; gap: var(--space-2); min-width: 0; }
+html[data-layout="stack"] .logs-card { padding: 0; background: none; box-shadow: none; border-radius: 0; }
 .logs-empty { margin: 0; color: var(--text-secondary); font-size: var(--type-body); line-height: var(--line-body); }
 .logs-empty[hidden] { display: none; }
 
@@ -6816,7 +6833,10 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     }
 }
 :root[data-window-chrome="integrated"][data-layout="docked"] #page-dashboard > .app-page-header[data-empty]:not([data-return]) ~ .section-shell :is(.section-rail, .dashboard-body) {
-    padding-top: calc(var(--window-chrome-top) + var(--space-4));
+    padding-top: calc(var(--page-header-row-h) + var(--space-4));
+}
+:root[data-window-chrome="integrated"][data-layout="docked"] #page-dashboard > .app-page-header[data-empty]:not([data-return]) ~ .section-shell > .section-rail {
+    padding-top: calc(var(--page-header-row-h) + var(--space-3));
 }
 /* A phone: the list's screen keeps `☰ Dashboard`, with nothing under it; a page's screen is one row, Back (to the
    list, or to Settings) and the page's name in the header's title style, where ☰ and the place's name stood. Only a
@@ -7119,30 +7139,33 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 #page-skills { container: skillspage / inline-size; }
 #page-skills .app-page-return { flex: none; max-width: none; }
 #page-skills .skills-scroll { padding-top: 0; }
+#page-skills .skills-scroll { padding-inline: var(--page-header-padding-x); }
 #page-skills > .app-page-tabs { padding-bottom: 0; }
 #page-skills > .app-page-tabs > .app-tab-strip {
     padding-bottom: var(--space-4);
     margin-bottom: calc(-1 * var(--space-4));
 }
-@container skillspage (max-width: 44rem) {
-    html[data-layout="docked"] #page-skills > .app-page-header[data-lead] {
-        grid-template-columns: auto minmax(0, 1fr);
-        grid-template-areas: "back toolbar" "tabs tabs";
-        row-gap: 0;
-        overflow: visible;
-        mask-image: none;
-        -webkit-mask-image: none;
+html[data-layout="docked"] #page-skills > .app-page-header[data-lead] {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas: "back tabs toolbar";
+    row-gap: 0;
+    overflow: visible;
+    mask-image: none;
+    -webkit-mask-image: none;
+}
+html[data-layout="docked"] #page-skills > .app-page-header[data-lead]:not([data-return]) { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "tabs toolbar"; }
+html[data-layout="docked"] #page-skills .app-page-title-block,
+html[data-layout="docked"] #page-skills .app-page-lead { display: contents; }
+html[data-layout="docked"] #page-skills .app-page-title-row { display: none; }
+html[data-layout="docked"] #page-skills .app-page-return { grid-area: back; }
+html[data-layout="docked"] #page-skills .app-page-toolbar { min-height: var(--page-header-row-h); }
+html[data-layout="docked"] #page-skills .app-tab-strip { grid-area: tabs; }
+@media (max-width: 1087px) {
+    @container skillspage (max-width: 36rem) {
+        html[data-layout="docked"] #page-skills > .app-page-header[data-lead][data-return] { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "back toolbar" "tabs tabs"; }
     }
-    html[data-layout="docked"] #page-skills .app-page-title-block,
-    html[data-layout="docked"] #page-skills .app-page-lead { display: contents; }
-    html[data-layout="docked"] #page-skills .app-page-title-row { display: none; }
-    html[data-layout="docked"] #page-skills .app-page-return { grid-area: back; }
-    html[data-layout="docked"] #page-skills .app-page-toolbar { min-height: max(50px, var(--window-chrome-top, 0px)); }
-    html[data-layout="docked"] #page-skills .app-tab-strip {
-        grid-area: tabs;
-        padding-top: var(--space-2);
-        padding-bottom: var(--space-4);
-        margin-bottom: calc(-1 * var(--space-4));
+    @container skillspage (max-width: 30rem) {
+        html[data-layout="docked"] #page-skills > .app-page-header[data-lead] { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "back toolbar" "tabs tabs"; }
     }
 }
 
@@ -12187,23 +12210,52 @@ html[data-telegram-fullscreen][data-layout="docked"] .app-page-header[data-lead]
 html[data-telegram-fullscreen][data-layout="docked"] .project-panel-bar { padding-top: calc(10px + var(--inset-top)); }
 html[data-telegram-fullscreen][data-layout="docked"] .sidebar-head { padding-top: calc(var(--space-4) + var(--inset-top)); }
 
-/* A section shares Telegram's own row. The host reports heights, never capsule rectangles: fixed safe sides keep
-   the name and one page action in its gap. A rail belongs on the next line. Rooms retain their own placement. */
+/* A section shares Telegram's row: one drawer control and one title inside the host's safe gap.
+   Rails and actions keep their existing nodes on the line below. Rooms keep their own placement. */
 html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header {
-    --telegram-header-start: 96px;
-    --telegram-header-end: 88px;
-    padding: calc(var(--inset-top) - var(--tg-content-safe-area-inset-top)) var(--telegram-header-end) 0 var(--telegram-header-start);
-    min-height: calc(var(--inset-top) - var(--tg-content-safe-area-inset-top) + var(--touch-target-min));
-    column-gap: var(--space-2);
+    position: relative;
+    --telegram-header-start: 108px;
+    --telegram-header-end: 100px;
+    --touch-target-min: 44px;
+    --control-h-float: var(--touch-target-min);
+    --telegram-row-top: calc(var(--inset-top) - var(--tg-content-safe-area-inset-top));
+    padding: calc(var(--telegram-row-top) + var(--touch-target-min) + var(--space-2)) var(--space-3) var(--space-2);
+    min-height: calc(var(--telegram-row-top) + var(--touch-target-min));
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "title toolbar";
+    gap: 0 var(--space-2);
 }
-html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header .app-page-toolbar { flex: none; }
-html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header > .app-page-leading { display: none; }
-html[data-telegram-fullscreen="active"] #page-dashboard .logs-kinds {
-    margin-inline: calc(var(--space-3) - var(--telegram-header-start)) calc(var(--space-3) - var(--telegram-header-end));
-    max-width: none;
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header > .app-page-leading {
+    display: flex;
+    position: absolute;
+    top: var(--telegram-row-top);
+    left: var(--telegram-header-start);
+    grid-area: auto;
 }
-/* Update all remains available at the list's start while Refresh occupies the shared row. */
-.skills-scroll > #skills-update-all { margin-bottom: var(--space-3); }
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header :is(.app-page-title, .app-page-lead-title) {
+    position: absolute;
+    top: var(--telegram-row-top);
+    left: calc(var(--telegram-header-start) + var(--touch-target-min) + var(--space-1));
+    right: var(--telegram-header-end);
+    width: auto;
+    height: var(--touch-target-min);
+    margin: 0;
+    display: flex;
+    align-items: center;
+    clip-path: none;
+    grid-area: auto;
+}
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place[data-section-view="page"] > .app-page-header .app-page-title { display: none; }
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header > .app-page-title-block { display: block; grid-area: title; }
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header .app-page-title-row { display: contents; }
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header .app-page-lead {
+    display: flex; position: static; width: auto; height: auto; min-height: 0; margin: 0; overflow: visible; clip-path: none;
+}
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header .app-tab-strip { padding: 0; margin: 0; }
+html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header .app-tab { --control-pad-x: var(--space-2); --button-font-size: var(--type-meta); }
+html[data-telegram-fullscreen="active"][data-layout="stack"] #page-dashboard .app-page-header[data-controls] .section-lead-page { display: flex; }
+html[data-telegram-fullscreen="active"] #page-dashboard .logs-filters:not([hidden]) { display: flex; }
+html[data-telegram-fullscreen="active"] #page-dashboard .logs-kinds { margin: 0; padding: 0; max-width: 100%; }
 
 /* A return always restores focus. Its input determines whether that cursor is visible. */
 [data-return-focus="keyboard"]:focus { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }

@@ -390,7 +390,8 @@ export function initSkills(ctx = {}) {
         paintFilters(skills);
         const candidates = skills ? updateAllCandidates(skills, cache.sourcesValue) : [];
         updateAllBtn.hidden = !(activeTab === 'installed' && candidates.length >= 2);
-        updateAllBtn.textContent = `Update ${candidates.length} trusted`;
+        updateAllBtn.textContent = `Update ${candidates.length}`;
+        updateAllBtn.setAttribute('aria-label', `Update ${candidates.length} trusted skills`);
         const pill = document.getElementById('skills-tab-pill-installed');
         const count = inFlightCount(lifecycleEventsFromQueue(snapshot?.queue));
         if (pill) { pill.hidden = !count; pill.textContent = count ? String(count) : ''; }
@@ -1038,8 +1039,7 @@ export function initSkills(ctx = {}) {
         onChange(tabName) { closeMenus(); activeTab = tabName; activateTab(tabName); paintChrome(); showActive(); },
     });
     // On a desk Installed, Browse and Sources start the bar that Update all and Refresh end (DESIGN "Page header").
-    const disposeBar = bindPageHeader(root.querySelector('.app-page-header'), {
-        secondary: updateAllBtn, overflow: root.querySelector('.skills-scroll') });
+    const disposeBar = bindPageHeader(root.querySelector('.app-page-header'));
 
     const onRefresh = async () => {
         refreshBtn.disabled = true;

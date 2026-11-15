@@ -344,9 +344,9 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
             bar = bars[name]
             # Two ends on Main's line: the page's tabs or location at the start, its actions at the end.
             assert bar['lead'] and 'data-lead' in bar['attrs'] and not bar['under'], (name, bar)
-            assert bar['height'] <= 56 and bar['centres'] and max(bar['centres']) - min(bar['centres']) <= 1, (name, bar)
-            # Skills' strip retains its shared fade inset inside the band; Files starts at the band inset.
-            assert abs(bar['centres'][0] - 25) <= 1 and abs(bar['first'] - (36 if name == 'skills' else 20)) <= 1, (name, bar)
+            assert bar['height'] == 66 and bar['centres'] and max(bar['centres']) - min(bar['centres']) <= 1, (name, bar)
+            # A browser keeps the same 18px upper inset and content edge as the desktop window.
+            assert abs(bar['centres'][0] - 33) <= 1 and abs(bar['first'] - 20) <= 1, (name, bar)
             # The strip lends its shadows room below the bar but never takes a press meant for the page.
             assert bar['hitsPage'], (name, bar)
             setup_browser.capture(page, f'bar-a-{name}-{engine}-1087')
@@ -354,7 +354,7 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         _goto(page, 'settings')
         settings_bar = page.evaluate(BAR, 'settings')
         assert settings_bar['lead'] and 'data-lead' in settings_bar['attrs'] and 'data-empty' not in settings_bar['attrs']
-        assert settings_bar['height'] == 50, settings_bar
+        assert settings_bar['height'] == 66, settings_bar
         # The macOS window: the bar is the band, its controls centred on it; an empty header (Widgets) is only the
         # window's handle over the page, and the page's first card sits one inset (not two) under the band.
         _band(page)
@@ -736,7 +736,7 @@ def test_skills_tabs_and_existing_toolbar_survive_a_narrow_content_column(engine
                     return r.left >= p.left && r.right <= p.right; })""")
             assert abs(positions[0] - positions[1]) < 1, 'trailing actions cannot move the tabs under the pointer'
             below = strip.locator('[data-tab="installed"]').bounding_box()['y'] >= lead.bounding_box()['y'] + lead.bounding_box()['height']
-            assert below == (column == 488)
+            assert below == (column == 488), 'only the column too narrow for the return, tabs and short actions takes two lines'
     finally:
         page.close()
 

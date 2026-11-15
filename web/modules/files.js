@@ -105,9 +105,16 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     bindPageHeader(page.querySelector('.app-page-header'), {
         lead: breadcrumbEl, actions: page.querySelector('.files-browser-actions') });
     const revealFolder = (crumb) => revealStripChoice(breadcrumbEl, crumb);
-    const revealCurrentFolder = () => revealFolder(breadcrumbEl.lastElementChild);
+    const revealCurrentFolder = () => {
+        const band = page.querySelector('.app-page-header').offsetHeight + page.querySelector('.files-band').offsetHeight;
+        page.style.setProperty('--files-band-h', `${band}px`);
+        revealFolder(breadcrumbEl.lastElementChild);
+    };
     bindScrollFade(breadcrumbEl, { axis: 'x' });
-    if (typeof ResizeObserver === 'function') new ResizeObserver(revealCurrentFolder).observe(breadcrumbEl);
+    if (typeof ResizeObserver === 'function') {
+        const bandSize = new ResizeObserver(revealCurrentFolder);
+        for (const node of [breadcrumbEl, page.querySelector('.app-page-header'), page.querySelector('.files-band')]) bandSize.observe(node);
+    }
     breadcrumbEl.addEventListener('focusin', (event) => revealFolder(event.target.closest?.('.files-crumb')));
 
     const state = {

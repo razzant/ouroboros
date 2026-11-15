@@ -15,16 +15,46 @@ test('Skills keeps its return and tabs at the leading edge, with one extra line 
     assert.match(css, /#page-skills > \.app-page-tabs \{ padding-bottom: 0; \}/);
     assert.match(css, /#page-skills > \.app-page-tabs > \.app-tab-strip \{[\s\S]*?margin-bottom: calc\(-1 \* var\(--space-4\)\);/,
         'the strip lends its shadows space without a blank row before the search');
-    const narrow = css.slice(css.indexOf('@container skillspage'), css.indexOf('.skills-search-chrome {'));
-    assert.match(narrow, /max-width: 44rem/);
+    const narrow = css.slice(css.indexOf('html[data-layout="docked"] #page-skills > .app-page-header[data-lead]'), css.indexOf('.skills-search-chrome {'));
+    assert.match(narrow, /max-width: 36rem/);
+    assert.match(narrow, /max-width: 30rem/);
+    assert.match(narrow, /@media \(max-width: 1087px\)/);
     assert.match(narrow, /grid-template-areas: "back toolbar" "tabs tabs"/);
-    assert.match(narrow, /\.app-page-toolbar \{ min-height: max\(50px, var\(--window-chrome-top, 0px\)\);/,
+    assert.match(narrow, /\.app-page-toolbar \{ min-height: var\(--page-header-row-h\);/,
         'the first row keeps its band with native chrome and without the host token');
     assert.match(narrow, /\.app-page-lead \{ display: contents;/);
     assert.match(narrow, /\.app-tab-strip \{[\s\S]*?grid-area: tabs;/);
     assert.match(css, /html\[data-layout="docked"\] \.app-page-header\[data-lead\] \{[\s\S]*?grid-template-areas: "title toolbar"/,
         'a wide column keeps the single existing row');
-    assert.doesNotMatch(narrow, /@media|ResizeObserver/);
+    assert.doesNotMatch(narrow, /ResizeObserver/);
+});
+
+test('a section band has the same inset without native chrome and one leading edge with or without a return', () => {
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    const ui = readFileSync(new URL('../ui.css', import.meta.url), 'utf8');
+    assert.match(ui, /--page-header-row-h: max\(var\(--window-chrome-top, 0px\), calc\(var\(--control-h-float\) \+ 36px\)\)/);
+    assert.match(css, /\.app-page-header\[data-lead\] \{[^}]*min-height: var\(--page-header-row-h\)/);
+    assert.match(css, /\.app-page-header\[data-return="column"\] > \.app-page-title-block \{ display: block; \}/);
+    assert.match(css, /\.app-page-header\[data-return\] > \.app-page-title-block \{ display: flex;/, 'an ordinary leading return keeps its actual sibling');
+    assert.match(css, /\.app-page-lead \.app-tab-strip \{[^}]*padding: 10px 0 26px;/);
+    assert.match(css, /section-rail \{\s*padding-top: calc\(var\(--page-header-row-h\) \+ var\(--space-3\)\)/);
+});
+
+test('header actions use the floating control tokens while the return keeps its glass recipe', () => {
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.match(css, /\.app-page-header \.btn, \.files-band \.btn \{[^}]*--control-h: var\(--control-h-float\);[^}]*--button-font-size: var\(--type-meta\)/);
+    assert.match(css, /\.shell-back \{ width: auto;/);
+    assert.doesNotMatch(css, /\.app-page-header \.shell-back[^}]*--control-h:/);
+});
+
+test('Telegram sections keep a visible drawer control and one title baseline inside both host buttons', () => {
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    const telegram = css.slice(css.indexOf('/* A section shares Telegram'));
+    assert.match(telegram, /--telegram-header-start: 108px/);
+    assert.match(telegram, /--telegram-header-end: 100px/);
+    assert.match(telegram, /> \.app-page-leading \{[^}]*display: flex;/);
+    assert.match(telegram, /:is\(\.app-page-title, \.app-page-lead-title\) \{/);
+    assert.doesNotMatch(telegram, /> \.app-page-leading \{ display: none;/);
 });
 
 test('page headers retain their toolbar contract with an optional chrome recipe', () => {
@@ -274,8 +304,8 @@ test('a page\'s own navigation starts its bar on a desk and goes back under the 
         el('page', telegram, overflow);
         update.focus();
         const offTelegram = bindPageHeader(telegram, { secondary: update, overflow });
-        assert.deepEqual(names(telegramActions), ['refresh'], 'fullscreen: one page action in the host row');
-        assert.deepEqual(names(overflow), ['update'], 'the other action stays reachable in the list');
+        assert.deepEqual(names(telegramActions), ['update', 'refresh'], 'fullscreen keeps the same actions together');
+        assert.deepEqual(names(overflow), [], 'no isolated action above the list');
         assert.equal(doc.activeElement, update);
         doc.documentElement.dataset.telegramFullscreen = 'expanded';
         layout('stack');

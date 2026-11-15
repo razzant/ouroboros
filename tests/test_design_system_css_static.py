@@ -41,7 +41,9 @@ def test_header_presence_comes_from_writers_and_telegram_owns_its_back():
     assert ':has([data-settings-search-slot]:empty)' not in settings
     assert 'data-page-back' not in css and '.dashboard-back' not in css
     scope = 'html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header'
-    assert scope + ' > .app-page-leading { display: none; }' in css
+    leading = re.search(re.escape(scope) + r' > \.app-page-leading \{([^}]+)\}', css)[1]
+    assert 'display: flex;' in leading, 'sections keep a visible way to the drawer in Telegram'
+    assert '--telegram-header-start: 108px;' in css and '--telegram-header-end: 100px;' in css
     assert scope + ' {' in css, 'Telegram section placement excludes room bars'
     capsule = re.search(r'\.app-page-return \{([^}]+)\}', css)[1]
     assert float(re.search(r'flex-shrink: ([\d.]+)', capsule)[1]) > 1, 'return words yield before the page controls'

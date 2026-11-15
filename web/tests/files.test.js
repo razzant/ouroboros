@@ -21,6 +21,12 @@ test('Files keeps location and actions in the band, with the filter first in its
     assert.equal(band.contains(page.querySelector('#files-search')), false);
     assert.equal(page.querySelector('#files-search').getAttribute('type'), 'search', 'Escape can clear a filter before Back');
     assert.equal(page.querySelector('[data-files-back]'), null, 'a preview uses the shell slot too');
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.match(css, /\.files-layout \{[^}]*position: absolute;[^}]*inset: 0;/);
+    const sidebar = css.match(/\.files-sidebar \{([^}]+)\}/)[1];
+    assert.match(sidebar, /border-right: 1px solid var\(--divider\)/);
+    assert.doesNotMatch(sidebar, /background:/, 'the column does not paint its own sheet');
+    assert.match(css, /\.files-sidebar\[data-scroll-above\] \{ --scroll-fade-top-clear: var\(--files-band-h\); --scroll-fade-top: calc\(var\(--files-band-h\) \+ var\(--scroll-fade-edge\)\); \}/);
 });
 
 test('a file shown alone names its folder in the shell layer; beside the list it owes no level Back', () => {

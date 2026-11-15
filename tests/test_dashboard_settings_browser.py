@@ -259,11 +259,8 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     assert back.inner_text().strip() == "Consciousness" and back.get_attribute("aria-label") == "Back to Consciousness"
     assert back.get_attribute("title") == "Back to Consciousness"
     parent = page.locator('#page-settings [data-shell-level]')
-    assert parent.inner_text().strip() == "Models" and parent.is_visible()
-    assert page.locator('#page-settings [data-settings-lead-name]').inner_text() == "Consciousness"
-    parent.click()
-    page.locator('[data-settings-page="models"]:visible').wait_for()
-    assert back.inner_text().strip() == "Consciousness" and parent.count() == 0
+    assert parent.count() == 0, 'the jump is the only back control until spent'
+    assert page.locator('#page-settings [data-settings-lead-name]').inner_text() == "Consciousness model"
     back.click()
     page.wait_for_selector("#dashboard-panel-consciousness.active")
     # Spending a jump through the map keeps the child named and its own parent reachable.
@@ -358,6 +355,12 @@ def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, widt
             page.go_back()
         page.wait_for_selector("#page-settings.active")
         assert back.count() == 0, leave
+        focus = page.evaluate("""() => ({row: document.activeElement?.dataset.settingsOpen,
+            ring: getComputedStyle(document.activeElement).outlineStyle,
+            input: document.activeElement?.dataset.returnFocus})""")
+        assert focus['row'] == f'dashboard:{tab}', focus
+        assert focus['input'] == ('keyboard' if leave == 'Escape' else 'pointer'), focus
+        assert (focus['ring'] != 'none') == (leave == 'Escape'), focus
 
     tops = {}
     for tab in TABS:

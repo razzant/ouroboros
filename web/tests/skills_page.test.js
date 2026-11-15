@@ -32,6 +32,21 @@ test('search and chips belong to the scrolling list; tabs and actions stay above
     }
 });
 
+test('Update counts trusted candidates briefly in the band and keeps the full scope in its accessible name', () => {
+    const source = readFileSync(new URL('../modules/skills.js', import.meta.url), 'utf8');
+    const button = { setAttribute(key, value) { this[key] = value; } };
+    const context = vm.createContext({ snapshot: { rawSkills: true }, projected: () => [], paintFilters() {},
+        updateAllCandidates: () => Array.from({ length: context.count }), cache: {}, activeTab: 'installed',
+        updateAllBtn: button, document: { getElementById: () => null }, lifecycleEventsFromQueue: () => [], inFlightCount: () => 0 });
+    vm.runInContext(source.match(/    function paintChrome\(\) \{[\s\S]+?\n    \}/)[0], context);
+    for (const count of [4, 0]) {
+        context.count = count; context.paintChrome();
+        assert.equal(button.textContent, `Update ${count}`);
+        assert.equal(button['aria-label'], `Update ${count} trusted skills`);
+        assert.equal(button.hidden, count < 2);
+    }
+});
+
 test('a skill opens Widgets as a jump; a nested visit cannot replace the tab saved by an earlier return', async () => {
     const source = readFileSync(new URL('../modules/skills.js', import.meta.url), 'utf8');
     const shown = [], selected = [];
