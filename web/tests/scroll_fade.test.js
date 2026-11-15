@@ -3,17 +3,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { bindScrollFade, revealPastFade } from '../modules/scroll_fade.js';
 
-test('room fades cover hidden chrome; the top comparison keeps the same bottom in both settings', () => {
+test('room fades cover the floating chrome only while content waits there; crisp preserves its alternative', () => {
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
     const room = css.slice(css.indexOf('/* Room edges use'), css.indexOf('.page-header .spacer'));
     assert.match(room, /\[data-scroll-above\][^{]*\{[^}]*--scroll-fade-top: calc\(var\(--chat-header-reserve, 56px\) \+ var\(--scroll-fade-edge\)\)/);
     assert.match(room, /\[data-scroll-below\][^{]*\{[^}]*--scroll-fade-bottom: var\(--chat-input-reserve, 108px\)/);
     assert.match(room, /--scroll-fade-bottom-clear: calc\(var\(--chat-input-reserve, 108px\) - var\(--scroll-fade-edge\)\)/);
     assert.match(css, /\.scroll-fade-y \{[^}]*--scroll-fade-bottom-clear: 0px/);
-    const crisp = room.match(/\[data-room-top="crisp"\][^{]*\{([^}]+)\}/)[1];
-    assert.match(crisp, /--scroll-fade-top: 0px/);
-    assert.doesNotMatch(crisp, /mask-image|--scroll-fade-bottom/,
-        'B changes only the top; bottom clearance and the shared mask still apply');
+    assert.match(room, /\[data-room-top="crisp"\][^{]*\{[^}]*mask-image: none/);
 });
 
 function fixture() {

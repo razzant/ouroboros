@@ -1615,7 +1615,8 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 /* Build B for the owner’s frame comparison: one root attribute keeps the room’s historical crisp top without
    changing the shared scroller or its bottom edge. The candidate default is the fade above. */
 [data-room-top="crisp"] :is(#chat-messages, .chat-messages) {
-    --scroll-fade-top: 0px;
+    -webkit-mask-image: none;
+    mask-image: none;
 }
 
 .page-header .spacer { flex: 1; }
