@@ -699,9 +699,8 @@ def _replace_unready_slot(wid: int, slot: Any, owner_chat_id: int, started: floa
     if slot.proc.is_alive():
         _defer_unready_teardown(wid, slot, owner_chat_id, started, attempt)
         return  # stop unconfirmed: never spawn beside it
-    with _WORKER_LIFECYCLE_LOCK:
-        if _booting_slot_current(wid, slot):
-            _replace_or_park_unready_slot(wid, slot, owner_chat_id, started, attempt)
+    if _booting_slot_current(wid, slot):
+        _replace_or_park_unready_slot(wid, slot, owner_chat_id, started, attempt)
 
 
 def _defer_unready_teardown(wid: int, slot: Any, owner_chat_id: int, started: float, attempt: int) -> None:
@@ -747,16 +746,15 @@ def finish_unready_teardown(job: dict) -> None:
         slot.proc.join(timeout=2 if job.pop("first_stop", False) else 0)  # the first stop sees an ordinary exit now
     if slot.proc.is_alive():
         raise TerminalFileRecoveryPending("unready worker stop is not yet confirmed")
-    with _WORKER_LIFECYCLE_LOCK:
-        if _unready_teardown_current(job, slot):
-            _replace_or_park_unready_slot(wid, slot, job["owner_chat_id"], job["started"], job["attempt"])
+    if _unready_teardown_current(job, slot):
+        _replace_or_park_unready_slot(wid, slot, job["owner_chat_id"], job["started"], job["attempt"])
 
 
 def _replace_or_park_unready_slot(wid: int, slot: Any, owner_chat_id: int, started: float, attempt: int) -> None:
     """After a confirmed stop: retry or park; only the first park since a ready notifies the owner."""
     if attempt < WORKER_READY_MAX_ATTEMPTS:
         try:
-            respawn_worker(wid, ready_attempt=attempt + 1)
+            respawn_worker(wid, ready_attempt=attempt + 1, expected_worker=slot)
         except Exception:
             log.warning("Respawn of unready worker %d failed; clearing reaping for recovery", wid, exc_info=True)
             with _queue_lock:
@@ -765,8 +763,9 @@ def _replace_or_park_unready_slot(wid: int, slot: Any, owner_chat_id: int, start
                     slot.reaping = False  # the crash detector recovers the dead slot
         return
     log.error("Worker %d never confirmed ready in %d attempts; slot parked until restart", wid, attempt)
-    with _queue_lock:
-        if _pool().WORKERS.get(wid) is not slot:
+    with _WORKER_LIFECYCLE_LOCK, _queue_lock:
+        if (_pool().WORKERS.get(wid) is not slot or project_fenced(slot)
+                or slot.proc.is_alive()):
             return
         slot.readiness_exhausted = slot.reaping = True
         slot.booting = False
@@ -873,32 +872,65 @@ def _kill_survivors(slots: Any = None) -> None:
             w.proc.join(timeout=2)
 
 
-@_serialized_worker_lifecycle
-def respawn_worker(wid: int, *, ready_attempt: int = 1) -> bool:
-    """Replace one owned slot without forking under the queue RLock.
+def respawn_worker(wid: int, *, ready_attempt: int = 1, expected_worker: Any = None) -> bool:
+    """Read admission off both locks, then replace only the captured dead slot.
 
-    The lifecycle lock makes the two-phase check/start/swap mutually exclusive
-    with full-pool shutdown/start.  The identity check after ``proc.start()``
-    prevents a replacement from being installed if the slot was removed while
-    the queue lock was released.  The fresh slot is installed unassignable and
-    handed to the readiness seam; ``ready_attempt`` is that seam's own
-    consecutive-failure count for this slot. A current pool stop fence
-    (exhaustion, Stop, update) starts no child and forgets no slot: a
-    death or timeout captured earlier, a lent slot's included, leaves its dead
-    slot to that fence's owner, whose stop needs the membership it captured.
+    A slow native probe must not hold Stop, conversation dispatch or a warm return.
+    Membership, liveness and the generation's fence are rechecked after it returns.
     """
     with _queue_lock:
         old = _pool().WORKERS.get(wid)
-        fenced = old is not None and project_fenced(old)
-    if old is None or fenced:
+        if (old is None or project_fenced(old) or old.proc.is_alive()
+                or (expected_worker is not None and old is not expected_worker)):
+            return False
+    reading = pool_admission.read() if is_project_slot(old) and is_worker_slot(old) else None
+    with _WORKER_LIFECYCLE_LOCK:
+        with _queue_lock:
+            if _pool().WORKERS.get(wid) is not old or project_fenced(old) or old.proc.is_alive():
+                return False
+        if not is_worker_slot(old):
+            return retire_worker(wid, old)
+        if not getattr(old, "active_capacity", True):
+            return bool(retire_or_replace_worker(wid, old, reading=reading))
+        ready_attempt = max(ready_attempt, getattr(old, "replacement_ready_attempt", 1))
+        if _replacement_waits(wid, old, reading, ready_attempt):
+            old.replacement_ready_attempt = ready_attempt
+            return False
+        return _spawn_worker_slot(wid, old, ready_attempt=ready_attempt, lane=getattr(old, "lane", LANE_PROJECT))
+
+
+def _replacement_waits(wid: int, slot: Any, reading: Any, ready_attempt: int = 1) -> bool:
+    """Apply a pre-lock reading to a dead project replacement, under the serializer.
+
+    No reading means the caller cannot start a project process now. Maintenance
+    uses that case to leave its last dead member for the off-loop crash reaper.
+    A critical hold keeps that member, and a slot past its first readiness attempt, whose
+    count would die with it, for the crash reaper's next replacement; it retires any other.
+    A slot-local mark deduplicates the critical hold; retiring the slot releases it.
+    """
+    if not is_project_slot(slot):
         return False
-    if not is_worker_slot(old):
-        return retire_worker(wid, old)  # an inline executor's pseudo-slot ends with its thread; nothing replaces it
-    if not getattr(old, "active_capacity", True):
-        # A sleeper's dead process mints no replacement (growth buys processes for demand); an enabled
-        # pool's last member is still replaced, with normal failed-spawn recovery.
-        return False if old.proc.is_alive() else bool(retire_or_replace_worker(wid, old))
-    return _spawn_worker_slot(wid, old, ready_attempt=ready_attempt, lane=getattr(old, "lane", LANE_PROJECT))
+    critical = reading is not None and reading.memory is not None and reading.memory.pressure is True
+    if reading is not None and not critical:
+        return False
+    with _queue_lock:
+        if _pool().WORKERS.get(wid) is not slot or project_fenced(slot) or slot.proc.is_alive():
+            return True
+        last = len(_pool().WORKERS) == 1
+        kept = last or (critical and ready_attempt > 1)
+        if kept:
+            slot.booting = slot.reaping = slot.retiring = False
+    if not critical:
+        return True
+    if kept and getattr(slot, "replacement_pressure_held", False):
+        return True
+    outcome = ("kept_last_member" if last else "kept_readiness_attempt" if kept
+               else "retired" if retire_worker(wid, slot) else "fence_owns_it")
+    if kept:
+        slot.replacement_pressure_held = True
+    _supervisor_row({"type": "worker_replacement_held", "worker_id": wid, "reason": "memory_pressure_critical",
+                     "read_at": reading.at, "outcome": outcome})
+    return True
 
 
 def retire_worker(wid: int, slot: Any) -> bool:
@@ -922,7 +954,7 @@ def retire_worker(wid: int, slot: Any) -> bool:
     return True
 
 
-def retire_or_replace_worker(wid: int, slot: Any) -> str:
+def retire_or_replace_worker(wid: int, slot: Any, *, reading: Any = None) -> str:
     """Forget a confirmed-dead slot, but replace an enabled pool's last member in place.
 
     Growth needs a member (an empty pool is stopped); a fence forgets and starts nothing. Serializer held, not Q."""
@@ -931,6 +963,8 @@ def retire_or_replace_worker(wid: int, slot: Any) -> str:
         fenced = project_fenced(slot)
     if not last:
         return "retired" if retire_worker(wid, slot) else ""
+    if not fenced and is_worker_slot(slot) and _replacement_waits(wid, slot, reading):
+        return ""  # a critical verdict holds the start; the dead last member stays for the tick after it
     try:
         return ("replaced" if not fenced and is_worker_slot(slot)
                 and _spawn_worker_slot(wid, slot, lane=getattr(slot, "lane", LANE_PROJECT)) else "")
@@ -1020,8 +1054,9 @@ def reap_idle_worker(job: dict) -> None:
         slot.proc.join(timeout=2 if job.pop("first_stop", False) else 0)
     if slot.proc.is_alive():
         raise TerminalFileRecoveryPending("idle worker stop is not yet confirmed")
+    reading = pool_admission.read() if is_project_slot(slot) else None
     with _WORKER_LIFECYCLE_LOCK:
-        outcome = _idle_retirement_current(job, slot) and retire_or_replace_worker(slot.wid, slot)
+        outcome = _idle_retirement_current(job, slot) and retire_or_replace_worker(slot.wid, slot, reading=reading)
     if outcome:
         lost = int(getattr(slot, "quiescence_retained_rows", 0) or 0)
         _supervisor_row({"type": "worker_retired", "worker_id": slot.wid, "pid": _slot_pid(slot), "token": job["token"],

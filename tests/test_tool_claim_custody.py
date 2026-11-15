@@ -515,7 +515,12 @@ def test_replacing_the_pools_last_dead_member_owes_its_exit(tmp_path, monkeypatc
     monkeypatch.setattr("supervisor.worker_process.close_worker_stop_channel", lambda _proc: None)
     monkeypatch.setattr(lifecycle.threading, "Thread", lambda **_kw: SimpleNamespace(start=lambda: None))
     _claim(tmp_path, "t1", "op-a", pid=42)
-    assert lifecycle.retire_or_replace_worker(0, dead) == "replaced"
+    # A replacement starts only on a reading that is not critical (``pool_admission``); None starts nothing.
+    from ouroboros.host_memory import MemorySnapshot
+    from supervisor import pool_admission
+
+    monkeypatch.setattr(pool_admission, "physical_memory", lambda: MemorySnapshot(64 * 2 ** 30, 48 * 2 ** 30))
+    assert lifecycle.retire_or_replace_worker(0, dead, reading=pool_admission.read()) == "replaced"
     assert custody_owed.labels() == ["exit:42"], "a replacement door owes the ended member's exit too"
     assert custody_owed.drain() == 0 and "op-a" not in _claims(tmp_path, "t1")
 

@@ -9,15 +9,19 @@ from __future__ import annotations
 
 import json
 import time
+import threading
+
+_REAL_THREAD = threading.Thread
 
 import pytest
 
 from ouroboros.host_memory import MemorySnapshot
-from supervisor import pool_admission, queue, worker_pool_lifecycle as lifecycle, workers
+from supervisor import conversation_lane, pool_admission, queue, worker_pool_lifecycle as lifecycle, workers
 from tests.test_owner_wait_pool import InputQueue, Process, park, pool as pool  # noqa: F401 -- fixture
 from tests.worker_pool_support import affirm_ready
 
 GIB = 2 ** 30
+_REAL_LANE_RECONCILE = conversation_lane.reconcile_conversation_lane  # the pool fixture stubs the lane's maintenance
 
 
 @pytest.fixture
@@ -76,7 +80,7 @@ def test_one_readiness_park_leaves_a_waiting_parent_its_floor_and_two_stop_growt
     from ouroboros.engine_facts import engine_pool_line
 
     park(assigning)
-    machine(monkeypatch, 0.1, pressure=True)
+    machine(monkeypatch, 0.1)  # no room: the floor is the waiting parent's one start (critical pressure: below)
     assert starts() == 1
     memory_fact = pool_admission.facts()
     with queue._queue_lock:
@@ -191,22 +195,224 @@ def test_room_admits_k_starts_and_starting_processes_of_both_lanes_take_their_sh
         4 * GIB, GIB, GIB, 2, 1, "memory_room")
 
 
-def test_critical_pressure_admits_nothing_beside_acting_work_and_the_floor_one_start(assigning, monkeypatch):
-    """Pressure refuses only a new process; the floor (nothing acting, nothing starting) still admits exactly one,
-    with room or without, and one starting process takes it back."""
+def test_confirmed_critical_pressure_admits_no_start_and_an_unread_verdict_admits_as_before(assigning, monkeypatch):
+    """Pressure refuses only a new process. A confirmed critical verdict admits none, the floor included (owner
+    choice, 2026-11-14); without it the floor (nothing acting, nothing starting) still admits exactly one, with room
+    or without, and one starting process takes it back. An unread verdict (None) is published as unknown and admits
+    exactly what a reading without critical pressure admits: unknown is neither critical nor normal."""
     assigning.original.rss = {"rss_bytes": GIB, "rss_measure": "current"}
     machine(monkeypatch, 9, pressure=True)
     assert starts() == 0 and pool_admission.facts()["reason"] == "memory_pressure_critical"
     machine(monkeypatch, 0.5)  # no room at all
     assert starts() == 0 and pool_admission.facts()["reason"] == "memory_full"
+    for pressure, published in ((False, "not_critical"), (None, "unknown")):
+        machine(monkeypatch, 9, pressure=pressure)
+        facts = pool_admission.facts() if starts() == 8 else pytest.fail(f"room decides beside {published}")
+        assert (facts["pressure"], facts["reason"]) == (published, "memory_room")
     workers.RUNNING.clear()
     assigning.original.busy_task_id = None
     assigning.original.ready_identity = None  # not idle either: nothing acts, nothing starts
-    for pressure, available in ((True, 9), (False, 0.5)):
+    machine(monkeypatch, 9, pressure=True)
+    assert starts() == 0, "nothing acts or starts, and still a confirmed critical verdict admits no start"
+    facts = pool_admission.facts()
+    assert facts["read_at"] and (facts["pressure"], facts["starts_admitted"], facts["reason"]) == (
+        "critical", 0, "memory_pressure_critical")
+    for pressure, available in ((False, 0.5), (None, 0.5), (None, 9)):
         machine(monkeypatch, available, pressure=pressure)
-        assert starts() == 1, "the floor admits one start"
+        assert starts() == (1 if available < 1 else 8), "the floor admits one start; an unread verdict, as before"
+    machine(monkeypatch, 0.5)
     booting_slot(5)
     assert starts() == 0, "one starting process: the floor is spent"
+
+
+def test_a_waiting_parents_child_waits_out_critical_pressure_visibly_stoppably_and_starts_when_it_clears(
+        assigning, monkeypatch):
+    """The floor once started a new process for a parent that waits on its own process (holding its memory) for
+    its queued child, even under critical pressure. Now that child waits while the kernel confirms critical: no
+    process starts, the published facts date the wait and name its reason for the mind (runtime facts, the pool
+    line its schedule_subagent result carries) and the owner (/status), Stop settles a waiting row before it starts
+    as any queued row, the
+    conversation lane still gets its carrier, and the first pass whose reading is not critical starts the child
+    with no other actor's help. Reuse and a warm return never ask (``test_an_idle_process_and_a_warm_return_go_at_
+    zero_room``)."""
+    from ouroboros import cancel_intents
+    from ouroboros.context_runtime_facts import _queue_context_fact
+    from ouroboros.engine_facts import engine_pool_line
+    from ouroboros.task_results import load_task_result, write_task_result
+    from supervisor.state import status_text
+
+    monkeypatch.setattr(workers, "_emit_task_done_terminal", lambda *args, **kwargs: True)
+    park(assigning)  # the parent waits on its own process for what it queued
+    calls = []
+    machine(monkeypatch, 9, pressure=True, calls=calls)
+    for tid in ("child", "stopped"):
+        write_task_result(assigning.root, tid, "scheduled")
+        workers.PENDING.append(child(tid))
+    for _tick in range(3):
+        workers.assign_tasks()
+    assert not assigning.created and [row["id"] for row in workers.PENDING] == ["child", "stopped"]
+    assert calls == [(False, False)] * 3, "one reading a pass, outside Q and the serializer: no busy loop"
+    queue.persist_queue_snapshot("memory_pressure_wait")
+    fact = _queue_context_fact({"budget_drive_root": str(assigning.root)})["memory_admission"]
+    assert fact["read_at"] and (fact["pressure"], fact["starts_admitted"], fact["reason"]) == (
+        "critical", 0, "memory_pressure_critical")
+    line = engine_pool_line(assigning.root)
+    assert "kernel pressure critical" in line and "new processes admitted 0 (memory_pressure_critical)" in line
+    owner = status_text(workers.WORKERS, workers.PENDING, workers.RUNNING).splitlines()  # the owner's /status
+    assert f"memory_admission: no new project process starts: the kernel reports critical memory pressure (read " \
+           f"{fact['read_at']}); queued work that needs one waits and starts by itself once a reading is not " \
+           "critical; Stop ends a queued task" in owner and owner.index("pending: 2") + 1 == owner.index(
+               next(row for row in owner if row.startswith("memory_admission: ")))
+    cancel_intents.request_cancel(assigning.root, "stopped", reason="owner stop while it waited")
+    workers.assign_tasks()
+    assert [row["id"] for row in workers.PENDING] == ["child"] and not assigning.created
+    assert load_task_result(assigning.root, "stopped")["status"] == "cancelled", "Stop ended a waiting row"
+    monkeypatch.setattr(conversation_lane, "reconcile_conversation_lane", _REAL_LANE_RECONCILE)
+    monkeypatch.setattr(conversation_lane, "_ARMED_TABLE", id(workers.WORKERS))  # a started generation
+    lifecycle.reconcile_worker_capacity(lambda: 0, pool_admission.read())
+    lane = [slot for slot in workers.WORKERS.values() if slot.lane == "conversation"]
+    assert len(lane) == 1 and assigning.created == [lane[0].proc], "the conversation lane stays outside admission"
+    machine(monkeypatch, 9)  # the verdict clears
+    workers.assign_tasks()
+    assert len(assigning.created) == 2 and [row["id"] for row in workers.PENDING] == ["child"]
+    assert pool_admission.facts()["reason"] == "memory_room", "the next pass admitted the start on its own"
+    owner = status_text(workers.WORKERS, workers.PENDING, workers.RUNNING)
+    assert "no new project process starts" not in owner and "new project process(es) admitted (memory_room), " \
+           "kernel pressure not_critical (read " in owner
+
+
+def _held_rows(root) -> list:
+    path = root / "logs" / "supervisor.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+    return [row for row in rows if row.get("type") == "worker_replacement_held"]
+
+
+def _dies_idle(slot):
+    """The slot's process died with no task left on it (a crash, a reap, jetsam): the reaper's respawn comes next."""
+    slot.proc.alive = False
+    slot.busy_task_id = None
+    workers.RUNNING.pop("owner", None)
+
+
+def _lane_spare():
+    workers.WORKERS[7] = affirm_ready(workers.Worker(7, Process(507), InputQueue(), lane="conversation"))
+    return workers.WORKERS[7]
+
+
+def test_a_dead_project_slot_is_not_replaced_under_confirmed_critical_and_the_next_pass_admits_a_process(
+        assigning, monkeypatch):
+    """A replacement is bound to no task (once ready it takes the first queued row, new work included), so a confirmed
+    critical verdict holds it like any start. Through the reaper's own respawn the dead slot is forgotten on a reading
+    taken outside Q and the lifecycle serializer, and is never told as a refused respawn; the queued
+    retry and new work wait; the next ordinary pass whose reading is not critical starts a process by the old policy."""
+    from supervisor import task_reaper
+
+    monkeypatch.setattr(task_reaper, "_RESPAWN_REFUSALS", {})
+    spare, calls, original = _lane_spare(), [], assigning.original
+    machine(monkeypatch, 9, pressure=True, calls=calls)
+    _dies_idle(original)
+    task_reaper._respawn_after_reap(queue, workers, 0, expected_worker=original)
+    assert calls == [(False, False)], "one reading, outside both locks"
+    assert not assigning.created and 0 not in workers.WORKERS and workers.WORKERS == {7: spare}
+    assert task_reaper._RESPAWN_REFUSALS == {}, "a held replacement is no refused respawn"
+    assert [(row["outcome"], row["reason"]) for row in _held_rows(assigning.root)] == [
+        ("retired", "memory_pressure_critical")]
+    assert workers.worker_pool_admission_state()["available"], "the table keeps its member: the pool stays enabled"
+    workers.PENDING.extend([task("owner-retry", _attempt=2), task("new-work")])
+    for _tick in range(2):
+        workers.assign_tasks()
+    assert not assigning.created and pool_admission.facts()["reason"] == "memory_pressure_critical"
+    machine(monkeypatch, 9)  # the verdict clears: the ordinary pass admits, by the old policy
+    workers.assign_tasks()
+    (fresh,) = [slot for slot in workers.WORKERS.values() if slot.booting]
+    assert len(assigning.created) == 1 and fresh.lane == "project"
+    fresh.reaping = False
+    affirm_ready(fresh)
+    workers.assign_tasks()
+    assert workers.RUNNING["owner-retry"]["worker_id"] == fresh.wid
+
+
+@pytest.mark.parametrize("pressure, lane", [(None, "project"), (False, "project"), (True, "conversation")],
+                         ids=["unread-verdict", "not-critical", "conversation-lane"])
+def test_unknown_and_not_critical_replace_as_before_and_the_conversation_lane_is_never_held(
+        assigning, monkeypatch, pressure, lane):
+    from supervisor import task_reaper
+
+    calls, original = [], assigning.original
+    machine(monkeypatch, 9, pressure=pressure, calls=calls)
+    original.lane = lane
+    _dies_idle(original)
+    task_reaper._respawn_after_reap(queue, workers, 0, expected_worker=original)
+    fresh = workers.WORKERS[0]
+    assert fresh is not original and fresh.booting and len(assigning.created) == 1 and not _held_rows(assigning.root)
+    assert calls == ([] if lane == "conversation" else [(False, False)]), "the lane never reads the machine"
+
+
+def test_the_tables_last_member_stays_dead_through_critical_and_is_replaced_in_place_after_it(assigning, monkeypatch):
+    """Growth needs a member, so the table's dead last member is never forgotten: under a confirmed critical verdict
+    it stays, handed back to the crash detector (reaping cleared) and decided again each tick, one row for the whole
+    hold, the pool enabled; ``retire_or_replace_worker`` (an idle retirement, a dead sleeper) holds it alike; the first
+    reading that is not critical replaces it in place, as before."""
+    from supervisor import task_reaper
+
+    machine(monkeypatch, 9, pressure=True)
+    original = assigning.original
+    _dies_idle(original)
+    for _tick in range(2):
+        original.reaping = True  # the crash detector's hand-back
+        task_reaper._respawn_after_reap(queue, workers, 0, expected_worker=original)
+        assert workers.WORKERS == {0: original} and not original.reaping and not original.booting
+    assert lifecycle.retire_or_replace_worker(0, original) == "" and workers.WORKERS == {0: original}
+    assert [row["outcome"] for row in _held_rows(assigning.root)] == ["kept_last_member"]
+    assert not assigning.created and workers.worker_pool_admission_state()["available"]
+    machine(monkeypatch, 9)
+    task_reaper._respawn_after_reap(queue, workers, 0, expected_worker=original)
+    assert workers.WORKERS[0] is not original and workers.WORKERS[0].booting and len(assigning.created) == 1
+
+
+def test_a_failed_readiness_respawn_is_held_too_never_parked_or_counted_as_exhaustion(assigning, monkeypatch):
+    """Not the table's last member, it stays too: its spent attempt waits on it for the crash detector."""
+    _lane_spare()
+    machine(monkeypatch, 9, pressure=True)
+    slot = booting_slot(5)
+    slot.proc.alive = False  # its stop is confirmed; one attempt is spent
+    lifecycle._replace_or_park_unready_slot(5, slot, 0, 0.0, 1)
+    assert workers.WORKERS[5] is slot and not slot.readiness_exhausted and not assigning.created
+    assert not slot.booting and not slot.reaping and slot.replacement_ready_attempt == 2
+    assert workers._worker_pool_execution_state()["disabled_reason"] == ""
+    assert [row["outcome"] for row in _held_rows(assigning.root)] == ["kept_readiness_attempt"]
+
+
+def test_readiness_attempts_beside_a_lane_spare_count_through_critical_holds_and_park(assigning, monkeypatch):
+    """Astra r1: a non-last slot past its first readiness attempt was retired under critical and the next start
+    counted from 1, so a never-ready checkout restarted forever. Through the crash detector's own respawn its count
+    now reaches each replacement and the bound parks it as on a calm machine; one row per hold."""
+    from types import SimpleNamespace
+
+    from supervisor import task_reaper
+
+    workers.WORKERS.clear()
+    workers.RUNNING.clear()
+    lane, attempts = _lane_spare(), []
+    monkeypatch.setattr(lifecycle.threading, "Thread",
+                        lambda **kw: attempts.append(kw["args"][2]) or SimpleNamespace(start=lambda: None))
+    machine(monkeypatch, 9)
+    lifecycle.reconcile_worker_capacity(lambda: 1, pool_admission.read())
+    while True:
+        (slot,) = lifecycle.project_slots()
+        slot.proc.alive = False  # confirmed teardown after this readiness attempt timed out
+        machine(monkeypatch, 9, pressure=True)
+        lifecycle._replace_or_park_unready_slot(slot.wid, slot, 0, 0.0, attempts[-1])
+        if slot.readiness_exhausted:
+            break
+        assert workers.WORKERS == {lane.wid: lane, slot.wid: slot} and not slot.reaping
+        machine(monkeypatch, 9)
+        slot.reaping = True  # the crash detector's hand-back
+        task_reaper._respawn_after_reap(queue, workers, slot.wid, expected_worker=slot)
+    assert attempts == list(range(1, lifecycle.WORKER_READY_MAX_ATTEMPTS + 1))
+    assert workers._worker_pool_execution_state()["disabled_reason"]
+    assert [row["outcome"] for row in _held_rows(assigning.root)] == (
+        ["kept_readiness_attempt"] * (lifecycle.WORKER_READY_MAX_ATTEMPTS - 1))
 
 
 def test_an_unknown_reading_admits_one_starting_process_at_a_time_or_the_owners_cap(assigning, monkeypatch):
@@ -534,3 +740,123 @@ def test_the_environment_configures_only_an_unauthored_worker_cap(tmp_path, monk
     _owner_update_settings(fields_on_saved_document({"OUROBOROS_MAX_WORKERS": ""}),
                            authored_keys=["OUROBOROS_MAX_WORKERS"])
     assert config.load_settings()["OUROBOROS_MAX_WORKERS"] == "", "a saved blank wins over the environment too"
+
+
+@pytest.mark.parametrize("door", ["reaper", "readiness", "deferred_readiness", "idle"])
+@pytest.mark.parametrize("change", ["fence", "replacement"])
+def test_slow_replacement_probe_holds_neither_lock_and_revalidates_identity(assigning, monkeypatch, door, change):
+    """A native read stalls; another thread can still stop/change the generation.
+    Returning a healthy reading never revives the captured old membership.
+    """
+    from supervisor import task_reaper
+
+    monkeypatch.setattr(threading, "Thread", _REAL_THREAD)
+    entered, release = threading.Event(), threading.Event()
+    old = assigning.original
+    _dies_idle(old)
+    old.booting = door == "readiness"
+    old.retiring = door == "idle"
+    old.quiescence_token = "owned"
+    job = {"worker": old, "worker_id": old.wid, "drive_root": str(assigning.root),
+           "owner_chat_id": 0, "started": 0, "attempt": 1, "token": "owned"}
+    def slow_read():
+        assert not queue._queue_lock._is_owned()
+        assert not lifecycle._WORKER_LIFECYCLE_LOCK._is_owned()
+        entered.set()
+        assert release.wait(10)
+        return pool_admission.Reading(MemorySnapshot(10 * GIB, 9 * GIB, False), "", "now")
+    monkeypatch.setattr(pool_admission, "read", slow_read)
+    starts = []
+    monkeypatch.setattr(lifecycle, "_spawn_worker_slot", lambda *a, **kw: starts.append(a))
+    errors = []
+    def run():
+        try:
+            if door == "reaper":
+                task_reaper._respawn_after_reap(queue, workers, old.wid, expected_worker=old)
+            elif door == "readiness":
+                lifecycle._replace_unready_slot(old.wid, old, 0, time.time(), 1)
+            elif door == "deferred_readiness":
+                lifecycle.finish_unready_teardown(job)
+            else:
+                lifecycle.reap_idle_worker(job)
+        except BaseException as exc:
+            errors.append(exc)
+    thread = _REAL_THREAD(target=run)
+    thread.start()
+    try:
+        assert entered.wait(5), errors
+        assert lifecycle._WORKER_LIFECYCLE_LOCK.acquire(timeout=1), "native probe blocks control"
+        try:
+            with queue._queue_lock:
+                if change == "fence":
+                    workers._WORKER_POOL_DISABLED_REASON = "managed_update"
+                else:
+                    workers.WORKERS[old.wid] = affirm_ready(workers.Worker(old.wid, Process(9876), InputQueue()))
+        finally:
+            lifecycle._WORKER_LIFECYCLE_LOCK.release()
+    finally:
+        release.set()
+        thread.join(10)
+    assert not thread.is_alive() and not errors and not starts
+    assert workers.WORKERS[old.wid] is old if change == "fence" else workers.WORKERS[old.wid] is not old
+
+
+def test_dead_last_parked_member_never_probes_on_warm_return_tick(assigning, monkeypatch):
+    from supervisor import worker_owner_wait, task_reaper
+
+    old = assigning.original
+    _dies_idle(old)
+    old.active_capacity = False
+    calls = []
+    machine(monkeypatch, 9, pressure=True, calls=calls)
+    worker_owner_wait.grant_warm_returns()
+    assert calls == [] and workers.WORKERS == {old.wid: old}
+    assert not old.reaping and not old.retiring
+    task_reaper._respawn_after_reap(queue, workers, old.wid, expected_worker=old)
+    assert calls == [(False, False)] and not assigning.created
+
+
+def test_readiness_attempt_survives_a_held_last_member(assigning, monkeypatch):
+    from supervisor import task_reaper
+    old = assigning.original
+    _dies_idle(old)
+    machine(monkeypatch, 9, pressure=True)
+    lifecycle._replace_or_park_unready_slot(old.wid, old, 0, 0.0, 1)
+    assert old.replacement_ready_attempt == 2
+    attempts = []
+    monkeypatch.setattr(lifecycle, "_spawn_worker_slot", lambda *a, **kw: attempts.append(kw["ready_attempt"]) or True)
+    machine(monkeypatch, 9)
+    task_reaper._respawn_after_reap(queue, workers, old.wid, expected_worker=old)
+    assert attempts == [2]
+
+
+def test_reaper_without_a_captured_slot_never_claims_a_later_replacement(assigning, monkeypatch):
+    from supervisor import task_reaper
+
+    workers.WORKERS.clear()
+    monkeypatch.setattr(workers, "respawn_worker", lambda *a, **k: pytest.fail("no captured slot to replace"))
+    task_reaper._respawn_after_reap(queue, workers, assigning.original.wid)
+
+
+@pytest.mark.parametrize("door", ["reaper", "stranded_cancel"])
+def test_failed_replacement_never_clears_a_new_slots_reaping_marker(assigning, monkeypatch, door):
+    from supervisor import task_reaper, task_lifecycle
+
+    old = assigning.original
+    _dies_idle(old)
+    old.busy_task_id, old.reaping = "settled", True
+    newer = workers.Worker(old.wid, Process(9876), InputQueue())
+    newer.reaping = True
+    def failed(wid, *, expected_worker):
+        assert expected_worker is old
+        with queue._queue_lock:
+            workers.WORKERS[wid] = newer
+        raise RuntimeError("controlled late replacement failure")
+    monkeypatch.setattr(workers, "respawn_worker", failed)
+    monkeypatch.setattr(task_lifecycle, "_reconcile_dead_review_owner", lambda *args: None)
+    monkeypatch.setattr(task_lifecycle, "_reaping_owner_abandoned", lambda intent: True)
+    if door == "reaper":
+        task_reaper._respawn_after_reap(queue, workers, old.wid)
+    else:
+        task_lifecycle._recover_stranded_reaping_slot(queue, "settled", {"claim_owner": "dead"})
+    assert workers.WORKERS[old.wid] is newer and newer.reaping

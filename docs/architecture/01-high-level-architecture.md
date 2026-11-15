@@ -148,7 +148,8 @@ ouroboros/ — agent core and shared runtime (§6)
   observability.py, redaction.py, source_retention.py, shared_values.py — private CAS: elements stored once, gzip-1, hardlinks (§10)
   evidence_packs.py, evidence_packer.py — per-task xz packs (maintenance job, §5); verified addressed reads, missing ≠ `evidence_corrupt` (PERSISTENCE)
   finalization_timing.py — final-event phase fields and `task_finalization_timing` (§6)
-  process_logging.py — per-process logging bootstrap; the server is the sole `server.log` writer; the launcher copies the server pipe, byte-capped, into `agent_stdout.log`
+  process_logging.py — bounded diagnostic output and logging; server writes `server.log`, launcher copies into `agent_stdout.log`
+  browser_output.py — Playwright driver stderr joins that buffer; stdout stays protocol
   model_send_seal.py — the invariant `model-visible ⟺ logged` for `model_send` (docs/MODEL_SEND_OBSERVABILITY.md)
   cancel_intents.py — durable cancel-intent projection with claim-generation fencing; the one ingress `request_cancel`; fail-closed reads (§5; §10 invariants 14–15)
   owner_hurry.py — owner "hurry": a typed task-local latch and one line for the running work, never a chat message (§5)

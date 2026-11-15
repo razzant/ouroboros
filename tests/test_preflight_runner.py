@@ -1166,6 +1166,45 @@ def test_plugins_are_verified_before_the_candidate_tree_exists(tmp_path, two_pas
     )
 
 
+def test_the_gate_waits_out_critical_memory_pressure_on_the_tasks_progress_line(tmp_path, two_pass_env, stub_passes,
+                                                                               monkeypatch):
+    """A gate is a new heavy test launch: while the kernel confirms critical pressure it starts nothing, says so on
+    the task's progress line (the owner's view of the running tool) and its stderr, and starts its passes at the
+    first reading that is not critical; ``result.json`` keeps the wait beside the admission (owner choice,
+    2026-11-14). The wait spends none of the lanes' budget: a wait longer than the whole budget still runs both
+    passes. The task's Stop and deadline end its worker as before: the wait holds no lock or ledger row."""
+    from types import SimpleNamespace
+
+    from ouroboros import config, host_memory, preflight_runner as pr, test_parallelism as budget
+
+    monkeypatch.delenv(budget.NESTED_WORKERS_ENV)  # a task's gate, not a test's child
+    monkeypatch.setattr(budget, "_ledger_dir", lambda: tmp_path / "slots")
+    monkeypatch.setattr(budget, "_process_table", lambda: ([], ""))
+    monkeypatch.setattr(config, "TEST_PROCESS_SAMPLE_SEC", 0.6)  # five critical readings: a wait past the budget
+    verdicts = [True] * 5 + [False, False]  # the admission, the wait's readings, the admission that starts
+    monkeypatch.setattr(budget, "physical_memory", lambda: host_memory.MemorySnapshot(2 ** 40, 2 ** 40, verdicts.pop(0)))
+    events = stub_passes([(0, ""), (0, "")])
+    repo = _make_repo(tmp_path, {"tests/test_plain.py": "def test_ok():\n    assert True\n"})
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    ctx = SimpleNamespace(repo_dir=repo, drive_root=tmp_path / "drive", task_id="task-w",
+                          task_metadata={"budget_drive_root": str(canonical)},
+                          emit_progress_fn=lambda text: events.append(("progress", text)))
+    began = time.monotonic()
+    assert pr.run_hermetic_pytest(repo, timeout=2, ctx=ctx) is None
+    assert time.monotonic() - began > 2, "the wait outlasted the gate's whole budget"
+    assert [event[0] for event in events] == ["progress", "progress", "pass", "pass"] and not verdicts
+    assert events[2][2] > 1.5, "the first pass got the budget the wait did not spend"
+    waiting, cleared = events[0][1], events[1][1]
+    assert waiting.startswith("Tests preflight waiting to start: the kernel reports critical memory pressure (read ")
+    assert cleared.startswith("Tests preflight memory pressure no longer critical (read ")
+    record = json.loads((pathlib.Path(ctx._preflight_test_evidence) / "result.json").read_text(encoding="utf-8"))
+    since, until, ended = record["workers"]["memory_wait"]
+    assert f"(read {since})" in waiting and f"(read {until})" in cleared and f"since {since}" in cleared
+    assert ended == "not_critical"
+    assert record["workers"]["workers"] == 2 and not list((tmp_path / "slots").glob("*.json"))
+
+
 def test_the_legacy_single_pass_does_not_require_the_parallel_plugins(tmp_path, two_pass_env, stub_passes, monkeypatch):
     """Verification is scoped to passes that actually carry `-n`. The escape
     hatch exists precisely so an operator can commit WHILE provisioning, so it

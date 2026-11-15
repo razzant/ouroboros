@@ -1325,8 +1325,11 @@ def _run_hermetic_pytest(
         if (durations := _durations_target(ctx)) is not None:  # every session of this gate keeps it current
             (temp_root / DURATIONS_POINTER).write_text(str(durations), encoding="utf-8")
         # One reservation under the ledger's lock: the admission and this run's row, which stays leased in the
-        # host ledger until the run ends, whatever the verdict.
-        admitted, lease = reserve("hermetic gate")
+        # host ledger until the run ends, whatever the verdict. A wait for critical memory pressure comes first,
+        # told on the gate's stderr and the task's progress line; the task's Stop ends it.
+        progress = getattr(ctx, "emit_progress_fn", None) or (lambda _text: None)
+        admitted, lease = reserve("hermetic gate", say=lambda text: (print(
+            f"PREFLIGHT_MEMORY_WAIT {text}", file=sys.stderr, flush=True), progress(f"Tests preflight {text}")))
         # Install before compiling specs: -p must name the actual nonce module.
         probe_module = install_worker_probe(temp_root, admitted)
         evidence["workers"] = recorded_admission(temp_root)

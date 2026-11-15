@@ -12,22 +12,33 @@ one ``<pid>.json`` row each: pid, birth token, admitted workers; ``SlotLease``)
 and one conservative slot per unleased ``pytest``/``node --test`` root the
 process census sees. ``reserve`` reads the ledger, admits and publishes the row
 under the ledger's one lock, so two runs started at once never both take the
-whole machine. Floor one; a run never waits for a free slot. A child with a
-parent allocation reads neither: its parent accounted for its slots.
+whole machine. Floor one; a run never waits for a free slot. It waits only while
+the macOS kernel confirms critical memory pressure (owner choice, 2026-11-14):
+``reserve`` then holds neither the lock nor a row, says why with the reading's
+date, re-reads the machine every ``config.TEST_PROCESS_SAMPLE_SEC`` and reserves
+at the first reading that is not critical; the caller's interrupt (Ctrl-C, a
+task's Stop) ends the wait, and an unread verdict admits as before, said as unknown.
+Each ``scripts/run_tests.py`` pass reserves on its own, so a battery may wait at a
+pass boundary, never inside a running pass; the hermetic gate reserves once, before
+its first lane. A child with a parent allocation reads neither and never waits:
+its parent accounted for its slots, and its run is work already running.
 """
 from __future__ import annotations
 
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
 import re
 import stat
 import subprocess
-from typing import Mapping, Optional
+import sys
+import time
+from typing import Callable, Mapping, Optional
 
 from ouroboros.host_memory import physical_memory
+from ouroboros.utils import utc_now_iso
 
 # Transport state must survive the OUROBOROS_ runtime-settings scrub, just like
 # ProcessContainer's membership token. A test explicitly allocates extra slots
@@ -88,13 +99,16 @@ class HostRuns:
 class Admission:
     workers: int
     host: HostRuns
+    critical_at: str = ""  # the reading's date when the kernel confirmed critical pressure: no run starts on it
+    waited: tuple = ()     # (first critical reading, the reading that ended it, how: ``WAIT_ENDED``) when one preceded
 
 
 def admission(cpu_workers: Optional[int] = None, *, env: Optional[Mapping[str, str]] = None) -> Admission:
     """The workers this run may start: the request within physical room, minus what other runs hold.
 
     An ``env`` carrying a parent allocation (``NESTED_WORKERS_ENV``) is a child whose slots its parent
-    already accounted for on the host, so it reads no ledger and runs no census."""
+    already accounted for on the host, so it reads no ledger, runs no census and is never held for pressure.
+    ``workers`` keeps its floor of one under critical pressure too: ``critical_at`` says no run starts now."""
     from ouroboros.config import TEST_WORKER_PEAK_RSS_BYTES
 
     env = os.environ if env is None else env
@@ -102,7 +116,8 @@ def admission(cpu_workers: Optional[int] = None, *, env: Optional[Mapping[str, s
     capacity = max(1, memory.room_bytes // TEST_WORKER_PEAK_RSS_BYTES) if memory else 1
     own = min(requested_workers(cpu_workers, env=env), capacity)
     host = HostRuns() if NESTED_WORKERS_ENV in env else other_runs()
-    return Admission(max(1, own - host.held), host)
+    critical = memory is not None and memory.pressure is True and NESTED_WORKERS_ENV not in env
+    return Admission(max(1, own - host.held), host, utc_now_iso() if critical else "")
 
 
 # ── The host ledger and the census ──────────────────────────────────────────────────────
@@ -150,7 +165,7 @@ def _owned_ledger() -> Optional[Path]:
 def _ledger_lock(directory: Optional[Path]):
     """The ledger's one lock while a run reads it, admits and publishes its row: two runs started at once
     would otherwise both see an empty ledger and both take the whole machine. Held for the milliseconds of
-    one census and one write, never while a run waits for a slot (owner 10.10: a run never waits)."""
+    one census and one write, never while a run waits (owner 10.10: never for a slot; critical pressure: outside)."""
     if directory is None:
         yield
         return
@@ -173,17 +188,56 @@ def _ledger_lock(directory: Optional[Path]):
 
 
 def reserve(command: str, cpu_workers: Optional[int] = None, *, env: Optional[Mapping[str, str]] = None,
-            slots=None) -> tuple[Admission, "SlotLease"]:
+            slots=None, say: Optional[Callable[[str], None]] = None) -> tuple[Admission, "SlotLease"]:
     """Admit this run's workers and publish its row as ONE reservation under the ledger lock: no other run's
     census, admission or write comes between this run's. ``slots`` maps the admission to the count the row
     holds, within the admitted workers (default: all of them; a one-process pass holds one, a Node lane its
-    concurrency). A child with a parent allocation reads no ledger and holds no row."""
+    concurrency). A child with a parent allocation reads no ledger and holds no row.
+
+    An admission that confirms critical pressure starts nothing: the lock is released with no row written,
+    ``say`` (default: stderr) tells the wait and its end with each reading's date, and the machine alone is
+    re-read outside the lock until a reading is not critical; the reservation then admits as usual and its
+    admission carries ``waited``."""
     env = os.environ if env is None else env
+    say = say or (lambda text: print(text, file=sys.stderr, flush=True))
     directory = None if NESTED_WORKERS_ENV in env else _owned_ledger()
-    with _ledger_lock(directory):
-        admitted = admission(cpu_workers, env=env)
-        held = admitted.workers if slots is None else max(1, min(int(slots(admitted)), admitted.workers))
-        return admitted, SlotLease(held, command, locked=True)
+    since, ended = "", ()
+    while True:
+        with _ledger_lock(directory):
+            admitted = admission(cpu_workers, env=env)
+            if not admitted.critical_at:
+                admitted = replace(admitted, waited=(since, *ended)) if since else admitted
+                held = admitted.workers if slots is None else max(1, min(int(slots(admitted)), admitted.workers))
+                return admitted, SlotLease(held, command, locked=True)
+        since = since or admitted.critical_at
+        say(f"waiting to start: the kernel reports critical memory pressure (read {admitted.critical_at}); work "
+            "already running continues; this run starts when a reading is no longer critical; Ctrl-C or Stop ends "
+            "the wait")
+        ended = _until_not_critical()
+        say(WAIT_ENDED[ended[1]].format(at=ended[0], since=since))
+
+
+# How a wait ended, said as such: only a read verdict is "no longer critical"; an unknown admits as it always did.
+WAIT_ENDED = {
+    "not_critical": "memory pressure no longer critical (read {at}); starting after waiting since {since}",
+    "pressure_unknown": "critical memory pressure no longer confirmed: the kernel's level is unreadable (read {at}), "
+                        "an unknown that admits as before; starting after waiting since {since}",
+    "memory_unknown": "critical memory pressure no longer confirmed: the machine's memory is unreadable (read {at}), "
+                      "an unknown that admits as before; starting after waiting since {since}",
+}
+
+
+def _until_not_critical() -> tuple:
+    """Sleep a sample interval and re-read the machine until a reading is not critical: ``(its date, how)``, how a
+    ``WAIT_ENDED`` key (a read verdict, or an unknown one). No lock, row or child is held meanwhile."""
+    from ouroboros import config
+
+    while True:
+        time.sleep(config.TEST_PROCESS_SAMPLE_SEC)
+        memory = physical_memory()
+        if memory is None or memory.pressure is not True:
+            return utc_now_iso(), ("memory_unknown" if memory is None else
+                                   "pressure_unknown" if memory.pressure is None else "not_critical")
 
 
 def _read_lease(path: Path) -> Optional[dict]:

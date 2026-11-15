@@ -152,6 +152,8 @@ SCENARIOS = {
     "S41": ("live skill-smoke adapter: ordinary author, one independent rebuttal, immutable payload, true/unknown criticism red, tool-policy and identity controls", LANE_MOCK),
     "S42": ("direct Project turn across an application stop: a WS turn in a Project room writes in the room, the tree is SIGTERMed while its next model round is held, the next boot restores the same id with its saved working state, one owner Resume over HTTP releases the stop hold and the Project verification, and a worker continues the saved loop to a completed result carrying the continuation's answer; in a folderless room the resumed write still lands in the turn's task drive after a sibling start_task gives the room its first folder (#2547)", LANE_MOCK),
     "S43": ("the production-shaped stand, real half (tests/_stand.py; its counted half: tests/test_stand_counts.py): a root restored with paused trees, pending rows, held runs, schedules, markers, rooms and a story; real tasks, owner turns and a Presence burst held at the model; no server stack runs cognition (E1), the door and the controls answer and Panic ends the whole tree under load (E5, E9), the owner is answered with no pool: a worker storm, a refused spawn, a marker window (E7), Stop finalizes then kills a carrier (E9); WAL and PERSIST (E10)", LANE_MOCK),
+    # #3396 in real processes: the launcher stops reading a running server's pipe.
+    "S44": ("a server in the launcher's shape whose output pipe, once it is ready, is full and unread: a task still completes through its worker and Quit over the stop pipe exits 0 inside the launcher's grace; the base tree stalls on the same pipe", LANE_MOCK),
 }
 
 MOCK_SLUG = "openai-compatible::mock-model"

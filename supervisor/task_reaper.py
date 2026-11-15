@@ -637,23 +637,19 @@ def _respawn_after_reap(
 ) -> None:
     """Reopen a reaped slot, leaving crash recovery available on failure (a refusal that stands is logged once per
     change of its cause and once when it ends: ``_RESPAWN_REFUSALS``)."""
-    # The lifecycle serializer guards replacement; process start stays outside queue lock.
-    from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK
-
     slot = None
     try:
-        with _WORKER_LIFECYCLE_LOCK:
-            with q._queue_lock:
-                slot = workers_mod.WORKERS.get(worker_id)
-                if expected_worker is not None and slot is not expected_worker:
-                    return
-            workers_mod.respawn_worker(worker_id)
+        with q._queue_lock:
+            slot = workers_mod.WORKERS.get(worker_id)
+            if slot is None or (expected_worker is not None and slot is not expected_worker):
+                return
+        workers_mod.respawn_worker(worker_id, expected_worker=slot)
     except Exception as exc:
         _respawn_refused(worker_id, slot, exc)
         try:
             with q._queue_lock:
                 worker = workers_mod.WORKERS.get(worker_id)
-                if worker is not None and (expected_worker is None or worker is expected_worker):
+                if worker is not None and worker is slot:
                     worker.reaping = False
         except Exception:
             pass
