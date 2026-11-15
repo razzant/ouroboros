@@ -145,8 +145,8 @@ def test_the_base_replay_checks_its_commit_out_with_git_never_through_tar():
 
 def test_the_gate_reaches_the_launcher_modules_and_windows_runs_the_real_job_test_without_a_skip(tmp_path):
     """Every launcher module the Quit touches, and the platform modules its Job drain reads through, triggers the gate;
-    on Windows the lifecycle job runs the native real-Job retirement test, whose two cases must pass: a skip or a
-    missing case is red, never a native PASS."""
+    on Windows the lifecycle job runs the native real-Job retirement and engine-breakaway tests, whose four cases must
+    pass: a skip or a missing case is red (the former two-case run too), never a native PASS."""
     import fnmatch
 
     workflow = yaml.safe_load((Path(__file__).resolve().parents[1] / ".github" / "workflows"
@@ -160,20 +160,21 @@ def test_the_gate_reaches_the_launcher_modules_and_windows_runs_the_real_job_tes
     steps = workflow["jobs"]["lifecycle"]["steps"]
     native = next(step for step in steps if "test_windows_retirement_returns_only_after_its_real_job_members_are_gone"
                   in step.get("run", ""))
+    assert "test_windows_engine_leaves_its_generation_job_through_a_silent_job_but_not_a_refusing_one" in native["run"]
     assert native["if"] == "${{ !cancelled() && matrix.os == 'windows-latest' }}"
     assert '"$py" -I -S scripts/safe_test.py' in native["run"] and "--junitxml" in native["run"]
     upload = next(step for step in steps if "upload-artifact" in str(step.get("uses", "")))
     assert "quit-native-tests" in upload["with"]["path"]
     check = native["run"].split("<<'PY'\n", 1)[1].rsplit("PY", 1)[0]
     outcomes = {}
-    for name, cases in {"passed": ["", ""], "skipped": ["<skipped/>", "<skipped/>"], "one": [""],
-                        "failed": ["", "<failure/>"]}.items():
+    for name, cases in {"passed": [""] * 4, "skipped": ["", "", "", "<skipped/>"], "one": [""] * 3,
+                        "former": [""] * 2, "failed": ["", "", "", "<failure/>"]}.items():
         junit = tmp_path / f"{name}.xml"
         junit.write_text("<testsuites><testsuite>" + "".join(
             f'<testcase name="c{i}">{body}</testcase>' for i, body in enumerate(cases)) + "</testsuite></testsuites>",
             encoding="utf-8")
         outcomes[name] = subprocess.run([sys.executable, "-c", check, str(junit)], capture_output=True).returncode
-    assert outcomes == {"passed": 0, "skipped": 1, "one": 1, "failed": 1}
+    assert outcomes == {"passed": 0, "skipped": 1, "one": 1, "former": 1, "failed": 1}
 
 
 # Handle 5.0 as https://download.sysinternals.com/files/Handle.zip served it on 2026-11-14 (Last-Modified 2022-10-26);

@@ -274,8 +274,9 @@ jobs:
           "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" -- "$py" scripts/claudexor_quit_witness.py \
             --expect release --evidence-dir "$RUNNER_TEMP/quit-witness-candidate" \
             --handle-exe "$RUNNER_TEMP/handle/handle64.exe"
-      - name: A Windows retirement returns only after its real Job members are gone
-        # The native test that portable fakes cannot replace: exactly its two cases must pass, never skip.
+      - name: A Windows retirement returns only after its real Job members are gone, and spares the engine that left
+        # The native tests that portable fakes cannot replace: exactly their four cases must pass, never skip. The
+        # second runs its generation through this venv's own redirector and in a Job with the redirector's limits.
         if: ${{ !cancelled() && matrix.os == 'windows-latest' }}
         run: |
           py="$(python -c 'import pathlib, sys; print(pathlib.Path(sys.executable).as_posix(), end="")')"
@@ -284,13 +285,14 @@ jobs:
           "$py" -I -S scripts/safe_test.py --temp-parent "$RUNNER_TEMP" -- "$py" -m pytest -p no:cacheprovider -rA \
             --junitxml="$out/junit.xml" \
             tests/test_launcher_quit_engine.py::test_windows_retirement_returns_only_after_its_real_job_members_are_gone \
+            tests/test_launcher_quit_engine.py::test_windows_engine_leaves_its_generation_job_through_a_silent_job_but_not_a_refusing_one \
             2>&1 | tee "$out/pytest.log"
           "$py" - "$out/junit.xml" <<'PY'
           import sys, xml.etree.ElementTree as ET
           cases = list(ET.parse(sys.argv[1]).getroot().iter("testcase"))
           ran = [case.get("name") for case in cases if not {"failure", "error", "skipped"} & {c.tag for c in case}]
           print("passed:", ran)
-          sys.exit(0 if len(cases) == len(ran) == 2 else "the native real-Job test did not pass both cases")
+          sys.exit(0 if len(cases) == len(ran) == 4 else "the native real-Job tests did not pass all four cases")
           PY
       - name: The same scenario on the named base keeps the home held
         if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.quit_witness_base != '' }}

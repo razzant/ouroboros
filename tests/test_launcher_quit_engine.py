@@ -417,6 +417,194 @@ def test_a_retirement_holds_its_members_before_the_terminate_and_releases_them_b
     assert events == ["terminate", "member gone", ("release", {7: "member handle"}), "close"] and not quit_._gaps
 
 
+@pytest.mark.parametrize(("limits", "asked", "warned"), [
+    (None, False, False),  # outside any Job
+    (0x2000, False, True),  # a Job refusing breakaway (an old launcher's, a tracked child's) keeps the engine
+    (0x2800, True, False),  # the launcher's generation Job, the embedded interpreter's immediate one
+    (0x3000, True, False),  # a venv redirector's silent Job (CPython PC/launcher.c), measured on native CI
+    (0x3800, True, False),
+    ("unread", False, True),  # an unreadable immediate Job confirms nothing
+    ("membership unread", False, True),
+])
+def test_the_engine_requests_breakaway_whenever_its_immediate_job_permits_it(monkeypatch, caplog, limits, asked,
+                                                                             warned):
+    """``platform_layer._windows_breakaway_flags`` with the ABI faked on any host: its branches only. Windows'
+    own nested-Job semantics, which the request relies on, are the native test below."""
+    import ctypes
+    import ctypes.wintypes
+
+    from ouroboros import platform_layer as pl
+
+    class Basic(ctypes.Structure):
+        _fields_ = [("LimitFlags", ctypes.c_uint32)]
+
+    class Extended(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", Basic)]
+
+    def in_job(process, job, member):
+        assert (process, job) == ("this process", None)
+        member._obj.value = limits is not None
+        return limits != "membership unread"
+
+    def query(job, info_class, info, size, returned):
+        assert (job, info_class, size, returned) == (None, 9, ctypes.sizeof(Extended), None), "the immediate Job"
+        if limits == "unread":
+            return 0
+        info._obj.BasicLimitInformation.LimitFlags = limits
+        return 1
+
+    for name, value in (("IS_WINDOWS", True), ("ctypes", ctypes), ("_ExtendedLimitInfo", Extended),
+                        ("_JOBOBJECTINFOCLASS_EXTENDED", 9), ("_JOB_OBJECT_LIMIT_BREAKAWAY_OK", 0x800),
+                        ("_JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK", 0x1000),
+                        ("_kernel32", SimpleNamespace(GetCurrentProcess=lambda: "this process", IsProcessInJob=in_job,
+                                                      QueryInformationJobObject=query))):
+        monkeypatch.setattr(pl, name, value, raising=False)
+    with caplog.at_level(logging.WARNING, logger=pl.log.name):
+        flags = pl.subprocess_new_group_kwargs(breakaway_from_job=True)["creationflags"]
+    assert flags == 0x200 | (0x01000000 if asked else 0)
+    assert ("does not confirm breakaway" in caplog.text) is warned
+
+
+def test_the_owned_engine_spawn_hands_its_breakaway_request_unchanged_to_the_supervised_spawn(monkeypatch, tmp_path):
+    """The selector's one production caller (``OwnedClaudexorDaemon._spawn``) asks for breakaway and passes exactly
+    the answer on; ``spawn_supervised``'s own group default never overrides it (its native proof: the Quit witness's
+    recycle, through the real chain)."""
+    import ouroboros.process_custody as custody
+    from ouroboros import platform_layer as pl
+    from tests.test_claudexor_owned_daemon import _point_owned_home, _UnpublishedChild
+
+    data = tmp_path / "data"
+    _point_owned_home(monkeypatch, data / "claudexor", data)
+    real, asked, spawned = pl.subprocess_new_group_kwargs, [], {}
+
+    def selector(**kwargs):
+        asked.append(kwargs)
+        return {"creationflags": 0x01000200} if kwargs.get("breakaway_from_job") else real(**kwargs)
+
+    monkeypatch.setattr(pl, "subprocess_new_group_kwargs", selector)
+    monkeypatch.setattr(custody, "spawn_supervised",
+                        lambda command, **kwargs: spawned.update(kwargs) or _UnpublishedChild(424242))
+    manager = claudexor_daemon.OwnedClaudexorDaemon()
+    manager._spawn([sys.executable], SimpleNamespace(status=dict), manager._generation)
+    assert asked == [{"breakaway_from_job": True}]
+    assert spawned["creationflags"] == 0x01000200 and spawned["scope"] == "daemon"
+
+
+# A generation's process under a silent immediate Job: its engine by the real request, a sleeper by the pre-repair one
+# (no breakaway), then its report; it leaves on its launcher's EOF, as a recycle's server leaves on its quit line.
+_SILENT_GENERATION = r'''
+import ctypes, json, subprocess, sys
+from ouroboros import platform_layer as pl
+info = pl._ExtendedLimitInfo()
+if not pl._kernel32.QueryInformationJobObject(None, pl._JOBOBJECTINFOCLASS_EXTENDED, ctypes.byref(info),
+                                              ctypes.sizeof(info), None):
+    raise OSError(f"immediate Job unreadable: {ctypes.get_last_error()}")
+sleeper = [getattr(sys, "_base_executable", sys.executable), "-c", "import time; time.sleep(120)"]
+quiet = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+asked = pl.subprocess_new_group_kwargs(breakaway_from_job=True)
+started = {"engine": subprocess.Popen(sleeper, **quiet, **asked),
+           "before": subprocess.Popen(sleeper, **quiet, **pl.subprocess_new_group_kwargs())}
+print(json.dumps({"immediate": int(info.BasicLimitInformation.LimitFlags), "asked": asked["creationflags"],
+                  **{name: [proc.pid, pl.process_start_time(proc.pid)] for name, proc in started.items()}}), flush=True)
+sys.stdin.read()
+'''
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="native Windows nested Job semantics")
+@pytest.mark.parametrize("silent", ["venv-redirector", "silent-job"])
+def test_windows_engine_leaves_its_generation_job_through_a_silent_job_but_not_a_refusing_one(
+        monkeypatch, tmp_path, silent):
+    """The measured seam (native CI run 43673021456): a generation behind a venv redirector runs in the redirector's
+    silent Job (0x3000) nested in the launcher's generation Job (0x2800); its engine, asking nothing, stayed in the
+    generation Job, and the recycle's retirement ended it. Here, nested under a Job that refuses breakaway as a
+    tracked child's (and ``safe_test``'s) does, the engine's real request leaves both, outlives the real retirement
+    and stays in the refusing Job, whose termination still ends it. ``before``, the pre-repair request from the same
+    process, must stay in the generation Job and end with it: the counterfactual that tells the two apart.
+    ``venv-redirector`` starts the generation through this interpreter's own redirector, the witness's path;
+    ``silent-job`` gives the base interpreter a Job with ``PC/launcher.c``'s limits."""
+    import _winapi
+    import ctypes.wintypes
+    import json
+    import pathlib
+    import queue
+
+    import launcher
+    from ouroboros import platform_layer as pl
+
+    base = getattr(sys, "_base_executable", sys.executable)
+    if silent == "venv-redirector" and os.path.normcase(base) == os.path.normcase(sys.executable):
+        pytest.skip("this interpreter is no venv redirector")
+
+    def in_job(handle, job):
+        member = ctypes.wintypes.BOOL()
+        assert pl._kernel32.IsProcessInJob(handle, job, ctypes.byref(member)), ctypes.get_last_error()
+        return bool(member.value)
+
+    refusing, generation_job = pl.create_kill_on_close_job(), pl.create_kill_on_close_job(allow_breakaway=True)
+    jobs, handles, generation = [job for job in (refusing, generation_job) if job], {}, None
+    try:
+        assert len(jobs) == 2
+        if silent == "silent-job":
+            redirector_job, limits = pl._kernel32.CreateJobObjectW(None, None), pl._ExtendedLimitInfo()
+            limits.BasicLimitInformation.LimitFlags = 0x3000  # KILL_ON_JOB_CLOSE | SILENT_BREAKAWAY_OK
+            jobs.append(redirector_job)
+            assert redirector_job and pl._kernel32.SetInformationJobObject(
+                redirector_job, pl._JOBOBJECTINFOCLASS_EXTENDED, ctypes.byref(limits), ctypes.sizeof(limits))
+        source = str(pathlib.Path(__file__).resolve().parents[1])
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
+                   PYTHONPATH=os.pathsep.join(filter(None, (source, os.environ.get("PYTHONPATH")))))
+        with open(tmp_path / "generation.log", "wb") as log:
+            generation = subprocess.Popen(
+                [sys.executable if silent == "venv-redirector" else base, "-c", _SILENT_GENERATION], env=env,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log, text=True,
+                **pl.subprocess_new_group_kwargs(suspended=True))
+        # Root first, then each child Job: the order Windows requires to nest them (refusing > generation > silent).
+        assert all(pl.assign_pid_to_job(job, generation.pid) for job in jobs) and pl.resume_process(generation.pid)
+        lines = queue.Queue()
+        _THREAD(target=lambda: lines.put(generation.stdout.readline()), daemon=True).start()
+        try:
+            report = json.loads(lines.get(timeout=60))
+        except (queue.Empty, ValueError):
+            pytest.fail("no report from the generation: " + (tmp_path / "generation.log").read_text(errors="replace"))
+        for name in ("engine", "before"):
+            pid, birth = report[name]
+            handles[name] = pl._kernel32.OpenProcess(0x00101001, False, pid)  # SYNCHRONIZE | QUERY_LIMITED | TERMINATE
+            assert handles[name] and pl._windows_handle_birth(handles[name]) == birth, f"{name} is not {report}"
+        engine, before = handles["engine"], handles["before"]
+        assert report["immediate"] & 0x1000, f"not the measured seam: no silent immediate Job ({report})"
+        assert report["asked"] & 0x01000000, f"the engine's spawn asked no breakaway from a silent Job ({report})"
+        assert not in_job(engine, generation_job) and in_job(engine, refusing), report
+        assert in_job(before, generation_job) and in_job(before, refusing), f"no counterfactual: {report}"
+        if silent == "silent-job":
+            assert not in_job(engine, jobs[2]) and not in_job(before, jobs[2]), "silence left the redirector's Job"
+        generation.stdin.close()
+        assert generation.wait(30) == 0
+        quit_ = reaper.QuitEngineStop()
+        for name, value in (("_quit", quit_), ("_agent_proc", generation), ("_agent_job", generation_job),
+                            ("_agent_start", None), ("_agent_stopping", None),
+                            ("_cleanup_recorded_server_group_for_pid", lambda *a: True)):
+            monkeypatch.setattr(launcher, name, value)
+        jobs.remove(generation_job)  # the retirement closes it
+        assert launcher._retire_agent(generation, "agent_exit") is True and not quit_._gaps
+        assert pl._kernel32.WaitForSingleObject(before, 10_000) == 0, "the pre-repair engine outlived its generation"
+        assert pl._kernel32.WaitForSingleObject(engine, 0) == 0x102, "the generation's retirement ended the engine"
+        assert pl.terminate_job(refusing) == ""
+        assert pl._kernel32.WaitForSingleObject(engine, 10_000) == 0, "the refusing Job lost the engine"
+    finally:
+        for handle in handles.values():
+            if handle and pl._kernel32.WaitForSingleObject(handle, 0) == 0x102:
+                _winapi.TerminateProcess(handle, 1)
+            if handle:
+                pl._kernel32.CloseHandle(handle)
+        if generation is not None:
+            if generation.poll() is None:
+                generation.kill()
+            generation.wait(30)
+            generation.stdout.close()
+        for job in jobs:
+            pl.close_job(job)
+
+
 @pytest.fixture
 def win32_job(native_guard, monkeypatch):
     """The real ``job_members_running`` over ``platform_layer``'s Job ABI faked on any host, behind ``native_guard``.
