@@ -581,7 +581,6 @@ function reviewHistory(skill) {
         ${rows ? `<details class="ui-disclosure skills-review-history ui-rich-content"><summary>Review history (${historyLabel})</summary><ol>${rows}</ol></details>` : ''}`;
 }
 
-/** Exactly one sentence of review evidence for the current bytes (UX §3.4). */
 // What a ready skill runs over when no review passed its current files (twin of `skill_review_status.runs_over`):
 // 'review_problems' (current blocker findings), 'no_review_verdict', or '' when a review passed or another basis runs it.
 function runsOver(skill) {
@@ -590,6 +589,7 @@ function runsOver(skill) {
     return current && skill.review_status === 'blockers' ? 'review_problems' : 'no_review_verdict';
 }
 
+/** Exactly one sentence of review evidence for the current bytes (UX §3.4). */
 export function reviewSentence(skill) {
     const install = installFacts(skill);
     const ready = reviewReady(skill);

@@ -425,7 +425,10 @@ def run_skill_action(
         if action == "enable" and result.get("enabled"):
             note_skill_over_review(ctx, skill_name, result.get("review_gate"), "turned_on")
         elif action == "grant" and result.get("turn_on_when_ready") == "enabled":  # the grant let a waiting turn-on through
-            granted = find_skill(drive, skill_name, repo_path=repo_path)
-            if granted is not None and granted.enabled:
-                note_skill_over_review(ctx, skill_name, granted.review.gate_for(granted.content_hash), "turned_on")
+            try:
+                granted = find_skill(drive, skill_name, repo_path=repo_path)
+                if granted is not None and granted.enabled:
+                    note_skill_over_review(ctx, skill_name, granted.review.gate_for(granted.content_hash), "turned_on")
+            except Exception:  # the grant stands and its audit row follows; only the card's note is lost
+                log.warning("A skill turned on by a grant was not named on its work's card", exc_info=True)
     return audit(result)
