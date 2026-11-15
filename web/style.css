@@ -1421,7 +1421,7 @@ html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
 .app-page-lead:empty,
 .app-page-tabs:not(:has(> *)) { display: none; }
 /* Levels and returns share the shell's leading capsule. The writer supplies presence and placement. */
-.app-page-return { display: flex; align-items: center; min-width: 0; max-width: 40%; order: -1; }
+.app-page-return { display: flex; align-items: center; flex-shrink: 100; min-width: calc(20px + var(--space-2) + var(--space-2) + var(--space-1) + 1em); max-width: 40%; order: -1; }
 .app-page-return:empty { display: none; }
 html[data-telegram-back="back"] .app-page-return { display: none; }
 .shell-back { width: auto; max-width: 100%; gap: var(--space-1); padding-inline: var(--space-2);

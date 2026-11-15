@@ -24,6 +24,9 @@ def test_header_presence_comes_from_writers_and_telegram_owns_its_back():
     scope = 'html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header'
     assert scope + ' > .app-page-leading { display: none; }' in css
     assert scope + ' {' in css, 'Telegram section placement excludes room bars'
+    capsule = re.search(r'\.app-page-return \{([^}]+)\}', css)[1]
+    assert float(re.search(r'flex-shrink: ([\d.]+)', capsule)[1]) > 1, 'return words yield before the page controls'
+    assert 'min-width: calc(20px + var(--space-2) + var(--space-2) + var(--space-1) + 1em)' in capsule, 'the chevron and ellipsis keep their space'
 
 
 # No exception: status/provenance/stat labels keep the renderer's sentence case.
