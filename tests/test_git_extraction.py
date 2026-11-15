@@ -125,8 +125,8 @@ def test_git_catalog_schema_bytes_and_handler_owners_are_stable():
     # description is the only change from a4ff0c92….
     # #3032: review_reference also takes the reference of the predecessor a recorded Continue continues, and without
     # author_disposition reads the outcome back when the index no longer holds the reviewed bytes. #3296 (Blocking
-    # retired): the reviewed-commit description, author_disposition, subagent_check, reason, reviewers and
-    # counter_argument drop their Blocking branches and the identical-diff refusal. #3319: since_review says no PASS or
+    # retired): the reviewed-commit description, author_disposition and its subagent_check, reason, reviewers and
+    # review_rebuttal drop their Blocking branches and the identical-diff refusal. #3319: since_review says no PASS or
     # finding carries over. Descriptions only, in both aliases; the structure is unchanged from e7ad640f….
     assert hashlib.sha256(schema_bytes).hexdigest() == (
         "f2341717365cbb39ddbd9f94db0e7d5448ae43d4f1dc5acf000bce234e333f91"
