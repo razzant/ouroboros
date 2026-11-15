@@ -475,6 +475,7 @@ def assert_rail(page, rows, states):
             assert row['slot'][key] == pytest.approx(marker[key], abs=0.01), (row['id'], key, row['slot'], marker)
         assert row['slot']['width'] == pytest.approx(18, abs=0.01)
         assert row['slot']['top'] >= row['line1']['top'], row
+        assert row['slot']['top'] >= row['time']['bottom'] - 0.5, row  # on the second line, clear of the time above it
         assert row['slot']['bottom'] <= row['row']['bottom'] - 6 + 0.5, row
         if not row['solo']:
             assert row['line2']['top'] >= row['line1']['bottom'], row
