@@ -321,6 +321,23 @@ def skill_review_gate(
     }
 
 
+# The gate's reasons to run a payload that are neither a review's pass nor an acceptance basis of the host or the owner.
+_RUNS_WITHOUT_PASS = frozenset({"blockers_allowed_by_advisory_enforcement", "author_accepted_advisory", "cyber_authority"})
+
+
+def runs_over(gate: Any) -> str:
+    """What an executable gate lets a skill run over: ``review_problems`` (current blocker findings) or
+    ``no_review_verdict`` (no review passed its current files); "" for a gate that is off, a current clean or
+    warnings verdict, or a host or owner acceptance basis (a trusted source, the owner's Skip or edit, a self check)."""
+    gate = gate if isinstance(gate, dict) else {}
+    if not gate.get("executable_review") or gate.get("blocking_reason") not in _RUNS_WITHOUT_PASS:
+        return ""
+    current = not gate.get("stale")
+    if current and gate.get("status") in {STATUS_CLEAN, STATUS_WARNINGS}:
+        return ""
+    return "review_problems" if current and gate.get("status") == STATUS_BLOCKERS else "no_review_verdict"
+
+
 def executable_review_requirement(gate: Dict[str, Any], *, strict_review: bool = False) -> str:
     """What a refused gate still needs: a qualified author acceptance also admits it,
     except for a skill from a source that reviews each skill (``strict_review``, the

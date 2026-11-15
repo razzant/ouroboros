@@ -386,18 +386,23 @@ def test_recorded_historical_outcome_is_not_reclassified_from_its_text():
 
 @pytest.mark.parametrize("action", ["click", "fill", "select", "wait", "unrecognized"])
 def test_browser_plain_argument_refusals_survive_the_return_wrapper(invoke, monkeypatch, action):
-    from ouroboros.tools import browser
+    from ouroboros.tools import browser, browser_session
+    from tests._browser_fakes import close_generations
     page = SimpleNamespace(set_default_timeout=lambda timeout: None)
     generation = invoke.ctx.browser_state
     monkeypatch.setattr(browser, "_readonly_subagent", lambda ctx: False)
     monkeypatch.setattr(browser, "_ensure_browser", lambda *a, **k: (page, generation))
 
-    def navigation(*args):
-        generation.request_block_reason = "retained browser route notice"
+    async def navigation(*args):
+        # A page request the session's guard refused meanwhile, kept for the next result.
+        browser_session.record_block(generation, "retained browser route notice")
         return ""
 
     monkeypatch.setattr(browser, "_navigation_block_reason", navigation)
-    result = invoke(browser._browser_action, action=action)
+    try:
+        result = invoke(browser._browser_action, action=action)
+    finally:
+        close_generations(generation)
     assert (result.status, result.code) == ("error", "TOOL_ARG_ERROR")
     assert result.text.endswith("\n\nretained browser route notice")
     assert "operation_outcome" not in result.meta  # a browser could already have been opened

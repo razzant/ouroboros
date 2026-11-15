@@ -11,7 +11,9 @@ to keep folding it, part by part. The per-call ceiling went the other way: the
 owner retired it on every install, a configured value included, so each install
 with a settings document hears once what bounds a command, an in-slot wait and the
 silence before attention now. Blocking reviews went that way too: an install that had them
-hears once that the setting is gone and what still holds. (Which reviewers run is no longer a notice
+hears once that the setting is gone and what still holds. An empty Light model follows its local box
+for every call since the owner's decision of 15 Nov 2026: an install whose box is ticked under a cloud
+Main hears once which calls moved to its local model. (Which reviewers run is no longer a notice
 of this module: the review lanes became rows of the subagent catalog, and the
 migration's own one-time report — ``server_maintenance._startup_review_pool_notice``
 — says which rows run now.)
@@ -20,8 +22,9 @@ The facts are only what the document, the environment and the imported memory
 show — a key absent from the document, an invalid value, a saved value, an
 environment variable, the imported legacy sections. A saved value is never
 presented as proof of a manual choice. Delivery follows the existing
-retired-settings notice (``server_maintenance``): nothing is sent or marked
-while no owner chat is bound, and ``state.json`` records each notice only after
+retired-settings notice (``server_maintenance``): nothing is sent while no owner
+chat is bound, and nothing is marked then but the Light rule's notice (judged at the
+first start of its version: ``light_local_notice``); ``state.json`` records each notice only after
 it was handed to the owner-chat writer, so a failed write is retried at a later
 boot rather than claimed as published.
 """
@@ -39,6 +42,7 @@ OPTIONAL_BOUNDS_NOTICE_KEY = "optional_bounds_notified"
 LEGACY_MEMORY_NOTICE_KEY = "legacy_memory_notified"
 COMMAND_TIMEOUT_NOTICE_KEY = "command_timeout_notified"
 REVIEW_ENFORCEMENT_NOTICE_KEY = "review_enforcement_notified"
+LIGHT_LOCAL_NOTICE_KEY = "light_local_box_notified"
 _CALL_CEILING_KEY = "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC"
 _REVIEW_ENFORCEMENT_KEY = "OUROBOROS_REVIEW_ENFORCEMENT"
 # The old dialogue writer's retelling; its cursor file alone holds no retelling to tell about.
@@ -147,7 +151,46 @@ def review_enforcement_notice(document: Optional[Mapping[str, Any]], environ: Ma
             "finding, or a review that gave no answer, no longer stops Ouroboros. Outside Cyber Pro it still asks for a "
             "review before changing its own code and reads the answer first; when it disagrees, it goes ahead and says "
             "why. Each time it goes ahead over a serious finding or without an answer, the work card, the restart "
-            "message and the update description name it.")
+            "message and the Update window name it.")
+
+
+def light_local_notice(settings: Mapping[str, Any]) -> str:
+    """The owner-facing sentences that an empty Light model now follows its local box for every call (owner,
+    2026-11-15), owed once to an install this moves: a cloud Main, an empty Light and its box ticked. Before, only
+    some Light calls read the box (project names, interface translation, a Presence Light turn); memory
+    consolidation, the Light helpers, the reading of review verdicts, duplicate checks and an inheriting Safety
+    Supervisor ran on Main, and the sentences name those. The Safety ones are said only where a check is asked and
+    inherits Light (its own model, a deployment's checker and Safety off in both modes do not move), the Fallback
+    walk only where a chain is set; the last one only while no local model is configured. Judged once, at the first
+    start of this version (``startup_upgrade_notices``): a box ticked later is the owner's own act under the rule,
+    never news, and an install with no owner chat bound yet is not told afterwards."""
+    from ouroboros.deployment_policy import checker
+    from ouroboros.route_choice import box_checked, following_route
+    from ouroboros.settings_scales import normalize_safety_mode
+
+    def text(key: str) -> str:
+        return str(settings.get(key) or "").strip()
+
+    main, main_local = following_route("main", read=settings.get)
+    if (text("OUROBOROS_MODEL_LIGHT") or not box_checked(settings.get("USE_LOCAL_LIGHT")) or main_local
+            or main.endswith(" (local)")):  # a Main stored with its local label already runs locally
+        return ""
+    checks = checker() is None and not text("OUROBOROS_MODEL_SAFETY") and any(
+        normalize_safety_mode(settings.get(key)) != "off"
+        for key in ("OUROBOROS_SAFETY_MODE", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"))
+    moved = "memory consolidation, Light helper agents, review verdict reading and duplicate checks"
+    said = ("⚙️ An empty Light model now follows its “Use the local model for this role” box everywhere. Here the box is ticked and "
+            f"Main is a cloud model, so {'Safety checks, ' if checks else ''}{moved} now run on the local model too, "
+            f"instead of {main or 'Main'}.")
+    if checks:
+        said += (" A Safety check the local model does not answer goes to your Fallback models and holds the action "
+                 "if none answers." if text("OUROBOROS_MODEL_FALLBACKS")
+                 else " A Safety check the local model does not answer holds the action.")
+    if not text("LOCAL_MODEL_SOURCE"):
+        said += (" No local model is configured: until you add one or untick the box, "
+                 + ("every Safety check goes that way and these calls get no answer." if checks
+                    else "these calls get no answer."))
+    return said + " Untick the box under Light in Settings › Models to keep them on Main."
 
 
 def legacy_memory_facts(root: Any) -> Optional[Dict[str, Any]]:
@@ -229,7 +272,12 @@ def startup_upgrade_notices(settings: Mapping[str, Any]) -> None:
         state = load_state()
         known, owner_chat = control_value(state, "owner_chat_id")
         if not known or not owner_chat:
-            return  # display-only backup values never authorize delivery
+            # Display-only backup values never authorize delivery. The Light rule is judged at the first start of
+            # this version: an install with no owner to tell yet (a fresh one, seeded or not) ran no work under the
+            # old rule, so it is marked now and a box it has or gets is never told as news of an update.
+            if known and not state.get(LIGHT_LOCAL_NOTICE_KEY):  # an unconfirmed state (a recovery, a stale read) leaves it owed
+                update_state(lambda st: st.setdefault(LIGHT_LOCAL_NOTICE_KEY, utc_now_iso()))
+            return
         owner_chat = int(owner_chat)
         owed = []
         if not state.get(OPTIONAL_BOUNDS_NOTICE_KEY):
@@ -252,10 +300,12 @@ def startup_upgrade_notices(settings: Mapping[str, Any]) -> None:
                 text = ""
             if text:
                 owed.append((LEGACY_MEMORY_NOTICE_KEY, text, "legacy_memory_notice"))
+        if not state.get(LIGHT_LOCAL_NOTICE_KEY):  # judged once: an install it does not move is marked unsent
+            owed.append((LIGHT_LOCAL_NOTICE_KEY, light_local_notice(settings or {}), "light_local_box_notice"))
         for key, text, system_type in owed:
             # require_write: a chat row that could not be written raises, so the
             # notice stays owed instead of being marked as published.
-            if not recorded(message_bus.DATA_DIR, owner_chat, system_type):
+            if text and not recorded(message_bus.DATA_DIR, owner_chat, system_type):
                 message_bus.send_with_budget(owner_chat, text, role="system", system_type=system_type,
                                              require_write=True, ensure_record_boundary=True)
 

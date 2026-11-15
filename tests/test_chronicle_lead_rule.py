@@ -11,7 +11,7 @@ from ouroboros.tools.compact_context import record_context_view
 from ouroboros.tools.tool_result import ToolResult
 from ouroboros.chronicle_store import ChronicleStore
 from tests.test_chronicle_tools import ctx_for, write, chat, addr, ts
-from tests.test_tool_call_log import _Registry, _call
+from tests._tool_call_log_shared import _Registry, _call
 
 
 def schema(description=None):

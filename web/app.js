@@ -23,7 +23,7 @@ import { startVoice } from './modules/voice_controls.js';
 import { projectRoomOptions, startConversations } from './modules/conversation_controls.js';
 import { createNotificationActivation, getNotifier } from './modules/notifications.js';
 import { showToast } from './modules/toast.js';
-import { noteReadAhead, onReadAheadChange, readAheadFor, unreadCount } from './modules/read_ahead.js';
+import { captureObserverMode, noteReadAhead, onReadAheadChange, ownerReads, readAheadFor, unreadCount } from './modules/read_ahead.js';
 import { openNewProjectDialog, openProjectRowMenu, repositionProjectRowMenu } from './modules/project_create.js';
 
 import { initLogs } from './modules/logs.js';
@@ -59,6 +59,9 @@ import { initOnboardingOverlay } from './modules/onboarding_overlay.js';
 import { installAltMenuSuppression, installDesktopShellLinkInterceptor } from './modules/ui_helpers.js';
 import { bindDocumentSelectionDismissal, ordinaryPress } from './modules/selection_lifecycle.js';
 import { watchSegmentFills } from './modules/segment_fill.js';
+
+// A view opened with `?observer=1` reads nothing for the owner (read_ahead.js; DESIGN "Unread"): taken before any read.
+captureObserverMode();
 
 const state = {
     messages: [],
@@ -317,6 +320,7 @@ function mergeMainSeenRevision(prefs) {
 }
 
 async function markMainViewed(revision) {
+    if (!ownerReads()) return false;  // the observer mode: nothing is the owner's read
     try {
         const prefs = await fetchJson('/api/ui/preferences', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1093,7 +1097,7 @@ function paintNavToggles() {
 // so stale tabs cannot move it backwards or acknowledge unseen future output; the
 // cursors it answers with, never the requested number, become this client's.
 async function markProjectViewed(projectId, revision) {
-    if (!projectId) return false;
+    if (!projectId || !ownerReads()) return false;  // the observer mode reads nothing
     const seen = Math.max(0, Number(revision) || 0);
     let prefs;
     try {

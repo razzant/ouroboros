@@ -4,8 +4,8 @@ import pathlib
 import pytest
 
 from tests.test_schedule_occurrence import _row, _rows, q  # noqa: F401
-from tests.test_tool_call_log import _call, _Registry
-from tests.test_tool_call_log import _rows as tool_rows
+from tests._tool_call_log_shared import _call, _Registry
+from tests._tool_call_log_shared import _rows as tool_rows
 
 
 def test_readonly_input_scan_failure_and_symlink_refuse_before_engine(tmp_path, monkeypatch):

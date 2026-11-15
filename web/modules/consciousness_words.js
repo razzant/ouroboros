@@ -1,5 +1,6 @@
 import { tr, fmt } from './i18n.js';
 import { shortName } from './chat_model_routes.js';
+import { parseModelSource } from './route_editor_primitives.js';
 import { taskPresentation } from './log_events.js';
 import { taskCostMeta } from './chat_activity.js';
 import { escapeHtmlAttr as escapeHtml } from './ui_primitives.js';
@@ -124,17 +125,26 @@ export const placeService = (place) => String(place.serviceLabel || place.provid
 const MODEL_ALIASES = Object.freeze({ main: ['places.model.main', 'Main'], light: ['places.model.light', 'Light'] });
 export const isModelAlias = (value) => Object.hasOwn(MODEL_ALIASES, String(value || ''));
 export const placeModelWord = (value) => (isModelAlias(value) ? tr(...MODEL_ALIASES[value]) : shortName({ model: String(value || '') }));
+/** The model consciousness thinks with, from the route its server publishes (`model_route` of GET /api/consciousness:
+ *  `{value, layer, local}`), in the words Costs and the Consciousness tab share: a local route is `Local model`
+ *  whatever name its slot holds, a route that follows Main says so; '' when the read does not say. */
+export function modelRouteWords(route) {
+    if (!route?.value) return '';
+    const name = route.local ? tr('consciousness.model.local', 'Local model') : parseModelSource(route.value).model || route.value;
+    return route.layer === 'main' ? fmt('{model} (Main model)', { model: name }) : name;
+}
 /** What an empty Model field of a place uses, from its `model_route` and its circle as last read (a circle's model
  *  edit does not revise its places' rows): `{circle, model}`, `circle` empty for the consciousness model and `model`
- *  empty when this read does not say which one that is. */
+ *  empty when this read does not say which one that is. A route on the local runtime is said as `Local model`. */
 export function inheritedModel(place, circle = null) {
     const route = place.modelRoute;
+    const routed = () => (route.local ? tr('consciousness.model.local', 'Local model') : placeModelWord(route.value));
     if (circle?.model) {
         // An alias is named by what it resolves to now, which only a place that inherits it carries.
-        const resolved = isModelAlias(circle.model) && route?.layer === 'circle' && route.value ? route.value : circle.model;
-        return { circle: circle.name, model: placeModelWord(resolved) };
+        const resolved = isModelAlias(circle.model) && route?.layer === 'circle' && route.value;
+        return { circle: circle.name, model: resolved ? routed() : placeModelWord(circle.model) };
     }
-    return { circle: '', model: route?.layer === 'consciousness' && route.value ? placeModelWord(route.value) : '' };
+    return { circle: '', model: route?.layer === 'consciousness' && route.value ? routed() : '' };
 }
 /** One title for a place's row and its sheet: its label without the service it is on and without its circle's own
  *  name; a whole-account place with nothing left takes the account's name from its connector's status; the service

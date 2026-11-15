@@ -83,8 +83,8 @@ function syncStatus() {
     const pending = [...views].some((view) => view.pending());
     if (pending && !disposeStatus) {
         disposeStatus = () => {}; // A subscription's first callback may render synchronously.
-        disposeStatus = claudexorStatus.subscribe((status) => {
-            if (!status.loading) controller.poll();
+        disposeStatus = claudexorStatus.subscribe(() => {
+            controller.poll();
         }, {visible: () => [...views].some((view) => view.pending())});
     } else if (!pending && disposeStatus) { disposeStatus(); disposeStatus = null; }
 }

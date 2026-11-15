@@ -313,3 +313,54 @@ test('detach after the unknown-custody per-card close answers the remembered ver
     assert.equal(ctl.detach(), closeStatus,
         'the external detach answers the verdict the queued close remembered');
 });
+
+test('a held login follows the runtime phases from the status poll alone', async (t) => {
+    // The card subscribes without a visibility predicate and holds the poll: the hold, not
+    // a caller's refresh, must carry the lifecycle reads while the create POST waits.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { createClaudexorStatusStore } = await import('../modules/claudexor_status_store.js');
+    let runtime = { state: 'installing', target_version: '6.0.0' };
+    let daemonState = 'unreachable';
+    const store = createClaudexorStatusStore({
+        fetchImpl: async (url) => json(200, url.includes('view=quota')
+            ? { view: 'quota', profiles: { profiles: [] }, quota: [], quota_absences: [],
+                reads: { accounts: 'not_read', quota: 'not_read' } }
+            : { daemon: { state: daemonState, runtime }, config_dir: '/home/agent', harnesses: [],
+                profiles: { profiles: [] }, quota: [] }),
+        doc: { hidden: false, addEventListener() {}, removeEventListener() {} },
+    });
+    let releaseCreate = () => {};
+    const gate = new Promise((resolve) => { releaseCreate = resolve; });
+    const host = interactiveHost();
+    const ctl = createLoginCardController({
+        host,
+        store,
+        fetchImpl: async (url, init = {}) => {
+            if (url === '/api/claudexor/login' && init.method === 'POST') {
+                await gate;
+                return json(200, { job_id: 'job-x', job: { state: 'cancelled' }, attach_command: '' });
+            }
+            return json(200, { job: { state: 'cancelled' } });
+        },
+    });
+    try {
+        const starting = ctl.start('codex', '');
+        await flush();
+        assert.ok(host.innerHTML.includes('Checking Claudexor…'));
+        t.mock.timers.tick(5000);
+        await flush();
+        assert.ok(host.innerHTML.includes('Installing Claudexor 6.0.0…'), 'the held poll read no runtime phase');
+        runtime = { state: 'ready' };
+        daemonState = 'stale';
+        t.mock.timers.tick(5000);
+        await flush();
+        assert.ok(host.innerHTML.includes('Starting the Claudexor daemon…'),
+            'the held poll left the lifecycle to the 120 s discovery');
+        releaseCreate();
+        await starting;
+    } finally {
+        ctl.dispose();
+        await flush();
+        store.dispose();
+    }
+});

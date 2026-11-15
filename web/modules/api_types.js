@@ -1220,7 +1220,7 @@
  * @property {Array<{adoption_id:string, outcome:'adopted'|'not_applied'|'superseded'|'unconfirmed', commit_sha:string, previous_sha:string, branch:string, note:string, settled_at:string, revision:number, commits?:string[], commits_complete?:boolean, commits_omitted?:number}>=} body_adoptions
  *   Every adoption this task authorized, as boot settled them; `commits` (previous..candidate, newest first, bounded;
  *   a cut range counts the rest in `commits_omitted`) only when adopted.
- * @property {{count?:number, latest?:{at:string, reason:string, task_id:string, text:string}, continued?:{count:number, latest:{at:string, disposition:string, rationale:string, reason:string, record_id:string}}, landed?:{count:number, latest:{sha:string, at:string}}}=} review_overrides  // a root's reviews that returned FAIL or no verdict, the author's continuations over one, the commits landed over one (review_overrides.py)
+ * @property {{count?:number, latest?:{at:string, reason:string, task_id:string, text:string}, continued?:{count:number, latest:{at:string, disposition:string, rationale:string, reason:string, record_id:string}}, landed?:{count:number, latest:{sha:string, at:string}}, skills?:{count:number, latest:{skill:string, reason:string, door:string, at:string, task_id:string}, seen:string[]}}=} review_overrides  // a root's reviews that returned FAIL or no verdict, the author's continuations over one, the commits landed over one (review_overrides.py)
  * @property {string=} error
  * @property {ContinuationOffer=} continuation_offer
  */
@@ -1238,13 +1238,14 @@
  * read as "no account connected" while real accounts sat in the agent home.
  * "ok" — read, the matching collection is AUTHORITATIVE (empty means empty);
  * "not_read" — never asked: no daemon, or discovery/handshake died before the
- * fan-out (which leaves every facet untouched); "failed" — asked, and no
+ * fan-out (which leaves every facet untouched); or an answer the host discarded as
+ * older than a confirmed account write or a newer held read; "failed" — asked, and no
  * usable answer came back (refused, or a body in the wrong shape).
  * Facets are independent: one fanned-out read can fail while its siblings land.
  * @typedef {"ok"|"not_read"|"failed"} ClaudexorReadState
  */
 /**
- * Independent facets: ok=authoritative, not_read=never asked, failed=no usable answer. Empty without ok proves nothing.
+ * Independent facets: ok=authoritative, not_read=never asked or discarded, failed=no usable answer. Empty without ok proves nothing.
  * @typedef {Object} ClaudexorStatusReads
  * @property {ClaudexorReadState} catalog
  * @property {ClaudexorReadState} accounts
@@ -1281,7 +1282,7 @@
  * @property {Object=} daemon
  * @property {string=} config_dir
  * @property {Array<Object>=} harnesses
- * @property {Object=} profiles
+ * @property {Object=} profiles Full Accounts adds login_capable_harnesses (string[]|null); manifest eligibility, null retains unread-manifest fail-open.
  * @property {Array<Object>=} quota
  * @property {Array<Object>=} quota_absences
  * @property {Array<Object>=} resources Engine resource facets retain decimal strings, units and independent observation times.
@@ -1554,7 +1555,7 @@
  * @property {boolean} description_current  the shown text covers exactly the running-source to checked-target range; a newer post-merge run never clears it
  * @property {string} failed_at  ISO 8601 of the retained failure or the check's material error
  * @property {({base_sha: string, target_sha: string, update_channel: string, target_ref: string}|null)} latest_failed_key  that failure's range, never the provenance of retained text
- * @property {?Object=} qualification - Exact-range commit receipts and observed GitHub checks of the last check's range (self-keyed by base_sha/target_sha), including missing evidence.
+ * @property {?Object=} qualification - Exact-range commit receipts and observed GitHub checks of the last check's range (self-keyed by base_sha/target_sha), including missing evidence; `landed_over_review` lists this install's own commits of the range recorded over a review FAIL or no verdict (absent = not read).
  * @property {number} revision  compared by every writer; 0 before the first save
  * @property {{task_id: string, model: string, requested: boolean}|{}} author  host-derived: the task that saved it, its model, whether it was the owner's request
  * @property {?{base_sha: string, target_sha: string, update_channel: string, target_ref: string}} checked_key  the range the last fetching check offered

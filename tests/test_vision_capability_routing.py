@@ -56,7 +56,8 @@ def test_slot_candidates_prefer_active_then_light_dedup(monkeypatch):
     monkeypatch.setenv("OUROBOROS_MODEL_HEAVY", "google/gemini-3.5-flash")
     monkeypatch.setenv("OUROBOROS_MODEL", "z-ai/glm-5.2")
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "anthropic/claude-sonnet-4.6")
-    monkeypatch.setattr("ouroboros.config.get_light_model", lambda: "google/gemini-3.5-flash")
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "google/gemini-3.5-flash")  # the slot route_choice's rule reads
+    monkeypatch.delenv("USE_LOCAL_LIGHT", raising=False)
 
     class _Client:
         def default_model(self):

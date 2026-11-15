@@ -687,7 +687,7 @@ runtime; known queued, active or finalizing work keeps its own factual label. A
 durably accepted incoming message likewise proves acceptance, not that its task
 has begun or a model has read it.
 
-The Update indicator names the real stage, then a failed or unconfirmed outcome until the owner hides it with the close beside it (this browser, that attempt; the record is untouched). It opens the existing Updates panel, never a second apply flow. A confirmed success never wears the indicator (owner 1B): the panel retains it until the next admitted attempt, with actual saved-local-work references and accessible diagnostics, and it never masks a newer available version. A pre-admission refusal stays with the request. A busy-work refusal offers explicit retry, never a delayed automatic restart. Connection or version alone proves no successful update. Unknown remains neutral and a failed/refused/rolled-back attempt takes the error triple; a needed restart keeps its words, without a close. The Update and Replace confirmations say in fixed words, before the engine and interpreter facts, what the restart does to this installation's tasks (what returns by itself, what stays paused or held, what is not continued); the engine's admission count is labelled engine work, never tasks. The Restart confirmation's Details name what that door does differently: sleeping tasks wait for Resume and the runs its tasks started in Claudexor end. After a start that restored queue rows, the startup notice says how many of them continue by themselves, wait for Resume or stay paused, read as the work projection reads them; when a row cannot be read it keeps the count alone.
+The Update indicator names the real stage, then a failed or unconfirmed outcome until the owner hides it with the close beside it (this browser, that attempt; the record is untouched). It opens the existing Updates panel, never a second apply flow. A confirmed success never wears the indicator (owner 1B): the panel retains it until the next admitted attempt, with actual saved-local-work references and accessible diagnostics, and it never masks a newer available version. A pre-admission refusal stays with the request. A busy-work refusal offers explicit retry, never a delayed automatic restart. Connection or version alone proves no successful update. Unknown remains neutral and a failed/refused/rolled-back attempt takes the error triple; a needed restart keeps its words, without a close. The Update and Replace confirmations say in fixed words, before the engine and interpreter facts, what the restart does to this installation's tasks (what returns by itself, what stays paused or held, what is not continued); the engine's admission count is labelled engine work, never tasks. Above the description, in the panel for the update on offer and at the top of that confirmation, one host line counts what the range brings over a review FAIL or no verdict (`Went in over a review FAIL or no verdict: 2 merges, 3 commits Ouroboros made on this computer.`): merges whose receipt observed one and this install's own commits it recorded so, shown with or without a description and only from that range's check facts; the items are named in Details, a PASS on earlier code and a commit without a receipt are not counted, a range whose older receipts were not read says how many (`The review receipts of 41 older commits were not read.`), and when nothing is named there is no line (unknown, never clean). The Restart confirmation's Details name what that door does differently: sleeping tasks wait for Resume and the runs its tasks started in Claudexor end. After a start that restored queue rows, the startup notice says how many of them continue by themselves, wait for Resume or stay paused, read as the work projection reads them; when a row cannot be read it keeps the count alone.
 
 Status, owner action, and urgent notification are separate product concepts:
 
@@ -1035,6 +1035,12 @@ revision, so this counter guarantees no delivery durability.
 - **Several clients** share one read cursor that only moves forward: a room read
   on one client stops showing the crimson mark on the others at their next state
   refresh, and nothing read is shown unread again.
+- **Observer views** (`?observer=1`) show unread without creating or moving read
+  cursors or recording message reads. The builtin browser uses this mode for
+  this installation's UI; scripts opt in. Session storage keeps it across reloads
+  until `?observer=0`, and passes it to windows with an opener. Without storage
+  it lasts only for the current document: reload needs `?observer=1` again.
+  Intentional writes and human views are unchanged.
 - **One message in two rooms** counts in each until read, then is read in both
   (owner 28.10, A): shown whole in either room, every part on screen at some moment
   (a long one by scrolling, a wide block by panning it; a folded or hidden part, or
@@ -1651,15 +1657,19 @@ reviews create child tasks or prove execution.
 - A work whose review returned FAIL or no verdict carries one quiet phrase on
   its card's line, `Review: FAIL or no verdict N× (latest: <reason>) · author
   continued M× (latest: <disposition> — "<head>") · landed over it: K
-  commits`, a part only when recorded (unknown is not zero; a part with no
-  count before it names what it went over), the first live,
+  commits · skill "<name>" left on over review problems`, a part only when
+  recorded (unknown is not zero; a part with no count before it names what it
+  went over; a skill left on although no review passed its current files
+  reads `over review problems` or `with no review verdict`, several as a count
+  with the latest), the first live,
   all on a page load before Details open, running ones too (a Project work's
   portal in Main shows it live and once its Details open), and one Details
-  row, `Review returned FAIL or no verdict`, with the stored heads (300
+  row, `Review returned FAIL or no verdict` (`Skill left on without a passed
+  review` when that part stands alone), with the stored heads (300
   characters, an ellipsis when cut; `review_gate_card.js`): counts, never a
   row per decision, no Main row or Telegram message of its own; the Telegram
-  completion carries it. It never says merged or running; a child's outcome
-  counts on its root's card, naming the child.
+  completion carries it. It never says merged or running, nor that a skill is
+  on now; a child's outcome counts on its root's card, naming the child.
 - Read opens the selected saved answer in the document reader (Markdown, Source
   exact; a failure note as plain text) and never regenerates a review or
   switches sources after an update; limits, Download, timeout and focus follow
@@ -2918,7 +2928,8 @@ with every row, the limits warning and Continue in view: subscriptions
 are equal rows, two columns where they fit, the warning under them in every state,
 before any connection. A narrow or short window, expanded keys, a sign-in or a long
 error may scroll; Continue, Back and the reason stay on the bottom edge, and focus
-stops clear of them.
+stops clear of them. On Windows the desktop setup window opens no larger than its
+screen's working area, so that edge is on screen.
 
 - Step title `--type-page`; card titles `--type-section`; field labels and
   notes `--type-meta`. No display size above `--type-page`.

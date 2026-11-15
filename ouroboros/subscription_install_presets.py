@@ -590,7 +590,11 @@ def connected_preset_harnesses(discoveries: Sequence[HarnessDiscovery]) -> Tuple
 
 def _local_model(settings: Mapping[str, Any], slot: str, model: str) -> str:
     flag = str(settings.get(f"USE_LOCAL_{slot}") or "").strip().lower()
-    if flag not in {"1", "true", "yes", "on"}:
+    return _on_lane(settings, model, flag in {"1", "true", "yes", "on"})
+
+
+def _on_lane(settings: Mapping[str, Any], model: str, local: bool) -> str:
+    if not local:
         return model
     if not str(settings.get("LOCAL_MODEL_SOURCE") or "").strip():
         return ""
@@ -602,7 +606,12 @@ def _effective_api_models(settings: Mapping[str, Any]) -> Tuple[str, str]:
     light_raw = str(settings.get("OUROBOROS_MODEL_LIGHT") or "").strip()
     light = light_raw or main
     main = _local_model(settings, "MAIN", main) if main else ""
-    light = _local_model(settings, "LIGHT" if light_raw else "MAIN", light) if light else ""
+    if light_raw:
+        light = _local_model(settings, "LIGHT", light)
+    elif light:  # an empty Light is Main's model on the lane the one rule gives it (its own box under a cloud Main)
+        from ouroboros.route_choice import following_route
+
+        light = _on_lane(settings, light, following_route("light", read=settings.get)[1])
     if main and not model_has_credentials_in_settings(main, dict(settings)):
         main = ""
     if light and not model_has_credentials_in_settings(light, dict(settings)):
