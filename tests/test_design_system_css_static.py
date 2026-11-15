@@ -14,6 +14,25 @@ def without_comments(text):
     return re.sub(r"/\*.*?\*/", "", text, flags=re.S)
 
 
+def test_settings_minimum_spans_the_content_tracks_without_the_result():
+    css = without_comments((WEB / 'settings.css').read_text(encoding='utf-8'))
+
+    def rule(selector):
+        found = re.search(re.escape(selector) + r'\s*\{([^{}]*)\}', css)
+        assert found, selector
+        return found.group(1)
+
+    minimum = rule('.settings-row::before')
+    assert 'content: "";' in minimum
+    assert 'grid-area: 1 / 1 / 3 / -1;' in minimum
+    assert 'min-height: calc(52px - 2 * (var(--space-3) + 1px));' in minimum
+    assert 'min-height: 52px;' in rule('.ui-card > .settings-row:only-child::before')
+    assert 'grid-row: 1 / 4;' in rule('.settings-row[data-wide]::before')
+    assert 'grid-row: 1 / 4;' in rule('.settings-row[data-kind="choices"]::before')
+    assert 'content: none;' in rule('.dashboard-settings[data-solo] > .settings-row::before')
+    assert 'grid-column: 1 / -1;' in rule('.settings-row > .settings-row-result')
+
+
 # No exception: status/provenance/stat labels keep the renderer's sentence case.
 UPPERCASE_ALLOWLIST = {}
 

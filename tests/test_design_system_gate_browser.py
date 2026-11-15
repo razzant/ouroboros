@@ -14,9 +14,8 @@ from urllib.parse import urlparse
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
-from tests import settings_browser_helpers as settings
 from tests._shared import answer_projects
-from tests.settings_browser_helpers import HOME
+from tests.settings_browser_helpers import HOME, walk_settings
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
@@ -181,33 +180,6 @@ AT_REST = """() => !document.querySelector('[data-leaving]') && document.getAnim
 def rest(page, timeout=5000):
     page.wait_for_function(AT_REST, timeout=timeout)
     settle(page)
-
-
-def walk_settings(page, measure, *, skill='', settle):
-    """Audit the same registered views and editors with Ouroboros's card in either column."""
-    settings.open_settings(page, '')
-    overview = page.locator(f'{HOME} [data-settings-overview-row]:visible')
-    if overview.count():
-        overview.click()
-    # The card moves from the list into the overview pane when both columns fit.
-    page.locator('#page-settings [data-settings-card]').wait_for(state='visible')
-    settle()
-    measure('home')
-    paths = page.evaluate(settings.SETTINGS_PATHS, skill)
-    for path in paths:
-        level = settings.open_settings(page, path)
-        if path.startswith('skill/'):
-            level.locator('[data-extension-settings-form]').wait_for(state='visible')
-        settle()
-        measure(path)
-        head = level.locator('[data-entry-id]').first
-        if head.count():
-            settings.open_entry(page, head.get_attribute('data-entry-id'))
-            settle()
-            measure(settings.top_path(page))
-    settings.open_settings(page, '')
-    settle()
-    return paths
 
 
 def nav_pages(page):
