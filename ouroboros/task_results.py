@@ -347,6 +347,22 @@ def _refuse_occupied(drive_root: Any, task_id: str, *, write: bool) -> None:
         raise ValueError(f"task result authority is unreadable or invalid: task:{task_id}")
 
 
+def set_aside(drive_root: Any) -> Dict[str, str]:
+    """Every identity ``_refuse_occupied`` refuses, with the import's reason: occupied and without a row (a
+    refused file can stand beside an older row, which a strict read still serves). What a pass over many
+    members asks once instead of meeting that refusal on each: no restart changes such an identity, and
+    only an admissible file at a later import re-opens it."""
+    from ouroboros import store
+    from ouroboros.store_import import OCCUPIED
+
+    with store.open_store(drive_root, write=False) as txn:
+        occupied = txn.meta(OCCUPIED) or {}
+        rows = {record["task_id"] for record in txn.conn.execute(
+            "SELECT task_id FROM tasks WHERE task_id IN (SELECT value FROM json_each(?))",
+            (json.dumps(sorted(occupied)),))} if occupied else set()
+    return {task_id: str(reason) for task_id, reason in occupied.items() if reason and task_id not in rows}
+
+
 def _admit_stored(data: Dict[str, Any], task_id: str, *, strict: bool, noun: str) -> None:
     """A stored row was admitted when it entered the store; the strict reader still refuses an
     identity or status it cannot bind (the file-era message, so callers keep their wording)."""
