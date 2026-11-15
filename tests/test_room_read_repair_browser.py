@@ -291,7 +291,9 @@ def test_a_repaired_reply_target_joins_its_project_and_a_quiet_run_keeps_its_wor
 
     tag = uuid.uuid4().hex[:12]
     target_mark, reply_mark = f"REPAIRED_TARGET_{tag}", f"LEGACY_REPLY_{tag}"
-    sentence = f"Checked the disk and the gateway; nothing needed you. [QUIET_WORDS_{tag}]"
+    # One sentence: the browser boundary projects a closing sentence's first sentence (completion_gist.py, PR #3262),
+    # so the run's mark stands inside it.
+    sentence = f"Checked the disk and the gateway [QUIET_WORDS_{tag}]; nothing needed you."
     data = tmp_path / "instance" / "data"
     data.mkdir(parents=True)
     project = create_project(data, "repair-room", name="Repair room")
