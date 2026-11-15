@@ -489,4 +489,8 @@ def test_the_child_is_told_its_boundary_is_a_request_and_not_a_fact(tmp_path, mo
 
     # #1609: the read-only child is the one whose selected row captured `readonly`.
     request, _ = _started_request(tmp_path, acting=False, monkeypatch=monkeypatch, access="readonly")
-    assert "boundary" not in request["instructions"].lower(), request["instructions"]
+    # Its ACCESS line may say the starting folder is "not a read boundary" (#2922); that is
+    # read scope, not the OS filesystem boundary this disclosure is about.
+    readonly = request["instructions"]
+    assert "filesystem boundary" not in readonly.lower() and "sandboxed or confined" not in readonly, readonly
+    assert "Work as if there is no boundary" not in readonly, readonly

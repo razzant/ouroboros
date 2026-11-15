@@ -50,7 +50,7 @@ class _RoomStub(ScriptedStubModel):
     """The room turn's first round works; every later round of it answers."""
 
     def __init__(self, gate: ModelGate) -> None:
-        super().__init__(gate=gate)
+        super().__init__(gate=gate, select_retained=True)  # the write meets the finish door's notice (#3280)
         self.served: list = []
 
     def _next_step(self, body):
@@ -198,7 +198,7 @@ class _FolderStub(ScriptedStubModel):
     task with an explicit folder; the sibling answers at once."""
 
     def __init__(self, gate: ModelGate, folder) -> None:
-        super().__init__(gate=gate)
+        super().__init__(gate=gate, select_retained=True)  # the write meets the finish door's notice (#3280)
         self.folder, self.served = str(folder), []
 
     def _next_step(self, body):
@@ -295,7 +295,7 @@ class _ReturnStub(ScriptedStubModel):
     """The room turn writes before the stop and answers after Resume; the background work answers once released."""
 
     def __init__(self, gate) -> None:
-        super().__init__(gate=gate)
+        super().__init__(gate=gate, select_retained=True)  # the write meets the finish door's notice (#3280)
         self.served: list = []
 
     def _next_step(self, body):

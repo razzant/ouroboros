@@ -606,7 +606,7 @@ def test_full_can_create_and_edit_circle_models_through_dispatch(tmp_path, monke
         "expected_revision": created["revision"]}))["circle"]
     assert edited["model"] == "circle/next" and edited["revision"] > created["revision"]
     inspected = json.loads(wake.execute("configure_presence", {"action": "inspect", "place_id": place.place_id}))
-    assert inspected["place"]["model_route"] == {"value": "circle/next", "layer": "circle"}
+    assert inspected["place"]["model_route"] == {"value": "circle/next", "layer": "circle", "local": False}
     cleared = json.loads(wake.execute("configure_presence", {
         "action": "edit_circle", "circle_id": created["circle_id"], "model": "",
         "expected_revision": edited["revision"]}))["circle"]
