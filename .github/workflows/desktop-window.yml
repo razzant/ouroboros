@@ -1,0 +1,75 @@
+# The desktop window on a real Windows desktop.
+#
+# WHAT A GREEN CHECK HERE SAYS. On a hosted Windows runner, at the display size this
+# job sets and 100 % scale, a real pywebview window asked for more than its screen
+# shows opens outside the screen's working area without the launcher's fit and inside
+# it with the fit (ouroboros/launcher_window_chrome.py `fit_to_work_area`). The job
+# summary prints both measurements. It does NOT say anything about another display
+# scale (a hosted runner cannot change its DPI, so 125 % and 150 % stay unmeasured),
+# and it runs only the fit's resize: a minimum larger than the screen (WinForms
+# itself limits it on a one-screen runner), the move of a form that hangs over an
+# edge and a form Windows opened maximized are covered by the stand-in test alone.
+#
+# WHY ITS OWN WORKFLOW. The test lanes of ci.yml install no desktop packages (the
+# `test` profile of .github/actions/setup-python-env has no `desktop` extra), so the
+# home test's native case skips there on every OS. Installing pywebview into every
+# test job to run one case would change what all of them import. This job installs
+# the `build` profile, which carries the `desktop` extra, and runs that one case; a
+# skip is a failure here, since a skipped case proves nothing.
+#
+# WHEN. On request and on every `v*` release tag, as the owner chose for cloud tests
+# (2026-10-16, the header of ci.yml): never on a branch push or a pull request. A tag
+# is where a changed pywebview or pythonnet pin is measured again; whoever changes
+# them between tags runs this by hand (`gh workflow run desktop-window.yml --ref
+# <branch>` once the default branch carries the file). It reads the repository and
+# writes nothing.
+name: Desktop window (Windows)
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-window-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  native-window:
+    name: native window fits its screen (Windows, 100 %)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: ./.github/actions/setup-python-env
+        with:
+          profile: build
+      # The laptop of razzant/ouroboros#3204. A runner that refuses the size keeps its
+      # own: the case below measures whatever screen it gets and prints it.
+      - name: Set the display to 1366x768
+        shell: pwsh
+        run: |
+          try { Set-DisplayResolution -Width 1366 -Height 768 -Force } catch { Write-Host "display size kept: $_" }
+          Add-Type -AssemblyName System.Windows.Forms
+          $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+          Write-Host "screen $($screen.Bounds.Width)x$($screen.Bounds.Height), working area $($screen.WorkingArea.Width)x$($screen.WorkingArea.Height)"
+      - name: Open a real oversized window without and with the fit
+        shell: pwsh
+        env:
+          PYTHONUTF8: '1'
+          OUROBOROS_WINDOWS_DESKTOP_QA: '1'  # the case opens real windows: opt-in everywhere else
+        run: |
+          python -m pytest -o addopts="" -o junit_family=xunit1 -q -rs -s -p no:randomly --junitxml=native-window.xml `
+            "tests/test_launcher_window_chrome.py::test_on_windows_a_real_oversized_window_opens_inside_its_screen_only_with_the_fit"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          [xml]$report = Get-Content native-window.xml
+          $suite = $report.SelectSingleNode('//testsuite')
+          $measured = $report.SelectSingleNode('//property[@name="form_and_working_area_ltrb"]')
+          if ([int]$suite.tests -ne 1 -or [int]$suite.skipped -ne 0 -or -not $measured) {
+            Write-Host "::error::the native case did not run: tests=$($suite.tests) skipped=$($suite.skipped)"
+            exit 1
+          }
+          "### A real window on Windows, left/top/right/bottom`n`n``````json`n$($measured.value)`n``````" >> $env:GITHUB_STEP_SUMMARY

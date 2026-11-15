@@ -12,6 +12,8 @@ const fact = (count, reason = 'critical_findings', taskId = 'work-1') => ({ coun
 const continued = (count, rationale = WHY) => ({ count, latest: { at: '2026-11-11T10:01:00+00:00',
     disposition: 'rejected', rationale, reason: 'critical_findings', record_id: 'rec-1' } });
 const landed = (count) => ({ count, latest: { sha: 'abc123def4567890'.padEnd(40, '0'), at: '2026-11-11T10:02:00+00:00' } });
+const skills = (count, skill = 'weather', reason = 'review_problems', door = 'turned_on', taskId = 'work-1') => ({ count,
+    latest: { skill, reason, door, task_id: taskId, at: '2026-11-15T10:03:00+00:00' } });
 
 test('the field names each recorded part, twin of review_overrides.card_line', () => {
     assert.equal(reviewGateLine({ count: 2, latest: { reason: 'review_quorum' } }),
@@ -32,6 +34,41 @@ test('the field names each recorded part, twin of review_overrides.card_line', (
         assert.equal(reviewGateLine(none), '');
     }
     assert.doesNotMatch(reviewGateLine({ ...fact(1), continued: continued(1), landed: landed(1) }), /Blocking|PASS|merged/);
+    assert.equal(reviewGateLine({ ...fact(1), skills: skills(2, 'calendar') }),
+        'Review: FAIL or no verdict 1× (latest: critical findings) · 2 skills left on over review problems or no verdict (latest: "calendar")');
+    assert.equal(reviewGateLine({ skills: skills(1) }), 'Review: skill "weather" left on over review problems');
+    assert.equal(reviewGateLine({ skills: { count: 0, latest: {} } }), '');
+});
+
+test('a skill left on over its review is its own part: its own headline alone, one more line beside the others', () => {
+    const record = { groupId: 'work-1', items: [] };
+    assert.equal(syncReviewGateItem(record, { review_overrides: { skills: skills(1) } }), true);
+    assert.equal(record.items[0].headline, 'Skill left on without a passed review');
+    assert.equal(record.items[0].body, 'Ouroboros turned on skill "weather" although its review found problems.');
+    assert.equal(syncReviewGateItem(record, { review_overrides: { skills: skills(1) } }), false, 'the same skill again is no news');
+    const more = { ...fact(1), skills: skills(3, 'calendar', 'no_review_verdict', 'after_review', 'child-7') };
+    assert.equal(syncReviewGateItem(record, { review_overrides: more }), true, 'a part that grew is news');
+    assert.equal(record.items.length, 1);
+    assert.equal(record.items[0].headline, 'Review returned FAIL or no verdict');
+    assert.ok(record.items[0].body.endsWith('\n3 skills were left on over review problems or no verdict. Latest: Skill "calendar" '
+        + 'was left on although no review passed its current files (task child-7).'));
+    assert.equal(record.items[0].bodyFormat, 'text', 'its lines stay lines and a quoted finding is never read as Markdown');
+    assert.equal(record.items[0].sourceTs, '2026-11-15T10:03:00+00:00');
+    const accepted = { groupId: 'work-2', items: [] };
+    syncReviewGateItem(accepted, { review_overrides: { skills: skills(1, 'weather', 'no_review_verdict', 'author_finish', 'work-2') } });
+    assert.equal(accepted.items[0].body,
+        'Skill "weather" stayed on because Ouroboros accepted it as its author, although no review passed its current files.');
+    // A skill left on again in the same work keeps its count and moves its latest: the newer read replaces the line
+    // and the item, an older one arriving late does not.
+    const first = skills(1, 'weather', 'no_review_verdict', 'turned_on', 'work-3');
+    const later = { ...first, latest: { ...first.latest, reason: 'review_problems', door: 'after_review', at: '2026-11-15T10:09:00+00:00' } };
+    const again = { groupId: 'work-3', items: [] };
+    syncReviewGateItem(again, { review_overrides: { skills: first } });
+    assert.equal(syncReviewGateItem(again, { review_overrides: { skills: later } }), true, 'the same count with a newer latest is news');
+    assert.equal(again.reviewGateLine, 'Review: skill "weather" left on over review problems');
+    assert.equal(again.items[0].body, 'Skill "weather" was left on although its review found problems.');
+    assert.equal(syncReviewGateItem(again, { review_overrides: { skills: first } }), false, 'an older read never replaces a newer one');
+    assert.equal(again.reviewGateLine, 'Review: skill "weather" left on over review problems');
 });
 
 test('one Details item and one meta phrase, replaced in place; an older read never wins', () => {

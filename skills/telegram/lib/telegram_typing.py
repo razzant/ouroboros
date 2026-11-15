@@ -45,6 +45,7 @@ import time
 from typing import Any, AsyncIterator, Callable, Dict, Optional, Set
 
 from .telegram_api import (
+    OUTBOUND_JOURNAL,
     TELEGRAM_RETRY_INITIAL_SEC,
     TelegramBindingChanged,
     TelegramRequestRejected,
@@ -109,6 +110,9 @@ class TypingCue:
     @contextlib.asynccontextmanager
     async def message(self, chat_id: int) -> AsyncIterator[Callable[[], None]]:
         """Bracket one message to ``chat_id``; call the yielded function once it was delivered."""
+        if getattr(OUTBOUND_JOURNAL.get(), "probing", False):  # the outbox's decision run sends nothing
+            yield lambda: None
+            return
         self._fence[chat_id] = self._fence.get(chat_id, 0) + 1
         self._sending[chat_id] = self._sending.get(chat_id, 0) + 1
         delivered = []

@@ -1,3 +1,4 @@
+import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -265,11 +266,8 @@ def test_non_main_call_does_not_project_stale_main_fit_fields(tmp_path):
         physical_context=None,
     )
     assert msg == {"content": "ok"}
-    event = next(
-        json.loads(line)
-        for line in (tmp_path / "events.jsonl").read_text().splitlines()
-        if '"type": "llm_round"' in line
-    )
+    event = next(row for row in map(json.loads, (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines())
+                 if row["type"] == "llm_round")
     assert "context_profile" not in event
     assert "context_target_miss" not in event
 
@@ -401,11 +399,8 @@ def test_empty_structured_context_overflow_event_carries_fit_projection(tmp_path
     )
     assert msg is None and llm.calls == 1
     assert usage["_last_llm_error_kind"] == "context_overflow"
-    event = next(
-        __import__("json").loads(line)
-        for line in (tmp_path / "events.jsonl").read_text().splitlines()
-        if '"type": "remote_context_overflow"' in line
-    )
+    event = next(row for row in map(json.loads, (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines())
+                 if row["type"] == "remote_context_overflow")
     assert event["context_profile"] == "owner_low"
     assert event["context_fit_mode"] == "low"
     assert event["context_target_miss"] is True

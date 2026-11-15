@@ -220,6 +220,17 @@ def collect_range_material(
             commit["body"] = truncate_within_limit(body, COMMIT_BODY_MAX_CHARS) if body else ""
     for commit in commits:
         commit["body_read"] = commit["sha"] in bodies
+    # The review receipt of EVERY first-parent commit is read, behind the body bound too: the Update window counts the
+    # merges that went in over a review outcome, and a receipt left unread would make that count silently short.
+    behind = [commit for commit in material["first_parent_commits"] if not commit["body_read"]]
+    if behind:
+        rc, out, err = capture(["git", "log", "--first-parent", "--format=%H%x1f%b%x1e", spec])
+        if rc != 0:
+            raise MaterialUnavailable(f"git log --first-parent bodies {spec} failed (rc={rc}): {str(err)[:200]}")
+        receipts = dict(chunk.strip("\n").split("\x1f", 1) for chunk in out.split("\x1e") if "\x1f" in chunk)
+        for commit in behind:
+            if commit["sha"] in receipts:
+                commit["qualification"], commit["receipt_read"] = commit_qualification(receipts[commit["sha"]].strip()), True
     material["bodies_omitted"] = max(0, len(commits) - max_bodies)
     material["commits"] = commits
 
@@ -342,7 +353,8 @@ READ_RECIPE = """How to read further (the installation's own repository holds {b
 - What one merged branch brought: vcs_read(root="system_repo", action="diff", base="<merge sha>^1", head="<merge sha>", stat=true).
 - Plain Git in that repository: git log --format='%H %s%n%n%b' {base}..{target}"""
 # Named only where the record's qualification is this very range's (a check replaces it).
-CHECK_FACTS = ("Check facts for this exact range (receipts, post-merge runs; missing evidence is not a pass): "
+CHECK_FACTS = ("Check facts for this exact range (receipts, post-merge runs, this install's own commits in it that "
+               "landed over a review FAIL or no verdict; missing evidence is not a pass): "
                "query_data(op=\"json\", kind=\"update_letter\", select=\"qualification\").")
 
 
@@ -505,6 +517,14 @@ def _record_check(status: Dict[str, Any], drive_root: Optional[pathlib.Path], gi
         # The runs of a range already recorded refresh without its material; a new range needs it.
         if recorded or material is not None:
             facts["qualification"] = _check_qualification(before, key, material, str(status.get("official_repo_url") or ""))
+        if material is not None and isinstance(facts.get("qualification"), dict):
+            # This install's own commits the range brings back that it recorded over a review FAIL or no verdict;
+            # the key is absent when its rows could not be read: unknown, never "none".
+            from ouroboros.review_overrides import landed_in
+
+            landed = landed_in(record_path(drive_root).parent.parent, material.get("commits"))
+            if landed is not None:
+                facts["qualification"] = {**facts["qualification"], "landed_over_review": landed}
     shown_key = shown_letter(before)[0].get("key") if before else None
     shown_target = str((shown_key or {}).get("target_sha") or "") if before.get("state") != "none" else ""
     facts["ancestry"] = {

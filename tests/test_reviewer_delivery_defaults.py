@@ -498,7 +498,7 @@ BLOCKING_GONE = (
     "finding, or a review that gave no answer, no longer stops Ouroboros. Outside Cyber Pro it still asks for a "
     "review before changing its own code and reads the answer first; when it disagrees, it goes ahead and says "
     "why. Each time it goes ahead over a serious finding or without an answer, the work card, the restart "
-    "message and the update description name it.")
+    "message and the Update window name it.")
 
 
 @pytest.mark.parametrize("where, value, environment, owed", [
