@@ -2,7 +2,7 @@ import { bindTabStrip, placePageBack, renderBackControl, renderPageHeader } from
 import { sectionHoldsTwoPanes } from './layout.js';
 import { fluentIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
-import { bindSettingRows, readSettings, settingsRow, settingsSnapshot } from './settings_controls.js';
+import { bindSettingRows, readSettings, settingsRow } from './settings_controls.js';
 import { homeAnswers, homeFactsSeen } from './settings_home.js';
 import { rowsOf } from './settings_rows.js';
 import { paintStatusMark, statusMarkHtml } from './status_mark.js';
@@ -62,7 +62,7 @@ function rowHtml({ value, label }, active) {
  */
 export function mountTabSettings(host, tab, { state, cards = null, custom = null, openDoor = null, words = null, onPaint = null, onSaved = null } = {}) {
     const page = `dashboard:${tab}`;
-    const ctx = { custom, openDoor, onPaint };
+    const ctx = { custom, openDoor };
     const named = new Set((cards || []).flatMap((card) => card.rows || []));
     const draw = (card, inFold) => rowsOf(page, { fold: inFold }).filter((row) => (card.rows ? card.rows.includes(row.id) : !named.has(row.id)))
         .map((row) => settingsRow(row, ctx)).join('');
@@ -74,8 +74,6 @@ export function mountTabSettings(host, tab, { state, cards = null, custom = null
     };
     host.innerHTML = cards ? cards.map((card) => `<section class="ui-card dashboard-settings"${card.solo ? ' data-solo' : ''}`
         + ` aria-label="${escape(card.label || card.title)}">${body(card)}</section>`).join('') : body({});
-    const rows = bindSettingRows(host, ctx);
-    const nodes = Array.from(host.querySelectorAll('[data-setting-row]'));
     const shown = () => !document.hidden && state?.activePage === 'dashboard' && state?.dashboardActiveSubtab === tab;
     let reads = 0;
     // A row's own words from the last read: made once, then only their text changes.
@@ -90,14 +88,14 @@ export function mountTabSettings(host, tab, { state, cards = null, custom = null
         }
         if (span && span.textContent !== (text || '')) span.textContent = text || '';
     };
+    const rows = bindSettingRows(host, { ...ctx, onPaint: (settings, row, node) => {
+        if (row.control?.kind === 'custom') onPaint?.(settings);
+        const said = settings && words?.(settings)?.[row.id];
+        say(node, 'caption', said?.caption);
+        say(node, 'value', said?.value);
+    } });
     const paint = () => {
         rows.paint();
-        const settings = settingsSnapshot();  // the last read, whoever made it: the rows above paint from the same
-        const said = (settings && words?.(settings)) || {};
-        nodes.forEach((node) => {
-            say(node, 'caption', said[node.dataset.settingRow]?.caption);
-            say(node, 'value', said[node.dataset.settingRow]?.value);
-        });
         // A card whose every row is left out (a managed deployment's channel) takes no room.
         (cards ? Array.from(host.children) : [host]).forEach((card) => {
             card.hidden = !Array.from(card.querySelectorAll('[data-setting-row]')).some((node) => !node.hidden);

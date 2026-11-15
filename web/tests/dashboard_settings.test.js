@@ -16,6 +16,7 @@ import { initEvolution, whenMode, whenName, whenWords } from '../modules/evoluti
 import { CODECS, GUARDED_WRITERS, HIDDEN_WHEN, bindSettingRows, commitSetting, forgetSettingRows, outcomeLine, readSettings, settingsRow } from '../modules/settings_controls.js';
 import { ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
 import { initStorage } from '../modules/storage.js';
+import { initUpdates } from '../modules/updates.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 
 const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => structuredClone(data) });
@@ -338,8 +339,9 @@ test('Undo of the evolution choice restores a key that was absent by unsetting i
 });
 
 test('Evolution: the cycles card presses one choice; "Every N tasks" shows its count, and both keys go in one body', async (t) => {
-    const server = settingsServer(t, { OUROBOROS_POST_TASK_EVOLUTION: 'false', OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'llm',
+    const server = settingsServer(t, { OUROBOROS_POST_TASK_EVOLUTION: true, OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'every_n:7',
         OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD: 0, OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE: '' });
+    await readSettings();
     // The fixture's nodes lack two calls the history's painter makes; the card does not use them.
     for (const [name, body] of [['replaceChildren', function (...nodes) { this.textContent = ''; this.append(...nodes); }],
         ['prepend', function (...nodes) { nodes.reverse().forEach((node) => this.insertBefore(node, this.firstChild)); }]]) {
@@ -350,9 +352,8 @@ test('Evolution: the cycles card presses one choice; "Every N tasks" shows its c
     }
     server.routes.set('/api/state', response({ runtime_mode: 'advanced', evolution_state: { status: 'disabled', enabled: false } }));
     server.routes.set('/api/evolution-data', () => new Promise(() => {}));
-    const { dispose } = initEvolution({ ws: { on: () => () => {} }, mount: server.mount,
-        state: { activePage: 'dashboard', dashboardActiveSubtab: 'evolution' } });
-    await settle();
+    const state = { activePage: 'dashboard', dashboardActiveSubtab: 'evolution' };
+    const { dispose } = initEvolution({ ws: { on: () => () => {} }, mount: server.mount, state });
     const card = server.mount.querySelector('[data-evo-settings]');
     // The choice and the floor are one card's rows; the standing direction is a card of its own, its row drawn solo.
     const sections = card.querySelectorAll('section');
@@ -362,68 +363,125 @@ test('Evolution: the cycles card presses one choice; "Every N tasks" shows its c
         ['What to work on', true, ['OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE']]]);
     assert.match(card.querySelector('#setting-OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE').getAttribute('placeholder'), /^For example: /);
     const caption = () => rowNode(card, 'OUROBOROS_POST_TASK_EVOLUTION').querySelector('[data-row-caption]').textContent;
-    assert.equal(caption(), 'It starts no cycle by itself.');
     const choices = card.querySelectorAll('[data-evo-when]');
     const pressed = () => choices.filter((button) => button.getAttribute('aria-pressed') === 'true').map((button) => button.textContent);
     const count = card.querySelector('[data-evo-n]');
-    assert.deepEqual(pressed(), ['Off']);
-    assert.equal(count.parentElement.hidden, true, 'no count while it is off');
-    count.value = '3';  // a browser reflects the field's value="3"; the fixture does not
-    const click = (target) => card.fire('click', { type: 'click', target });
-    const leave = (target) => card.fire('change', { type: 'change', target });
-    await click(choices[2]);
-    await settle();
-    assert.deepEqual(server.posts, [{ OUROBOROS_POST_TASK_EVOLUTION: true, OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'every_n:3' }]);
+    const painted = (n) => {
+        assert.equal(count.value, String(n));
+        assert.equal(caption(), `After every ${n} tasks, chats included, it decides whether one improvement is worth a cycle.`);
+    };
+    painted(7);  // bind uses the snapshot, before this tab's own read answers
     assert.deepEqual(pressed(), ['Every N tasks']);
     assert.equal(count.parentElement.hidden, false);
-    assert.equal(count.parentElement.querySelector('.settings-row-unit').textContent, 'N', 'the count is the N of its choice');
-    assert.equal(caption(), 'After every 3 tasks, chats included, it decides whether one improvement is worth a cycle.');
-    assert.equal(result(card, 'OUROBOROS_POST_TASK_EVOLUTION'), 'Saved · applies to new tasks · was Off · Undo');
-    count.value = '7';
-    // The value typed into the custom control must stay in the field while its row is saving. The answer below is held
-    // so an ordinary row repaint cannot hide the edit by calling Evolution's painter.
+    assert.equal(count.parentElement.querySelector('.settings-row-unit').textContent, 'N');
+    await settle();
+    const click = (target) => card.fire('click', { type: 'click', target });
+    const leave = (target) => card.fire('change', { type: 'change', target });
+    const type = async (n) => { count.value = String(n); await card.fire('input', { target: count }); document.activeElement = document.body; };
+    // A read from elsewhere paints both halves, even without this tab's own read or a showing event.
+    server.stored.OUROBOROS_POST_TASK_EVOLUTION_CADENCE = 'every_n:11';
+    await readSettings();
+    painted(11);
+    server.stored.OUROBOROS_POST_TASK_EVOLUTION_CADENCE = 'every_n:7';
+    await readSettings();
+    painted(7);
+    await type(9);
+    await readSettings();
+    assert.equal(count.value, '9', 'an unsubmitted draft also survives a landed read');
     const originalSettings = server.routes.get('/api/settings');
     const held = deferred();
+    const followup = deferred();
     let writeMode = 'hold';
+    let holdRead = false;
     server.routes.set('/api/settings', async (url, init = {}) => {
+        if (init.method !== 'POST' && holdRead) return followup.promise;
         if (init.method === 'POST' && writeMode === 'hold') return held.promise;
-        if (init.method === 'POST' && writeMode === 'refuse') return response({ saved: false, error: 'the document refused this value' }, 500);
+        if (init.method === 'POST' && writeMode === 'unknown') return response({ error: 'answer lost' }, 500);
         return originalSettings(url, init);
     });
-    const saving = leave(count);
-    await settle();
-    assert.equal(count.value, '7', 'a typed count survives the repaint while its write is in flight');
-    const saved = await originalSettings('/api/settings', { method: 'POST', body: JSON.stringify({
-        OUROBOROS_POST_TASK_EVOLUTION: true, OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'every_n:7' }) });
-    held.resolve(saved);
-    await saving;
-    await settle();
-    assert.deepEqual(server.posts.at(-1), { OUROBOROS_POST_TASK_EVOLUTION: true, OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'every_n:7' });
-    assert.equal(count.value, '7', 'the read that lands keeps the field at its stored count');
-    assert.equal(caption(), 'After every 7 tasks, chats included, it decides whether one improvement is worth a cycle.',
-        'the count and its caption land together through one painter');
-    writeMode = 'refuse';
-    count.value = '11';
     await leave(count);
     await settle();
-    assert.equal(count.value, '11', 'an HTTP refusal keeps the typed count');
-    assert.equal(caption(), 'After every 7 tasks, chats included, it decides whether one improvement is worth a cycle.',
-        'a refusal leaves the last read caption beside the typed value');
+    assert.deepEqual([count.value, count.disabled], ['9', true], 'the write holds the typed count');
+    await readSettings();
+    assert.equal(count.value, '9', 'a landed read during the write keeps it too');
+    held.resolve(response({ saved: false, error: 'the document refused this value' }, 500));
+    await settle();
+    await readSettings();
+    assert.deepEqual([count.value, count.disabled], ['9', false], 'a refusal and a later read keep the edit');
     assert.match(result(card, 'OUROBOROS_POST_TASK_EVOLUTION'), /Not saved\. The document refused this value/);
-    count.value = '0';
+    await type(9);
+    writeMode = 'unknown';
+    const beforeRecovery = server.calls.length;
+    await leave(count);
+    await settle();
+    assert.equal(server.calls.length, beforeRecovery + 2, 'an unconfirmed write starts its recovery read');
+    await readSettings();
+    assert.equal(count.value, '9', 'both the recovery read and a later read keep an unconfirmed draft');
+    assert.equal(result(card, 'OUROBOROS_POST_TASK_EVOLUTION'), 'Not confirmed yet');
+    writeMode = 'normal';
+    // Clear the unknown outcome's prerequisite read, then hold just the read after the accepted write.
+    const write = server.routes.get('/api/settings');
+    server.routes.set('/api/settings', async (url, init = {}) => {
+        const answer = await write(url, init);
+        if (init.method === 'POST') holdRead = true;
+        return answer;
+    });
+    await leave(count);
+    await settle();
+    painted(9);
+    assert.deepEqual(server.posts.at(-1), { OUROBOROS_POST_TASK_EVOLUTION: true, OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'every_n:9' });
+    assert.match(result(card, 'OUROBOROS_POST_TASK_EVOLUTION'), /^Saved/);
+    followup.resolve(response({ error: 'read failed' }, 500));
+    await settle();
+    painted(9);
+    holdRead = false;
+    server.routes.set('/api/settings', originalSettings);
+    server.stored.OUROBOROS_POST_TASK_EVOLUTION_CADENCE = 'every_n:11';
+    await readSettings();
+    painted(11);  // nothing pending: a later external value wins over the last save
+    await type(0);
     await leave(count);
     await settle();
     assert.equal(result(card, 'OUROBOROS_POST_TASK_EVOLUTION'), 'Not saved. Enter a whole number of tasks, 1 or more.');
-    assert.equal(server.posts.length, 2, 'a count of 0 is never sent');
-    writeMode = 'normal';
+    assert.equal(server.posts.length, 1, 'a count of 0 is never sent');
+    await readSettings();
+    assert.equal(count.value, '0');
+    state.dashboardActiveSubtab = 'logs';
+    shown(server.window, 'logs');
+    painted(11);  // leaving ends the rejected draft
+    state.dashboardActiveSubtab = 'evolution';
+    shown(server.window, 'evolution');
+    await settle();
     await click(choices[2]);
-    assert.equal(server.posts.length, 2, 'pressing the pressed choice sends nothing');
+    assert.equal(server.posts.length, 1, 'pressing the pressed choice sends nothing');
+    server.routes.set('/api/settings', (url, init = {}) => init.method === 'POST' ? originalSettings(url, init) : response({}, 500));
     await click(choices[1]);
     await settle();
     assert.deepEqual(server.posts.at(-1), { OUROBOROS_POST_TASK_EVOLUTION: true, OUROBOROS_POST_TASK_EVOLUTION_CADENCE: 'llm' });
     assert.deepEqual(pressed(), ['After each task']);
     assert.equal(count.parentElement.hidden, true);
+    assert.equal(caption(), 'After each task it decides whether one improvement is worth a cycle.');
     dispose();
+});
+
+test('Updates marks its accepted channel while the follow-up read is held, and keeps it when that read fails', async (t) => {
+    const server = settingsServer(t, { OUROBOROS_UPDATE_CHANNEL: 'stable' });
+    initUpdates({ mount: server.mount, state: { activePage: 'dashboard', dashboardActiveSubtab: 'updates' }, ws: server.ws });
+    await settle();
+    const card = server.mount.querySelector('[data-updates-settings]');
+    const choices = card.querySelectorAll('[data-setting-value]');
+    const pressed = () => choices.filter((button) => button.getAttribute('aria-pressed') === 'true').map((button) => button.dataset.settingValue);
+    assert.deepEqual(pressed(), ['stable']);
+    const original = server.routes.get('/api/settings');
+    const followup = deferred();
+    server.routes.set('/api/settings', (url, init = {}) => init.method === 'POST' ? original(url, init) : followup.promise);
+    await card.fire('click', { target: choices[1] });
+    await settle();
+    assert.deepEqual(pressed(), ['qa'], 'the accepted write paints before the GET answers');
+    assert.match(result(card, 'OUROBOROS_UPDATE_CHANNEL'), /^Saved/);
+    followup.resolve(response({ error: 'read failed' }, 500));
+    await settle();
+    assert.deepEqual(pressed(), ['qa'], 'a failed follow-up cannot put Stable back');
 });
 
 test('Storage: how long finished work is kept is a row of its Cleanup card, read only while the tab is shown', async (t) => {
