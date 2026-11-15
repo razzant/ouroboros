@@ -1553,7 +1553,6 @@ button.settings-row:focus-visible { outline: 2px solid var(--focus-accent-border
 .models-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr)); align-items: start; gap: var(--space-3); }
 .model-role-field { min-width: 0; }
 .model-role-field > :is(select, .ui-model-chooser) { width: 100%; min-width: 0; }
-.model-role-row[data-solo] > .model-role-notes[data-no-status] { display: none; }  /* model_roles.js writes both */
 .model-role-row[data-solo] .model-role-meta { margin-top: 0; }
 .model-role-row[data-solo] > .model-role-details { margin-top: 0; }
 .models-role .model-role-copy { margin: 0; }

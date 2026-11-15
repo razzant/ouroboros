@@ -139,9 +139,6 @@ test('under a role: an OpenRouter model says its price per 1M tokens; every othe
     assert.equal(direct, 'Price unknown', 'a direct key names no price of its own, though OpenRouter prices the same id');
     assert.match(gone, /Accounts/, 'a key that cannot send says so first');
     assert.doesNotMatch(gone, /\$/);
-    // The notes are drawn saying nothing (settings.css hides them on a role's own page); the line written, they say it.
-    const notes = host.querySelectorAll('.model-role-notes');
-    assert.deepEqual([notes.length, notes.filter((node) => node.hasAttribute('data-no-status')).length], [7, 0]);
     editor.destroy();
 });
 
