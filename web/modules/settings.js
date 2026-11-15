@@ -187,17 +187,25 @@ export function initSettings(ctx = {}) {
     // outside Settings (a capsule's `dashboard:costs`) gets no Back: nobody came from Settings. `main:context` shows
     // Main and does nothing else: the Context capsule is the room's.
     const doorBack = settingsReturn({ layers, openSettings: (path) => openFromOutside(path), id: 'settings-door-back' });
+    let leavingDoor = false;
     async function leave(door, { row = '', back } = {}) {
         const [kind, name] = door.split(':');
         const inside = typeof back === 'string';
-        if (kind === 'dashboard') return openDashboardTab?.(name, inside ? { row, back } : { row });
-        const left = await showPage?.(kind === 'main' ? 'chat' : name);
-        const landed = left !== false && kind === 'page' && inside ? document.getElementById(`page-${name}`) : null;
-        let first = landed && [...landed.children].find((part) => part.matches('.app-page-header'))?.nextElementSibling;
-        if (first?.matches('.app-page-tabs')) first = first.nextElementSibling;
-        if (first?.matches('.dashboard-shell')) doorBack.show(first, back);
-        else if (first) doorBack.show(landed, back, first);
-        return left;
+        leavingDoor = inside;
+        try {
+            if (kind === 'dashboard') return await openDashboardTab?.(name, inside ? { row, back } : { row });
+            const left = await showPage?.(kind === 'main' ? 'chat' : name);
+            const landed = left !== false && kind === 'page' && inside ? document.getElementById(`page-${name}`) : null;
+            let first = landed && [...landed.children].find((part) => part.matches('.app-page-header'))?.nextElementSibling;
+            if (first?.matches('.app-page-tabs')) first = first.nextElementSibling;
+            if (first?.matches('.dashboard-shell')) doorBack.show(first, back);
+            else if (first) doorBack.show(landed, back, first);
+            return left;
+        } finally {
+            // The destination's return replaces the Settings levels without consuming their browser Back entry.
+            leavingDoor = false;
+            syncLayers();
+        }
     }
 
     // `view` is what a door asks its page to show first (Permissions' Reviewers: the Agents list on its reviewers).
@@ -390,7 +398,7 @@ export function initSettings(ctx = {}) {
     // top one: in one column every level; in two panes every level below the first (the first stands beside the list,
     // which is not hidden). Settings put away: none.
     function syncLayers() {
-        if (!layers) return;
+        if (!layers || leavingDoor) return;
         const wanted = !shown() ? [] : beside() ? levels.slice(1) : levels;
         layers.batch(() => {
             for (const id of [...layered]) {
