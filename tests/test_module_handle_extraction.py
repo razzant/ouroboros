@@ -278,7 +278,7 @@ LEAVES: dict[str, tuple[str, str, frozenset[str]]] = {
         "RECONCILED", "RunCustody", "START_FAILED", "_reconcile_one", "admitted_store_id",
         "cancel_and_verify", "close_absent_run", "daemon_says_absent", "emit",
         "is_terminal", "output_disposition", "pending_invocations",
-        "record_containment_fault", "record_settled_unread", "record_started",
+        "record_containment_fault", "record_settled_unread",
         "retire_settled_registrations", "review_owned_source",
         "settle_run", "summary_of",
     })),

@@ -83,7 +83,8 @@ def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone
     ]
     gate = ModelGate(lambda body: bool(body.get("tools")) and "S27_HOLD" in body_text(body),
                      timeout=300)
-    with ScriptedStubModel(steps, gate=gate) as stub:
+    # The room write meets the finish door's one notice (#3280); the held answer is then selected.
+    with ScriptedStubModel(steps, gate=gate, select_retained=True) as stub:
         settings = keyless_settings(stub, MCP_ENABLED=True, MCP_SERVERS=[{
             "id": "fixture", "enabled": True, "transport": "stdio", "command": sys.executable,
             "args": [str(script)], "cwd": str(mcp_dir),
@@ -157,14 +158,16 @@ def test_s27_ordinary_main_and_project_mcp_with_concurrent_native_turn(e2e_clone
             assert not [row for row in oracle._jsonl("logs/chat.jsonl")
                         if row.get("type") == "project_completion_summary"
                         and row.get("task_id") == project_id], "ordinary Project reply leaked into Main"
+            # The room write meets the finish door's one notice (#3280): the Project turn delivers its held
+            # answer through finish_task, one more agent call; the MCP-only Main turn finishes plainly.
             for task_id, expected in ((main_id, {read_tool, write_tool}),
-                                      (project_id, {read_tool, write_tool, "write_file"})):
+                                      (project_id, {read_tool, write_tool, "write_file", "finish_task"})):
                 rows = [r for r in oracle.tools_rows() if r.get("task_id") == task_id]
                 assert {r.get("tool") for r in rows} == expected, rows
                 assert "S27_READ_яё𐍈🚀" in json.dumps(rows, ensure_ascii=False), rows
                 assert all(not r.get("is_error") for r in rows), rows
             agent_calls = [body for kind, body in stub.calls if kind == "agent"]
-            assert len(agent_calls) == 5 and stub.script_consumed(), stub.kinds()
+            assert len(agent_calls) == 6 and stub.script_consumed(), stub.kinds()
             # An unpinned server's call schemas load on demand (#2332): every request names its tools in
             # the connections map and carries the loader; the calls above ran without loading them.
             for body in agent_calls:

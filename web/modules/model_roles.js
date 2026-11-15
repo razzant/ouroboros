@@ -823,7 +823,7 @@ function mountModels(container, { path, ctx }) {
             : keyWords(settings[slots.main?.settingKey], local('main'));
         // The answer is one row: the model, under it the source with its own mark (or what is wrong with its key), and
         // the chevron of a row that opens a level. The role's name is the object's title above.
-        container.querySelector('.models-main').innerHTML = `<button type="button" class="ui-row settings-row models-main-row" data-kind="door" data-entry-open>
+        container.querySelector('.models-main').innerHTML = `<button type="button" class="ui-row settings-row models-main-row" data-kind="door" data-entry-open${mainNote || main.source ? '' : ' data-no-meta'}>
             <span class="ui-row-title models-main-name">${escapeHtml(main.follows || labels.length ? 'Not chosen yet' : main.name)}</span>
             <span class="ui-row-meta models-main-meta"${mainNote ? ' data-tone="warn"' : ''}>${mainNote ? '' : routeMark(settings[slots.main?.settingKey], { local: local('main') })}<span>${escapeHtml(mainNote || main.source)}</span></span>
             <span class="ui-row-actions">${doorSign('models/role/main')}</span></button>`;

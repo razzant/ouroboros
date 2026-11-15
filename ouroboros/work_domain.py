@@ -85,6 +85,13 @@ def _confirmed(result: subprocess.CompletedProcess, what: str) -> subprocess.Com
 # --- which domain a path belongs to ---------------------------------------------------------------------------
 
 def _domain() -> Any:
+    from ouroboros import deployment_policy
+
+    # Unmanaged (or a policy without ``execution``): no domain, without importing the execution-domain graph
+    # into every process that asks (a staging writer, a helper). An unusable policy raises here as it does there.
+    policy = deployment_policy.current()
+    if policy is None or policy.execution is None:
+        return None
     from ouroboros import execution_domain
 
     return execution_domain.current()
