@@ -233,6 +233,9 @@ test('a Settings jump retains its clean origin until Back, while a map choice re
     await controls.open('test-return-clean', { map: true }); await settle();
     assert.equal(controls.capture().label, 'test-return-clean', 'a deeper origin names the level it returns to');
     assert.equal(controls.capture().title, 'Settings › test-return-clean');
+    const fromHome = controls.capture(content.querySelector('[data-settings-home]'));
+    assert.equal(fromHome.label, 'Settings', 'a door in the list returns to the home even while a pane is open');
+    assert.equal(fromHome.title, 'Settings');
     const clean = () => content.querySelectorAll('.settings-page').find(level => level.dataset.settingsPage === 'test-return-clean');
     const origin = clean();
     const body = origin.querySelector('.settings-page-body');

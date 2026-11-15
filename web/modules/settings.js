@@ -499,10 +499,11 @@ export function initSettings(ctx = {}) {
     // Loopback-only debug hook, like app.js's __ouroWs: Settings has no URL, so browser tests open a path through it.
     window.__ouroSettings = { open: openFromOutside };
     return { page, open: openFromOutside, pressedAgain,
-        capture() {
+        capture(opener) {
             const kept = [...levels], own = ownChosen;
-            return { label: levels.length ? settingsTitle(levels.at(-1).path) : 'Settings',
-                title: ['Settings', ...levels.map((level) => settingsTitle(level.path))].join(' › '),
+            const origin = homeEl.contains(opener) ? [] : levels;
+            return { label: origin.length ? settingsTitle(origin.at(-1).path) : 'Settings',
+                title: ['Settings', ...origin.map((level) => settingsTitle(level.path))].join(' › '),
                 retains: el => kept.some(level => level.el === el), release: releaseAside,
                 restore() {
                     let shared = 0;

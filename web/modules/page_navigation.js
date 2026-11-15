@@ -52,7 +52,7 @@ export function createPageNavigation({ layers, capture, canLeave, land = () => {
 export function capturePagePlace({ state, navState, settingsControls, dashboardControls, skillsControls,
     projectInstances, projectPanelTitle, rooms, mainChat, logsControls, restorePlaces, commitPage, doc = document }, opener) {
     const page = state.activePage, projectId = navState.activeProjectId;
-    const settings = page === 'settings' ? settingsControls?.capture() : null;
+    const settings = page === 'settings' ? settingsControls?.capture(opener) : null;
     const dashboard = page === 'dashboard' ? dashboardControls?.capture() : null;
     const skills = page === 'skills' ? skillsControls?.capture() : null;
     const project = projectId ? { id: projectId, name: projectPanelTitle.textContent } : null;
