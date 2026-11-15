@@ -1232,13 +1232,13 @@ def resolve_bundled_ripgrep() -> Optional[str]:
 
 def get_system_memory() -> str:
     """Return total system memory as a human-readable string."""
-    os_name = platform.system()
+    from ouroboros.process_logging import check_output_with_relayed_stderr
     try:
-        if os_name == "Darwin":
-            mem_bytes = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"]).strip())
+        if (os_name := platform.system()) == "Darwin":
+            mem_bytes = int(check_output_with_relayed_stderr(["sysctl", "-n", "hw.memsize"]).strip())
             return f"{mem_bytes / (1024**3):.1f} GB"
         elif os_name == "Linux":
-            return subprocess.check_output(
+            return check_output_with_relayed_stderr(
                 ["awk", '/MemTotal/ {print $2/1024/1024 " GB"}', "/proc/meminfo"]).strip().decode()
         elif os_name == "Windows":
             mem_bytes = int(_wmic_value_line("ComputerSystem", "get", "TotalPhysicalMemory").split("=")[1])
@@ -1256,10 +1256,11 @@ def _wmic_value_line(*query: str) -> str:
 
 def get_cpu_info() -> str:
     """Return CPU model string."""
+    from ouroboros.process_logging import check_output_with_relayed_stderr
     os_name = platform.system()
     try:
         if os_name == "Darwin":
-            return subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"]).strip().decode()
+            return check_output_with_relayed_stderr(["sysctl", "-n", "machdep.cpu.brand_string"]).strip().decode()
         elif os_name == "Windows" and (line := _wmic_value_line("cpu", "get", "Name")):
             return line.split("=", 1)[1].strip()
     except Exception:
