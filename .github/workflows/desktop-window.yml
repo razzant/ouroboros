@@ -3,11 +3,12 @@
 # WHAT A GREEN CHECK HERE SAYS. On a hosted Windows runner, at the display size this
 # job sets and 100 % scale, a real pywebview window asked for more than its screen
 # shows opens outside the screen's working area without the launcher's fit and inside
-# it with the fit (ouroboros/launcher_window_chrome.py `fit_to_work_area`): its size
-# and its place. The job summary prints both measurements. It does NOT say anything
-# about another display scale (a hosted runner cannot change its DPI, so 125 % and
-# 150 % stay unmeasured) or about a minimum larger than the screen, which WinForms
-# itself limits on a one-screen runner (the stand-in test covers that branch).
+# it with the fit (ouroboros/launcher_window_chrome.py `fit_to_work_area`). The job
+# summary prints both measurements. It does NOT say anything about another display
+# scale (a hosted runner cannot change its DPI, so 125 % and 150 % stay unmeasured),
+# and it runs only the fit's resize: a minimum larger than the screen (WinForms
+# itself limits it on a one-screen runner), the move of a form that hangs over an
+# edge and a form Windows opened maximized are covered by the stand-in test alone.
 #
 # WHY ITS OWN WORKFLOW. The test lanes of ci.yml install no desktop packages (the
 # `test` profile of .github/actions/setup-python-env has no `desktop` extra), so the
@@ -16,42 +17,24 @@
 # the `build` profile, which carries the `desktop` extra, and runs that one case; a
 # skip is a failure here, since a skipped case proves nothing.
 #
-# WHEN. On a branch push or a pull request that touches the window code, its home
-# test, what the job installs (the lock, the project file, the environment action) or
-# this file, and on request; never on a tag. A branch that is also a pull request
-# starts it twice for one commit; the second run replaces the first. It reads the
-# repository and writes nothing.
+# WHEN. On request and on every `v*` release tag, as the owner chose for cloud tests
+# (2026-10-16, the header of ci.yml): never on a branch push or a pull request. A tag
+# is where a changed pywebview or pythonnet pin is measured again; whoever changes
+# them between tags runs this by hand (`gh workflow run desktop-window.yml --ref
+# <branch>` once the default branch carries the file). It reads the repository and
+# writes nothing.
 name: Desktop window (Windows)
 
 on:
   push:
-    branches: ['**']  # a tag ignores a path filter
-    paths:
-      - ouroboros/launcher_window_chrome.py
-      - ouroboros/launcher_onboarding.py
-      - tests/test_launcher_window_chrome.py
-      - .github/workflows/desktop-window.yml
-      - tests/group_run.py
-      - uv.lock
-      - pyproject.toml
-      - .github/actions/setup-python-env/action.yml
-  pull_request:
-    paths:
-      - ouroboros/launcher_window_chrome.py
-      - ouroboros/launcher_onboarding.py
-      - tests/test_launcher_window_chrome.py
-      - .github/workflows/desktop-window.yml
-      - tests/group_run.py
-      - uv.lock
-      - pyproject.toml
-      - .github/actions/setup-python-env/action.yml
+    tags: ['v*']
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: desktop-window-${{ github.event.pull_request.head.sha || github.sha }}
+  group: desktop-window-${{ github.sha }}
   cancel-in-progress: true
 
 jobs:

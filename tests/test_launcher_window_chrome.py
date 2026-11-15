@@ -2210,7 +2210,7 @@ def shown():
     try:
         form.Invoke(Func[Type](read))
     finally:
-        os._exit(0)  # measured: pywebview's own shutdown of a window destroyed this early may never return
+        os._exit(0)  # its line is printed: pywebview's own shutdown is not part of the measurement
 
 window.events.shown += shown
 webview.start()

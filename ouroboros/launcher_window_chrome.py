@@ -79,8 +79,8 @@ Continue with it: both desktop windows already on a 1366×768 laptop at 100 %, m
 comes first is unproven: each lowers the minimum where it exceeds the area (WinForms otherwise restores it), then sizes
 the form to the area at most and moves it inside, in the form's own pixels. A form that lies inside is not touched,
 nothing is maximized or shown, and a failure is logged and never keeps the window from opening. macOS and Linux are left
-to their window managers (not measured here). The home test's native case measures a real window; it needs
-Windows with pywebview and pythonnet, which ``.github/workflows/desktop-window.yml`` provides (100 % scale only).
+to their window managers (not measured here). The home test's native case measures a real window; it is opt-in and
+needs Windows with pywebview and pythonnet, which ``.github/workflows/desktop-window.yml`` provides (100 % scale only).
 """
 
 from __future__ import annotations
