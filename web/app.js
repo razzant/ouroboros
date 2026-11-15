@@ -780,7 +780,9 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
     try {
         // One paint for the whole step (the sync below): a handover leaves the room that was on screen.
         let inst;
-        const movedToChat = await showPage('chat', { map, origin, key: `project:${project.id}`, closeProject: false, closeDrawer: false, sync: false, enter: () => {
+        const movedToChat = await showPage('chat', { map, origin, key: `project:${project.id}`, closeProject: false, closeDrawer: false, sync: false,
+            current: () => navigation === projectNavigationGeneration && (!sourceReveal || sourceReveal.current()),
+            enter: () => {
         // A document Main had open (a modal over the whole app) closes rather than sit over the room. Covered (a phone,
         // a finger's docked column), Main leaves with it; docked beside the room it stays on screen and live.
         rooms.rememberSelection(mainChat);
@@ -818,7 +820,7 @@ async function openProjectPanel(project, { closeDrawer = true, openOnly = false,
         inst.quietFocus?.(pointer);  // pressed open by a pointer: the room's focus corners wait for a key
         syncNavigationState();
         } });
-        if (movedToChat === false || navigation !== projectNavigationGeneration || sourceReveal && !sourceReveal.current()) return;
+        if (movedToChat === false || navigation !== projectNavigationGeneration) return;
         if (sourceReveal) {
             const reveal = {};
             projectReveals.set(project.id, reveal);

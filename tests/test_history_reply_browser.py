@@ -251,6 +251,7 @@ def test_exact_nested_line_and_post_quote_conversion(direct_server_with_data, br
             bind_task_to_project(root, "converted-source", fixture["x"]["id"], origin={"absent": "system"})
             _quote(page, address).click()
             facts["converted"] = _landed(page, address, '#pchat-quote-converted-messages')
+            assert page.evaluate("window.__ouroLayers.returnPage()?.back.label") == "Main"
             _evidence(page, tmp_path, f"converted-target-{browser_engine}", fixture, facts)
             page.locator('#project-panel-close').click()
             _idle(page, '#chat-messages')
@@ -282,9 +283,10 @@ def test_exact_nested_line_and_post_quote_conversion(direct_server_with_data, br
             _evidence(page, tmp_path, f"line-after-gesture-{browser_engine}", fixture, facts)
             page.locator('#project-panel-close').click()
             _idle(page, '#chat-messages')
-            # Ordinary reopening still reads the present; source navigation adds no global Back.
+            # A sidebar reopen reads the present and clears the source jump’s return.
             page.locator('.nav-project-row[data-project-id="quote-triage"]').click()
             _idle(page, '#pchat-quote-triage-messages')
+            assert page.evaluate("window.__ouroLayers.returnPage() === null")
             assert page.locator('#pchat-quote-triage-messages').evaluate(
                 'n => n.scrollHeight - n.scrollTop - n.clientHeight') < 48
         finally:

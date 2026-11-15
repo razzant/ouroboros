@@ -16,8 +16,9 @@ export function createPageNavigation({ layers, capture, canLeave, doc = document
     }
 
     const currentPlace = () => capture(pressed || doc.activeElement);
-    async function go(key, commit, { map = false, origin = currentPlace() } = {}) {
-        if (await canLeave(key) === false) return false;
+    async function go(key, commit, { map = false, origin = currentPlace(), current = () => true } = {}) {
+        // A source owns its claim until this commit; covering its room then transfers ownership to the destination.
+        if (await canLeave(key) === false || !current()) return false;
         if (origin.key !== key) doc.activeElement?.blur?.();
         layers.batch(() => {
             if (map === true) clear(); // sidebar/drawer; a section's own list and tabs keep the visit

@@ -105,3 +105,26 @@ test('leave guards preserve section moves, map Projects to Main, and stop at the
     assert.deepEqual(calls, [{ from: 'settings', to: 'chat' }]);
     assert.equal(await canLeavePage('dashboard:costs', state, [() => true]), true);
 });
+
+
+test('a source claim is checked after leave permission and handed over when its destination commits', async () => {
+    let answer, current = true, commits = 0;
+    const layers = createLayerStack({ win: null, doc: null });
+    const doc = { activeElement: {}, addEventListener() {}, removeEventListener() {} };
+    const nav = createPageNavigation({ layers, doc, canLeave: () => new Promise(resolve => { answer = resolve; }),
+        capture: () => ({ key: 'chat', label: 'Main', restore() {} }) });
+    const commit = () => { commits++; current = false; }; // covering Main ends the origin's visible claim
+    const cancelled = nav.go('project:one', commit, { current: () => current });
+    current = false;
+    answer(true);
+    assert.equal(await cancelled, false);
+    assert.equal(commits, 0);
+    assert.equal(layers.size(), 0, 'a superseded read creates neither a page nor a return');
+    current = true;
+    const accepted = nav.go('project:two', commit, { current: () => current });
+    answer(true);
+    assert.equal(await accepted, true, 'the commit may cover the origin without cancelling its own landing');
+    assert.equal(commits, 1);
+    assert.equal(layers.returnPage().destination, 'project:two');
+    nav.destroy(); layers.destroy();
+});
