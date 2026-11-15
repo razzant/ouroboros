@@ -192,7 +192,12 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_wr
             assert float(_settings(data_dir)[KEY]) == 12.75
             _costs(page, url)
             expect(allowance).to_have_value("12.75")
-            expect(page.locator("#costs-allowance-spend")).to_contain_text("of $12.75 in the last 24 hours")
+            # DESIGN.md:2729–2735: the card names the window, then separates spend, limit and room;
+            # a limit set with cents keeps cents. The old spend sentence is now the omissions line.
+            expect(page.locator("#costs-meter-consciousness")).to_have_text("Consciousness, last 24 hours")
+            expect(page.locator("#costs-allowance-spent")).to_have_text("$0.00")
+            expect(page.locator("#costs-allowance-of")).to_have_text("of $12.75")
+            expect(page.locator("#costs-allowance-left")).to_have_text("$12.75 left")
             # Another unrelated row keeps the decimal too.
             stored = _write_unrelated(page, data_dir, posts, 11)
             assert float(stored[KEY]) == 12.75, stored
