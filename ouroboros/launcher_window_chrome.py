@@ -70,6 +70,17 @@ surface, opaque white by default, covers it on every host until a page paints (h
 and WebKitGTK 2.50.4; a head-blocked ``html=`` document still showed the theme's colour). ``paint_room``
 gives that surface the room of the palette the theme resolved; a subsequent hosted run observed it
 before the held URL's page painted.
+
+On Windows a window can open larger than its screen shows. pywebview 5.4 gives the WinForms form the size and minimum
+it was asked for, the form scales both by the display's DPI (``AutoScaleMode.Dpi``), and a form taller than its screen's
+working area (the screen less the taskbar) opens top-aligned, its bottom edge under the taskbar and the setup window's
+Continue with it: both desktop windows already on a 1366×768 laptop at 100 %, more so at a larger scale.
+``fit_to_work_area`` hooks the form's ``Load`` and, once, its ``Shown``, because which of ``Load`` and the DPI scaling
+comes first is unproven: each lowers the minimum where it exceeds the area (WinForms otherwise restores it), then sizes
+the form to the area at most and moves it inside, in the form's own pixels. A form that lies inside is not touched,
+nothing is maximized or shown, and a failure is logged and never keeps the window from opening. macOS and Linux are left
+to their window managers (not measured here). The home test's native case measures a real window; it is opt-in and
+needs Windows with pywebview and pythonnet, which ``.github/workflows/desktop-window.yml`` provides (100 % scale only).
 """
 
 from __future__ import annotations
@@ -88,6 +99,7 @@ log = logging.getLogger("launcher.window_chrome")
 
 _MACOS = sys.platform == "darwin"
 _LINUX = sys.platform.startswith("linux")
+_WINDOWS = sys.platform == "win32"
 HANDLER = "ouroborosWindowChrome"
 WORLD = "ouroboros-window"
 TOOLBAR = "ouroboros-window-chrome"
@@ -331,6 +343,53 @@ def _paint_gtk_room(window: Any) -> None:
         log.warning("The web view keeps WebKit's white until its page paints.", exc_info=True)
 
 
+def fit_to_work_area(window: Any) -> None:
+    """Before ``webview.start``, Windows only: ``window`` opens no larger than its screen's working area. Its form
+    exists in ``before_show`` (its UI thread, not shown yet) and takes the fit's two handlers there."""
+    if _WINDOWS and window is not None:
+        window.events.before_show += lambda: _fit_when_loaded_and_first_shown(window)
+
+
+def _fit_when_loaded_and_first_shown(window: Any) -> None:
+    try:
+        form = window.native
+
+        def shown(*_event: Any) -> None:
+            _fit(form)
+            try:
+                form.Shown -= shown  # once: a restore from the tray or the owner's own size is never fitted again
+            except Exception:
+                log.debug("The fit stays subscribed to the form's Shown.", exc_info=True)
+
+        form.Load += lambda *_event: _fit(form)
+        form.Shown += shown
+    except Exception:
+        log.warning("The window is not fitted to its screen: its form takes no handlers.", exc_info=True)
+
+
+def _fit(form: Any) -> None:
+    """A WinForms event of ``form`` (its UI thread). Its size and its screen's working area are the same pixels, so
+    there is no DPI arithmetic; the minimum goes down first, or WinForms holds the form at it."""
+    try:
+        from System.Drawing import Point, Size
+        from System.Windows.Forms import FormWindowState, Screen
+
+        if form.WindowState != FormWindowState.Normal:
+            return  # a first show Windows itself maximizes (a shortcut set to run maximized) is whole already
+        area, size, least = Screen.FromControl(form).WorkingArea, form.Size, form.MinimumSize
+        width, height = min(size.Width, area.Width), min(size.Height, area.Height)
+        left = max(area.Left, min(form.Left, area.Right - width))
+        top = max(area.Top, min(form.Top, area.Bottom - height))
+        if (width, height) != (size.Width, size.Height):
+            if least.Width > width or least.Height > height:
+                form.MinimumSize = Size(min(least.Width, width), min(least.Height, height))
+            form.Size = Size(width, height)
+        if (left, top) != (form.Left, form.Top):  # also a form of a fitting size that hangs over an edge
+            form.Location = Point(left, top)
+    except Exception:
+        log.warning("The window was not fitted to its screen's working area.", exc_info=True)
+
+
 class WindowChrome:
     """One window's title bar and appearance, decided per document on the main thread."""
 
@@ -363,8 +422,10 @@ class WindowChrome:
         return self._phase not in (None, "windowed")
 
     def attach(self, window: Any) -> None:
-        """Register on ``window`` before ``webview.start``: its room colour everywhere, the rest on macOS only."""
+        """Register on ``window`` before ``webview.start``: its room colour everywhere, its fit to the screen on
+        Windows, the rest on macOS only."""
         paint_room(window)
+        fit_to_work_area(window)
         if not _MACOS or window is None:
             return
         self._window = window

@@ -2922,7 +2922,8 @@ with every row, the limits warning and Continue in view: subscriptions
 are equal rows, two columns where they fit, the warning under them in every state,
 before any connection. A narrow or short window, expanded keys, a sign-in or a long
 error may scroll; Continue, Back and the reason stay on the bottom edge, and focus
-stops clear of them.
+stops clear of them. On Windows the desktop setup window opens no larger than its
+screen's working area, so that edge is on screen.
 
 - Step title `--type-page`; card titles `--type-section`; field labels and
   notes `--type-meta`. No display size above `--type-page`.
