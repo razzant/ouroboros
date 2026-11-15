@@ -248,9 +248,11 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     _serve(page, "models")
     _serve(page, "permissions")
     page.click(row("consciousness-model"))
-    back = page.locator('#page-settings [data-settings-page="models/role/consciousness"] [data-settings-back]')
+    page.locator('#page-settings [data-settings-page="models/role/consciousness"]').wait_for(state="visible")
+    back = page.locator('#page-settings > .app-page-header [data-settings-back]')
     back.wait_for()
-    assert back.inner_text().strip() == "Consciousness"
+    assert back.inner_text().strip() == "" and back.get_attribute("aria-label") == "Back to Consciousness"
+    assert back.get_attribute("title") == "Back to Consciousness"
     back.click()
     page.wait_for_selector("#dashboard-panel-consciousness.active")
     # The four doors of "Around it" stand in the picture's order, each with its value before its chevron.
@@ -260,9 +262,10 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
         "Model | Main model", f"Its actions are checked | {_scale_word(page, 'light')}", "Where it lives |", "Improving itself | Off"]
     # The Safety door opens its row's page in Settings, whose Back names this tab and returns to it.
     page.click(row("consciousness-safety"))
-    back = page.locator('#page-settings [data-settings-page="permissions"] [data-settings-back]')
+    page.locator('#page-settings [data-settings-page="permissions"]').wait_for(state="visible")
     back.wait_for()
-    assert back.inner_text().strip() == "Consciousness"
+    assert back.inner_text().strip() == "" and back.get_attribute("aria-label") == "Back to Consciousness"
+    assert back.get_attribute("title") == "Back to Consciousness"
     back.click()
     page.wait_for_selector("#dashboard-panel-consciousness.active")
     # The evolution door opens its row on the Evolution tab, and the allowance door its row in Costs: a door inside
@@ -289,9 +292,11 @@ def test_costs_shows_subscriptions_from_the_passive_view_alone_and_its_doors_ope
     assert not [path for path, _ in ui["posts"] if "/api/claudexor/" in path], "nothing is woken or refreshed"
     _serve(page, "accounts")
     door.click()
-    back = page.locator('#page-settings [data-settings-page="accounts/codex"] [data-settings-back]')
+    page.locator('#page-settings [data-settings-page="accounts/codex"]').wait_for(state="visible")
+    back = page.locator('#page-settings > .app-page-header [data-settings-back]')
     back.wait_for()
-    assert back.inner_text().strip() == "Costs"
+    assert back.inner_text().strip() == "" and back.get_attribute("aria-label") == "Back to Costs"
+    assert back.get_attribute("title") == "Back to Costs"
     back.click()
     page.wait_for_selector("#dashboard-panel-costs.active")
 
