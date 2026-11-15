@@ -133,8 +133,14 @@ def test_ui_smoke_chat_inflight_indicator_lifecycle(direct_server_with_data, req
                 }""")
                 evidence.checkpoint("typing_emit_returned")
 
-                # In-flight state: reached through the receipt's own census read. The header
-                # names the census phase in the task-phase words (#1740: 'Thinking', no dots).
+                # Main behind another page is away and quiet (PR #2951, room_retire.js): the receipt draws
+                # nothing there. That a shown room's receipt pulls the census at once is
+                # web/tests/chat_header_census.test.js ("a typing frame is a receipt").
+                page.wait_for_timeout(1_000)
+                assert page.evaluate("() => document.querySelector('#chat-status')?.textContent.trim()") in {"Online", "Ready"}
+                page.click('[data-nav-page="chat"]')
+                # Back, Main catches up as after a reconnect: its census read names the census phase in the
+                # task-phase words (#1740: 'Thinking', no dots).
                 page.wait_for_function(
                     """() => {
                         const el = document.querySelector('#chat-status');
@@ -144,8 +150,7 @@ def test_ui_smoke_chat_inflight_indicator_lifecycle(direct_server_with_data, req
                 )
                 evidence.checkpoint("thinking_visible")
                 evidence.checkpoint("assert_census_read", reads=state["reads"], reads_before=reads_before)
-                assert state["reads"] > reads_before, "the receipt did not pull the census"
-                page.click('[data-nav-page="chat"]')
+                assert state["reads"] > reads_before, "the return did not read the census"
 
                 # Dots indicator visible (main chat instance id is #typing-indicator)
                 typing_el = page.locator("#typing-indicator")
