@@ -48,9 +48,3 @@ def show_page(page, name: str, *, timeout: float = 10_000):
     page.locator(f'#primary-sidebar [data-nav-page="{name}"]').first.evaluate("row => row.click()")
     page.wait_for_function("name => document.getElementById(`page-${name}`)?.classList.contains('active')", arg=name,
                            timeout=timeout)
-
-
-def card_needs(page) -> list[str]:
-    """What the card lists now, as ``kind:id`` of each row it shows or keeps behind "Show all", wherever it stands."""
-    return page.locator(f"{CARD} [data-needs]").evaluate_all(
-        "rows => rows.map((row) => `${row.dataset.needs}:${row.dataset.needId}`)")

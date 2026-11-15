@@ -9,8 +9,8 @@ from urllib.parse import urlsplit
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
-from tests.settings_browser_helpers import HOME, home_answer, open_settings, search_settings, settings_page, top_path
-from tests.settings_section_helpers import card_needs, header_back, lead_name, show_card, show_page
+from tests.settings_browser_helpers import HOME, home_answer, needs, open_settings, search_settings, settings_page, top_path
+from tests.settings_section_helpers import header_back, lead_name, show_card, show_page
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
@@ -69,7 +69,7 @@ def test_the_home_answers_from_passive_reads_and_the_card_lists_what_waits(subsc
     # as a line of the card (docs/DESIGN.md "Settings"; the approved shell, PR #3369, took the card's Check away).
     assert card.locator(".settings-being-name").inner_text().strip() == "Ouroboros"
     assert card.locator("[data-being-state]").inner_text().strip() == "Online"
-    assert card_needs(page) == ["restart:restart"]
+    assert needs(page) == ["restart:restart"]
     assert card.locator("[data-being-count]").inner_text().strip() == "One thing needs you"
     assert "nothing" not in card.inner_text().lower()
     setup_browser.capture(page, f"settings-home-card-{width}x{height}")
@@ -84,7 +84,7 @@ def test_the_home_answers_from_passive_reads_and_the_card_lists_what_waits(subsc
     dialog.wait_for(state="visible")
     dialog.get_by_role("button", name="Cancel").click()
     dialog.wait_for(state="detached")
-    assert "restart:restart" in card_needs(page)
+    assert "restart:restart" in needs(page)
     ui["settings"]["_meta"]["restart_state"] = {**WAITING, "restart_required": False, "restart_keys": []}
     # The list reads its answers when it comes on screen (settings.js look, #3470), not at a press beside it: Settings
     # shown again after another page reads what waits again.
