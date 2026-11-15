@@ -58,7 +58,7 @@ export function initSettings(ctx = {}) {
     // lead on the shell's own columns). A phone's home has one band, `☰ Settings`; its search starts the list.
     const leadHtml = `<div class="settings-lead section-lead" data-settings-lead>
             <span class="settings-lead-col settings-lead-rail section-lead-col section-lead-rail" data-settings-search-slot></span>
-            <span class="settings-lead-col settings-lead-page section-lead-col section-lead-page"><span class="app-page-return" data-page-return></span><span class="app-page-lead-title" data-settings-lead-name></span></span>
+            <span class="settings-lead-col settings-lead-page section-lead-col section-lead-page"><span class="app-page-return" data-page-return></span><h2 class="app-page-lead-title" data-settings-lead-name></h2></span>
         </div>`;
     page.dataset.sectionView = 'home';
     page.innerHTML = `${renderPageHeader({ page: 'settings', leadHtml })}

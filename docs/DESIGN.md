@@ -3288,9 +3288,9 @@ are this row; a list groups it under a quiet group name, on a phone one card of 
 ### A section with pages
 
 Settings and Dashboard are sections with pages, and their pages stand as a list beside the open page: from 40rem
-of the section's box the list is a rail (`--section-rail-w`) and the page stands beside it, each column named in
-the band over it (over the list what the section puts there, Settings its search field; over the page its name in
-the header's one title style, with no Back). A page is always open: the section's first page the first time
+of the section's box the list is a rail (`--section-rail-w`) and the page stands beside it. The band holds the list's
+controls (Settings' search) and the page's controls. Its chosen row names the page; the heading stays for readers,
+and a deeper Settings level keeps its name. A page is always open: the section's first page the first time
 (Settings: Models), later the last one opened on the device. Narrower, one column shows the list, under the
 section's name led by Ouroboros's picture, or the page, under Back and its name. Choosing a row keeps the list
 where it was and the page arrives on `--motion-fade`. A section's pages are never tabs (§3).
@@ -3414,7 +3414,7 @@ controls yield; its chevron stays. Two panes place it over the page; one column 
 names shows no title: its tabs or Files' location take that place and its actions the end, on Main's line, so the
 bar has two ends as Main's does; tabs wrap and never scroll, a location that does not fit scrolls inside it (it
 rests at the folder you are in, no folder wider than the bar's start), and in the macOS window its empty parts
-still move the window. A section with pages names its two columns (A section with pages). A header with nothing to
+still move the window. A section with pages keeps its heading for readers; its chosen row names the pane. A deeper Settings level keeps its name. A header with nothing to
 show draws no bar, and its page starts at the window's top edge: the band under the macOS title bar stays the
 window's (owner 22.10), the page's first row starts below it, and the Widgets board's cards pass under it with
 crisp edges (owner 20.10), as a room's feed does (owner 21.10), while a plain press in the empty band still moves

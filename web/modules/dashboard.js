@@ -160,7 +160,7 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     // The band: over the list nothing; over the page `(‹) <page>` in the header's one title style.
     const leadHtml = `<div class="section-lead dashboard-lead">
             <span class="section-lead-col section-lead-rail"></span>
-            <span class="section-lead-col section-lead-page"><span class="app-page-return" data-page-return></span><span class="app-page-lead-title" data-dashboard-lead-name></span></span>
+            <span class="section-lead-col section-lead-page"><span class="app-page-return" data-page-return></span><h2 class="app-page-lead-title" data-dashboard-lead-name></h2></span>
         </div>`;
     page.innerHTML = `
         ${renderPageHeader({ page: 'dashboard', leadHtml })}
@@ -188,6 +188,7 @@ export function initDashboard({ state, layers = null, openSettings = null, state
     const panels = Array.from(page.querySelectorAll('.dashboard-panel'));
     const rows = Array.from(list.querySelectorAll('[data-dashboard-tab]'));
     const leadName = page.querySelector('[data-dashboard-lead-name]');
+    const header = page.querySelector('.app-page-header');
     const tabStrip = bindTabStrip(list, { dataAttr: 'data-dashboard-tab', onChange: (name) => showTab(name, { asLevel: true }) });
     const disposeFade = bindScrollFade(rail);
     // Two panes from a 40rem box where the engine draws them (ui.css @container sectionplace), as Settings.
@@ -208,6 +209,7 @@ export function initDashboard({ state, layers = null, openSettings = null, state
         const view = panes() || level ? 'page' : 'home';
         page.dataset.sectionView = view;
         shell.dataset.sectionView = view;
+        header.toggleAttribute('data-empty', panes());
         const tab = DASHBOARD_TABS.find((each) => each.value === state.dashboardActiveSubtab);
         if (leadName) leadName.textContent = tab?.label || '';
         syncLayer();

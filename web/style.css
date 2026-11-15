@@ -6778,11 +6778,22 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 /* The Dashboard's shell is the section shell (ui.css), which bounds its columns. A page that borrows this class
    without a section's list (Circles) keeps the bounded column of its own, so its body is the page's scroller. */
 .dashboard-shell:not(.section-shell) { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
-.dashboard-lead-back { display: flex; flex: none; align-items: center; }
-.dashboard-lead-back:empty { display: none; }
 .dashboard-row-mark[hidden] { display: none; }
 @container sectionplace (min-width: 40rem) {
     .dashboard-shell[data-section-view="page"] .dashboard-body { padding-inline-start: var(--space-4); }
+    /* The chosen list row names its pane; the heading remains available to readers. */
+    .section-lead-page > [data-dashboard-lead-name],
+    #page-settings[data-settings-depth="1"] .section-lead-page > [data-settings-lead-name] {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+    }
+}
+:root[data-window-chrome="integrated"][data-layout="docked"] #page-dashboard > .app-page-header[data-empty]:not([data-return]) ~ .section-shell :is(.section-rail, .dashboard-body) {
+    padding-top: calc(var(--window-chrome-top) + var(--space-4));
 }
 /* A phone: the list's screen keeps `☰ Dashboard`, with nothing under it; a page's screen is one row, Back (to the
    list, or to Settings) and the page's name in the header's title style, where ☰ and the place's name stood. Only a
