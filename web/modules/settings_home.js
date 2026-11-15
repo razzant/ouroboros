@@ -104,7 +104,9 @@ export function needRows(facts = {}) {
 /** Ouroboros's state for its card: `{ text, tone }`, from the socket and the last state snapshot. */
 export function beingState({ connected = true, state = null } = {}) {
     if (!connected) return { text: fmt('Reconnecting…'), tone: 'muted' };
-    if (supervisorReady(state) === false) {
+    // Only a body that says ready ends Starting… (host_starting_status.js): a state not read yet, or one that
+    // states nothing, is no Online.
+    if (supervisorReady(state) !== true) {
         const starting = startingStatus(bootPhase(state));
         return { text: starting.text, tone: starting.kind === 'failed' ? 'danger' : 'muted' };
     }
@@ -399,7 +401,8 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     const flights = new Map();  // a source -> its read in flight: `{ controller, again }`
 
     function paintCard() {
-        const being = beingState({ connected: ctx.ws?.isConnected?.() !== false, state: facts.state });
+        const being = beingState({ connected: ctx.ws?.isConnected?.() !== false,
+            state: ctx.stateSnapshots?.latest?.() || facts.state });
         stateEl.textContent = being.text;
         stateEl.dataset.tone = being.tone;
         needs = needRows(facts);

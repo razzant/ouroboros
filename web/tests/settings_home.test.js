@@ -171,6 +171,9 @@ test('the card says who it is and its state, never that nothing waits', () => {
     assert.deepEqual(beingState({ connected: true, state: { supervisor_ready: true } }), { text: 'Online', tone: 'ok' });
     assert.deepEqual(beingState({ connected: false, state: { supervisor_ready: true } }), { text: 'Reconnecting…', tone: 'muted' });
     assert.equal(beingState({ connected: true, state: { supervisor_ready: false, boot: { phase: 'failed', error: 'x' } } }).tone, 'danger');
+    // Only a body that says ready is Online: a state not read yet, or one that states nothing, keeps Starting….
+    assert.deepEqual(beingState({ connected: true, state: null }), { text: 'Starting…', tone: 'muted' });
+    assert.deepEqual(beingState({ connected: true, state: {} }), { text: 'Starting…', tone: 'muted' });
 });
 
 test('showing the home reads only what is passive: no catalogue, no review pool, no wake, no refresh, no status poll', async (t) => {
@@ -230,6 +233,31 @@ test('the card\'s first word follows the socket: an open or a close repaints it 
     assert.equal(env.calls.length, reads, 'neither reads anything');
     home.dispose();
     assert.equal(handlers.has('open') || handlers.has('close'), false, 'dispose lets the socket go');
+});
+
+test('a socket that opens before the home reads paints the page\'s latest state, never an Online it has not read', async (t) => {
+    // The home is mounted at start and reads only when it comes on screen; the socket's open repaints its card
+    // (settings_home.js) with the page's latest state, and with none read yet the card does not claim Online.
+    const { env, content } = world(t);
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    let connected = false;
+    let latest;
+    const handlers = new Map();
+    const ws = { isConnected: () => connected, on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); } };
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws, stateSnapshots: { latest: () => latest } } });
+    t.after(() => home.dispose());
+    const word = () => content.querySelector('[data-settings-card]').querySelector('[data-being-state]').textContent;
+    connected = true;
+    handlers.get('open')?.({});
+    assert.equal(word(), 'Starting…', 'no state read yet: not Online');
+    latest = { supervisor_ready: false, boot: { phase: 'failed', error: 'init failed' } };
+    handlers.get('open')?.({});
+    assert.equal(word(), 'Start failed', 'the page\'s latest state: the start failed');
+    latest = { supervisor_ready: true };
+    handlers.get('open')?.({});
+    assert.equal(word(), 'Online');
+    assert.equal(env.calls.length, 0, 'the home read nothing');
 });
 
 test('a page reads when it is shown, not when Settings is', async (t) => {
