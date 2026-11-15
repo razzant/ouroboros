@@ -253,6 +253,7 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     _serve(page, "models")
     _serve(page, "permissions")
     page.click(row("consciousness-model"))
+    page.locator('#page-settings [data-settings-page="models/role/consciousness"]').wait_for(state="visible")
     back = page.locator('#page-settings > .app-page-header [data-shell-back]')
     back.wait_for()
     assert back.inner_text().strip() == "Consciousness" and back.get_attribute("aria-label") == "Back to Consciousness"
@@ -266,6 +267,7 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
         "Model | gpt-6-astra (Main model)", f"Its actions are checked | {_scale_word(page, 'light')}", "Where it lives |", "Improving itself | Off"]
     # The Safety door opens its row's page in Settings, whose Back names this tab and returns to it.
     page.click(row("consciousness-safety"))
+    page.locator('#page-settings [data-settings-page="permissions"]').wait_for(state="visible")
     back = page.locator('#page-settings > .app-page-header [data-shell-back]')
     back.wait_for()
     assert back.inner_text().strip() == "Consciousness" and back.get_attribute("aria-label") == "Back to Consciousness"
