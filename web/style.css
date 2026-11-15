@@ -1453,11 +1453,23 @@ html[data-layout="stack"] .app-page-header[data-return] > .app-page-title-block 
 html[data-layout="stack"] .app-page-header[data-return] .app-page-title-row { grid-area: title; }
 html[data-layout="stack"] .app-page-header[data-return] > .app-page-title-block > .app-page-return { grid-area: back; max-width: 36vw; }
 html[data-layout="docked"] .app-page-header[data-lead] {
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(8rem, 1fr) auto;
     grid-template-areas: "title toolbar";
     min-height: 50px;
     padding-block: 0;
+    overflow-x: auto;
+    scrollbar-width: none;
+    --band-fade-start: 0px;
+    --band-fade-end: 0px;
+    --scroll-fade-edge: var(--space-4);
+    -webkit-mask-image: linear-gradient(to right, transparent, black var(--band-fade-start), black calc(100% - var(--band-fade-end)), transparent);
+    mask-image: linear-gradient(to right, transparent, black var(--band-fade-start), black calc(100% - var(--band-fade-end)), transparent);
 }
+/* At the residual room floor the same row scrolls, so Paste cannot squeeze the folder rail to zero. */
+html[data-layout="docked"] .app-page-header[data-lead][data-return] { grid-template-columns: minmax(14rem, 1fr) auto; }
+html[data-layout="docked"] .app-page-header[data-lead]::-webkit-scrollbar { display: none; }
+html[data-layout="docked"] .app-page-header[data-scroll-start] { --band-fade-start: var(--space-4); }
+html[data-layout="docked"] .app-page-header[data-scroll-end] { --band-fade-end: var(--space-4); }
 /* In the macOS window the row is the window's band, so its tabs and actions sit level with the traffic lights at every
    Interface size: a larger size shrinks the band in CSS px, and the strip's insets shrink with it, the bottom one
    keeping the tabs' 16px of shadow room (at 100 % they are the 10px and 26px above; once the band is shorter than a
@@ -1471,7 +1483,11 @@ html[data-layout="docked"] .app-page-header[data-lead] {
     padding-bottom: calc(16px + var(--lead-inset));
 }
 html[data-layout="docked"] .app-page-header[data-lead] > .app-page-leading { display: none; }
-html[data-layout="docked"] .app-page-header[data-lead] > .app-page-toolbar { --control-h: var(--control-h-float); }
+html[data-layout="docked"] .app-page-header[data-lead] > .app-page-toolbar {
+    --control-h: var(--control-h-float);
+    min-width: max-content;
+    max-width: none;
+}
 html[data-layout="docked"] .app-page-header[data-lead] > .app-page-toolbar button {
     height: var(--control-h-float);
     min-height: var(--control-h-float);

@@ -345,7 +345,8 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
             # Two ends on Main's line: the page's tabs or location at the start, its actions at the end.
             assert bar['lead'] and 'data-lead' in bar['attrs'] and not bar['under'], (name, bar)
             assert bar['height'] <= 56 and bar['centres'] and max(bar['centres']) - min(bar['centres']) <= 1, (name, bar)
-            assert abs(bar['centres'][0] - 25) <= 1 and abs(bar['first'] - 20) <= 1, (name, bar)
+            # Skills' strip retains its shared fade inset inside the band; Files starts at the band inset.
+            assert abs(bar['centres'][0] - 25) <= 1 and abs(bar['first'] - (36 if name == 'skills' else 20)) <= 1, (name, bar)
             # The strip lends its shadows room below the bar but never takes a press meant for the page.
             assert bar['hitsPage'], (name, bar)
             setup_browser.capture(page, f'bar-a-{name}-{engine}-956')
@@ -382,6 +383,9 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         page.wait_for_function("document.documentElement.dataset.layout === 'stack'")
         phone = page.evaluate(BAR, 'dashboard')
         assert not phone['under'] and phone['height'] <= 56, phone
+        # Residual guarantee: a chosen page survives narrowing. Return once to reach the retained list.
+        assert page.locator('#page-costs').is_visible()
+        page.locator('#page-dashboard .app-page-header [data-shell-back]').click()
         assert page.evaluate("""() => document.querySelector('#page-dashboard .dashboard-rail [role=tablist]') === window.__strip
             && document.activeElement?.dataset.dashboardTab === 'costs'""")
         page.locator('#page-dashboard [data-dashboard-tab="costs"]').click()
@@ -599,7 +603,7 @@ def test_files_location_keeps_every_folder_reachable_in_the_bar(engine_ui, width
 
 @pytest.mark.parametrize('theme', ['light', 'dark'])
 def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme):
-    """A docked 720px window can leave only 160px for Files; use its real resize handle."""
+    """A docked 720px window preserves the residual 320px room floor during and after a drag."""
     page = _open(engine_ui, 720, 801)
     engine = engine_ui['engine']
     try:
@@ -610,21 +614,20 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
             .map(id => document.getElementById(id)); document.getElementById('files-new-file').focus(); }""")
         handle = page.locator('#primary-sidebar > .resize-handle').bounding_box()
         start_x = handle['x'] + handle['width'] / 2
-        # The sidebar now clamps to its own minimum (owner 14.11); a drag follows the shown box
-        # (DESIGN.md:3228). Keep the same 175px/160px content probes, measured from that actual start.
+        # The residual sidebar clamp keeps 320px for the room. Both attempted wider drags stop there.
         start_width = page.locator('#primary-sidebar').bounding_box()['width']
         page.mouse.move(start_x, handle['y'] + handle['height'] / 2)
         page.mouse.down()
         # Check during the drag as well as after release, without a window resize event.
         page.mouse.move(start_x + 545 - start_width, handle['y'] + handle['height'] / 2, steps=12)
-        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 175")
+        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 320")
         page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
         setup_browser.capture(page, f'files-sidebar-drag-{engine}-{theme}')
         assert page.locator('#files-breadcrumb').evaluate("el => el.closest('.app-page-lead') !== null")
         assert page.evaluate("document.activeElement === window.__filesNodes[1]")
         page.mouse.move(start_x + 560 - start_width, handle['y'] + handle['height'] / 2)
         page.mouse.up()
-        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 160")
+        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 320")
         # Reveal Paste through the real file menu, making the action group wider than the available column.
         page.locator('#files-list .files-entry').filter(has_text='notes.md').click(button='right')
         page.locator('#files-context-menu [data-action="copy"]').click()
@@ -635,12 +638,12 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
             control.scroll_into_view_if_needed()
             assert control.evaluate("""el => { const r = el.getBoundingClientRect(), content = document.getElementById('content').getBoundingClientRect();
                 const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
-                return r.width > 0 && r.left >= content.left && r.right <= content.right + 1 && (hit === el || el.contains(hit)); }""")
+                return r.width > 0 && r.left >= content.left && r.right <= content.right + 1 && (hit === el || el.contains(hit)); }"""), control.evaluate("el => ({box: el.getBoundingClientRect().toJSON(), html: el.outerHTML})")
             control.click(trial=True)
             measured.append({'name': control.inner_text(), 'box': control.bounding_box()})
-        print(json.dumps({'files_narrow_controls': measured, 'engine': engine, 'theme': theme, 'content_width': 160}))
+        print(json.dumps({'files_narrow_controls': measured, 'engine': engine, 'theme': theme, 'content_width': 320}))
         assert page.evaluate('document.scrollingElement.scrollWidth <= innerWidth')
-        assert page.locator('#page-files .app-page-header').get_by_role('heading', name='Files', exact=True).count() == 0
+        assert page.locator('#page-files .app-page-title').evaluate("el => getComputedStyle(el).clipPath === 'inset(50%)'")
         page.locator('#files-new-file').scroll_into_view_if_needed()
         setup_browser.capture(page, f'files-sidebar-narrow-{engine}-{theme}')
         page.locator('#files-new-file').click()
@@ -694,13 +697,14 @@ def test_skills_tabs_and_existing_toolbar_survive_a_narrow_content_column(engine
         page.mouse.down()
         page.mouse.move(558, handle['y'] + handle['height'] / 2, steps=12)
         page.mouse.up()
-        page.wait_for_function("document.getElementById('content').clientWidth < 200")
-        assert page.locator('#page-skills .app-page-header').get_by_role('heading', name='Skills', exact=True).count() == 0
+        page.wait_for_function("document.getElementById('content').clientWidth === 320")
+        assert page.locator('#page-skills .app-page-title').evaluate("el => getComputedStyle(el).clipPath === 'inset(50%)'")
         strip = page.locator('#page-skills .app-page-lead .app-tab-strip')
         assert strip.evaluate('el => el === window.__skillsTabs && el.clientWidth > 0')
         assert page.evaluate("document.activeElement.dataset.tab === 'installed'")
         for selector in ('#skills-update-all', '#skills-refresh'):
             button = page.locator(selector)
+            button.scroll_into_view_if_needed()
             assert button.evaluate("el => { const r=el.getBoundingClientRect(), c=document.getElementById('content').getBoundingClientRect(); return r.left >= c.left && r.right <= c.right; }")
             button.click(trial=True)
         setup_browser.capture(page, f'skills-sidebar-narrow-{engine_ui["engine"]}-{theme}')

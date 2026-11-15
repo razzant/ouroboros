@@ -174,9 +174,10 @@ export function bindPageHeader(header, { lead = null, actions = null, secondary 
         if (active?.isConnected && doc.activeElement !== active) active.focus?.({ preventScroll: true });
     };
     place();
+    const disposeFade = bindScrollFade(header, { axis: 'x' });
     const offLayout = onLayoutChange(place);
     doc.defaultView?.addEventListener?.('ouro:host-chrome', place);
-    return () => { offLayout(); doc.defaultView?.removeEventListener?.('ouro:host-chrome', place); };
+    return () => { disposeFade(); offLayout(); doc.defaultView?.removeEventListener?.('ouro:host-chrome', place); };
 }
 
 /** A bar narrower than this (px) cannot hold the status, the consciousness chip, Restart, Panic and the budget. */

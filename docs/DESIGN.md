@@ -3432,7 +3432,8 @@ The shared header (`web/modules/page_header.js`) draws one row, without decorati
 top page layer's return: ‹ Settings, ‹ Main, or a level's parent. Its tooltip and accessible name give the full path.
 The word ellipsizes before controls yield; the chevron stays. Two panes place it over the page column; one column
 replaces the leading picture. Docked, the sidebar names a section without pages: tabs or Files' location lead its
-band, actions end it, on Main's line. Tabs, filters and location use one sideways rail with the shared fade; location reveals the current
+band, actions end it, on Main's line. If the actions and navigation cannot fit beside the widest sidebar, the same
+row scrolls sideways, keeping every control reachable. Tabs, filters and location use the shared fade; location reveals the current
 folder, none wider than the rail. Section headings follow
 “A section with pages”; a Project shows its name.
 An empty header draws nothing. The page reaches the window's top edge; its first row starts below the macOS band,
