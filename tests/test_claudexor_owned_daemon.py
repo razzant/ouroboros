@@ -3253,9 +3253,10 @@ def test_status_payload_asks_model_catalogs_together_and_discloses_a_refusal(mon
     and asks them together: a busy daemon answers every request late, so asked one
     after another the read paid that wait once per harness. The pin is a
     rendezvous, as in the fan-out test: the three reads must meet at one barrier,
-    which reads asked one after another never do. They then finish in reverse
-    catalog order, so rows filled by completion would come out crossed. The hidden
-    harness is never asked. One read refuses while the catalog itself landed: its
+    which reads asked one after another never do. They are then released in
+    reverse catalog order, so rows filled by completion would usually come out
+    crossed; the barrier, not this order, is the guarantee. The hidden harness is
+    never asked. One read refuses while the catalog itself landed: its
     row carries `models_error` so the UI can say "not checked" instead of calling
     a saved model undiscovered, a verdict about a search nobody ran, and its
     siblings keep their lists. Both the negotiated accounts view and the legacy
