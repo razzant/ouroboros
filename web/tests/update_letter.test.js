@@ -419,6 +419,9 @@ test('the letter body goes through the sanitizing markdown pipeline and is dispo
     assert.match(render, /const nextKey = letterContentKey\(view\);\s*if \(nextKey === letterKey\) \{\s*if \(letterMeasureOwed\) requestAnimationFrame\(measureLetter\);\s*return;\s*\}/);
     assert.match(SOURCE, /function measureLetter\(\) \{\s*if \(!letterMeasureOwed \|\| letterBody\.hidden \|\| !letterBody\.clientHeight\) return;/);
     assert.match(SOURCE, /'ouro:dashboard-subtab-shown', \(event\) => \{\s*if \(event\.detail\?\.tab !== 'updates'[^\n]*\n\s*requestAnimationFrame\(measureLetter\);/);
+    // Whichever door shows the body, its own box takes the owed measure: the page opened from the Dashboard's list by
+    // the row already chosen changes no tab and announces nothing (tests/test_update_description_browser.py, step 7).
+    assert.match(SOURCE, /new ResizeObserver\(\(\) => measureLetter\(\)\)\.observe\(letterBody\)/);
     // Content identity is the CONTENT: two different paragraphs of equal length must not
     // share a key, and a rewrite that produced the same text must not throw the DOM away.
     assert.match(SOURCE, /function letterContentKey\(view\) \{[\s\S]*?return view\.markdown;/);

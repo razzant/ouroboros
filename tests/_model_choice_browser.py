@@ -13,12 +13,12 @@ MAIN, PICKED, OTHER, QUEUED = (f"{SOURCE}::mock-{name}" for name in ("main", "pi
 MODELS = ("mock-main", "mock-light", "mock-fallback", "mock-picked", "mock-other", "mock-queued")
 NEXT_STEP, AT_START = "Switches at the next step; the running call finishes.", "Applies when it starts."
 # What the tier strip at the Model sheet's foot applies to (card_model.js, composer_model.js): a running work, a queued
-# one, a room's new work; the tier they run on, their own or Default's (Main's included), reaches their new helpers
+# one, a room's new work; the tier they run on, their own or Default's (Main's included), reaches their new subagents
 # without one of theirs too (owner 13.11), so a scope with a tier of its own says the same.
-WORK_SCOPE = WORK_SCOPE_OWN = ("for this work from its next call and its new helpers without a tier of their own; "
-                               "the running call and started helpers keep theirs")
-QUEUED_SCOPE = "for this work when it starts, and its new helpers without a tier of their own"
-ROOM_SCOPE = ROOM_SCOPE_OWN = "for new work here and its new helpers without a tier of their own; running work keeps its own"
+WORK_SCOPE = WORK_SCOPE_OWN = ("for this work from its next call and its new subagents without a tier of their own; "
+                               "the running call and started subagents keep theirs")
+QUEUED_SCOPE = "for this work when it starts, and its new subagents without a tier of their own"
+ROOM_SCOPE = ROOM_SCOPE_OWN = "for new work here and its new subagents without a tier of their own; running work keeps its own"
 # The tiers the strip offers on the loopback source, in its order (Flex, Standard, Fast): Ultrafast stands there only
 # where the source's transport and the model's catalog both list it, or it is already the choice, and never for Main.
 OFFERED = ["economy", "standard", "fast"]

@@ -493,7 +493,7 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
             assert sheet["headings"][0] == "Recent" and [row["id"] for row in sheet["groups"][1]["rows"]] == ["mock-picked"], \
                 ("a room's pick is a recent model everywhere", sheet)
             assert sheet["offered"] == OFFERED and sheet["chosen"] == "" and not sheet["reset"], ("Main's strip offers no Ultrafast", sheet)
-            assert sheet["scope"] == "Default · Standard · for Main and its new helpers; no running work follows it now", sheet
+            assert sheet["scope"] == "Default · Standard · for Main and its new subagents; no running work follows it now", sheet
             close_capsule(desk)
 
             def search(page) -> None:

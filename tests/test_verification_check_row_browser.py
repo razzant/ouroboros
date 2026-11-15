@@ -349,7 +349,10 @@ def _titles(card):
 
 
 def _checks(card):
-    return _lines(card).filter(has_text="Check did not pass")
+    """The card's check rows: the lines headed "Check did not pass". Its Done line may say the same words of the
+    last recorded check in its detail (#3445); that is the task's outcome, not one more check row."""
+    headed = card.page.locator(".chat-live-line-title", has_text=re.compile(r"^Check did not pass"))
+    return _lines(card).filter(has=headed)
 
 
 def _time_of(card, title_pattern):
