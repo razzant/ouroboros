@@ -583,6 +583,20 @@ def test_settings_legacy_singleton_uses_the_canonical_linear_compiler(
     ]
 
 
+@pytest.mark.parametrize("box, scout", [(True, "openai/gpt-5.6-sol (local)"), (False, "openai/gpt-5.6-sol")])
+def test_a_migrated_light_stand_in_runs_where_an_empty_light_runs(_clean_subagent_env, box, scout):
+    """The legacy migration's `fast-scout` stands in for the Light slot. An empty Light is Main's model on the lane
+    the one rule gives it (route_choice.following_route): the local runtime when its own box is ticked under a cloud
+    Main, Main's own route otherwise."""
+    settings = {"OUROBOROS_SUBAGENT_HARNESS": "claude=claude-opus-5:high", "OUROBOROS_MODEL": "openai/gpt-5.6-sol",
+                "OPENROUTER_API_KEY": "configured", "LOCAL_MODEL_SOURCE": "org/model.gguf", "USE_LOCAL_LIGHT": box}
+
+    resolution, _diagnostics = resolve_settings_subagent_candidate(settings)
+
+    assert resolution.config is not None
+    assert dict((row.subagent_id, row.route.target_id) for row in resolution.config.items)["fast-scout"] == scout
+
+
 def test_row_enabled_defaults_true_and_only_a_false_row_changes_the_saved_bytes():
     """The per-row owner switch is additive: an existing roster's canonical
     serialization — and every fingerprint, receipt and snapshot bound to it —

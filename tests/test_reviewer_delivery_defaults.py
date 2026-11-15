@@ -295,25 +295,20 @@ def test_an_install_whose_light_box_now_decides_hears_once_which_calls_moved(not
     assert notice_world.state["light_local_box_notified"]
 
 
-def test_the_light_rule_is_judged_at_the_first_start_even_with_no_owner_to_tell_yet(notice_world):
-    """With no owner chat bound, an install the rule moves nothing for (a first start before setup too) is judged at
-    once: the box its wizard or its owner ticks later is their own act, never told as news of an update. An install
-    the rule does move stays owed and hears it when there is an owner to tell. The other notices stay owed."""
+@pytest.mark.parametrize("seeded", [False, True])
+def test_the_light_rule_is_judged_at_the_first_start_even_with_no_owner_to_tell_yet(notice_world, seeded):
+    """An install with no owner chat bound at the first start of this version (a fresh one, before setup or seeded
+    with its settings) ran no work under the old rule: it is judged at once, so the box it has or gets is never told
+    as news of an update once an owner is bound. The other notices stay owed until there is an owner to tell."""
     moved = {"OUROBOROS_MODEL": "openai/main", "USE_LOCAL_LIGHT": True, "LOCAL_MODEL_SOURCE": "org/model"}
-    said = notice_world.notices.light_local_notice(moved)
+    assert notice_world.notices.light_local_notice(moved)
     owner_chat = notice_world.state.pop("owner_chat_id")
-    notice_world.notices.startup_upgrade_notices(moved)
-    assert "light_local_box_notified" not in notice_world.state and not notice_world.sent, "owed: nobody to tell yet"
-    notice_world.notices.startup_upgrade_notices({})
+    notice_world.notices.startup_upgrade_notices(moved if seeded else {})
     assert notice_world.state["light_local_box_notified"] and not notice_world.sent
     assert "optional_bounds_notified" not in notice_world.state
     notice_world.state["owner_chat_id"] = owner_chat
     notice_world.notices.startup_upgrade_notices(moved)
-    assert said and "light_local_box_notice" not in [kw["system_type"] for _chat, _text, kw in notice_world.sent]
-    # The owed one is told once an owner is bound.
-    del notice_world.state["light_local_box_notified"]
-    notice_world.notices.startup_upgrade_notices(moved)
-    assert (said, "light_local_box_notice") in [(text, kw["system_type"]) for _chat, text, kw in notice_world.sent]
+    assert "light_local_box_notice" not in [kw["system_type"] for _chat, _text, kw in notice_world.sent]
 
 
 def test_an_upgraded_untouched_install_hears_each_notice_once(notice_world):

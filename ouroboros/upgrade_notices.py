@@ -160,8 +160,9 @@ def light_local_notice(settings: Mapping[str, Any]) -> str:
     consolidation, the Light helpers, the reading of review verdicts, duplicate checks and an inheriting Safety
     Supervisor ran on Main, and the sentences name those. The Safety ones are said only where a check is asked and
     inherits Light (its own model, a deployment's checker and Safety off in both modes do not move), the Fallback
-    walk only where a chain is set; the last one only while no local model is configured. Judged once, on the first
-    start with an owner to tell: a box ticked later is the owner's own act under the rule, never news."""
+    walk only where a chain is set; the last one only while no local model is configured. Judged once, at the first
+    start of this version (``startup_upgrade_notices``): a box ticked later is the owner's own act under the rule,
+    never news, and an install with no owner chat bound yet is not told afterwards."""
     from ouroboros.deployment_policy import checker
     from ouroboros.route_choice import box_checked, following_route
     from ouroboros.settings_scales import normalize_safety_mode
@@ -271,10 +272,9 @@ def startup_upgrade_notices(settings: Mapping[str, Any]) -> None:
         known, owner_chat = control_value(state, "owner_chat_id")
         if not known or not owner_chat:
             # Display-only backup values never authorize delivery. The Light rule is judged at the first start of
-            # this version: where it moves nothing (a first start before setup too), a box ticked later is the
-            # owner's own act and never told as news; where it moves calls, the notice stays owed.
-            if not state.get(LIGHT_LOCAL_NOTICE_KEY) and not light_local_notice(settings or {}):
-                update_state(lambda st: st.setdefault(LIGHT_LOCAL_NOTICE_KEY, utc_now_iso()))
+            # this version: an install with no owner to tell yet (a fresh one, seeded or not) ran no work under the
+            # old rule, so it is marked now and a box it has or gets is never told as news of an update.
+            update_state(lambda st: st.setdefault(LIGHT_LOCAL_NOTICE_KEY, utc_now_iso()))
             return
         owner_chat = int(owner_chat)
         owed = []

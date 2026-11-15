@@ -49,7 +49,6 @@ def _history():
     rows += _attempt(index + 3, wave="w-subscription", row="critic", model="claudexor::codex=light", cost=None,
                      provider="claudexor")
     # Seats with a paid call whose sum is not all there stay unmeasured, whatever the catalog knew beforehand:
-    # still open, closed without a sum, a known subtotal with an unpriced remainder.
     # still open, closed without a sum (also in a record that names no ``kind``, which reads as an attempt), a known
     # subtotal with an unpriced remainder, a subscription call closed administratively (its price is still unknown).
     abandoned = dict(cost=None, provider="claudexor", cost_final=False, settle_reason="abandoned")
