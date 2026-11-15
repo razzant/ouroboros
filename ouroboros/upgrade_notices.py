@@ -150,7 +150,7 @@ def review_enforcement_notice(document: Optional[Mapping[str, Any]], environ: Ma
             "finding, or a review that gave no answer, no longer stops Ouroboros. Outside Cyber Pro it still asks for a "
             "review before changing its own code and reads the answer first; when it disagrees, it goes ahead and says "
             "why. Each time it goes ahead over a serious finding or without an answer, the work card, the restart "
-            "message and the update description name it.")
+            "message and the Update window name it.")
 
 
 def model_cap_notice(document: Optional[Mapping[str, Any]], settings: Mapping[str, Any]) -> str:

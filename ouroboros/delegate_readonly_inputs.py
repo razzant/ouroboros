@@ -452,7 +452,8 @@ def _lineage_copies(ctx: Any, root: pathlib.Path) -> List[Dict[str, Any]]:
     a clone where the volume makes one, captured whole at one instant, else a bounded stream that refuses a source
     changing while read. Bytes only: a copy gets ROOT's new-file mode, never the source's mode or times. A file a
     supported ``record_compression`` pass may compress (``in_scope``) streams until already compressed, since an APFS clone
-    keeps its source shared; an already compressed record keeps its compression in the clone."""
+    keeps its source shared while it lives (before macOS 14, for good); an already compressed record keeps its
+    compression in the clone."""
     from ouroboros.artifact_storage import compression_supported, is_compressed
     from ouroboros.artifacts import copy_artifact_file
     from ouroboros.protected_artifacts import block_reason_for_path

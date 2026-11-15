@@ -24,7 +24,6 @@ from ouroboros import _outcome_receipts
 # with it; these historical names stay resolvable through this module.
 from ouroboros._outcome_receipts import (  # explicit re-exports, one statement
     latest_unreconciled_failed_receipt as latest_unreconciled_failed_receipt,
-    latest_unreconciled_failed_verification as latest_unreconciled_failed_verification,
     latest_unreconciled_masked_pass as latest_unreconciled_masked_pass,
 )
 # Tool-call trace vocabulary + execution-axis classifier (leaf module). Re-exported
@@ -219,8 +218,7 @@ WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW = "residual_tool_errors_without_review"
 # examination. A BINARY transparency flag that keeps the result solved (never a downgrade —
 # anti-oscillation), shown in the details, never on the headline (owner, 9 Nov 2026).
 WARN_RECEIPT_ABSENT = "receipt_absent"
-# A check of this task failed and no later check of the same verification passed
-# (``_outcome_receipts.unreconciled_failed``): its own word, never "no receipt" (audit 11.11).
+# A failed check no later check of the same verification passed; ``verification_red`` beside it holds the fact.
 WARN_VERIFICATION_RED = "verification_red_unreconciled"
 # Finished direct children whose results carry no recorded decision (``child_result_dispositions.undecided``).
 WARN_CHILDREN_UNDECIDED = "children_undecided"
@@ -321,15 +319,14 @@ def apply_receipt_absent_flag(
     loop_outcome: Dict[str, Any], llm_trace: Dict[str, Any], drive_root: Any, task_id: str,
     *, receipts: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
-    """Run by the host AFTER ``derive_loop_outcome`` and BEFORE the verification ledger. Inject
-    durable verify_and_record receipts into the trace so the ledger records them; then, on a clean
-    turn (execution ok — NOT best_effort/degraded/failed), flag ``receipt_absent`` when nothing
-    examined the result after it last changed (``result_unexamined``) and
-    ``verification_red_unreconciled`` when a check failed and no later check of it passed, and
-    ``children_undecided`` for finished direct children without a recorded decision. All are
-    BINARY details that keep the result solved (never a downgrade — anti-oscillation) and never
-    raise the headline (``DETAIL_ONLY_WARNINGS``). A turn without effects is never flagged: plain
-    prose can itself be the deliverable. Applied before ``outcome_axes`` is normalized so the
+    """Run by the host AFTER ``derive_loop_outcome`` and BEFORE the verification ledger. Inject durable
+    verify_and_record receipts into the trace so the ledger records them; then, on a clean turn (execution ok — NOT
+    best_effort/degraded/failed), flag ``receipt_absent`` when nothing examined the result after it last changed
+    (``result_unexamined``; never a turn without effects: plain prose can itself be the deliverable),
+    ``verification_red_unreconciled`` with its fact ``verification_red`` (``_outcome_receipts.red_check_fact``) when a
+    check failed and no later check of it passed, and ``children_undecided`` for finished direct children without a
+    recorded decision. All are BINARY details that keep the result solved (never a downgrade — anti-oscillation) and
+    never raise the headline (``DETAIL_ONLY_WARNINGS``). Applied before ``outcome_axes`` is normalized so the
     persisted axes and the ledger agree."""
     receipt_rows = (
         receipts if isinstance(receipts, list)
@@ -344,8 +341,10 @@ def apply_receipt_absent_flag(
         return
     if result_unexamined(llm_trace):
         _merge_objective_warning(objective, WARN_RECEIPT_ABSENT)
-    if _outcome_receipts.unreconciled_failed(receipt_rows):
+    red = _outcome_receipts.red_check_fact(receipt_rows)
+    if red:  # the task row keeps the typed fact its sentence reads; the command stays in the receipt
         _merge_objective_warning(objective, WARN_VERIFICATION_RED)
+        objective["verification_red"] = {key: value for key, value in red.items() if key != "check"}
     if (llm_trace.get("child_result_dispositions") or {}).get("undecided"):
         _merge_objective_warning(objective, WARN_CHILDREN_UNDECIDED)
 

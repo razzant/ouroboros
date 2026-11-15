@@ -777,6 +777,7 @@ def _author_finish_existing_skill_review(
     author_record["review_reference"] = basis
     review_state.author_disposition = author_record
     save_review_state(drive_root, skill_name, review_state)
+    from ouroboros.review_overrides import note_skill_over_review
     from ouroboros.skill_dependencies import ensure_skill_dependencies
     from ouroboros.skill_loader import auto_grant_if_enabled
     from ouroboros.skill_review_runner import _reconcile_extension_payload
@@ -787,6 +788,8 @@ def _author_finish_existing_skill_review(
     extension = (_reconcile_extension_payload(ctx, skill_name, drive_root=drive_root,
                                              repo_path=None, binding=binding)
                  if loaded.manifest.is_extension() else {})
+    if loaded.enabled:  # on, and accepted by its author without a passed review: named on the work's card
+        note_skill_over_review(ctx, skill_name, review_state.gate_for(current_hash), "author_finish")
     return {
         "skill_name": skill_name,
         "status": review_state.status,

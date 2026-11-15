@@ -824,10 +824,10 @@ class StateResponse(WorkStateFields):
     project_chat_ids: Optional[list]  # COMPLETE (uncapped) registered chat_ids, the live WS fan-out isolation SSOT; null: unknown
     # Main's room revision (its standalone messages, the kind a Project's visible_revision counts); null while unreadable.
     main_visible_revision: NotRequired[Optional[int]]
-    # Task->project bindings ({task_id: {project_id, chat_id, project_name}}): a bound card hides the stray
-    # "turn into project" button (v6.33.0 P2) and opens its project (v6.33.0 F4). Null only when
-    # ``?bindings_since`` named the current opaque ``task_bindings_revision`` (the map's digest; "" after a failed
-    # read, and while ``project_chat_ids`` is null: its Project names are unknown too).
+    # Task->project bindings ({task_id: {project_id, chat_id}}; a Project's name is in the census rows and
+    # ``projects``): a bound card hides the stray "turn into project" button (v6.33.0 P2) and opens its project
+    # (v6.33.0 F4). Null only when ``?bindings_since`` named the current opaque ``task_bindings_revision`` (the
+    # map's digest; "" after a failed read).
     task_bindings: Optional[dict]
     task_bindings_revision: str
     task_bindings_unchanged: bool
@@ -1198,7 +1198,7 @@ class TaskDetailResponse(TypedDict, total=False):
     # Every adoption this task authorized, as boot settled them: {adoption_id, outcome, commit_sha, previous_sha, branch,
     # note, settled_at, revision, commits?, commits_complete?, commits_omitted?}; commits (newest first) only when adopted.
     body_adoptions: List[Dict[str, Any]]
-    review_overrides: Dict[str, Any]  # a root's review trace: {count?, latest?, continued?, landed?} (review_overrides.py)
+    review_overrides: Dict[str, Any]  # a root's review trace: {count?, latest?, continued?, landed?, skills?} (review_overrides.py)
     error: str
 
 

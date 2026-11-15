@@ -9,7 +9,7 @@ import { coordinatorRouteClause, formatCoordinatorProvenance, harnessPresentatio
 import { acceptanceIncidentClauses } from './acceptance_incident_presentation.js';
 import { fmt, tr } from './i18n.js';
 import { historyRetentionView } from './history_retention.js';
-import { checkFailureView } from './verification_presentation.js';
+import { checkFailureView, redCheckPhrase } from './verification_presentation.js';
 import { hostRowDisplayText, hostTaskMessage } from './host_notice_text.js';
 import { effortEvidenceText } from './effort_evidence.js';
 import { delegatedActivityView } from './delegated_activity.js';
@@ -570,9 +570,9 @@ export function taskReasonDetail(evt, codes = []) {
     if (reviewCause && (reason === reviewCause || bypass[reason] === reviewCause)) clause = '';
     const excluded = ['', 'delegated_custody_unreconciled', 'terminal_delivery_unknown', 'terminal_delivery_exhausted'];
     const warnings = [...(Array.isArray(objective?.warnings) ? objective.warnings : []), objective?.warning || ''];
-    const named = residualToolErrorsPhrase(execution);  // the failure the record holds, in owner words
-    const warningClauses = warnings.filter(w => !excluded.includes(w))
-        .map(w => (w === 'residual_tool_errors_without_review' && named) || taskReasonPhrase(w));
+    // The failure the record holds, in owner words; a record without the fact keeps its code's sentence.
+    const named = { residual_tool_errors_without_review: residualToolErrorsPhrase(execution), verification_red_unreconciled: redCheckPhrase(objective) };
+    const warningClauses = warnings.filter(w => !excluded.includes(w)).map(w => (Object.hasOwn(named, w) && named[w]) || taskReasonPhrase(w));
     const artifacts = record.artifact_bundle?.status || record.artifact_status || record.outcome_axes?.artifacts?.status;
     if (['failed', 'missing'].includes(artifacts)) warningClauses.push(taskReasonPhrase('artifacts_unavailable'));
     if (decision?.open_obligations?.length) warningClauses.push(taskReasonPhrase('open_obligations'));

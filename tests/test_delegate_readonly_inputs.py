@@ -288,9 +288,10 @@ def test_siblings_and_a_nested_child_each_start_once_with_exact_independent_copi
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="real APFS clones and transparent compression")
 def test_a_staged_record_stays_compressible_while_a_cloned_neighbour_cannot_be(tmp_path, monkeypatch):
-    """APFS marks a clone's source may-share for good: the floor then keeps it (``shared``). The records a pass
-    may compress stream, so after the staged scope retires the real job still compresses them, the small wire
-    journal grown afterwards included; the cloned report, by design outside that scope, says why."""
+    """The floor keeps a file while a clone of it lives (``shared``), and where the volume counts no clones the mark
+    it leaves keeps it for good. The records a pass may compress stream, so the real job compresses them whenever it
+    comes, the small wire journal grown afterwards included; the cloned report, by design outside that scope, says
+    why while its clone lives and is free again once the staged scope retires."""
     from ouroboros import artifact_storage, maintenance, record_compression
     from ouroboros.task_results import write_task_result
 
@@ -301,8 +302,11 @@ def test_a_staged_record_stays_compressible_while_a_cloned_neighbour_cannot_be(t
     assert _start_as(tmp_path, monkeypatch, engine, "c-one", ROOT)["status"] == "started"
     assert artifact_storage._may_share(materials["report"]) is True
     assert not any(artifact_storage._may_share(materials[name]) for name in SCOPE)
+    counted = artifact_storage._extended_attribute(materials["report"], 0x1000, "I")  # None before macOS 14
+    kept, freed = ("shared", "compressed") if counted else ("share_unknown", "share_unknown")
+    assert artifact_storage.compression_outcome(materials["report"]) == kept, "its clone lives in the staged scope"
     shutil.rmtree(engine.views[0]["scope"])  # the staged scope retires with its drive, its clones with it
-    assert artifact_storage.compression_outcome(materials["report"]) == "shared", "the mark outlives its clone"
+    assert artifact_storage.compression_outcome(materials["report"]) == freed, "a mark without a living clone keeps nothing"
     with materials["wire"].open("ab") as handle:
         handle.write(TEXT * 2048)  # the call's journal grows past the floor after the start
     identities = {name: hashlib.sha256(materials[name].read_bytes()).hexdigest() for name in SCOPE}
