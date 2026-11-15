@@ -203,7 +203,8 @@ test('only an actual failed read fans out, and a throwing fan-out still releases
     assert.equal(unavailable.length, 2);
 });
 
-test('a watcher is told after each change of latest(): an applied body, a failed read, a retire; never a stale answer', async () => {
+test('a watcher is told after each change of latest(): an applied body, a failed read, a retire; never a stale answer', async (t) => {
+    const logged = t.mock.method(console, 'error', () => {});
     let painting = true;
     const sequencer = createStateSnapshotSequencer(() => { if (painting) throw new Error('a consumer failed to paint'); });
     const seen = [];
@@ -224,6 +225,10 @@ test('a watcher is told after each change of latest(): an applied body, a failed
     off();
     sequencer.apply(await sequencer.gate(false), { supervisor_ready: true });
     assert.equal(seen.length, 4, 'a removed watcher hears nothing more');
+    // The failing watcher said so each of the five times it was told; the quiet one never did.
+    assert.equal(logged.mock.callCount(), 5);
+    assert.ok(logged.mock.calls.every((call) => call.arguments[0] === 'A state snapshot watcher failed:'
+        && /one watcher fails/.test(call.arguments[1]?.message)), 'the console names the failing watcher\'s error');
 });
 
 // The bindings map is held with its revision; `?bindings_since` lets the server answer "unchanged".
