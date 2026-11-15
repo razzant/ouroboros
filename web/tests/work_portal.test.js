@@ -112,7 +112,7 @@ test('a bound card becomes its work\'s portal in place: Project reference, the r
         assert.match(f.part('w-1', 'live-meta').innerHTML, /41 tool calls/);
         assert.match(f.part('w-1', 'live-meta').innerHTML, /updated /);
         assert.deepEqual(controls(f, 'w-1'), ['Stop…'], 'one action row of commands: Stop… while the room runs it (Reply is the row menu\'s)');
-        assert.equal(node.querySelector('[data-turn-into-project]'), null, 'a moved work no longer converts');
+        assert.ok(!node.querySelector('[data-turn-into-project]'), 'a moved work no longer converts');
         assert.equal(messages(f).filter((child) => child.classList.contains('project-handoff')).length, 0);
     } finally { f.close(); }
 });
@@ -435,9 +435,9 @@ test('after a Main reload whose census arrives before the history draws the card
             task_name: 'Audit the projects', text: 'Audit › Audit the projects · Started', ts: '2026-10-10T12:00:00Z',
             history_id: 'h-2' },
     ];
-    // The instance reads its history by itself after its hydration window (a timer); on a host with a coarse timer (a
-    // Windows runner) that read landed inside `settle()`, before this census, and the case met the order it denies.
-    // The gate holds every history read until the census is in.
+    // The census is applied at once; the instance also reads its history by itself after its hydration window (a timer).
+    // On a host with a coarse timer (a Windows runner) that read landed inside `settle()`, before the check below and
+    // the test's own read. The gate holds every history read until the test opens it.
     let open;
     const historyGate = new Promise((resolve) => { open = resolve; });
     const f = fixture({ history, historyGate, details: { 'w-1': failedDetail(continuedBy()) } });
@@ -726,7 +726,7 @@ test('a Continue pressed on the work\'s own card is the same card there, live, w
             await pressed;
             await settle();
             if (!successorFirst) {
-                assert.ok(!f.card('w-1-c1'));
+                assert.ok(!f.card('w-1-c1'), 'no successor card before the successor speaks');
                 assert.equal(node.hidden, false, 'nothing folds before the successor has a card');
                 successorFrame(f);
             }
