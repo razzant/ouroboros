@@ -89,15 +89,6 @@ def test_supervisor_stamped_state_values_win_over_the_checkout(tmp_path, monkeyp
     monkeypatch.setattr(config, "REPO_DIR", _plain_checkout(tmp_path / "repo"))
     st = {"current_branch": "managed-branch", "current_sha": OTHER}
     assert _runtime_repo_identity(st) == ("managed-branch", OTHER)
-    # A captured start commit changes nothing for a generation that is up: the stamp is the commit on disk.
-    from ouroboros import server_process
-
-    monkeypatch.setattr(server_process, "_source_baseline", "a" * 40)
-    assert _runtime_repo_identity(st) == ("managed-branch", OTHER)
-    # While the generation starts, the stamp may still be the previous start's: its own source answers.
-    assert _runtime_repo_identity(st, starting=True) == ("managed-branch", "a" * 40)
-    monkeypatch.setattr(server_process, "_source_baseline", None)
-    assert _runtime_repo_identity(st, starting=True) == ("managed-branch", OTHER), "nothing captured: the stamp"
 
 
 def test_source_mode_state_gap_is_filled_from_the_checkout(tmp_path, monkeypatch):
@@ -108,47 +99,6 @@ def test_source_mode_state_gap_is_filled_from_the_checkout(tmp_path, monkeypatch
     assert _runtime_repo_identity({"current_branch": None, "current_sha": None}) == (
         "ouroboros", SHA,
     )
-
-
-@pytest.mark.parametrize("ready", [False, True])
-def test_a_starting_generation_answers_with_its_own_source_until_its_supervisor_is_ready(tmp_path, monkeypatch, ready):
-    """After an update the stamp in state.json is the previous generation's until this one's bootstrap step, and
-    the server already answers: the page that reconnects in that window compares ``sha`` to learn the core changed.
-    The endpoint reads the generation's readiness from the app state; once ready the stamp answers as always."""
-    import threading
-
-    import ouroboros.config as config
-    from ouroboros import server_process
-    from ouroboros.gateway.state import api_state
-    from supervisor import queue, state, workers
-
-    root = tmp_path / "data"
-    (root / "state").mkdir(parents=True)
-    (root / "logs").mkdir(parents=True)
-    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(root))
-    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
-    usage_store.migrate_from_journal(root)
-    monkeypatch.setattr(config, "REPO_DIR", _plain_checkout(tmp_path / "repo"))
-    monkeypatch.setattr(server_process, "_source_baseline", "a" * 40)
-    monkeypatch.setattr(state, "TOTAL_BUDGET_LIMIT", 0.0)
-    monkeypatch.setattr(state, "load_state", lambda: {"current_branch": "managed-branch", "current_sha": OTHER})
-    monkeypatch.setattr(workers, "WORKERS", {})
-    monkeypatch.setattr(workers, "PENDING", [])
-    monkeypatch.setattr(workers, "RUNNING", {})
-    monkeypatch.setattr(queue, "get_evolution_status_snapshot", lambda **_kwargs: {})
-    event = threading.Event()
-    if ready:
-        event.set()
-    request = Request({
-        "type": "http", "method": "GET", "path": "/api/state", "headers": [], "query_string": b"",
-        "scheme": "http", "server": ("test", 80), "client": ("test", 1),
-        "app": types.SimpleNamespace(state=types.SimpleNamespace(
-            drive_root=root, app_start=0.0, supervisor_ready_event=event)),
-    })
-    payload = json.loads(asyncio.run(api_state(request)).body)
-    assert payload["supervisor_ready"] is ready
-    assert payload["sha"] == (OTHER[:8] if ready else "a" * 8)
-    assert payload["branch"] == "managed-branch"
 
 
 @pytest.mark.parametrize("stamped", [False, True])

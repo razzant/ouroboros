@@ -26,12 +26,6 @@ def _state_attr(request: Request, name: str, default: Any = None) -> Any:
     return getattr(state, name, default) if state is not None else default
 
 
-def _generation_starting(request: Request) -> bool:
-    """This server generation's supervisor has not reported ready yet; a request without that event is not one."""
-    ready = _state_attr(request, "supervisor_ready_event")
-    return ready is not None and not ready.is_set()
-
-
 def _git_checkout_identity(repo_dir: Any) -> tuple:
     """(branch|None, sha) of the ACTUAL runtime git checkout, read-only.
 
@@ -80,19 +74,12 @@ def _git_checkout_identity(repo_dir: Any) -> tuple:
         return None, ""
 
 
-def _runtime_repo_identity(st: Dict[str, Any], *, starting: bool = False) -> tuple:
-    """(branch, sha) for ``/api/state``: supervisor-stamped state values win (they carry managed
-    update/reset provenance); the live checkout fills the source-mode gap; nothing is invented
-    when both are silent. While this server generation is ``starting`` (its supervisor not ready),
-    the stamp may still name the previous generation, whose bootstrap step wrote it: the source
-    this generation captured at its start answers first, so a page that reconnects in that window
-    learns that the core changed (``server_process.server_source_baseline``)."""
+def _runtime_repo_identity(st: Dict[str, Any]) -> tuple:
+    """(branch, sha) for ``/api/state``: supervisor-stamped state values win
+    (they carry managed update/reset provenance); the live checkout fills the
+    source-mode gap; nothing is invented when both are silent."""
     branch = st.get("current_branch") or None
     sha = str(st.get("current_sha") or "")
-    if starting:
-        from ouroboros.server_process import server_source_baseline
-
-        sha = server_source_baseline() or sha
     if branch and sha:
         return branch, sha
     from ouroboros.config import REPO_DIR
@@ -332,7 +319,7 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
     return {
         "st": st,
         # Resolved here so the checkout file reads stay on the snapshot thread.
-        "runtime_identity": _runtime_repo_identity(st, starting=_generation_starting(request)),
+        "runtime_identity": _runtime_repo_identity(st),
         "jobs": jobs,
         # Other data roots the census read (a task's ledger root): the next revision probe stamps them too.
         "roots": sorted({str(facts["budget_drive_root"]) for facts in work_facts.values()

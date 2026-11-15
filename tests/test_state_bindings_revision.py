@@ -31,7 +31,7 @@ def read_state(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(root / "settings.json"))
     usage_store.migrate_from_journal(root)
     monkeypatch.setattr(utils, "_RACY_NS", 0)  # files are settled as written (the tick rule has its own case)
-    monkeypatch.setattr(gateway_state, "_runtime_repo_identity", lambda _st, **_kw: (None, ""))
+    monkeypatch.setattr(gateway_state, "_runtime_repo_identity", lambda _st: (None, ""))
     monkeypatch.setattr(state, "TOTAL_BUDGET_LIMIT", 0.0)
     monkeypatch.setattr(state, "load_state", lambda: {})
     monkeypatch.setattr(workers, "WORKERS", {})
