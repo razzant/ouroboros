@@ -282,8 +282,12 @@ def test_exact_nested_line_and_post_quote_conversion(direct_server_with_data, br
             _evidence(page, tmp_path, f"line-after-gesture-{browser_engine}", fixture, facts)
             page.locator('#project-panel-close').click()
             _idle(page, '#chat-messages')
-            # Ordinary reopening still reads the present; source navigation adds no global Back.
+            # Ordinary reopening finds the kept room as left (PR #2951, owner 2026-11-03: DESIGN "History edges"),
+            # and `Scroll to latest message` returns it to the present; source navigation adds no global Back.
             page.locator('.nav-project-row[data-project-id="quote-triage"]').click()
+            _idle(page, '#pchat-quote-triage-messages')
+            assert target.count() == 1, 'the kept room still holds the passage it was left on'
+            page.locator('#pchat-quote-triage-scroll-bottom').click()
             _idle(page, '#pchat-quote-triage-messages')
             assert page.locator('#pchat-quote-triage-messages').evaluate(
                 'n => n.scrollHeight - n.scrollTop - n.clientHeight') < 48
