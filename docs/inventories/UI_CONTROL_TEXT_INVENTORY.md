@@ -325,6 +325,7 @@ An owner intent that has a door is raised by exactly one module (`ouro:open-proj
 | `ouro:extension-settings-mounted` | modules/settings_extension_forms.js ×2 |
 | `ouro:language-changed` | modules/i18n.js |
 | `ouro:layout-changed` | theme.js |
+| `ouro:mcp-status-updated` | modules/mcp_settings.js |
 | `ouro:open-circles` | modules/place_sheet.js |
 | `ouro:open-dashboard` | modules/place_sheet.js |
 | `ouro:open-project` | modules/project_reference.js |

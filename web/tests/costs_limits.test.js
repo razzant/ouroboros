@@ -58,8 +58,11 @@ function costsPage(t, values = {}, meta = {}) {
     };
 }
 
-test('the limits card is the data module\'s Costs rows, each with its name, its meta and the notes that describe it', (t) => {
+test('the limits card is the data module\'s Costs rows, each with its name, its meta and the notes that describe it', async (t) => {
     const page = costsPage(t);
+    // Drawn before any read, a limit is no value yet: its meta line says so until the tab's read answers.
+    assert.deepEqual([page.mount.querySelector('#setting-TOTAL_BUDGET-meta').textContent, page.field('TOTAL_BUDGET').disabled], ['Reading…', true]);
+    await page.refresh();
     const ids = page.card.querySelectorAll('[data-setting-row]').map((row) => row.dataset.settingRow);
     assert.deepEqual(ids, rowsOf('dashboard:costs').map((row) => row.id));
     assert.deepEqual(rowsOf('dashboard:costs', { fold: true }).map((row) => row.id), ['OUROBOROS_MAX_ROUNDS', 'OUROBOROS_TASK_ABS_CEILING_SEC']);

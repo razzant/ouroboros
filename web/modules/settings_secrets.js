@@ -1,5 +1,5 @@
 import { apiClient } from './api_client.js';
-import { CONFIRMS, collectCustomSecretDraft, commitSetting, outcomeLine, readCustomSecretDraft, readSettings, setButtonBusy } from './settings_controls.js';
+import { CONFIRMS, collectCustomSecretDraft, commitSetting, outcomeLine, paintWithRow, readCustomSecretDraft, readSettings, setButtonBusy, settingsReadMessage, settingsSnapshot } from './settings_controls.js';
 import { deploymentOf, organizationSettingOwner } from './settings_policy.js';
 import { setResult } from './ui_primitives.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
@@ -252,25 +252,30 @@ export function bindSecretRows(container, { rowOf, ask } = {}) {
         // Disabling Remove can blur it before the saved-key readback removes its row.
         if (focused && doc.activeElement === doc.body && node.isConnected) (landed(outcome) ? parts(node).opener : remove).focus?.({ preventScroll: true });
     };
+    function paint(settings = settingsSnapshot()) {
+        const known = settings ?? settingsSnapshot();
+        const unread = known ? '' : settingsReadMessage();
+        held = Object.fromEntries(nodes().map((node) => [node.dataset.settingRow, Boolean(known?.[node.dataset.settingRow])]));
+        for (const node of nodes()) {
+            const { opener, state, remove } = parts(node);
+            // A value the organization fixes is said, never offered for change (settings_policy.js).
+            const owner = organizationSettingOwner(deploymentOf(known?._meta), node.dataset.settingRow);
+            const words = owner ? `Set by your organization for ${owner}` : isSet(node) ? 'Saved' : '';
+            if (state.textContent !== words) state.textContent = words;
+            const label = isSet(node) ? 'Replace' : 'Add';
+            if (opener.textContent !== label) opener.textContent = label;
+            opener.hidden = Boolean(owner || unread);
+            opener.disabled = Boolean(unread);
+            opener.className = `btn ${isSet(node) ? 'btn-ghost' : 'btn-default'} btn-sm`;
+            remove.hidden = Boolean(unread) || !isSet(node);
+            if (owner || unread) open(node, false);
+        }
+    }
+    const repaints = nodes().map((node) => paintWithRow(node.dataset.settingRow, () => paint()));
     container.addEventListener('click', onClick);
+    paint();
     return {
-        paint(settings) {
-            const deployment = deploymentOf(settings?._meta);
-            held = Object.fromEntries(nodes().map((node) => [node.dataset.settingRow, Boolean(settings?.[node.dataset.settingRow])]));
-            for (const node of nodes()) {
-                const { opener, state, remove } = parts(node);
-                // A value the organization fixes is said, never offered for change (settings_policy.js).
-                const owner = organizationSettingOwner(deployment, node.dataset.settingRow);
-                const words = owner ? `Set by your organization for ${owner}` : isSet(node) ? 'Saved' : '';
-                if (state.textContent !== words) state.textContent = words;
-                const label = isSet(node) ? 'Replace' : 'Add';
-                if (opener.textContent !== label) opener.textContent = label;
-                opener.hidden = Boolean(owner);
-                opener.className = `btn ${isSet(node) ? 'btn-ghost' : 'btn-default'} btn-sm`;
-                remove.hidden = !isSet(node);
-                if (owner) open(node, false);
-            }
-        },
+        paint,
         close(id) {
             const node = nodes().find((each) => each.dataset.settingRow === id);
             if (!node || parts(node).field.hidden) return;
@@ -281,6 +286,7 @@ export function bindSecretRows(container, { rowOf, ask } = {}) {
         },
         dispose() {
             resetSecretReveals(container);
+            repaints.forEach((dispose) => dispose());
             container.removeEventListener('click', onClick);
         },
     };

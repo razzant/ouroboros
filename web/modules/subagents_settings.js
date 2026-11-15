@@ -25,7 +25,7 @@ import {
     sessionRouteVerdict,
 } from './subagent_status_primitives.js';
 import { bindRecheckMarks, recheckMarkHtml, syncRecheckState } from './safety_recheck.js';
-import { CODECS, CONFIRMS, bindSettingRows, doorSign, outcomeLine, setButtonBusy, settingsRow, writeEntry } from './settings_controls.js';
+import { CODECS, CONFIRMS, bindSettingRows, doorSign, outcomeLine, paintWithRow, setButtonBusy, settingsReadMessage, settingsRow, settingsSnapshot, writeEntry } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { rowById, rowsOf } from './settings_rows.js';
 import { revealNewRow } from './ui_helpers.js';
@@ -1437,18 +1437,31 @@ function mountAgents(container, { path, view = '', ctx }) {
     let fold = null;
     const roster = container.querySelector(`[data-setting-row="${KEY}"]`);
     const delegation = roster?.querySelector('[data-setting-control]');
-    let reading = null;
-    const read = async () => {
-        let settings;
-        // A failed read keeps what the page showed (the next showing reads again); with nothing shown yet it says so.
-        try { settings = await ctx.readSettings(); } catch { if (!editor.loaded) editor.load(undefined); return; }
+    // The roster's switch says the stored value, or, until a read answers, that it is being read (or could not be):
+    // not operable, never "off".
+    const paintSwitch = () => {
+        if (!delegation) return;
+        const on = editor.loaded && editor.setting.enabled;
+        Object.assign(delegation, { checked: on, disabled: !editor.loaded }).setAttribute('aria-checked', String(on));
+        roster.querySelector('[data-setting-meta]').textContent = (!editor.loaded && settingsReadMessage()) || rowById(KEY).meta;
+    };
+    const adopt = (settings) => {
         syncRecheckState(recheckFromSettings(settings), container);
         editor.adopt(settings);
         // The fold's rows are drawn once their values are read: a row the page was opened for takes the focus filled.
         if (foldRows && !fold) foldRows.innerHTML = rowsOf('agents', { fold: true }).map((row) => settingsRow(row)).join('');
         fold = fold || (foldRows ? bindSettingRows(foldRows) : null);
         fold?.paint();
-        if (delegation) Object.assign(delegation, { checked: editor.setting.enabled, disabled: !editor.loaded }).setAttribute('aria-checked', String(editor.setting.enabled));
+        paintSwitch();
+    };
+    // Until it has loaded, the page follows every read: one that lands is adopted, the switch says what the others say.
+    const follow = () => { if (editor.loaded) return; if (settingsSnapshot()) adopt(settingsSnapshot()); else paintSwitch(); };
+    let reading = null;
+    const read = async () => {
+        let settings;
+        // A failed read keeps what the page showed (the next showing reads again); with nothing shown yet it says so.
+        try { settings = await ctx.readSettings(); } catch { if (!editor.loaded) { editor.load(undefined); paintSwitch(); } return; }
+        adopt(settings);
         void readReviewPool().then((payload) => editor.setReviewPool(payload));
         void editor.reloadStatus().then(() => accountCatalog?.arm());
     };
@@ -1469,6 +1482,8 @@ function mountAgents(container, { path, view = '', ctx }) {
     const onShown = (event) => { if (event.detail?.path === path) { void reload(); catchUp(); } };
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
     editor.mount();
+    follow();  // the last read at once, else the switch says it is reading; this page's own read follows
+    const offRead = paintWithRow(KEY, follow);
     // A sign-in that settles while an agent's form is open renews its model list, as on a role's page. The watch is
     // armed by the form's first account read, so the answer the form opened with is not a change.
     const accountCatalog = entry ? watchAccountModelCatalog() : null;
@@ -1477,7 +1492,7 @@ function mountAgents(container, { path, view = '', ctx }) {
     return { unmount() {
         globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown);
         accountCatalog?.dispose();
-        unbindRechecks(); fold?.dispose(); editor.destroy();
+        offRead(); unbindRechecks(); fold?.dispose(); editor.destroy();
     } };
 }
 
