@@ -289,7 +289,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
                 ${field('Source', source)}${field('Model', model)}${only ? `<div class="ui-field model-role-field" data-model-role-account-field ${sourceId(row) ? '' : 'hidden'}><span>Account</span>${account}</div>` : account}
                 ${isFallback && !only ? `<span class="model-role-order"><button type="button" class="btn btn-default" data-model-up aria-label="Move fallback up" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" class="btn btn-default" data-model-down aria-label="Move fallback down" ${index === total - 1 ? 'disabled' : ''}>↓</button><button type="button" class="btn btn-default" data-model-remove aria-label="Remove fallback">Remove</button></span>` : ''}
             </div>${local}
-            <div class="model-role-notes"><span id="${escapeHtml(hostId)}-${escapeHtml(row.id)}-status" class="model-role-meta ui-field-help" data-model-role-status></span>${only ? '' : detailsHtml(row)}</div>
+            <div class="model-role-notes" data-no-status><span id="${escapeHtml(hostId)}-${escapeHtml(row.id)}-status" class="model-role-meta ui-field-help" data-model-role-status></span>${only ? '' : detailsHtml(row)}</div>
             <div class="ui-status ui-field-help" id="${escapeHtml(hostId)}-${escapeHtml(row.id)}-error" data-model-role-error data-tone="error" hidden></div>
             ${only ? `${mainNote && row.slot.slot === 'main' ? `<p class="model-role-copy" id="${escapeHtml(hostId)}-main-note" data-main-follow-note>${escapeHtml(MAIN_FOLLOW_NOTE)}</p>` : ''}${only.actions || ''}${detailsHtml(row)}` : ''}
         </div>`;
@@ -394,6 +394,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
                     : sourceId(row) ? (rowCatalog?.read_state === 'ok' && !rowCatalog.items.length
                         ? 'No models were listed for this source. Your selection is kept.'
                         : 'Uses your subscription. No API key required.') : price || 'Price unknown');
+            status.closest('.model-role-notes')?.toggleAttribute('data-no-status', !status.textContent);  // said with its words
             // The price is already composed through the translation seam: the overlay leaves it alone and reads the rest.
             if (price) status.dataset.i18nFmt = 'model price'; else delete status.dataset.i18nFmt;
             const errors = validationAttempted ? rowErrors(row) : [];
@@ -823,7 +824,7 @@ function mountModels(container, { path, ctx }) {
             : keyWords(settings[slots.main?.settingKey], local('main'));
         // The answer is one row: the model, under it the source with its own mark (or what is wrong with its key), and
         // the chevron of a row that opens a level. The role's name is the object's title above.
-        container.querySelector('.models-main').innerHTML = `<button type="button" class="ui-row settings-row models-main-row" data-kind="door" data-entry-open>
+        container.querySelector('.models-main').innerHTML = `<button type="button" class="ui-row settings-row models-main-row" data-kind="door" data-entry-open${mainNote || main.source ? '' : ' data-no-meta'}>
             <span class="ui-row-title models-main-name">${escapeHtml(main.follows || labels.length ? 'Not chosen yet' : main.name)}</span>
             <span class="ui-row-meta models-main-meta"${mainNote ? ' data-tone="warn"' : ''}>${mainNote ? '' : routeMark(settings[slots.main?.settingKey], { local: local('main') })}<span>${escapeHtml(mainNote || main.source)}</span></span>
             <span class="ui-row-actions">${doorSign('models/role/main')}</span></button>`;

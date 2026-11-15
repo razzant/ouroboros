@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { bindSettingRows, commitSetting, forgetSettingRows, outcomeLine, readSettings, settingsRow, writeEntry } from '../modules/settings_controls.js';
+import { bindSettingRows, commitSetting, forgetSettingRows, outcomeLine, readSettings, setRowMeta, settingsRow, writeEntry } from '../modules/settings_controls.js';
 import { HAND_WRITTEN, HOME_ROWS, ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 
@@ -594,6 +594,37 @@ test('a wide control is marked to go under its words sooner; a door, a switch, a
         testRow('T_OWN', { kind: 'custom' }), testRow('T_BOUND', { kind: 'number', noLimit: true })]) assert.ok(wide(row), row.id);
     for (const row of [SWITCH, SECRET, LADDER, testRow('T_DOOR', { kind: 'door', page: 'models' }), testRow('T_N', { kind: 'number' }),
         testRow('T_DEVICE', { kind: 'custom', as: 'switch' })]) assert.ok(!wide(row), row.id);
+});
+
+test('a row says when its meta line has no words, drawn so and after every write: settings.css lays it on one line by it', () => {
+    forgetSettingRows();
+    const bare = testRow('T_BARE', { kind: 'switch' }, { keys: [], meta: '' });
+    const first = (row) => settingsRow(row).split('>')[0];
+    assert.deepEqual([/ data-no-meta$/.test(first(bare)), / data-no-meta/.test(first(SWITCH))], [true, false], 'the template says it as drawn');
+    const container = new NodeStub();
+    container.innerHTML = settingsRow(bare);
+    const bound = bindSettingRows(container, { rows: [bare] });
+    const row = container.querySelector('[data-setting-row]');
+    const said = () => [row.querySelector('[data-setting-meta]').textContent, row.hasAttribute('data-no-meta')];
+    assert.deepEqual(said(), ['', true]);
+    bare.meta = 'Words that came after the row was drawn';
+    bound.paint();
+    assert.deepEqual(said(), ['Words that came after the row was drawn', false], 'words written later take the flag away');
+    bare.meta = '';
+    bound.paint();
+    assert.deepEqual(said(), ['', true]);
+    // Another part of the same line (a Dashboard tab's caption) is written through the same writer and speaks for the row.
+    const caption = new NodeStub('span');
+    row.querySelector('.ui-row-meta').append(caption);
+    setRowMeta(caption, 'A caption');
+    assert.equal(row.hasAttribute('data-no-meta'), false);
+    setRowMeta(caption, '');
+    assert.equal(row.hasAttribute('data-no-meta'), true);
+    const loose = { textContent: '' };
+    setRowMeta(loose, 'A line outside any row');
+    setRowMeta(null, 'nowhere');
+    assert.equal(loose.textContent, 'A line outside any row', 'outside a row only the words are written');
+    bound.dispose();
 });
 
 test('a write that waits for a restart says why its line is yellow, with a receipt or without one', () => {

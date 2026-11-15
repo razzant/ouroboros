@@ -2,7 +2,7 @@ import { bindTabStrip, placePageBack, renderBackControl, renderPageHeader } from
 import { sectionHoldsTwoPanes } from './layout.js';
 import { fluentIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
-import { bindSettingRows, readSettings, settingsRow, settingsSnapshot } from './settings_controls.js';
+import { bindSettingRows, readSettings, setRowMeta, settingsRow, settingsSnapshot } from './settings_controls.js';
 import { homeAnswers, homeFactsSeen } from './settings_home.js';
 import { rowsOf } from './settings_rows.js';
 import { paintStatusMark, statusMarkHtml } from './status_mark.js';
@@ -88,7 +88,8 @@ export function mountTabSettings(host, tab, { state, cards = null, custom = null
             const box = node.querySelector(kind === 'caption' ? '.ui-row-meta' : '.ui-row-actions');
             box.insertBefore(span, kind === 'caption' ? null : box.firstChild);  // a caption ends the meta line
         }
-        if (span && span.textContent !== (text || '')) span.textContent = text || '';
+        if (kind === 'caption') setRowMeta(span, text || '');  // the meta line's words: the row says when it has none
+        else if (span && span.textContent !== (text || '')) span.textContent = text || '';
     };
     const paint = () => {
         rows.paint();

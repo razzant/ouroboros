@@ -25,7 +25,7 @@ import {
     sessionRouteVerdict,
 } from './subagent_status_primitives.js';
 import { bindRecheckMarks, recheckMarkHtml, syncRecheckState } from './safety_recheck.js';
-import { CODECS, CONFIRMS, bindSettingRows, doorSign, outcomeLine, paintWithRow, setButtonBusy, settingsReadMessage, settingsRow, settingsSnapshot, writeEntry } from './settings_controls.js';
+import { CODECS, CONFIRMS, bindSettingRows, doorSign, outcomeLine, paintWithRow, setButtonBusy, setRowMeta, settingsReadMessage, settingsRow, settingsSnapshot, writeEntry } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { rowById, rowsOf } from './settings_rows.js';
 import { revealNewRow } from './ui_helpers.js';
@@ -606,7 +606,7 @@ function agentPageHtml(row, state, index, live) {
     const saved = state.loadedItems.find((item) => item.subagent_id === row.subagent_id);
     const recheck = saved?.rechecks_flags === true
         || (saved?.route.kind === ROUTE_KIND_API_MODEL && saved.delivery === 'packet' && saved.enabled !== false);
-    const use = (field, title, meta, checked) => `<div class="ui-row settings-row agent-use" data-kind="switch"><p class="ui-row-title">${title}</p>
+    const use = (field, title, meta, checked) => `<div class="ui-row settings-row agent-use" data-kind="switch"${meta ? '' : ' data-no-meta'}><p class="ui-row-title">${title}</p>
         <p class="ui-row-meta"><span>${escapeHtml(meta)}</span></p><div class="ui-row-actions">${toggleHtml(field, title, checked, live, field === 'rechecks_flags' ? row.subagent_id : '')}</div></div>`;
     const card = (title, body, lead = '') => `<section class="ui-card settings-card"><h3 class="settings-card-title agents-card-title">${title}</h3>
         ${lead ? `<p class="settings-card-lead">${lead}</p>` : ''}${body}</section>`;
@@ -1443,7 +1443,7 @@ function mountAgents(container, { path, view = '', ctx }) {
         if (!delegation) return;
         const on = editor.loaded && editor.setting.enabled;
         Object.assign(delegation, { checked: on, disabled: !editor.loaded }).setAttribute('aria-checked', String(on));
-        roster.querySelector('[data-setting-meta]').textContent = (!editor.loaded && settingsReadMessage()) || rowById(KEY).meta;
+        setRowMeta(roster.querySelector('[data-setting-meta]'), (!editor.loaded && settingsReadMessage()) || rowById(KEY).meta);
     };
     const adopt = (settings) => {
         syncRecheckState(recheckFromSettings(settings), container);

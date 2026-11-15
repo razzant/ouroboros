@@ -197,7 +197,7 @@ export const storedKeyRow = (key, meta) => ({ id: key, keys: [key], page: 'accou
 /** One stored key's row, on the row helper's hooks. A key's own name is shown as written, never translated. */
 export function secretRowHtml(row) {
     const id = `setting-${row.id}`;
-    return `<div class="ui-row settings-row accounts-secret" data-setting-row="${escapeHtml(row.id)}" data-kind="secret" data-secret-row>
+    return `<div class="ui-row settings-row accounts-secret" data-setting-row="${escapeHtml(row.id)}" data-kind="secret" data-secret-row${row.meta ? '' : ' data-no-meta'}>
         <label class="ui-row-title" for="${id}"${row.verbatim ? ' data-i18n-skip' : ''}>${escapeHtml(row.name)}</label>
         <div class="ui-row-meta"><span id="${id}-meta" data-setting-meta>${escapeHtml(row.meta || '')}</span></div>
         <div class="ui-row-actions">

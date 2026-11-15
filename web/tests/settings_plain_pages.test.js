@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import test from 'node:test';
 
 import { SAFETY_LEVELS } from '../modules/consciousness_words.js';
+import { getNotifier } from '../modules/notifications.js';
 import { forgetSettingRows, readSettings, settingsRow } from '../modules/settings_controls.js';
 import { settingsPageFor } from '../modules/settings_pages.js';
 import { policyValueLabel } from '../modules/settings_policy.js';
@@ -361,6 +362,16 @@ test('Notifications keeps the notifier\'s own switches, as switches that act at 
     assert.ok(page.row('notify:enabled').querySelector('[data-setting-meta]').hasAttribute('data-notify-status'));
     assert.match(page.meta('notify:enabled'), /Notifications are off|This device blocks storage/);
     assert.ok(page.row('notify:test').querySelector('[data-setting-meta]').hasAttribute('data-notify-attention-status'));
+    // Off, the test row has no attention line and its row says so (settings.css: one line); turned on, the notifier writes
+    // the line through the rows' one writer, and the row has words again (in WebKit a `:has()` kept the line hidden).
+    const bare = () => ['notify:enabled', 'notify:test'].map((id) => page.row(id).hasAttribute('data-no-meta'));
+    assert.deepEqual([page.meta('notify:test'), ...bare()], ['', false, true]);
+    const notifier = getNotifier();
+    t.after(() => notifier.setPref('enabled', false));
+    await notifier.setPref('enabled', true);
+    notifier.mountSettings(page.container);
+    assert.ok(page.meta('notify:test'));
+    assert.deepEqual(bare(), [false, false]);
     assert.deepEqual(page.container.querySelectorAll('.settings-card-title').map((title) => title.textContent), ['Notify me about', 'How']);
     await page.container.querySelector('[data-notify-doors]').fire('click', { target: page.row('notify:places') });
     assert.deepEqual(page.opened, ['page:circles'], 'what a place is sent is set in Circles');
