@@ -215,16 +215,11 @@ def test_settings_card_actions_are_reachable_at_content_breakpoints(subscription
     card = page.locator("#page-settings [data-settings-card]")
 
     def show_card():
-        # Two panes hold the card in the pane of the list's Ouroboros row; one column keeps it atop the list
-        # (settings.js placeOverview, DESIGN "Settings"). Either way the owner reaches it with one press at most.
+        # Two panes hold the card in the pane of the list's Ouroboros row, one press away; one column keeps it atop
+        # the list (settings.js placeOverview, DESIGN "Settings"), and no page is opened over it here.
         overview = page.locator("#page-settings [data-settings-overview-row]")
-        if overview.is_visible():
-            if overview.get_attribute("aria-current") != "page":
-                overview.click()
-        else:
-            back = page.locator("#page-settings [data-settings-page]:visible [data-settings-back]")
-            if back.count():
-                back.first.click()
+        if overview.is_visible() and overview.get_attribute("aria-current") != "page":
+            overview.click()
         card.locator('[data-needs="restart"]').wait_for(state="visible")
 
     show_card()
@@ -235,7 +230,7 @@ def test_settings_card_actions_are_reachable_at_content_breakpoints(subscription
         for sidebar in [220, 280]:
             page.evaluate("value => document.documentElement.style.setProperty('--sidebar-width',value+'px')", sidebar)
             show_card()
-            # Every line the card lists is on screen with its action: the unread accounts, the restart, the local model.
+            # Every line the card lists is on screen with its action: the restart and the local model.
             actions = card.locator("[data-needs]:visible [data-need-action]")
             assert actions.count() >= 2, [width, sidebar, actions.count()]
             for index in range(actions.count()):

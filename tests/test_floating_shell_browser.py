@@ -61,7 +61,7 @@ def _gap_heads_history(page, host):
     }""", host)
 
 
-def test_hidden_main_defers_gap_notice_until_shown_without_reading_again(shell_ui):
+def test_hidden_main_reads_no_history_until_shown_and_tells_its_gap_at_its_head(shell_ui):
     page = shell_ui["page"]
     page.add_init_script(_ROOM_NOTICES)
     transport = Transport(page, history={1: reading(14)})

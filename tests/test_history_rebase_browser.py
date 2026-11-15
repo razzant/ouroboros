@@ -203,7 +203,7 @@ def test_a_visible_receipt_line_keeps_its_node_when_the_newest_window_moves_past
 
 
 @pytest.mark.parametrize('browser_engine', ['chromium', 'webkit'])
-def test_send_while_a_reopened_room_loads_keeps_a_failed_draft_and_stays_at_the_newest(direct_server_with_data, browser_engine, tmp_path):
+def test_send_while_a_room_opened_cold_loads_keeps_a_failed_draft_and_stays_at_the_newest(direct_server_with_data, browser_engine, tmp_path):
     """Read pages back, a room opened cold while its newest page is still loading: a failed Send keeps
     the draft and the file, and the room lands at its newest message; an accepted Send's echo is the
     newest row and the late read cannot pull the reader away from it (owner decision 2026-10-05). A return
@@ -223,7 +223,7 @@ def test_send_while_a_reopened_room_loads_keeps_a_failed_draft_and_stays_at_the_
             feed = _open_project(page, project)
             target = page.locator(f'{feed} [data-client-message-id="send-place-650"]')
 
-            def reopen_held(read_back):
+            def open_cold_held(read_back):
                 if read_back:
                     for _ in range(3):
                         _step(page, feed, automatic=True)
@@ -242,7 +242,7 @@ def test_send_while_a_reopened_room_loads_keeps_a_failed_draft_and_stays_at_the_
                 _idle(page, feed)
                 page.evaluate(_FRAMES)
 
-            reopen_held(read_back=True)
+            open_cold_held(read_back=True)
             page.route('**/api/chat/upload', lambda route: route.fulfill(
                 status=500, content_type='application/json', body='{"ok": false, "error": "controlled upload failure"}'))
             _stage_file(page)
@@ -258,7 +258,7 @@ def test_send_while_a_reopened_room_loads_keeps_a_failed_draft_and_stays_at_the_
             page.unroute('**/api/chat/upload')
             page.locator('#project-panel .attach-remove').click()
             page.locator(composer).fill('')
-            reopen_held(read_back=False)
+            open_cold_held(read_back=False)
             page.evaluate(_KEEP_CHAT_FRAMES)
             page.locator(composer).fill('SENT_WHILE_THE_ROOM_LOADS')
             page.locator(composer).press('Enter')

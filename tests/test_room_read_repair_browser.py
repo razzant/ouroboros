@@ -187,7 +187,7 @@ def test_a_wide_notice_is_read_once_all_of_it_was_in_view_and_rows_under_a_notic
                     assert wait_durable_result(oracle, task["id"], timeout=120)["status"] == "completed"
                     _wait_unread(page, project)
                     seen_before = (_prefs(page).get("project_seen_revision") or {}).get(project["id"], 0)
-                    capture.checkpoint("1-away-five-unread")
+                    capture.checkpoint("1-away-unread")
 
                     # ---- the short notice lands under a notice the room holds over its last lines ----
                     assert page.evaluate(_HOLD_TOAST, "A notice held over the conversation's last lines for this "
