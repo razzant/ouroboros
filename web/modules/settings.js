@@ -73,7 +73,7 @@ export function initSettings(ctx = {}) {
     const levelsEl = page.querySelector('.settings-levels');
     const leadName = page.querySelector('[data-settings-lead-name]');
     const levels = [];
-    const aside = new Map();  // path → a retained level, including its drafts and reading place
+    const aside = new Map();  // path → a level with unsaved words or owned by a jump's return
     const layered = new Set();
     const places = new WeakMap();  // a column → where it was scrolled while visible
     let opening = false;
@@ -202,7 +202,7 @@ export function initSettings(ctx = {}) {
     }
 
     // `opener` is the control that opened the level, where focus returns: WebKit does not focus a pressed button.
-    // A retained level comes back as it was left; a path not visited yet is drawn once.
+    // A jump-owned or unsaved level comes back as left; a closed clean page is drawn anew.
     function open(path, { row, under, opener, view = '', remember = true }) {
         if (remember && !under && path !== lastFirst) {
             lastFirst = path;
@@ -251,14 +251,29 @@ export function initSettings(ctx = {}) {
         } catch (err) { failed(err); }
     }
 
-    // A level put aside keeps its nodes, drafts and reading place until page teardown, like the other places.
+    const heldByJump = level => layers?.ids().some(id => layers.get(id)?.returnTo?.retains?.(level.el));
+    function disposeLevel(level) {
+        level.closed = true;
+        level.disposeFade?.();
+        try { level.handle?.unmount?.(); } catch (err) { console.error('settings: a page failed to let go', level.path, err); }
+    }
+    function releaseAside() {
+        for (const [path, level] of aside) {
+            if (level.handle?.unsaved?.() || heldByJump(level)) continue;
+            aside.delete(path);
+            disposeLevel(level);
+        }
+    }
+
+    // Closing a clean page releases its bindings. Only unsaved words or an actual jump retain the same nodes.
     function close(level) {
         const at = document.activeElement;
         if (at && level.el.contains(at)) at.blur?.();
         level.watch?.disconnect();
         level.el.remove();
         if (layered.delete(level.id)) layers?.remove(level.id);
-        aside.set(level.path, level);
+        if (level.handle?.unsaved?.() || heldByJump(level)) aside.set(level.path, level);
+        else disposeLevel(level);
     }
 
     function closeLevels(keep, { row = '', quiet = false } = {}) {
@@ -468,7 +483,7 @@ export function initSettings(ctx = {}) {
         disposeFade();
         disposeOverviewFade?.();
         offReconnect?.();
-        for (const level of [...levels, ...aside.values()]) { level.closed = true; level.disposeFade?.(); level.handle?.unmount?.(); }
+        for (const level of [...levels, ...aside.values()]) disposeLevel(level);
         window.removeEventListener('ouro:page-shown', onPageShown);
         document.removeEventListener('visibilitychange', onVisible);
         home.dispose();
@@ -478,12 +493,15 @@ export function initSettings(ctx = {}) {
     window.__ouroSettings = { open: openFromOutside };
     return { page, open: openFromOutside, pressedAgain,
         capture() {
-            const paths = levels.map((level) => level.path), own = ownChosen;
+            const kept = [...levels], own = ownChosen;
             return { title: ['Settings', ...levels.map((level) => settingsTitle(level.path))].join(' › '),
+                retains: el => kept.some(level => level.el === el), release: releaseAside,
                 restore() {
-                    closeLevels(0, { quiet: true });
+                    let shared = 0;
+                    while (shared < kept.length && levels[shared] === kept[shared]) shared++;
+                    closeLevels(shared, { quiet: true });
                     ownChosen = own;
-                    paths.forEach((path, under) => open(path, { under, remember: false }));
+                    kept.forEach((level, under) => { if (under >= shared) open(level.path, { under, remember: false }); });
                     paint({ quiet: true });
                 } };
         } };

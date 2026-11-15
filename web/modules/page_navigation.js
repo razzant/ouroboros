@@ -12,7 +12,9 @@ export function createPageNavigation({ layers, capture, canLeave, doc = document
     doc.addEventListener('click', onPress, true);
 
     function clear() {
-        for (const id of layers.ids()) if (layers.get(id)?.returnTo) layers.remove(id);
+        const returns = layers.ids().map(id => layers.get(id)).filter(layer => layer.returnTo);
+        for (const layer of returns) layers.remove(layer.id);
+        for (const layer of returns) layer.returnTo.release?.();
     }
 
     const currentPlace = () => capture(pressed || doc.activeElement);
@@ -33,6 +35,7 @@ export function createPageNavigation({ layers, capture, canLeave, doc = document
                             layers.remove(id);
                             return origin.restore();
                         });
+                        origin.release?.();
                         restored?.();
                         return true;
                     } });
@@ -59,6 +62,7 @@ export function capturePagePlace({ state, navState, settingsControls, dashboardC
     const label = project?.name || (settings ? 'Settings' : dashboard?.label || (page === 'chat' ? 'Main' : pageLabel(page)));
     return { key: project ? `project:${projectId}` : settings ? `settings:${state.settingsPath}`
         : dashboard ? `dashboard:${state.dashboardActiveSubtab}` : page, label, title: settings?.title || label,
+        retains: settings?.retains, release: settings?.release,
         restore() {
             commitPage(page, { reveal: true, enter: () => {
                 settings?.restore();

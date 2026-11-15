@@ -158,7 +158,7 @@ class DescendantStub extends Stub {
     }
 }
 
-test('Settings retains each level and its words, saved or unsaved, until the shell is disposed', async (t) => {
+test('a page left with unsaved words is put aside and comes back as it was left; without them it is let go and drawn anew', async (t) => {
     const { env, content, state, showPage, layers } = world(t);
     env.document.createElement = (tag) => new DescendantStub(tag);
     const drawn = [];
@@ -191,10 +191,46 @@ test('Settings retains each level and its words, saved or unsaved, until the she
     unsaved = false;
     await controls.open('');
     await settle();
-    assert.deepEqual([pages(), letGo.length], [[], 0]);
+    assert.deepEqual([pages(), letGo.length], [[], 1]);
     await controls.open('test-editor');
     await settle();
-    assert.deepEqual([drawn.length, words().getAttribute('value')], [1, 'typed']);
+    assert.deepEqual([drawn.length, words().getAttribute('value')], [2, 'stored']);
+});
+
+test('a Settings jump retains its clean origin until Back, while a map choice releases an abandoned origin', async (t) => {
+    const { createPageNavigation } = await import('../modules/page_navigation.js');
+    const { env, content, state, layers } = world(t);
+    const drawn = [], released = [];
+    for (const path of ['test-return-clean', 'test-return-next']) registerSettingsPage(path, {
+        title: path, mount(body) { drawn.push(body); return { unmount() { released.push(body); } }; },
+    });
+    let controls;
+    const shown = name => {
+        state.activePage = name;
+        env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: name } }));
+    };
+    const nav = createPageNavigation({ layers, doc: env.document, canLeave: async () => true, capture: () => {
+        const saved = controls.capture();
+        return { key: `settings:${state.settingsPath}`, label: 'Settings', retains: saved.retains, release: saved.release,
+            restore() { shown('settings'); saved.restore(); } };
+    } });
+    t.after(() => nav.destroy());
+    const showPage = (name, options = {}) => nav.go(options.key || name, () => { shown(name); options.enter?.(); }, options);
+    controls = initSettings({ state, ws: env.ws, layers, showPage });
+    await controls.open('test-return-clean', { map: true }); await settle();
+    const clean = () => content.querySelectorAll('.settings-page').find(level => level.dataset.settingsPage === 'test-return-clean');
+    const origin = clean();
+    const body = origin.querySelector('.settings-page-body');
+    await controls.open('test-return-next'); await settle();
+    assert.equal(content.contains(origin), false);
+    assert.equal(released.includes(body), false, 'the jump owns its detached origin');
+    layers.back(); await settle();
+    assert.equal(clean(), origin);
+    assert.equal(drawn.filter(item => item === body).length, 1, 'Back restores the same node and bindings');
+    await controls.open('test-return-next'); await settle();
+    await showPage('chat', { map: true }); await settle();
+    assert.equal(released.filter(item => item === body).length, 1, 'abandoning the return releases its clean origin once');
+    assert.equal(layers.returnPage(), null);
 });
 
 test('words the shell searched are spent by the first press on their results; words the owner typed stay', async (t) => {
