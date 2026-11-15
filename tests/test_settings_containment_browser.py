@@ -69,6 +69,6 @@ def test_a_narrow_column_in_a_wide_window_is_laid_out_as_a_phone(subscription_ui
     page.add_style_tag(content="#page-settings { max-width: 250px; }")
     results = _walk(page)
     assert all(extra <= 1 for extra in results.values()), json.dumps(results, indent=2)
-    level = open_settings(page, "skill-sources")
+    open_settings(page, "skill-sources")
     assert page.locator("#page-settings > .app-page-header [data-shell-back]").is_visible() and not page.locator(HOME).is_visible()
     page.close()
