@@ -33,6 +33,8 @@ test('a section band has the same inset without native chrome and one leading ed
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
     const ui = readFileSync(new URL('../ui.css', import.meta.url), 'utf8');
     assert.match(ui, /--page-header-row-h: max\(var\(--window-chrome-top, 0px\), calc\(var\(--control-h-float\) \+ 36px\)\)/);
+    assert.match(css, /:root\[data-window-chrome="integrated"\] \{[^}]*--page-header-row-h: max\(var\(--control-h-float\), var\(--window-chrome-top\)\);/,
+        'a measured native band still follows Interface size; only an absent band needs the browser inset');
     assert.match(css, /\.app-page-header\[data-lead\] \{[^}]*min-height: var\(--page-header-row-h\)/);
     assert.match(css, /\.app-page-header\[data-return="column"\] > \.app-page-title-block \{ display: block; \}/);
     assert.match(css, /\.app-page-header\[data-return\] > \.app-page-title-block \{ display: flex;/, 'an ordinary leading return keeps its actual sibling');

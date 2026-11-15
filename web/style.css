@@ -309,6 +309,7 @@ html[data-layout="stack"] .sidebar-foot-meta { min-height: 44px; margin: var(--s
     --window-chrome-top: 0px;
     --window-chrome-start: 0px;
     --window-chrome-clearance: calc(var(--window-chrome-start) + var(--space-3));
+    --page-header-row-h: max(var(--control-h-float), var(--window-chrome-top));
 }
 /* The card stands right under the traffic lights (owner 12.11, the fifth round frames): a step of air under them, so
    its top reaches into the band's lower part. The stack layout's drawer has its × there, which clears the band itself
