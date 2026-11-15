@@ -42,6 +42,7 @@ from .lib import telegram_i18n, telegram_inbound, telegram_quiz
 from .lib.telegram_origin import origin_label
 from .lib.telegram_health import _collect_health, _build_menu_tasks
 from .lib.telegram_notifier import _make_notifier, _notify_enabled, _completion_text, _relay_text, _routing_notice_text
+from .lib.telegram_outbox import outbox_for
 from .lib.telegram_share import make_prepare_share
 from .lib.telegram_typing import TypingCue, host_reply_preparation
 from .lib.telegram_poll_binding import (
@@ -1444,14 +1445,17 @@ def register(api):
     api.register_supervised_task("poller", _make_poller(api), restart_policy="on_failure", max_restarts=10)
     api.register_supervised_task("notifier", _make_notifier(api, trust_env=_HONOR_ENV_PROXIES), restart_policy="on_failure", max_restarts=10)
     api.register_supervised_task("typing_cue", cue.run, restart_policy="on_failure", max_restarts=10)
-    api.subscribe_event("chat.outbound", _make_outbound(api, cue))
+    # Every mirrored message goes through one durable, ordered journal (lib/telegram_outbox.py).
+    outbox = outbox_for(api)
+    api.register_supervised_task("outbox", outbox.run, restart_policy="on_failure", max_restarts=10)
+    api.subscribe_event("chat.outbound", outbox.subscriber("outbound", _make_outbound(api, cue), decide=True))
     api.subscribe_event("chat.typing", _make_typing(cue))
-    api.subscribe_event("chat.photo", _make_photo(api))
-    api.subscribe_event("chat.video", _make_video(api))
-    api.subscribe_event("chat.document", _make_document(api))
-    api.subscribe_event("chat.links", _make_links(api))
-    api.subscribe_event("chat.quiz", _make_quiz(api, cue))
-    api.subscribe_event("chat.quiz_state", _make_quiz_state(api))
+    api.subscribe_event("chat.photo", outbox.subscriber("photo", _make_photo(api)))
+    api.subscribe_event("chat.video", outbox.subscriber("video", _make_video(api)))
+    api.subscribe_event("chat.document", outbox.subscriber("document", _make_document(api)))
+    api.subscribe_event("chat.links", outbox.subscriber("links", _make_links(api)))
+    api.subscribe_event("chat.quiz", outbox.subscriber("quiz", _make_quiz(api, cue)))
+    api.subscribe_event("chat.quiz_state", outbox.subscriber("quiz_state", _make_quiz_state(api)))
     # GET hydrates the declarative form with what is stored; POST saves it.
     api.register_route("settings/save", handler=_make_settings_save(api), methods=("GET", "POST"))
     api.register_route("miniapp/status", handler=_make_status(api), methods=("POST",))

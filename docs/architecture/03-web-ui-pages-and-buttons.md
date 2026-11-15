@@ -149,7 +149,7 @@ Cancel appears only on unfinished root cards (moved works' portals too) whose ho
 
 #### Turning a card into a Project
 
-One click and `move_to_project` share one placement operation per task id. Its durable binding wins; a name requested for an already-bound task renames that room. Only this work moves. `project_started`, `project_handoff` and `/api/state.task_bindings` carry the task/project identity and name for the existing Main card. Origin siblings are independent. RUNNING resources stay unchanged until leased readmission (§6 Project placement).
+One click and `move_to_project` share one placement operation per task id. Its durable binding wins; a name requested for an already-bound task renames that room. Only this work moves. `project_started`, `project_handoff` and the census row name the Project on Main's card. Origin siblings are independent. RUNNING resources stay unchanged until leased readmission (§6 Project placement).
 
 Main-root `project_reference.js` opens (by `?id=`), never closes, the panel; names stay server-owned (DESIGN "References and actions"). Project-scoped is not project-bound: a headless/CLI `project_id` grants lease/memory scope without durable binding, routes to that thread at admission (§5), and creates neither Main card nor conversion button.
 

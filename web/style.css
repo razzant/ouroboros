@@ -443,7 +443,7 @@ html[data-layout="stack"] .resize-handle { display: none; }
 .nav-project-row { position: relative; }
 
 /* Main's place is this Ouroboros's own card in its voice colour (owner 12.11, the fifth round; DESIGN principle 3:
-   each voice colours its own objects): its picture, its name with a quiet "Main Chat" (the place it opens), Main's
+   each voice colours its own objects): its picture with its dot, its name with a quiet "Main Chat" (the place it opens), Main's
    count and its room's mark in the Project rows' mark column, and under them what Main is doing now across the
    card's width; nothing under them while it rests, so the card is one line tall then. As the chosen place it takes
    the crimson tone. */
@@ -453,7 +453,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
     gap: var(--space-3);
     padding: var(--space-2) calc(var(--nav-kebab-w) + var(--space-1) + 1px) var(--space-2) var(--space-2);
     border-radius: var(--radius-object);
-    background: var(--voice-ouroboros);
+    --nav-ouro-fill: var(--voice-ouroboros);  /* the card's fill, named once: the picture's dot is ringed in it */
+    background: var(--nav-ouro-fill);
     box-shadow: var(--elev-rest);
     color: var(--text-primary);
 }
@@ -473,14 +474,18 @@ html[data-layout="stack"] .resize-handle { display: none; }
     --focus-accent-border: var(--accent-light);
 }
 /* Chosen, the card takes the solid crimson's white ink in both themes (:root keeps it above the dark voice's inks). */
-:root .nav-ouro.active { --text-primary: var(--tone-crimson-ink); --text-meta: var(--tone-crimson-ink); }
+:root .nav-ouro.active { --text-primary: var(--tone-crimson-ink); --text-meta: var(--tone-crimson-ink); --nav-ouro-fill: var(--tone-crimson); }
 .nav-ouro-ava {
+    position: relative;  /* its dot sits on its rim */
     flex: 0 0 36px;
     width: 36px;
     height: 36px;
     border-radius: 50%;
     background: url("logo.jpg") center / cover no-repeat, #e6e0de;
 }
+/* The picture's dot says the owner's move in Main or a Project (app.js paintMainRow): the shared 7px fact dot on the
+   picture's top-right rim, ringed in the card's fill as the places control's dot is ringed in the room's. */
+.nav-ouro-ava > .nav-ava-mark { position: absolute; top: -1px; right: -1px; border-radius: 50%; box-shadow: 0 0 0 2px var(--nav-ouro-fill); }
 .nav-ouro-text {
     flex: 1 1 auto;
     min-width: 0;
@@ -559,6 +564,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
     .nav-ouro:not(.active):hover {
         background: linear-gradient(var(--tone-quiet-hover), var(--tone-quiet-hover)), var(--voice-ouroboros);
     }
+    /* Its picture's dot stays ringed in what the card shows now: the same tint over the same fill. */
+    .nav-ouro:not(.active):hover .nav-ouro-ava > .nav-ava-mark { box-shadow: 0 0 0 2px var(--tone-quiet-hover), 0 0 0 2px var(--nav-ouro-fill); }
 }
 .nav-row.active {
     background: var(--tone-crimson);

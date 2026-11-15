@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import html as html_lib
 import mimetypes
 import os
@@ -30,6 +31,12 @@ _MAX_TELEGRAM_DOWNLOAD_BYTES = 10 * 1024 * 1024
 # Outgoing document transport is independent of this integration's inbound cap.
 _MAX_TELEGRAM_UPLOAD_BYTES = 50 * 1024 * 1024
 _NOT_MODIFIED_PREFIX = "bad request: message is not modified"
+# A failure before any request byte could reach Telegram: connecting, a proxy's refused tunnel, a pool wait.
+_UNSENT_FAILURES = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ProxyError)
+# The requests that create or change a message in the owner's chat. Inside an outbound operation
+# (lib/telegram_outbox.py, which sets OUTBOUND_JOURNAL around one mirrored event) each is one journaled part.
+JOURNALED_METHODS = frozenset({"sendMessage", "sendPhoto", "sendVideo", "sendDocument", "sendAudio", "editMessageText"})
+OUTBOUND_JOURNAL: contextvars.ContextVar = contextvars.ContextVar("telegram_outbound_journal", default=None)
 
 
 def _u16len(value: str) -> int:
@@ -51,7 +58,7 @@ def _take_u16_prefix(value: str, budget: int) -> tuple[str, str]:
 
 
 class TelegramRequestRejected(RuntimeError):
-    """Telegram returned an explicit negative API response."""
+    """Telegram returned an explicit negative API response; ``retry_after`` is its flood-control wait (429)."""
 
     def __init__(
         self,
@@ -59,18 +66,35 @@ class TelegramRequestRejected(RuntimeError):
         *,
         status_code: int = 0,
         plain_retry_safe: bool = False,
+        retry_after: int = 0,
     ) -> None:
         super().__init__(message)
         self.status_code = int(status_code or 0)
         self.plain_retry_safe = bool(plain_retry_safe)
+        self.retry_after = max(0, int(retry_after or 0))
 
     @property
     def transient(self) -> bool:
         return self.status_code == 429 or self.status_code >= 500
 
+    @property
+    def unsent(self) -> bool:
+        """A 4xx answer created no message; a 5xx may follow a message Telegram already created."""
+        return 0 < self.status_code < 500
+
 
 class TelegramTransportError(RuntimeError):
-    """Telegram could not return a trustworthy API response yet."""
+    """Telegram could not return a trustworthy API response yet.
+
+    ``unsent`` is True only for a failure before any request byte could reach Telegram (connecting, a
+    proxy's refused tunnel, a pool wait); a broken or slow answer, a reset or an unreadable body may follow
+    a message Telegram already created, so it stays False: such a request is never sent again as new.
+    """
+
+    def __init__(self, message: str, *, unsent: bool = False, cause: str = "") -> None:
+        super().__init__(message)
+        self.unsent = bool(unsent)
+        self.cause = str(cause or "")  # the transport's own failure class, for status and logs
 
 
 class TelegramTokenMissing(ValueError):
@@ -86,17 +110,27 @@ class TelegramBindingChanged(RuntimeError):
     token's client. Broad fallbacks re-raise it instead of trying another form of the same request.
     """
 
-    def __init__(self, accepted: int = 0) -> None:
+    def __init__(self, accepted: int = 0, *, unsent: bool = True) -> None:
         super().__init__("The Telegram bot token changed; this operation stopped before its next request.")
         self.accepted = int(accepted)
+        self.unsent = bool(unsent)  # False: the request in flight at the change may have been delivered
 
 
-# Shared degraded-transport pacing contract for the poller and notifier loops:
+# Shared degraded-transport pacing contract for the poller, notifier and outbox loops:
 # the first retry waits TELEGRAM_RETRY_INITIAL_SEC and each further consecutive
 # failure doubles the wait monotonically up to TELEGRAM_RETRY_MAX_SEC; any
 # successful API round resets the wait to the initial value.
 TELEGRAM_RETRY_INITIAL_SEC = 5
 TELEGRAM_RETRY_MAX_SEC = 60
+
+
+def _retry_after(payload: Dict[str, Any]) -> int:
+    """Telegram's flood-control wait in whole seconds (``parameters.retry_after``); 0 when absent."""
+    parameters = payload.get("parameters")
+    try:
+        return max(0, int(parameters.get("retry_after") or 0)) if isinstance(parameters, dict) else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def next_telegram_retry_delay(current: float) -> float:
@@ -660,10 +694,19 @@ class TelegramClient:
         moved on, any failure (a refusal, a broken transport, an unreadable answer) belongs to the replaced token,
         so it ends as the typed change with the parts Telegram accepted, never as a failure of the token now in force."""
         if self._binding is not None and not self._binding.current(self.generation):
-            return TelegramBindingChanged(self.accepted)
+            return TelegramBindingChanged(self.accepted, unsent=bool(getattr(failure, "unsent", False)))
         return failure
 
     async def call(self, method: str, *, data: Optional[dict] = None, files: Optional[dict] = None, timeout: int = 30) -> Dict[str, Any]:
+        """One Bot API request; inside an outbound operation a message request is that operation's next part."""
+        journal = OUTBOUND_JOURNAL.get()
+        if journal is not None and method in JOURNALED_METHODS:
+            return await journal.call(self, method, data=data, files=files, timeout=timeout)
+        return await self.request(method, data=data, files=files, timeout=timeout)
+
+    async def request(self, method: str, *, data: Optional[dict] = None, files: Optional[dict] = None,
+                      timeout: int = 30) -> Dict[str, Any]:
+        """The request itself, never journaled: what ``call`` and an operation's part send."""
         self.check_binding()
         method_text = str(method or "")
         safe_method = method_text if re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,63}", method_text) else "request"
@@ -685,11 +728,14 @@ class TelegramClient:
             ) as client:
                 self.check_binding()  # entering the transport may yield: the request itself starts only here
                 response = await client.post(f"{self.api_base}/{method_text}", data=data, files=files)
-        except httpx.TimeoutException:
-            raise self._failed(TelegramTransportError(f"Telegram API timed out during {safe_method}.")) from None
+        except httpx.TimeoutException as exc:
+            raise self._failed(TelegramTransportError(f"Telegram API timed out during {safe_method}.",
+                                                      unsent=isinstance(exc, _UNSENT_FAILURES),
+                                                      cause=type(exc).__name__)) from None
         except httpx.HTTPError as exc:
             raise self._failed(TelegramTransportError(
-                f"Telegram API transport failed during {safe_method} ({type(exc).__name__})."
+                f"Telegram API transport failed during {safe_method} ({type(exc).__name__}).",
+                unsent=isinstance(exc, _UNSENT_FAILURES), cause=type(exc).__name__,
             )) from None
         try:
             payload = response.json()
@@ -719,12 +765,14 @@ class TelegramClient:
                 f"Telegram API {safe_method} returned HTTP {response.status_code}.",
                 status_code=response.status_code,
                 plain_retry_safe=(safe_method == "sendMessage" and response.status_code == 400),
+                retry_after=_retry_after(payload),
             ))
         if not payload.get("ok"):
             raise self._failed(TelegramRequestRejected(
                 f"Telegram API rejected {safe_method}.",
                 status_code=api_status,
                 plain_retry_safe=(safe_method == "sendMessage" and api_status == 400),
+                retry_after=_retry_after(payload),
             ))
         self.accepted += 1
         self._observe_message(data, payload.get("result"))
