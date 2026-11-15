@@ -925,3 +925,39 @@ def test_a_named_schedule_born_continuation_returns_by_itself(tmp_path, monkeypa
     assert (sent["id"], sent["_attempt"], sent["_working_recovery"]["cause"]) == ("digest", 2, "restart")
     assert commands.empty() and set(workers.RUNNING) == {"digest"} and not workers.PENDING
 
+
+@pytest.mark.parametrize("door_named", [True, False], ids=["named-at-the-stop", "not-named"])
+def test_work_that_arrived_after_the_returns_were_named_returns_with_them(tmp_path, monkeypatch, door_named):
+    """#3192, 13.11: an update named its returns, then a running parent started a helper before the stop reached
+    its workers. Named into the same transaction once the workers are down (``name_late_returns``), a saved running
+    helper and a queued one return by themselves beside their parent; the earlier names stay. Not named (another
+    door's transaction is no authority), they are held for Resume as before."""
+    from ouroboros import delegate_recovery
+    from supervisor.restart_retention import name_late_returns, prepare_restart_returns
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    _working_run(tmp_path, workers, "parent")
+    assert prepare_restart_returns(tmp_path, workers.RUNNING, workers.PENDING, transaction_id="tx-update") == {"parent"}
+    _working_run(tmp_path, workers, "late-run", parent="parent")
+    write_task_result(tmp_path, "late-queued", STATUS_SCHEDULED, chat_id=0)
+    workers.PENDING.append(_queued("late-queued", root_task_id="parent", parent_task_id="parent"))
+    workers.kill_workers(force=True, terminal_status="cancelled", result_reason="Server update.",
+                         stop_source="server_shutdown", retain_saved_work=True, preserve_pending=True)
+    named = name_late_returns(tmp_path, "tx-update" if door_named else "another-door")
+    transaction = delegate_recovery._read_restart_transaction(tmp_path, "tx-update")
+    late = {"late-run", "late-queued"}
+    assert named == ({"late-run"} if door_named else set())
+    assert (set(transaction["return_ids"]), set(transaction["queue_ids"])) == (
+        ({"parent", "late-run"}, {"late-queued"}) if door_named else ({"parent"}, set()))
+    _ack(tmp_path, "tx-update")
+    assert name_late_returns(tmp_path, "tx-update") == set(), "an acknowledged transaction is never extended"
+
+    workers.PENDING[:] = []
+    workers.RUNNING.clear()
+    queue.restore_pending_from_snapshot()
+    rows = {row["id"]: row for row in workers.PENDING}
+    assert set(rows) == {"parent"} | late and budget_hold_fact(rows["parent"]) is None
+    for task_id in late:
+        hold = budget_hold_fact(rows[task_id])
+        assert (hold is None) if door_named else hold["reason"] == HOLD_SAVED_WORK, (task_id, hold)

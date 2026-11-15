@@ -669,6 +669,10 @@ def _stop_repo_writers(reason: str) -> list[str]:
     )
     if survivors:
         return survivors
+    if reason != "manual_rollback":  # a helper started after the returns were named returns with them (#3192)
+        from supervisor.restart_retention import name_late_returns
+
+        name_late_returns(DRIVE_ROOT, restart_transaction_id)
     try:
         from ouroboros.tools.services import kill_all_services
 

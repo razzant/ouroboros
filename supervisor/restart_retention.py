@@ -754,8 +754,8 @@ def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: L
     Running rows (and direct turns) with a working checkpoint and no saved
     pause, the owner-wait handoffs already prepared, and the formerly runnable
     never-started queue, including unstarted successors with a validated saved
-    source and dispatch authority. Merged into the door's restart transaction (planned
-    handoffs may share it); the launcher's exit acknowledgement makes it fresh.
+    source and dispatch authority. Added to the door's restart transaction, never replacing a name (planned
+    handoffs and ``name_late_returns`` share it); the launcher's exit acknowledgement makes it fresh.
     """
     import os as _os
 
@@ -763,24 +763,17 @@ def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: L
     from supervisor.task_admission import _working_resume_granted, seed_returnable
 
     dr = _txn()
-    returns = set()
-    for task_id, meta in dict(running or {}).items():
-        task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
-        attempt = int(meta.get("attempt") or task.get("_attempt") or 1) if task else 0
+    returns, kept = set(), {RETAIN_SAVED, RETAIN_UNUSED_GRANT, RETAIN_SLEEP, RETAIN_OWNER_PAUSE}
+    active = [(str(task_id), meta["task"], int(meta.get("attempt") or meta["task"].get("_attempt") or 1))
+              for task_id, meta in dict(running or {}).items()
+              if isinstance(meta, dict) and isinstance(meta.get("task"), dict) and meta["task"]]
+    active += [(str(record.get("id") or ""), record, int(record.get("_attempt") or 1))
+               for record in direct or () if isinstance(record, dict)]
+    for task_id, task, attempt in active:  # running rows and direct turns: one rule
         root = pathlib.Path(task.get("budget_drive_root") or drive_root)
-        if (task and task_id not in set(owner_wait_ids) and not presence_turn(task, drive_root)
+        if (task_id and task_id not in set(owner_wait_ids) and not presence_turn(task, drive_root)
                 and (working_saved(root, task_id, attempt, task=task) or seed_returnable(root, task, attempt))
-                and pause_retention(root, task_id, attempt) not in {RETAIN_SAVED, RETAIN_UNUSED_GRANT, RETAIN_SLEEP,
-                                                                    RETAIN_OWNER_PAUSE}):
-            returns.add(str(task_id))
-    for record in direct or ():
-        task_id = str((record or {}).get("id") or "")
-        attempt = int((record or {}).get("_attempt") or 1)
-        root = pathlib.Path((record or {}).get("budget_drive_root") or drive_root)
-        if (task_id and task_id not in set(owner_wait_ids) and not presence_turn(record, drive_root)
-                and (working_saved(root, task_id, attempt, task=record) or seed_returnable(root, record, attempt))
-                and pause_retention(root, task_id, attempt) not in {RETAIN_SAVED, RETAIN_UNUSED_GRANT, RETAIN_SLEEP,
-                                                                    RETAIN_OWNER_PAUSE}):
+                and pause_retention(root, task_id, attempt) not in kept):
             returns.add(task_id)
     queue_ids = []
     for task in pending or ():
@@ -797,12 +790,12 @@ def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: L
                 queue_ids.append(task_id)
         except Exception:
             log.warning("Saved queued work of %s could not authorize a Restart return", task_id, exc_info=True)
-    queue_ids.sort()
     row = dr._read_restart_transaction(drive_root, transaction_id) or {
         "schema": 1, "transaction_id": transaction_id, "status": "prepared", "supervisor_pid": _os.getpid(),
         "task_ids": [], "prepared_at": utc_now_iso(), "expected_exit_code": 42}
     row.update(task_ids=sorted(set(row.get("task_ids") or []) | returns | set(owner_wait_ids)),
-               return_ids=sorted(returns), queue_ids=queue_ids)
+               return_ids=sorted(set(row.get("return_ids") or []) | returns),
+               queue_ids=sorted(set(row.get("queue_ids") or []) | set(queue_ids)))
     dr._write_restart_transaction(drive_root, row)
     from ouroboros.utils import atomic_write_json
 
@@ -811,6 +804,27 @@ def prepare_restart_returns(drive_root: Any, running: Dict[str, Any], pending: L
     atomic_write_json(active, {"transaction_id": transaction_id, "supervisor_pid": row["supervisor_pid"],
                                "prepared_at": row["prepared_at"]})
     return returns
+
+
+def name_late_returns(drive_root: Any, transaction_id: str) -> set:
+    """Once a returning stop's workers are down, name into its own still active transaction, by the same rules, work
+    that arrived after the door named its returns (a helper started meanwhile, #3192). The managed update and the
+    planned restart call it; the owner's Restart stops what it did not name. Never an id already decided; a failure
+    leaves that work held, as before."""
+    from supervisor import workers
+
+    try:
+        tx = _txn().active_restart_transaction(drive_root)
+        if (tx.get("transaction_id"), tx.get("status")) != (transaction_id, "prepared") or not transaction_id:
+            return set()
+        decided = {str(tid) for key in ("task_ids", "return_ids", "queue_ids") for tid in tx.get(key) or []}
+        with workers._queue_lock:  # memory only: the rows as the stop left them
+            late = {tid: meta for tid, meta in workers.RUNNING.items() if str(tid) not in decided}
+            queued = [task for task in workers.PENDING if str((task or {}).get("id") or "") not in decided]
+        return prepare_restart_returns(drive_root, late, queued, transaction_id=transaction_id)
+    except Exception:
+        log.warning("Work that arrived after the restart was prepared stays unnamed and held", exc_info=True)
+        return set()
 
 
 def fresh_return_transaction(drive_root: Any) -> Dict[str, Any]:
