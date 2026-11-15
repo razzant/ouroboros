@@ -929,11 +929,13 @@ def _stop_kept_service(ctx: ToolContext, service_id: str, reason: str) -> str:
             "⚠️ ARTIFACT_OUTPUT_ERROR (stop_service): the service has ended; its declared outputs are "
             f"{receipt.get('outputs', {}).get('state', 'unknown')}.\n\n{rendered}")))
     if receipt.get("outcome") in ("refused", "not_found"):
+        refused = receipt["outcome"] == "refused"  # each identifier spelled whole, so the producer harvest reads it
         return _publish_tool_result(ctx, ToolResult(
-            status="error" if receipt["outcome"] == "refused" else "unavailable",
-            code="TOOL_ARG_ERROR" if receipt["outcome"] == "refused" else "LEGACY_UNAVAILABLE",
+            status="error" if refused else "unavailable",
+            code="TOOL_ARG_ERROR" if refused else "LEGACY_UNAVAILABLE",
             meta={"operation_outcome": "completed_no_effect"},
-            text=f"⚠️ SERVICE_STOP_{receipt['outcome'].upper()}: {receipt.get('detail', '')}\n\n{rendered}"))
+            text=("⚠️ SERVICE_STOP_REFUSED" if refused else "⚠️ SERVICE_STOP_NOT_FOUND")
+            + f": {receipt.get('detail', '')}\n\n{rendered}"))
     return _UnconfirmedStopText(f"⚠️ SERVICE_STOP_ERROR (stop_service): {receipt.get('detail', '')}\n\n{rendered}")
 
 

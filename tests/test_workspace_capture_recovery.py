@@ -213,9 +213,13 @@ def test_promoted_fork_failure_busy_stamped_completion_recovers_once(promoted, m
     with _busy_custody(s.root, s.tid):
         s.worker.run()
         assert s.worker.calls == [s.tid] and not s.worker.crashes
-        frame = s.worker.output.get_nowait()
+        frames = [s.worker.output.get_nowait() for _ in range(s.worker.output.qsize())]
+        # The pooled worker reports its start phase first; the stamped completion follows it.
+        assert [row["type"] for row in frames] == ["direct_turn_phase", "task_done"], frames
+        frame = frames[-1]
         assert frame["_files_prepared_attempt"] == 3 and frame["worker_id"] == 0
-        events.dispatch_event(frame, s.ctx)
+        for row in frames:
+            events.dispatch_event(row, s.ctx)
         _consumers(s.root, s.tid, "running")
         print(json.dumps({"stamped_attempt": frame["_files_prepared_attempt"],
                           "running": sorted(s.ctx.RUNNING), "queued_recovery": s.jobs.qsize(),

@@ -101,8 +101,11 @@ class Node extends Events {
         return this.attrs.get(key) ?? null;
     }
     hasAttribute(key) { return this.getAttribute(key) !== null; }
-    removeAttribute(key) { this.attrs.delete(key); }
-    toggleAttribute(key, force = !this.hasAttribute(key)) { if (force) this.attrs.set(key, ''); else this.attrs.delete(key); return force; }
+    removeAttribute(key) {  // a `data-*` drawn from markup lives in the dataset: it goes with the attribute, as in a browser
+        this.attrs.delete(key);
+        if (key.startsWith('data-')) delete this.dataset[key.slice(5).replace(/-([a-z])/g, (_all, c) => c.toUpperCase())];
+    }
+    toggleAttribute(key, force = !this.hasAttribute(key)) { if (force) this.attrs.set(key, ''); else this.removeAttribute(key); return force; }
     matchesCompound(c) {
         if (c.tag && c.tag !== this.tagName.toLowerCase()) return false;
         if (c.disabled && !this.disabled) return false;

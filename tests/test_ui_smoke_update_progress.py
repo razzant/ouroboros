@@ -161,7 +161,10 @@ def test_successful_recheck_keeps_release_tags_and_the_last_attempt(direct_serve
 
 def _sidebar(page, width):
     """The sidebar the indicator lives in: always there on a desk, the open drawer on a phone."""
-    if width < 980 and not page.evaluate("document.body.classList.contains('nav-drawer-open')"):
+    if width < 720 and not page.evaluate("document.body.classList.contains('nav-drawer-open')"):
+        back = page.locator('.page.active [data-dashboard-list-back]:visible')
+        if back.count():
+            back.click()
         page.locator(".page.active [data-mobile-nav-toggle]:visible").click()
         page.wait_for_function("document.getElementById('content').inert === true")
 
@@ -353,9 +356,11 @@ def test_update_indicator_failure_closes_on_its_notice_and_success_stays_in_the_
             expect(pill).to_have_text("Restart needed")
             expect(close).to_be_hidden()
             # A failed retention write remains visible in the preserved Dashboard record, including after restart is needed.
-            if width < 980:
+            if width < 720:
                 page.keyboard.press("Escape")
                 page.wait_for_function("document.getElementById('content').inert === false")
+                # The section's Back led to its list before navigation; its selected row reopens the record.
+                page.click('[data-dashboard-tab="updates"]')
             status['update_progress']['retention_unconfirmed'] = True
             _emit_ws_frame(page, {'type': 'update_progress_changed'})
             expect(page.locator('#btn-update-primary')).to_have_text('Restart now')

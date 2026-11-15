@@ -50,11 +50,14 @@ export function bindSegmentFill(group) {
             return;
         }
         const rect = option.getBoundingClientRect();
+        // Viewport rectangles include the arriving page's scale; CSS dimensions belong to the unscaled track.
+        const style = win.getComputedStyle(group);
+        const scaleX = box.width / parseFloat(style.width), scaleY = box.height / parseFloat(style.height);
         const next = {
-            x: rect.left - box.left - group.clientLeft,
-            y: rect.top - box.top - group.clientTop,
-            w: rect.width,
-            h: rect.height,
+            x: (rect.left - box.left) / scaleX - group.clientLeft,
+            y: (rect.top - box.top) / scaleY - group.clientTop,
+            w: rect.width / scaleX,
+            h: rect.height / scaleY,
             top: option.offsetTop,
         };
         // Along one line it travels; to another line, on first paint, after a resize or under reduced motion it lands.

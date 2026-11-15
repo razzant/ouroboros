@@ -3,7 +3,7 @@ import { openConfirmDialog } from './confirm_dialog.js';
 import { saveCheckerSettings, saveSafetyLevel, saveSafetyRules } from './consciousness_api.js';
 import { isDoorId } from './settings_pages.js';
 import { rowById } from './settings_rows.js';
-import { errorWords, escapeHtmlAttr, setResult } from './ui_primitives.js';
+import { errorWords, escapeHtmlAttr, setResult, setRowMeta } from './ui_primitives.js';
 import { API_CHOICE_PREFIX, connectionParts, parseModelSource, routeChoiceGroups, selectHtml } from './route_editor_primitives.js';
 
 /** Read the complete custom-key draft, including blank and removed rows. No paint. */
@@ -694,7 +694,7 @@ export function settingsRow(row, ctx = {}) {
     // the words sooner than a door, a switch, a key's state or a short number (settings.css `[data-wide]`).
     const kind = control.as || control.kind || 'custom';
     const wide = !['door', 'switch', 'secret', 'choices'].includes(kind) && (kind !== 'number' || control.noLimit);
-    const attrs = `class="ui-row settings-row" data-setting-row="${escapeHtmlAttr(row.id)}" data-kind="${escapeHtmlAttr(kind)}"${control.noLimit ? ' data-no-limit' : ''}${wide ? ' data-wide' : ''}`;
+    const attrs = `class="ui-row settings-row" data-setting-row="${escapeHtmlAttr(row.id)}" data-kind="${escapeHtmlAttr(kind)}"${control.noLimit ? ' data-no-limit' : ''}${wide ? ' data-wide' : ''}${row.meta ? '' : ' data-no-meta'}`;
     if (control.kind === 'door') {  // the whole row is the press: phrasing content only
         return `<button type="button" ${attrs} data-setting-door><span class="ui-row-title">${name}</span>`
             + `<span class="ui-row-meta">${meta}</span><span class="ui-row-actions">${controlHtml(row, control, ctx)}</span></button>`;
@@ -808,8 +808,7 @@ function paintRow(node, row, ctx) {
     const noted = ['strip', 'select'].includes(control.kind)
         && (control.options || []).find((option) => String(option.value) === String(shown ?? ''))?.note;
     const meta = unread || (waits ? `Running: ${valueWords(row, running)} · after restart: ${valueWords(row, stored)}` : noted || row.meta || '');
-    const metaNode = node.querySelector('[data-setting-meta]');
-    if (metaNode && metaNode.textContent !== meta) metaNode.textContent = meta;
+    setRowMeta(node.querySelector('[data-setting-meta]'), meta);
     paintResult(node.querySelector('[data-setting-result]'), outcomeLine(row, state.outcome));
     if (state.outcome) state.seen = true;
     const settled = !state.outcome || ['saved', 'saved_then_failed', 'unchanged', 'changed_elsewhere'].includes(state.outcome.state);

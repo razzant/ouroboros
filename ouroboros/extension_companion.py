@@ -8,6 +8,7 @@ import os
 import pathlib
 import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -48,6 +49,19 @@ def _companion_base_env() -> Dict[str, str]:
 
     return {**{key: value for key, value in os.environ.items() if key.upper() in _COMPANION_BASE_ENV_KEYS},
             **installation_scope_entries()}
+
+
+def _interpreter_command(command: List[str], *, windows: bool = IS_WINDOWS, executable: str = sys.executable,
+                         base: str = getattr(sys, "_base_executable", "") or sys.executable,
+                         ) -> tuple[List[str], Dict[str, str]]:
+    """The companion as the started process itself. A Windows venv's ``python.exe`` is a redirector that runs
+    the base interpreter as its CHILD: the supervisor's PID, Job and kill would hold the redirector, not the
+    companion. As ``multiprocessing`` does (bpo-35797), start the base interpreter and name the venv in
+    ``__PYVENV_LAUNCHER__``: the same venv interpreter, one process."""
+    if (windows and command and os.path.normcase(command[0]) == os.path.normcase(executable)
+            and os.path.normcase(base) != os.path.normcase(executable)):
+        return [base, *command[1:]], {"__PYVENV_LAUNCHER__": executable}
+    return list(command), {}
 
 
 def _drain_companion_pipe(pipe, cap: int, buf: bytearray, overflow_flag: Dict[str, bool], label: str) -> None:
@@ -185,9 +199,10 @@ class CompanionSupervisor:
                     raise RuntimeError(f"port {port} is already in use")
             from ouroboros.process_custody import lifeline_parent_env
 
+            argv, launcher_env = _interpreter_command(list(descriptor.command))
             popen_kwargs: Dict[str, Any] = {
                 "cwd": str(descriptor.cwd),
-                "env": {**_companion_base_env(), **dict(descriptor.env), **lifeline_parent_env()},
+                "env": {**_companion_base_env(), **dict(descriptor.env), **lifeline_parent_env(), **launcher_env},
                 "stdin": subprocess.DEVNULL,
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
@@ -195,7 +210,7 @@ class CompanionSupervisor:
             if not IS_WINDOWS:
                 popen_kwargs.update(subprocess_new_group_kwargs())
             popen_kwargs = merge_hidden_kwargs(popen_kwargs)
-            proc = subprocess.Popen(descriptor.command, **popen_kwargs)  # noqa: S603
+            proc = subprocess.Popen(argv, **popen_kwargs)  # noqa: S603
             # The existing runtime owner publishes the positive identity before
             # accounting, custody or snapshot writes can block this lock.
             runtime = CompanionRuntime(descriptor, proc, time.monotonic())

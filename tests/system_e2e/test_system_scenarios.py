@@ -308,6 +308,38 @@ def test_stub_consumes_the_script_in_order_then_finalizes():
     assert kind4 == "final"
 
 
+def test_stub_selects_the_held_answer_only_when_the_finish_door_returned_it():
+    """#3280: a turn that wrote meets the one pre-delivery notice, which arms delivery control; a stub that opted in
+    selects its retained answer by hash instead of answering prose forever, and reads its script on any other round."""
+    sha = "a" * 64
+    finish = {"type": "function", "function": {"name": "finish_task"}}
+    held = {"messages": [{"role": "user", "content": "do it"}, {"role": "assistant", "content": "done"},
+                         {"role": "user", "content": "[SYSTEM REMINDER]\nBefore delivery: ...\n"
+                          "[DELIVERY_FINALIZATION_CONTROL]\n[SYSTEM NOTICE] The complete answer is retained as "
+                          + sha + ". Continue useful work or use the available completion tool."}],
+            "tools": [{"type": "function", "function": {"name": "list_files"}}, finish]}
+    consumed = []
+
+    def _next(_body):
+        consumed.append(1)
+        return {"final": "prose again"}
+
+    kind, message = scripted_completion(held, 1, _next, "x", select_retained=True)
+    call = message["tool_calls"][0]["function"]
+    assert (kind, call["name"], json.loads(call["arguments"])) == (
+        "agent", "finish_task", {"action": "finish", "answer_sha256": sha})
+    assert not consumed, "selecting the held answer consumed a script step"
+    # Off by default: a script that selects its own completion keeps its step.
+    assert scripted_completion(held, 2, _next, "x")[1]["content"] == "prose again" and len(consumed) == 1
+    # A retained hash before the latest assistant row is old: the round reads its script.
+    later = {**held, "messages": [*held["messages"], {"role": "assistant", "content": "", "tool_calls": []},
+                                  {"role": "tool", "content": "ok"}]}
+    assert scripted_completion(later, 3, _next, "x", select_retained=True)[1]["content"] == "prose again"
+    # No completion tool offered: nothing to select with.
+    plain = {**held, "tools": held["tools"][:1]}
+    assert scripted_completion(plain, 4, _next, "x", select_retained=True)[1]["content"] == "prose again"
+
+
 # ---------------------------------------------------------------------------
 # Egress hardening (roast F21): the regression the plan names — a planted
 # ANTHROPIC_API_KEY in the CALLER env must never reach the child server env.

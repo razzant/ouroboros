@@ -1138,6 +1138,49 @@ def test_delayed_crash_restart_obeys_the_current_descriptor(tmp_path, monkeypatc
         assert all(not thread.is_alive() for thread in monitors), "a test monitor was left running"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="on Windows the real venv redirector meets the tests above")
+def test_the_started_companion_is_the_interpreter_even_behind_a_venv_redirector(tmp_path, monkeypatch):
+    """A Windows venv's ``python.exe`` runs the base interpreter as its child, so the supervisor's PID (its Job,
+    kill and the published-PID checks above) would name the redirector. A POSIX stand-in for that redirector:
+    the supervisor starts the interpreter itself and names the venv; off Windows the command is left alone."""
+    import functools
+    import shlex
+
+    import ouroboros.extension_companion as companion
+
+    init_server_process_pid()
+    redirector = tmp_path / "venv" / "Scripts" / "python"
+    redirector.parent.mkdir(parents=True)
+    redirector.write_text(f'#!/bin/sh\n__PYVENV_LAUNCHER__="$0" {shlex.quote(sys.executable)} "$@"\nexit $?\n',
+                          encoding="utf-8")
+    redirector.chmod(0o755)
+    child = tmp_path / "child.py"
+    child.write_text("import os, sys, time\nfrom pathlib import Path\n"
+                     "Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+                     "time.sleep(60)\n", encoding="utf-8")
+    real = companion._interpreter_command
+    assert real([str(redirector), "x"], windows=True, executable=str(redirector), base=sys.executable) == (
+        [sys.executable, "x"], {"__PYVENV_LAUNCHER__": str(redirector)})
+    assert real([str(redirector), "x"], windows=False, executable=str(redirector), base=sys.executable) == (
+        [str(redirector), "x"], {})
+    assert real(["node", "x"], windows=True, executable=str(redirector), base=sys.executable) == (["node", "x"], {})
+    for windows in (True, False):
+        monkeypatch.setattr(companion, "_interpreter_command", functools.partial(
+            real, windows=windows, executable=str(redirector), base=sys.executable))
+        supervisor, marker = CompanionSupervisor(tmp_path), tmp_path / f"announced-{windows}"
+        try:
+            assert supervisor.start(CompanionDescriptor(skill_name="demo", name="daemon", cwd=tmp_path, env={},
+                                                        command=[str(redirector), str(child), str(marker)]))
+            process = supervisor._runtimes["demo:daemon"].process
+            deadline = time.monotonic() + 30
+            while not marker.exists() or not marker.read_text():
+                assert time.monotonic() < deadline, "the companion never announced itself"
+                time.sleep(.01)
+            assert (int(marker.read_text()) == process.pid) is windows, "the supervisor must hold the companion itself"
+        finally:
+            supervisor.stop_all(timeout_sec=3)
+
+
 def test_supervisor_refresh_compares_settings_keys_and_respawns_only_after_observed_death(tmp_path, monkeypatch):
     """Only the settings-derived keys decide: a changed bridge token, PATH or PYTHONPATH is no change. A
     change stops the old process, observes its death, builds the environment again (the save made while it

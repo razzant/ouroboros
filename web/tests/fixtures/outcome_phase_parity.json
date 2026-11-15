@@ -1432,6 +1432,37 @@
       "phase": "done",
       "headline": "Done",
       "acceptance_clause": "The reviewers approved an earlier version of this answer; the current version was not re-reviewed."
+    },
+    {
+      "name": "an adopted model answer proven delivered reads Done over its failed record, the gap as its cause",
+      "record": {"status": "failed", "reason_code": "finalization_incomplete", "terminal_origin": "model_final", "finalization_recovery": {"cause": "app_stop", "answer": "delivered", "delivery_id": "final:t:abc", "attempt": 1}, "outcome_axes": {"lifecycle": {"status": "failed"}, "execution": {"status": "infra_failed", "reason_code": "finalization_incomplete"}, "artifacts": {"status": "not_applicable"}, "objective": {"status": "not_evaluated", "source": "none"}, "review": {"status": "skipped", "trigger": "supervisor_terminal"}}},
+      "phase": "done",
+      "headline": "Done",
+      "acceptance_clause": "The answer was delivered. The task stopped before its review evidence, artifacts and cost accounting were stored.",
+      "exact_clause": true
+    },
+    {
+      "name": "the same adoption while the answer is only owed keeps Failed and the authored sentence",
+      "record": {"status": "failed", "reason_code": "finalization_incomplete", "terminal_origin": "model_final", "finalization_recovery": {"cause": "app_stop", "answer": "owed", "delivery_id": "final:t:abc", "attempt": 1}, "outcome_axes": {"lifecycle": {"status": "failed"}, "execution": {"status": "infra_failed", "reason_code": "finalization_incomplete"}, "artifacts": {"status": "not_applicable"}, "objective": {"status": "not_evaluated", "source": "none"}, "review": {"status": "skipped", "trigger": "supervisor_terminal"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The answer was authored, but the task's finalization did not complete, so its review evidence, artifacts and cost accounting are incomplete.",
+      "exact_clause": true
+    },
+    {
+      "name": "a delivered salvage receipt is not the model's answer: the adoption keeps Failed",
+      "record": {"status": "failed", "reason_code": "finalization_incomplete", "terminal_origin": "host_salvage", "finalization_recovery": {"cause": "app_stop", "answer": "delivered", "delivery_id": "final:t:abc", "attempt": 1}, "outcome_axes": {"lifecycle": {"status": "failed"}, "execution": {"status": "infra_failed", "reason_code": "finalization_incomplete"}, "artifacts": {"status": "not_applicable"}, "objective": {"status": "not_evaluated", "source": "none"}, "review": {"status": "skipped", "trigger": "supervisor_terminal"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The answer was authored, but the task's finalization did not complete, so its review evidence, artifacts and cost accounting are incomplete.",
+      "exact_clause": true
+    },
+    {
+      "name": "the delivery facts beside another failure's reason leave that failure as it is",
+      "record": {"status": "failed", "reason_code": "worker_crash_signal", "terminal_origin": "model_final", "finalization_recovery": {"cause": "app_stop", "answer": "delivered", "delivery_id": "final:t:abc", "attempt": 1}, "outcome_axes": {"lifecycle": {"status": "failed"}, "execution": {"status": "infra_failed", "reason_code": "worker_crash_signal"}, "artifacts": {"status": "not_applicable"}, "objective": {"status": "not_evaluated", "source": "none"}, "review": {"status": "skipped", "trigger": "supervisor_terminal"}}},
+      "phase": "error",
+      "headline": "Failed",
+      "acceptance_clause": "The worker process running the task crashed."
     }
   ]
 }

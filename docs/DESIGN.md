@@ -695,7 +695,12 @@ Status, owner action, and urgent notification are separate product concepts:
   owner can or must act. Task status uses one factual word family, `Working`,
   `Done`, `Done with warnings`, `Failed`, `Stopped`, shared by host task rows in
   Main and the Project thread (`OUTCOME_PHASE_HEADLINE`). `Done` says the turn ended, not that its goal was
-  met. Stop now reads `Stopped` whatever it kept (answer and files stay shown);
+  met. A model's final answer delivered before a stop cut its task's finalization
+  is not a failure of the work (owner 15.11, A): its status is `Done` unless another
+  fact of the record fails or warns, with no warning mark; the cause sentence, on the
+  collapsed line like any cause, names what was not stored, and the record stays
+  failed. An answer the host salvaged, one not yet delivered when the record was
+  written and one whose origin was not recorded keep `Failed`. Stop now reads `Stopped` whatever it kept (answer and files stay shown);
   a Wrap up reads `Done` over its final answer and `Stopped` without one; failed
   file preservation beside Wrap up reads `Failed`; the cause names the button.
   Explicit `task_completion/author_stop` reads `Stopped`, keeping its cause and Continue, including saved records.
@@ -956,9 +961,9 @@ status sentence's or a composer chip's dot is its tone, §4).
   value — is never amber; the fallback above is amber because the work then runs on a model nobody chose for it.
 
 In a Project row the mark owns one reserved trailing column, so it sits at one x
-across rows whatever the name length and, with a fine pointer, while the ⋯ is
-hovered, focused or open (on touch a focused ⋯ brings back its own column);
-Ouroboros's card puts Main's mark at the same x, its count just before it. A deleting row draws only `Deleting…`, its
+across rows whatever the name length; while the row's controls are drawn (a pointer's hover or the keyboard in the
+row, on touch a focused ⋯ or its open menu, the Pin with the keyboard) it gives way as the time does, and its words
+stay in the row's name. Ouroboros's card puts Main's mark at the same x, its count just before it. A deleting row draws only `Deleting…`, its
 census fact kept in the accessible name. The Projects have no header and no mark of their own: each row
 carries its own, and what waits for the owner in any of them also shows as the amber dot on Ouroboros's
 picture (§10 "Navigation"). An activity repaint keeps the row and menu
@@ -2949,7 +2954,9 @@ Reading… (Could not be read after a failed read) and the control waits. Settin
 list is search, Ouroboros's card and groups of navigation rows (§10), each a page's name over its current answer;
 the list and an open page stand together, and a page is always open, Models the first time and later the last
 one. A row opens its page or is a door: what lives elsewhere (a Dashboard page beside its live state, Main's
-composer) shows its value here and leads there with ↗. A list of entries (agents, MCP servers, keys, fallbacks)
+composer) shows its value here and leads there with ↗; there, in every layout, the destination's header starts
+with the round Back named Back to Settings, which returns to the Settings page the row stood on and goes when used or
+when another place is chosen (owner 14.11). A list of entries (agents, MCP servers, keys, fallbacks)
 is heads: a press opens the entry's page, Add an unsaved one. The card speaks in Ouroboros's voice: what it has
 read that waits for the owner here, each with its one action; a fact it has not read is said by the row it concerns,
 never on the card.

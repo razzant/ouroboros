@@ -23,7 +23,7 @@ def test_saved_fallback_context_keeps_incomplete_number_through_stay_and_auto(ro
     page.goto(ui["url"] + "/#settings")
     level = open_settings(page, f"models/role/fallback/{ordinal + 1}")
     level.locator("[data-editor-save]").wait_for(state="visible")
-    assert level.locator(".settings-page-title").inner_text() == f"Fallback {ordinal + 1}"
+    assert page.locator("#page-settings [data-settings-lead-name]").inner_text() == f"Fallback {ordinal + 1}"
     expect(level.locator("[data-model-role-model]")).to_have_value(['owner/first', 'owner/second', 'owner/third'][ordinal])
     level.locator("details.model-role-details > summary").click()
     field = level.locator('[data-model-role-context]')

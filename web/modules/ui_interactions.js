@@ -102,9 +102,10 @@ export function bindEnterSubmit(field, button, submit = () => { if (!button.disa
  * overflow and bounded sizing, and portals outside any clipping ancestor.
  * point uses client coordinates; otherwise align to the anchor (start/end).
  * Scroll follows the anchor unless its owner supplies onAnchorScroll to close.
+ * `field` protects the whole labelled field, bounds the popup to its scrollers, and scrolls it into room if needed.
  * No focus, keyboard, ARIA, DOM reparenting or action dispatch is installed.
  */
-export function bindPopoverPosition(popup, { anchor, point, align = 'start', onAnchorScroll } = {}) {
+export function bindPopoverPosition(popup, { anchor, field, point, align = 'start', onAnchorScroll } = {}) {
     const doc = popup.ownerDocument;
     const win = doc.defaultView;
     let disposed = false;
@@ -114,11 +115,25 @@ export function bindPopoverPosition(popup, { anchor, point, align = 'start', onA
         const margin = 8;
         // Below the screen's top inset (ui.css --ui-popup-inset-top; 0 where unregistered or none).
         const inset = parseFloat(win.getComputedStyle?.(popup)?.getPropertyValue?.('--ui-popup-inset-top')) || 0;
-        const leftEdge = (viewport?.offsetLeft || 0) + margin;
-        const topEdge = (viewport?.offsetTop || 0) + inset + margin;
-        const width = Math.max(0, (viewport?.width || win.innerWidth) - margin * 2);
-        const height = Math.max(0, (viewport?.height || win.innerHeight) - inset - margin * 2);
-        const target = anchor?.getBoundingClientRect();
+        let leftEdge = (viewport?.offsetLeft || 0) + margin;
+        let topEdge = (viewport?.offsetTop || 0) + inset + margin;
+        let rightEdge = (viewport?.offsetLeft || 0) + (viewport?.width || win.innerWidth) - margin;
+        let bottomEdge = (viewport?.offsetTop || 0) + (viewport?.height || win.innerHeight) - margin;
+        let scroller = null;
+        for (let parent = field?.parentElement; parent && parent !== doc.body; parent = parent.parentElement) {
+            if (!/(auto|scroll)/.test(win.getComputedStyle(parent).overflowY)) continue;
+            const bounds = parent.getBoundingClientRect();
+            leftEdge = Math.max(leftEdge, bounds.left + (parent.clientLeft || 0) + margin);
+            rightEdge = Math.min(rightEdge, bounds.left + (parent.clientLeft || 0)
+                + (parent.clientWidth ?? bounds.right - bounds.left) - margin);
+            topEdge = Math.max(topEdge, bounds.top + (parent.clientTop || 0) + margin);
+            bottomEdge = Math.min(bottomEdge, bounds.top + (parent.clientTop || 0) + parent.clientHeight - margin);
+            if (!scroller && parent.scrollHeight > parent.clientHeight) scroller = parent;
+        }
+        const width = Math.max(0, rightEdge - leftEdge);
+        const height = Math.max(0, bottomEdge - topEdge);
+        let target = anchor?.getBoundingClientRect();
+        let protectedBox = field?.getBoundingClientRect() || target;
         popup.style.setProperty('--ui-popup-max-width', `${width}px`);
         popup.style.setProperty('--ui-popup-max-height', `${height}px`);
         popup.style.setProperty('--ui-popup-anchor-width', `${target?.width || 0}px`);
@@ -127,14 +142,28 @@ export function bindPopoverPosition(popup, { anchor, point, align = 'start', onA
         let rect = size();
         let below = true;
         if (target && !point) {
-            const spaceBelow = Math.min(height, Math.max(0, topEdge + height - target.bottom - 4));
-            const spaceAbove = Math.min(height, Math.max(0, target.top - 4 - topEdge));
+            const spaces = () => [Math.min(height, Math.max(0, bottomEdge - protectedBox.bottom - 4)),
+                Math.min(height, Math.max(0, protectedBox.top - 4 - topEdge))];
+            let [spaceBelow, spaceAbove] = spaces();
+            if (scroller && rect.height > Math.max(spaceBelow, spaceAbove)) {
+                // Move only the field's scroller, toward the side needing the least movement that can fit it.
+                const wanted = Math.min(rect.height, Math.max(0, height - protectedBox.height - 8));
+                const down = Math.min(wanted - spaceBelow, scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop);
+                const up = Math.min(wanted - spaceAbove, scroller.scrollTop);
+                const canBelow = spaceBelow + down >= wanted, canAbove = spaceAbove + up >= wanted;
+                const useBelow = canBelow && (!canAbove || down <= up)
+                    || !canAbove && spaceBelow + down >= spaceAbove + up;
+                scroller.scrollTop += useBelow ? Math.max(0, down) : -Math.max(0, up);
+                target = anchor.getBoundingClientRect();
+                protectedBox = field.getBoundingClientRect();
+                [spaceBelow, spaceAbove] = spaces();
+            }
             below = rect.height <= spaceBelow || spaceBelow >= spaceAbove;
             popup.style.setProperty('--ui-popup-max-height', `${below ? spaceBelow : spaceAbove}px`);
             rect = size();
         }
         const x = point?.x ?? (target ? (align === 'end' ? target.right - rect.width : target.left) : leftEdge);
-        const y = point?.y ?? (target ? (below ? target.bottom + 4 : target.top - rect.height - 4) : topEdge);
+        const y = point?.y ?? (target ? (below ? protectedBox.bottom + 4 : protectedBox.top - rect.height - 4) : topEdge);
         const left = Math.max(leftEdge, Math.min(x, leftEdge + width - rect.width));
         const top = Math.max(topEdge, Math.min(y, topEdge + height - rect.height));
         popup.style.setProperty('--ui-popup-left', `${Math.round(left)}px`);
