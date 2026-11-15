@@ -202,10 +202,12 @@ test('a page\'s own navigation starts its bar on a desk and goes back under the 
         const dispose = bindPageHeader(header);
         assert.equal(strip.parentNode, lead, 'a desk: the tabs start the bar');
         assert.ok(header.attrs.has('data-lead'));
+        assert.ok(header.attrs.has('data-scroll-x'), 'the one-row desk band owns its horizontal scroll');
         assert.equal(doc.activeElement, tab, 'the owner\'s focus stays on the moved tab');
         layout('stack');
         assert.deepEqual([strip.parentNode, names(under), lead.children.length, header.attrs.has('data-lead')],
             [under, ['app-tab-strip'], 0, false], 'the stack layout: the same node back under the row');
+        assert.ok(!header.attrs.has('data-scroll-x'), 'the phone header gives the horizontal strip back its ownership');
         layout('docked');
         assert.equal(strip.parentNode, lead);
         dispose();

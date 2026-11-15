@@ -170,6 +170,7 @@ export function bindPageHeader(header, { lead = null, actions = null, secondary 
         }
         if (under) under.hidden = docked;
         header.toggleAttribute('data-lead', docked);  // the bar's two ends: style.css lays them on one line
+        header.toggleAttribute('data-scroll-x', docked); // this band owns overflow, like its tab and folder rails
         // An engine drops focus from a node it moves: the owner's place in the page stays where it was.
         if (active?.isConnected && doc.activeElement !== active) active.focus?.({ preventScroll: true });
     };
