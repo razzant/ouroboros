@@ -1416,6 +1416,7 @@ class OnboardingSubagentsPreviewResponse(TypedDict):
     ok: bool
     model_settings: Dict[str, Any]  # the model setting keys the draft would save
     available_subagents: Dict[str, Any]
+    known_spend_gaps: List[str]  # what the draft's limits cannot count, as GET /api/settings names it after a save
     source: str
     diagnostics: list[Dict[str, Any]]
 

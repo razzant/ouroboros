@@ -31,7 +31,7 @@ def test_model_catalog_tags_provider_values(monkeypatch):
         "DEEPSEEK_API_KEY": "deepseek-key",
     })
 
-    async def fake_openrouter(_client, _api_key):
+    async def fake_openrouter(_client, _api_key, _cache_ttl=""):
         return [model_catalog_api._build_model_catalog_entry(
             "openrouter", "Anthropic", "anthropic/claude-sonnet-4-6", "Claude Sonnet 4.6",
             source="OpenRouter",
@@ -99,7 +99,7 @@ def test_model_catalog_returns_errors_nonfatally(monkeypatch):
         "OPENAI_COMPATIBLE_BASE_URL": "https://compat.example/v1",
     })
 
-    async def fake_openrouter(_client, _api_key):
+    async def fake_openrouter(_client, _api_key, _cache_ttl=""):
         return [model_catalog_api._build_model_catalog_entry(
             "openrouter", "Anthropic", "anthropic/claude-opus", "Claude Opus", source="OpenRouter"
         )]
@@ -264,7 +264,7 @@ def test_direct_api_catalog_loaders_keep_the_native_async_transport():
             "OPENROUTER_API_KEY": "fixture", "ANTHROPIC_API_KEY": "fixture", "DEEPSEEK_API_KEY": "fixture",
             "OPENAI_COMPATIBLE_BASE_URL": "https://compat.invalid/v1",
         }):
-            _, items, error, _, _ = await model_catalog_api._load_provider(Client(), provider, loader)
+            items, error = await model_catalog_api._load_provider(Client(), provider, loader)
             assert items and not error
         assert len(calls) == 4
 
@@ -520,6 +520,190 @@ def test_an_openrouter_row_without_a_complete_token_price_has_no_price_field(pri
     [item] = _openrouter_items([record])
     assert "price" not in item, "absent, never null or zero"
     assert item["value"] == "vendor/model", "a price never decides whether a model is listed"
+
+
+@pytest.mark.parametrize("pricing, cache_ttl, expected", [
+    # The record's own figure for the cache tier the install sends: 1h reads the 1-hour field, any other named tier the base.
+    ({"input_cache_write": "0.000005", "input_cache_write_1h": "0.000008"}, "default", 5.0),
+    ({"input_cache_write": "0.000005", "input_cache_write_1h": "0.000008"}, "5m", 5.0),
+    ({"input_cache_write": "0.000005", "input_cache_write_1h": "0.000008"}, "1h", 8.0),
+    ({"input_cache_write": "0"}, "5m", 0.0),
+    # Never the other tier's figure, never one derived from the input price, and none when no tier is named.
+    ({"input_cache_write": "0.000005"}, "1h", None),
+    ({"input_cache_write_1h": "0.000008"}, "5m", None),
+    ({}, "1h", None),
+    ({"input_cache_write": "0.000005", "input_cache_write_1h": "0.000008"}, "", None),
+    # A figure that cannot be read, or would print a charge as zero, is not stated; the price itself stays.
+    ({"input_cache_write": "-0.000001"}, "5m", None), ({"input_cache_write": True}, "5m", None),
+    ({"input_cache_write": "0.00000000001"}, "5m", None),
+    # A price that changes with input length states no single cache-write figure.
+    ({"input_cache_write": "0.000005", "overrides": [{"min_prompt_tokens": 200000, "prompt": "0.000008"}]}, "5m", None),
+])
+def test_a_price_states_the_cache_write_figure_of_the_installs_cache_tier_or_none(pricing, cache_ttl, expected):
+    from ouroboros.llm_pricing import openrouter_catalog_price
+
+    price = openrouter_catalog_price({"id": "vendor/model", "pricing": {"prompt": "0.000004", "completion": "0.00002", **pricing}},
+                                     cache_ttl)
+    assert (price["input"], price["output"]) == (4.0, 20.0)
+    assert price.get("cache_write") == expected
+    assert ("cache_write" in price) is (expected is not None), "absent, never null"
+    # The figure carries the tier it is of: whoever holds it later says it only while the settings still name that tier.
+    assert price.get("cache_write_ttl") == (cache_ttl if expected is not None else None)
+
+
+@pytest.mark.parametrize("stored, tier", [("1h", "1h"), ("5m", "5m"), ("1H", "1h"), ("", "1h"), ("weekly", "1h")])
+def test_the_catalog_reads_the_cache_tier_as_the_wire_resolves_it(monkeypatch, stored, tier):
+    """The figure shown is the tier's the install sends (`settings_scales.resolve_prompt_cache_ttl`: lower-cased, an
+    unknown or absent value is the shipped default), never the raw text of the setting."""
+    from ouroboros.config import SETTINGS_DEFAULTS
+
+    assert SETTINGS_DEFAULTS["OUROBOROS_PROMPT_CACHE_TTL"] == "1h"
+    seen = []
+    monkeypatch.setattr(model_catalog_api, "_connection_loader", lambda kind, target, record, cache_ttl="": seen.append(cache_ttl))
+    model_catalog_api._provider_specs({"OPENROUTER_API_KEY": "or-key", "OUROBOROS_PROMPT_CACHE_TTL": stored})
+    assert seen == [tier]
+
+
+@pytest.mark.parametrize("stored, figure, tier", [("5m", 5.0, "5m"), ("1h", 8.0, "1h"), ("default", 5.0, "default"), ("", 8.0, "1h")])
+def test_the_settings_cache_tier_reaches_the_row_through_the_real_loader(stored, figure, tier):
+    """From a settings document to a catalog row with nothing replaced but the network: the loader the catalog runs
+    hands the resolved tier to the price, so the row's figure is that tier's and says so (`cache_write_ttl`)."""
+    record = {"id": "vendor/model", "name": "Vendor: Model", "pricing": {
+        "prompt": "0.000004", "completion": "0.00002", "input_cache_write": "0.000005", "input_cache_write_1h": "0.000008"}}
+
+    class Client:
+        async def get(self, _url, **_kwargs):
+            return httpx.Response(200, json={"data": [record]}, request=httpx.Request("GET", _url))
+
+    [(source, loader)] = model_catalog_api._provider_specs(
+        {"OPENROUTER_API_KEY": "or-key", "OUROBOROS_PROMPT_CACHE_TTL": stored}, record_image_input=False)
+    [row] = asyncio.run(loader(Client()))
+    assert source == "openrouter"
+    assert (row["price"]["cache_write"], row["price"]["cache_write_ttl"]) == (figure, tier)
+
+
+def test_an_openrouter_row_shows_the_window_its_catalog_publishes():
+    """Display only, beside the price (`context_window`): sizing reads its own evidence, never a catalog row."""
+    rows = _openrouter_items([{"id": "vendor/wide", "context_length": 1000000}, {"id": "vendor/unsized"},
+                              {"id": "vendor/zero", "context_length": 0}, {"id": "vendor/text", "context_length": "200000"},
+                              {"id": "vendor/flag", "context_length": True}])
+    assert [row.get("context_window") for row in rows] == [1000000, None, None, None, None]
+    assert all("max_context_window" not in row for row in rows)
+
+
+def _draft_catalog(monkeypatch, tmp_path, saved, draft):
+    """POST /api/onboarding/model-catalog over a saved settings file; the provider reads are recorded, not sent."""
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    import ouroboros.config as config
+    import ouroboros.gateway.onboarding as gw_onboarding
+
+    monkeypatch.setattr(config, "load_settings", lambda: dict(saved))
+    monkeypatch.setattr(model_catalog_api, "_subscription_model_catalog",
+                        lambda *_a: {"items": [], "errors": [], "model_sources": []})
+    asked = []
+
+    async def openrouter(_client, api_key, cache_ttl=""):
+        asked.append(("openrouter", api_key))
+        return [{**model_catalog_api._build_model_catalog_entry("openrouter", "Vendor", "vendor/model", "Model", source="OpenRouter"),
+                 "price": {"input": 4.0, "output": 20.0}}]
+
+    async def compatible(_client, provider_id, _label, api_key, base_url, **kwargs):
+        asked.append((provider_id, api_key, base_url, bool(kwargs.get("record_image_input"))))
+        return [model_catalog_api._build_model_catalog_entry(provider_id, "Compat", "served", "served")]
+
+    monkeypatch.setattr(model_catalog_api, "_fetch_openrouter_model_catalog", openrouter)
+    monkeypatch.setattr(model_catalog_api, "_fetch_openai_compatible_model_catalog", compatible)
+    app = Starlette(routes=[Route("/api/onboarding/model-catalog", gw_onboarding.api_onboarding_model_catalog, methods=["POST"])])
+    app.state.drive_root = tmp_path
+    with TestClient(app) as client:
+        response = client.post("/api/onboarding/model-catalog", json=draft)
+    return response, asked
+
+
+def test_a_setup_draft_reads_the_catalog_of_its_own_access_before_anything_is_saved(monkeypatch, tmp_path):
+    """The wizard's Models step: a key typed in the draft is in no saved file, so `GET /api/model-catalog` cannot
+    list or price its models. The draft read asks the providers with the draft's access, while Main is still blank,
+    and writes nothing; without a draft key it lists what the saved access gives."""
+    response, asked = _draft_catalog(monkeypatch, tmp_path, {}, {"OPENROUTER_API_KEY": "sk-or-v1-typed-in-the-draft"})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert asked == [("openrouter", "sk-or-v1-typed-in-the-draft")]
+    assert [(item["value"], item["price"]) for item in body["items"]] == [("vendor/model", {"input": 4.0, "output": 20.0})]
+    assert body["errors"] == []
+    assert not (tmp_path / "settings.json").exists()
+    # The saved access alone: nothing typed, nothing asked.
+    response, asked = _draft_catalog(monkeypatch, tmp_path, {}, {})
+    assert (response.json()["items"], asked) == ([], [])
+    assert _draft_catalog(monkeypatch, tmp_path, {}, {"OPENROUTER_API_KEY": ["not", "text"]})[0].status_code == 400
+
+
+def test_a_draft_read_sends_a_kept_key_only_where_it_was_saved_for(monkeypatch, tmp_path):
+    """Provider Test's rule (`_saved_secret_moved`): a draft that keeps a saved key (its field posts the marker back)
+    and moves the address would send that key to a server its author chose now. The connection is not asked and its
+    error row says why; a key typed in the draft may go to the draft's address. A draft read records no evidence."""
+    from ouroboros.secret_masking import mask_settings_secret
+
+    saved = {"OPENAI_COMPATIBLE_API_KEY": "sk-kept-compatible-key-123456", "OPENAI_COMPATIBLE_BASE_URL": "https://saved.example/v1"}
+    marker = mask_settings_secret("OPENAI_COMPATIBLE_API_KEY", saved["OPENAI_COMPATIBLE_API_KEY"])
+    moved = {"OPENAI_COMPATIBLE_API_KEY": marker, "OPENAI_COMPATIBLE_BASE_URL": "https://elsewhere.example/v1"}
+    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, moved)
+    body = response.json()
+    assert asked == [] and body["items"] == []
+    assert [(row["provider_id"], row["stage"]) for row in body["errors"]] == [("openai-compatible", "kept_key")]
+    # The same kept key at its saved address is asked, and so is a typed key at the new address.
+    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, {**moved, "OPENAI_COMPATIBLE_BASE_URL": "https://saved.example/v1"})
+    assert asked == [("openai-compatible", "sk-kept-compatible-key-123456", "https://saved.example/v1", False)]
+    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, {**moved, "OPENAI_COMPATIBLE_API_KEY": "sk-typed-now-for-elsewhere"})
+    assert asked == [("openai-compatible", "sk-typed-now-for-elsewhere", "https://elsewhere.example/v1", False)]
+    assert response.json()["errors"] == []
+    # The saved catalog's own read is the one that records what it learns.
+    asked.clear()
+    monkeypatch.setattr(model_catalog_api, "load_settings", lambda: dict(saved))
+    asyncio.run(model_catalog_api.api_model_catalog(None))
+    assert asked == [("openai-compatible", "sk-kept-compatible-key-123456", "https://saved.example/v1", True)]
+
+
+def test_a_draft_read_binds_a_kept_key_to_its_own_saved_row_or_pair(monkeypatch, tmp_path):
+    """The binding is the kept key's own saved row or pair, whatever serves today (Provider Test prepares the same):
+    a draft that only switches a saved connection on, or clears the dedicated compatible pair to use the saved legacy
+    one, moved nothing and is asked; the same rows at another address are still refused."""
+    from ouroboros.gateway.secret_rows import mask_connections
+
+    row = {"kind": "openai-compatible", "name": "lab", "api_key": "sk-kept-lab-key-1234567890",
+           "base_url": "https://lab.example/v1", "enabled": False}
+    saved = {"OUROBOROS_CONNECTIONS": [row]}
+    [masked] = mask_connections([row])
+    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, {"OUROBOROS_CONNECTIONS": [{**masked, "enabled": True}]})
+    assert response.json()["errors"] == []
+    assert asked == [("openai-compatible", "sk-kept-lab-key-1234567890", "https://lab.example/v1", False)]
+    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, {"OUROBOROS_CONNECTIONS": [
+        {**masked, "enabled": True, "base_url": "https://elsewhere.example/v1"}]})
+    assert asked == [] and [error["stage"] for error in response.json()["errors"]] == ["kept_key"]
+    # A key typed into the row in this draft is its author's to send to the row's new address.
+    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, {"OUROBOROS_CONNECTIONS": [
+        {**masked, "enabled": True, "base_url": "https://elsewhere.example/v1", "api_key": "sk-typed-for-elsewhere-123456"}]})
+    assert asked == [("openai-compatible", "sk-typed-for-elsewhere-123456", "https://elsewhere.example/v1", False)]
+    assert response.json()["errors"] == []
+    # Both built-in compatible pairs saved; the draft clears the dedicated one and so reaches the legacy pair.
+    saved = {"OPENAI_COMPATIBLE_API_KEY": "sk-kept-dedicated-123456", "OPENAI_COMPATIBLE_BASE_URL": "https://dedicated.example/v1",
+             "OPENAI_API_KEY": "sk-kept-legacy-1234567890", "OPENAI_BASE_URL": "https://legacy.example/v1"}
+    from ouroboros.secret_masking import mask_settings_secret
+
+    kept = mask_settings_secret("OPENAI_API_KEY", saved["OPENAI_API_KEY"])  # the legacy field posts its marker back
+    cleared = {"OPENAI_COMPATIBLE_API_KEY": "", "OPENAI_COMPATIBLE_BASE_URL": "", "OPENAI_API_KEY": kept}
+    response, asked = _draft_catalog(monkeypatch, tmp_path, saved, cleared)
+    assert response.json()["errors"] == [], response.json()["errors"]
+    assert [call for call in asked if call[2] == "https://legacy.example/v1"] == [
+        ("openai-compatible", "sk-kept-legacy-1234567890", "https://legacy.example/v1", False)], \
+        "the kept legacy key goes to the pair the draft reaches, at its own saved address"
+    assert "sk-kept-dedicated-123456" not in [call[1] for call in asked]
+    # The legacy address is no draft field: a draft that names another one moves nothing, and the kept key still
+    # goes only where it was saved for.
+    response, moved = _draft_catalog(monkeypatch, tmp_path, saved, {**cleared, "OPENAI_BASE_URL": "https://elsewhere.example/v1"})
+    assert moved == asked and "https://elsewhere.example/v1" not in [call[2] for call in moved]
 
 
 def test_the_shown_price_is_the_catalog_row_fetch_openrouter_pricing_reads():

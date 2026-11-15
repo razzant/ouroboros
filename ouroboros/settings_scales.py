@@ -193,8 +193,9 @@ def resolve_effort(task_type: str) -> str:
 PROMPT_CACHE_TTL_SCALE: tuple[str, ...] = ("default", "5m", "1h")
 
 
-def resolve_prompt_cache_ttl() -> str:
-    """The owner-configured global prompt-cache TTL ('default' | '5m' | '1h').
+def resolve_prompt_cache_ttl(stored: Any = None) -> str:
+    """The owner-configured global prompt-cache TTL ('default' | '5m' | '1h'); ``stored`` is a settings document's
+    own value, read by the same rule where a document and not the runtime is asked (the model catalog).
 
     Validated like ``resolve_effort``: an unknown value falls back to the shipped default.
     Consumed ONLY by the finalizer (``llm.LLMClient._normalize_payload_cache_ttl``), by
@@ -204,7 +205,7 @@ def resolve_prompt_cache_ttl() -> str:
     (payload-carrying sites use the finalizer's applied TTL) — never by per-builder marking
     sites (docs/DEVELOPMENT.md cache-friendliness invariant)."""
     default = str(SETTINGS_DEFAULTS["OUROBOROS_PROMPT_CACHE_TTL"])
-    raw = str(runtime_setting("OUROBOROS_PROMPT_CACHE_TTL", default) or "").strip().lower()
+    raw = str((runtime_setting("OUROBOROS_PROMPT_CACHE_TTL", default) if stored is None else stored) or "").strip().lower()
     return raw if raw in PROMPT_CACHE_TTL_SCALE else default
 
 
