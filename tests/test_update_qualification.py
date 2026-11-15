@@ -373,7 +373,7 @@ def test_check_writes_exact_real_git_range_and_preflight_reads_unqualified_items
     # A long range keeps only its newest bodies, yet reads the receipt of every first-parent commit: the count of
     # merges that went in over a review outcome is never short by the commits behind the body bound.
     (repo / "later.txt").write_text("later", encoding="utf-8")
-    newest = _commit(repo, "A later commit")
+    newest = _commit(repo, "A later commit\n\nIts body is the one the bound keeps.")
     long = letter.collect_range_material(base, newest, git=_capture_for(repo), max_bodies=1)
     assert [c["body_read"] for c in long["commits"] if c["sha"] in (newest, target)] == [True, False]
     behind = next(c for c in qualification.range_qualification(long, "")["commits"] if c["sha"] == target)
