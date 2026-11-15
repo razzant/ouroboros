@@ -75,12 +75,13 @@ def test_planned_restart_doors_name_saved_delegates_as_work_returns(tmp_path, mo
     assert not stub_delegate_engines
 
 
-@pytest.mark.parametrize("door", ["self_restart", "managed_update", "aborting_update"])
+@pytest.mark.parametrize("door", ["self_restart", "managed_update", "aborting_update", "self_restart_unnamed"])
 def test_planned_restart_doors_name_late_work_into_their_own_transaction_after_the_stop(tmp_path, monkeypatch, door,
                                                                                     stub_delegate_engines):
     """#3192: once its workers are down, each returning door names the work that arrived after it named its returns
     into the transaction it prepared itself (``restart_retention.name_late_returns``), never before the stop; an
-    update whose stop does not quiesce (a service survives) aborts and adds no names."""
+    update whose stop does not quiesce (a service survives) aborts and adds no names, and a planned restart whose own
+    naming failed gives the late step no transaction to add to."""
     from ouroboros import delegate_recovery as recovery, process_custody
     from ouroboros.gateway import control
     from supervisor import restart_retention as retention
@@ -90,6 +91,10 @@ def test_planned_restart_doors_name_late_work_into_their_own_transaction_after_t
         events.append(("named", transaction_id, recovery.active_restart_transaction(root).get("transaction_id")))
         raise InputReached  # the door's exit is not this test's
     monkeypatch.setattr(retention, "name_late_returns", named)
+    if door == "self_restart_unnamed":
+        def unnamed(*_a, **_k):
+            raise OSError("disk")
+        monkeypatch.setattr(retention, "prepare_restart_returns", unnamed)
     if door == "aborting_update":
         monkeypatch.setattr(process_custody, "quiesce_custodied_services", lambda _root: (False, ["custody:kept"]))
         stop = control._stop_repo_writers
@@ -98,10 +103,13 @@ def test_planned_restart_doors_name_late_work_into_their_own_transaction_after_t
             events.append(("blocked", tuple(stop(reason))))
             raise InputReached  # the update would abort here
         monkeypatch.setattr(control, "_stop_repo_writers", stopped)
-    _drive_door(tmp_path, monkeypatch, "managed_update" if door == "aborting_update" else door,
-                killed=lambda **_k: events.append(("killed",)))
+    _drive_door(tmp_path, monkeypatch, {"aborting_update": "managed_update", "self_restart_unnamed": "self_restart"}.get(
+        door, door), killed=lambda **_k: events.append(("killed",)))
     if door == "aborting_update":
         assert events == [("killed",), ("blocked", ("custody:kept",))], "an aborting update names nothing"
+        return
+    if door == "self_restart_unnamed":
+        assert [event[:2] for event in events] == [("killed",), ("named", "")], "a failed naming adds nothing late"
         return
     [kill, (step, transaction_id, active)] = events
     assert kill == ("killed",) and step == "named" and transaction_id and transaction_id == active
