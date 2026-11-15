@@ -315,10 +315,17 @@ def test_a_tool_servers_page_saves_its_entry_keeps_typed_text_and_remove_asks_fi
 @pytest.mark.parametrize("width,height", SIZES)
 def test_models_from_search_a_role_saves_through_its_writer_and_the_context_door_posts_nothing(subscription_ui, width, height):
     page, server = _page(subscription_ui, width, height)
-    # The list with Ouroboros's card, read again from nothing (beside a page, the card is the pane its row opens).
+    # The list with Ouroboros's card (beside a page, the card is the pane its row opens), shown again: the home reads
+    # its answers again (settings.js announce, settings_home.js refresh), and none of those reads is the catalogue.
     show_card(page)
     subscription_ui["reads"].clear()
     page.evaluate("() => window.__ouroSettings.open('')")
+    for _ in range(200):  # its storage read, one of the answers it reads each time, has reached the server
+        if any(urlparse(url).path == "/api/storage" for url in subscription_ui["reads"]):
+            break
+        page.wait_for_timeout(50)
+    else:
+        raise AssertionError(("the home did not read its answers again", subscription_ui["reads"]))
     page.wait_for_function("() => document.querySelector('#page-settings [data-settings-open=rules] [data-settings-answer]')?.textContent")
     assert not [url for url in subscription_ui["reads"] if "/api/model-catalog" in url], "the home reads no catalogue"
     assert "OUROBOROS_PROMPT_CACHE_TTL" in search_settings(page, "prompt cache")
@@ -387,9 +394,10 @@ def _open_role(page, role):
 
 
 def test_a_role_left_with_unsaved_words_comes_back_as_it_was_left_and_a_saved_one_is_read_again(subscription_ui):
-    """Back from an editor with unsaved words puts its page aside: its path opens it again as it was left, and Save
-    then writes those words. Around the typed role the page follows the read: a key saved in Accounts meanwhile is
-    offered. With nothing unsaved the page is let go and shows what is stored the next time."""
+    """Back from an editor with unsaved words puts its page aside: its path opens it again as it was left (from
+    outside Settings too, as a first-level page beside the list), its row in Models does too, and Save then writes
+    those words. Around the typed role the page follows the read: a key saved in Accounts meanwhile is offered. With
+    nothing unsaved the page is let go and shows what is stored the next time."""
     from playwright.sync_api import expect
 
     page, server = _page(subscription_ui, 1087, 740, ANTHROPIC_API_KEY="")
@@ -399,6 +407,15 @@ def test_a_role_left_with_unsaved_words_comes_back_as_it_was_left_and_a_saved_on
     editor.locator("[data-model-role-source]").select_option("api:openai")
     _type_model(editor, "gpt-vision")
     go_back(page)
+    assert not server.posts, "leaving wrote nothing"
+    # Its path, asked from outside Settings (a deep link), brings the page back as it was left; another page opened
+    # beside the list puts it aside again.
+    open_settings(page, "models/role/vision")
+    editor = _settled(page, "models/role/vision")
+    assert editor.locator("[data-model-role-source]").input_value() == "api:openai"
+    assert editor.locator("[data-model-role-model]").input_value() == "gpt-vision"
+    assert editor.locator("[data-editor-discard]").is_visible()
+    open_settings(page, "models")
     assert not server.posts, "leaving wrote nothing"
     server.values["ANTHROPIC_API_KEY"] = "***set***"  # saved in Accounts and keys while the role waited aside
     editor = _open_role(page, "vision")
