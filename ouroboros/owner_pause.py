@@ -922,20 +922,22 @@ def launch_admission(source: Any, *, root_resume: Optional[Dict[str, Any]] = Non
 
 
 def tree_member_results(root_drive: Any, root_task_id: str, *, linked: Iterable[str] = (),
-                        known: Optional[Dict[str, dict]] = None) -> Any:
+                        known: Optional[Dict[str, tuple]] = None) -> Any:
     """Select complete retained membership, then strictly read its authority.
 
     ``task_store.tree_facts`` selects the tree (``linked``: ids the caller's own queue,
     custody or model-request sources tie to it) and names the rows it could not read. A
     member whose strict read refuses or no longer finds its own record joins them as linked:
     it holds this tree while the others still answer. An unavailable store refuses the census.
-    Selection never supplies live status or custody. ``known``: rows the caller's earlier census
-    admitted for this tree whose rows have not been written since (``tree_census``); a member
-    selected again is taken from there, not decoded again. Returns a ``TreeCensus``.
+    Selection never supplies live status or custody. ``known``: ``{task_id: (signature, row)}``, rows
+    the caller's earlier census admitted for this tree, each read at or after that store signature
+    (``tree_census``); a member selected again whose signature, read for all of them after the
+    selection, is still that one is returned as given (unchecked, in the caller's own projection),
+    not decoded again. Returns a ``TreeCensus``.
     """
     from ouroboros.store_hot_facts import lineage_root
     from ouroboros.task_results import load_task_result
-    from ouroboros.task_store import TreeCensus, tree_facts
+    from ouroboros.task_store import TreeCensus, signatures, tree_facts
 
     try:
         census = tree_facts(root_drive, root_task_id, linked=linked)
@@ -943,10 +945,11 @@ def tree_member_results(root_drive: Any, root_task_id: str, *, linked: Iterable[
         raise
     except StoreError as exc:
         raise ValueError("tree_membership_unreadable") from exc
+    standing = signatures(root_drive, [task_id for task_id in census.members if task_id in known]) if known else {}
     members, unresolved = {}, dict(census.unresolved)
     for task_id in census.members:
-        if known and task_id in known:
-            members[task_id] = known[task_id]
+        if task_id in standing and standing[task_id] == known[task_id][0]:
+            members[task_id] = known[task_id][1]
             continue
         try:
             row = load_task_result(root_drive, task_id, strict=True)

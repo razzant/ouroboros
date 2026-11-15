@@ -84,6 +84,19 @@ def signature(root: Any, task_id: str, *, txn: Optional[Txn] = None) -> Optional
         return signature(root, task_id, txn=txn)
 
 
+def signatures(root: Any, task_ids: Iterable[str]) -> Dict[str, Tuple[int, Any]]:
+    """Each stored task's ``signature`` in ONE read, typed columns only: what a memo over many rows compares.
+    An id the store does not hold is absent."""
+    ids = sorted({str(task_id) for task_id in task_ids if str(task_id or "").strip()})
+    if not ids:
+        return {}
+    with open_store(root, write=False) as txn:
+        captured = capture(txn.conn, "SELECT task_id, write_seq, updated_at FROM tasks WHERE task_id IN "
+                           "(SELECT value FROM json_each(?))", (json.dumps(ids),),
+                           ("task_id", "write_seq", "updated_at"))
+    return {str(task_id): (seq, updated) for task_id, seq, updated in captured.tuples()}
+
+
 def terminal_writes_since(root: Any, counter: int) -> List[str]:
     """The task ids whose rows were written terminal after the terminal-write counter stood at COUNTER
     (``obligations.task_written`` stamps each such row with the counter's new value, ``terminal_seq``),
