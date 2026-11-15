@@ -170,6 +170,24 @@ def test_work_domain_stdin_and_stdout_cross_byte_exact(env, monkeypatch):
     assert not docker.records()
 
 
+def test_an_unmanaged_run_hands_input_bytes_over_as_a_file_never_a_pipe_the_wait_writes(tmp_path):
+    """Outside the work domain too, ``input`` bytes reach the command from an unlinked temporary file. A pipe the
+    wait wrote into hung the custody pass for four hours on 14.11.2026: macOS called git's full stdin writable, and
+    ``git hash-object --stdin-paths`` waited on its unread answers. The bytes still arrive exact (more than a pipe
+    holds); a caller's own ``stdin`` goes as it is, and ``input`` beside ``stdin`` is still the stdlib's refusal."""
+    probe = ("import os, stat, sys\ndata = sys.stdin.buffer.read()\n"
+             "sys.stdout.buffer.write((b'file ' if stat.S_ISREG(os.fstat(0).st_mode) else b'pipe ') + data)\n")
+    payload = bytes(range(256)) * 512 + b"\x00tail\xff"  # 128 KiB
+    done = work_domain.run([sys.executable, "-c", probe], input=payload, capture_output=True, timeout=60)
+    assert (done.returncode, done.stdout) == (0, b"file " + payload)
+    own = tmp_path / "own.bin"
+    own.write_bytes(b"own")
+    with own.open("rb") as handle:
+        assert work_domain.run([sys.executable, "-c", probe], stdin=handle, capture_output=True, timeout=60).stdout == b"file own"
+    with pytest.raises(ValueError):
+        work_domain.run([sys.executable, "-c", probe], input=b"x", stdin=subprocess.DEVNULL, capture_output=True)
+
+
 def test_a_native_run_receives_its_inputs_and_returns_verified_outputs_through_the_work_domain(env, monkeypatch, tmp_path):
     """The material flow of a native run on a work repository: its selected inputs are delivered into the staging
     root as bytes the work domain unpacks; its private copy is made there by the work domain's Git (the
