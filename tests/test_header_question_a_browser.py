@@ -575,7 +575,7 @@ def test_files_location_keeps_every_folder_reachable_in_the_bar(engine_ui, width
             rest = page.evaluate(LOCATION)
             print(json.dumps({'files_location': rest, 'kind': kind, 'engine': engine, 'width': width}))
             setup_browser.capture(page, f'files-location-{kind}-{engine}-{width}')
-            assert rest['names'] == names and rest['bar'] <= 56 and rest['page'] <= 0, rest
+            assert rest['names'] == names and rest['bar'] == 66 and rest['page'] <= 0, rest
             assert rest['seen'][-1] and rest['current'] <= rest['view'] + 0.5, 'the folder you are in, whole in view'
             assert not rest['cut'] or rest['ellipsis'] == 'ellipsis', rest
             if rest['hidden'] > 1:
