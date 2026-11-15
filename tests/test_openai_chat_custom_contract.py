@@ -100,9 +100,14 @@ def _projected_schema(catalog, name):
     return value
 
 
+def _schema_text(schema):
+    """A schema as a tool that fits whole carries it: canonical, with non-ASCII text as written."""
+    return json.dumps(schema, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
 def _lead_one_over_the_whole_schema(schema):
     """A lead one character too long to stand beside the whole schema: the structure alone is sent."""
-    return "l" * max(1, MAX_CUSTOM_DESCRIPTION_CHARS - len(_SCHEMA_CLAUSE + canonical_json(schema)))
+    return "l" * max(1, MAX_CUSTOM_DESCRIPTION_CHARS - len(_SCHEMA_CLAUSE + _schema_text(schema)))
 
 
 def _assert_validator_parity(schema, cases, validator_class):
@@ -137,10 +142,11 @@ def test_projection_is_deterministic_structural_and_schema_bound():
 
 
 def test_a_tool_that_fits_whole_keeps_its_field_prose_and_a_larger_one_sends_structure_alone():
-    """OpenAI bounds custom.description, and the schema inside it is all the model reads of a tool's fields.
-    Up to the bound a tool's lead and whole schema go as the function dialect sends them, every annotation
-    included; one character over, the same tool sends its structure alone with its lead still whole.
-    The schema bound for argument validation is the original either way."""
+    """OpenAI bounds custom.description in code points, and the schema inside it is all the model reads of a
+    tool's fields. Up to the bound a tool's lead and whole schema go as the function dialect sends them, every
+    annotation included and non-ASCII prose as written, one character each; one character over, the same tool
+    sends its structure alone with its lead still whole. The schema bound for argument validation is the
+    original either way."""
     tool = copy.deepcopy(_tools()[0])
     function = tool["function"]
     lead = function["description"]
@@ -149,7 +155,7 @@ def test_a_tool_that_fits_whole_keeps_its_field_prose_and_a_larger_one_sends_str
     structure = copy.deepcopy(function["parameters"])
     for annotation in ("default", "x-note", "description"):
         del structure["properties"]["marker"][annotation]
-    room = MAX_CUSTOM_DESCRIPTION_CHARS - len(lead + "\n" + _SCHEMA_CLAUSE + canonical_json(function["parameters"]))
+    room = MAX_CUSTOM_DESCRIPTION_CHARS - len(lead + "\n" + _SCHEMA_CLAUSE + _schema_text(function["parameters"]))
 
     def projected(prose, description=lead):
         field["description"], function["description"] = prose, description
@@ -157,13 +163,14 @@ def test_a_tool_that_fits_whole_keeps_its_field_prose_and_a_larger_one_sends_str
         assert catalog.schema_binding("probe").schema() == function["parameters"]
         return catalog.wire_tools()[0]["custom"]["description"]
 
-    at_the_bound = projected("p" * room)
+    at_the_bound = projected("я" * room)
     assert len(at_the_bound) == MAX_CUSTOM_DESCRIPTION_CHARS
-    assert at_the_bound == lead + "\n" + _SCHEMA_CLAUSE + canonical_json(function["parameters"])
+    assert at_the_bound == lead + "\n" + _SCHEMA_CLAUSE + _schema_text(function["parameters"])
+    assert "я" * room in at_the_bound and '"default":"ok"' in at_the_bound and '"x-note":"kept"' in at_the_bound
     assert _projected_schema(project_function_tools_to_openai_custom([tool]), "probe") == function["parameters"]
-    assert projected("p" * (room + 1)) == lead + "\n" + _SCHEMA_CLAUSE + canonical_json(structure)
+    assert projected("я" * (room + 1)) == lead + "\n" + _SCHEMA_CLAUSE + canonical_json(structure)
     # A tool without a lead is its schema alone, under the same bound.
-    assert projected("p", description=None) == _SCHEMA_CLAUSE + canonical_json(function["parameters"])
+    assert projected("p", description=None) == _SCHEMA_CLAUSE + _schema_text(function["parameters"])
 
 
 def test_compaction_preserves_literal_enum_and_const_objects_exactly():
