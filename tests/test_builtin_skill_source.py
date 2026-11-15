@@ -378,7 +378,7 @@ def test_bundled_telegram_reseed_delivers_the_current_version(tmp_path, monkeypa
     assert _reseed(seed_dir, drive_root) == 1
     assert "version: 1.4.12" in (installed / "SKILL.md").read_text(encoding="utf-8")
     for path in ("plugin.py", "lib/telegram_api.py", "lib/telegram_outbox.py", "lib/telegram_quiz.py", "lib/telegram_share.py",
-                 "lib/telegram_state.py", "scripts/sidecar.py")
+                 "lib/telegram_state.py", "scripts/sidecar.py"):
         assert (installed / path).read_bytes() == (seed_dir / "telegram" / path).read_bytes()
 
 
