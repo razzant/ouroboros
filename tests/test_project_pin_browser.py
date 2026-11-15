@@ -34,7 +34,9 @@ GROUPS = """() => {
                 after: item.hasAttribute('data-after-pins'), height: row.getBoundingClientRect().height,
                 gap: i ? item.getBoundingClientRect().top - items[i - 1].getBoundingClientRect().bottom : null,
                 title: row.title, name: row.getAttribute('aria-label'),
-                ellipsized: label.scrollWidth > label.clientWidth};
+                solo: row.hasAttribute('data-solo'),
+                ellipsized: label.scrollWidth > label.clientWidth,
+                labelWidth: label.clientWidth, labelScroll: label.scrollWidth, labelText: label.textContent};
     });
 }"""
 
@@ -348,30 +350,18 @@ def test_collapsed_list_keeps_pins_and_unpins_in_place(pins_ui, tmp_path):
     evidence = producer_evidence_dir(tmp_path, "project-pin", env="OUROBOROS_BROWSER_EVIDENCE_OUT")
     choose(page, "older", "Pin")
     expect()(row(page, "older")).to_have_attribute("data-pinned", "")
-    page.locator('#nav-projects-toggle').click()
+    # The approved list never collapses: the pin remains in the one feed beside the recent row.
     expect()(row(page, "older")).to_be_visible()
-    expect()(row(page, "newer")).to_be_hidden()
-    # All or nothing: no "Show all" offers the rest, and nothing shown follows the pins, so no air waits after them.
-    assert page.locator('#nav-projects-show-all').count() == 0
-    assert page.locator('#nav-projects-list [data-after-pins]').count() == 0
-    page.screenshot(path=str(evidence / f"collapsed-{ui['tag']}.png"), animations="disabled")
-    kebab = row(page, "older").locator('.nav-project-kebab')
-    if coarse(page):  # touch: a long press opens the menu, so the ⋯ takes no room until the keyboard reaches it
-        assert kebab.bounding_box()["width"] == 0
-        assert row(page, "older").evaluate("item => item.querySelector('.nav-project-row').getBoundingClientRect().right"
-                                           " === item.getBoundingClientRect().right")
-    assert page.locator('#primary-sidebar').evaluate("e => e.scrollWidth <= e.clientWidth")
-    # Unpin from the collapsed list by keyboard: the row hides at once and the keyboard goes to the Projects toggle.
-    kebab.focus()
-    page.keyboard.press("Enter")
-    expect()(menu(page).locator('[data-prm="pin"]')).to_have_text("Unpin")
-    page.keyboard.press("Enter")
+    expect()(row(page, "newer")).to_be_visible()
+    assert page.locator('#nav-projects-toggle, #nav-projects-show-all').count() == 0
+    assert page.locator('#nav-projects-list [data-after-pins]').count() == 1
+    page.screenshot(path=str(evidence / f"pinned-{ui['tag']}.png"), animations="disabled")
+    # Unpin in place: the row remains in the same list and merely returns after the other row.
+    choose(page, "older", "Unpin")
     expect()(row(page, "older")).not_to_have_attribute("data-pinned", "")
     assert registry.get_project(ui["root"], "older")["pinned"] is False
-    expect()(row(page, "older")).to_be_hidden()
-    expect()(page.locator('#nav-projects-toggle')).to_be_focused()
-    page.keyboard.press("Enter")
     expect()(row(page, "older")).to_be_visible()
+    assert order(page) == ["newer", "older"]
     assert page.locator('#nav-projects-list [data-pinned], #nav-projects-list [data-after-pins]').count() == 0
 
 
@@ -475,15 +465,9 @@ def test_pins_keep_unread_live_rows_menu_anchor_other_windows_and_deleting(pins_
     assert order(page) == ["older", "newer"]
     expect()(newer).to_have_attribute("data-unread", "")
     assert newer.get_attribute("aria-label") == "Recent project · Working · new messages"
-    # Collapsed keeps the pin alone: work and new messages elsewhere keep no row; the header's count and mark say them.
-    page.locator('#nav-projects-toggle').click()
-    expect()(row(page, "newer")).to_be_hidden()
-    groups = page.evaluate(GROUPS)
-    assert [g["id"] for g in groups] == ["older"]
-    assert_one_boundary(groups)
-    expect()(page.locator('#nav-projects-count')).to_have_text("2")  # its two unread messages (owner Q1 = B)
-    expect()(page.locator('.nav-projects-facts .status-mark')).to_have_attribute("data-shape", "moving")
-    page.locator('#nav-projects-toggle').click()
+    # The row's own mark carries work and unread; the approved list has no aggregate header fact.
+    expect()(row(page, "newer")).to_be_visible()
+    assert page.locator('#nav-projects-count, #nav-projects-toggle, .nav-projects-facts').count() == 0
     # Another window unpins while this one's menu is open on that row: the menu stays with its row, and its label
     # still names what it does, so pressing it never flips the pin back. A menu opened from the ⋯ follows its moved
     # anchor; one a finger opened stays where the finger was.
@@ -543,24 +527,20 @@ def test_many_pins_order_within_groups_long_names_and_short_windows(pins_ui, tmp
     assert_one_boundary(groups)
     assert_flat_and_unlabelled(page)
     by_id = {g["id"]: g for g in groups}
-    assert by_id["p1"]["title"] == f"{names['p1']} · Pinned · new messages" and by_id["p1"]["ellipsized"]
+    assert by_id["p1"]["title"] == f"{names['p1']} · Pinned · new messages"
+    # A row with no activity line spends both lines on its name; long names wrap/clamp instead of entering the time or mark rail.
+    assert by_id["p1"]["solo"] and by_id["p1"]["labelScroll"] <= by_id["p1"]["labelWidth"], by_id["p1"]
     assert by_id["p8"]["title"] == f"{names['p8']} · new messages"
     expect()(row(page, "p1").locator('.status-mark[data-shape="dot"][data-hue="unread"]')).to_be_visible()
     assert page.locator('#primary-sidebar').evaluate("e => e.scrollWidth <= e.clientWidth")
     page.locator('#primary-sidebar').screenshot(path=str(evidence / f"many-{ui['tag']}.png"), animations="disabled")
-    page.locator('#nav-projects-toggle').click()
-    expect()(page.locator('#nav-projects-count')).to_have_text("4")  # two rooms, two unread messages each
-    collapsed = page.evaluate(GROUPS)
-    assert [g["id"] for g in collapsed] == ["p7", "p4", "p1"]
-    assert_one_boundary(collapsed)
-    page.locator('#nav-projects-toggle').click()
-    # A short window keeps the boundary in the whole column's scroll, rows compacted only under a fine pointer.
+    # A short window keeps the boundary in the whole column's scroll; the approved two-line rows keep their touch/desk heights.
     page.set_viewport_size({"width": ui["width"], "height": 520})
     page.wait_for_function("() => getComputedStyle(document.getElementById('nav-projects-list'))"
                            ".overflowY === 'visible'")
     short = page.evaluate(GROUPS)
     assert_one_boundary(short)
-    assert {g["height"] for g in short} == {44 if ui["width"] < 720 else 28}
+    assert {g["height"] for g in short} == {52 if ui["width"] < 720 else 48}
     assert page.locator('#primary-sidebar').evaluate(
         "e => e.scrollHeight > e.clientHeight && e.scrollWidth <= e.clientWidth")
     page.screenshot(path=str(evidence / f"short-{ui['tag']}.png"), animations="disabled")
