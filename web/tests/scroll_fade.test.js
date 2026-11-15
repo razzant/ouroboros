@@ -105,10 +105,12 @@ test('keyboard focus clears the fade, while pointer focus leaves its pressed row
     f.scroller.ownerDocument.defaultView.getComputedStyle = () => ({ getPropertyValue: () => '32px' });
     let pressed = true;
     const row = { getBoundingClientRect: () => ({ top: 20, bottom: 50 }), matches: selector => selector === ':active' && pressed };
-    f.scroller.contains = (node) => node === row;
+    f.scroller.contains = (node) => node === row || node === f.scroller;
     f.scroller.getBoundingClientRect = () => ({ top: 0, bottom: 100 });
     f.scroller.scrollTop = 200;
     bindScrollFade(f.scroller);
+    f.listeners.get('focusin')({ target: f.scroller });
+    assert.equal(f.scroller.scrollTop, 200, 'landing focus on the scroller itself is not a row to reveal');
     f.listeners.get('focusin')({ target: row });
     assert.equal(f.scroller.scrollTop, 200, 'the pointer release must still hit the pressed row');
     pressed = false;

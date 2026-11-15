@@ -54,7 +54,7 @@ export function bindScrollFade(scroller, { axis = 'y', region = '' } = {}) {
     };
     const onFocus = (event) => {
         // Pointer focus precedes its click: moving the pressed control now loses the release to another row.
-        if (event.target && !event.target.matches?.(':active') && scroller.contains?.(event.target)) {
+        if (event.target && event.target !== scroller && !event.target.matches?.(':active') && scroller.contains?.(event.target)) {
             revealPastFade(scroller, event.target, { axis });
         }
         schedule();
