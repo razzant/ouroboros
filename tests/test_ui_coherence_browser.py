@@ -213,14 +213,26 @@ def test_settings_card_actions_are_reachable_at_content_breakpoints(subscription
         "local_model": {"pending_keys": ["LOCAL_MODEL_PORT"]}}
     page = open_app(subscription_ui, "/#settings")
     card = page.locator("#page-settings [data-settings-card]")
-    card.locator('[data-needs="restart"]').wait_for(state="visible")
+
+    def show_card():
+        # Two panes hold the card in the pane of the list's Ouroboros row, one press away; one column keeps it atop
+        # the list (settings.js placeOverview, DESIGN "Settings"), and no page is opened over it here. Which of the two
+        # stands is set by Settings' resize observer once the new width is laid out, so the row is read a frame later.
+        page.evaluate("() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))")
+        overview = page.locator("#page-settings [data-settings-overview-row]")
+        if overview.is_visible() and overview.get_attribute("aria-current") != "page":
+            overview.click()
+        card.locator('[data-needs="restart"]').wait_for(state="visible")
+
+    show_card()
     for width in [640, 641, 760, 768, 980, 981]:
         page.set_viewport_size({"width": width, "height": 600})
         if width <= 640:
             setup_browser.wait_drawer_closed(page)
         for sidebar in [220, 280]:
             page.evaluate("value => document.documentElement.style.setProperty('--sidebar-width',value+'px')", sidebar)
-            # Every line the card lists is on screen with its action: the unread accounts, the restart, the local model.
+            show_card()
+            # Every line the card lists is on screen with its action: the restart and the local model.
             actions = card.locator("[data-needs]:visible [data-need-action]")
             assert actions.count() >= 2, [width, sidebar, actions.count()]
             for index in range(actions.count()):
@@ -254,7 +266,7 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
     page.wait_for_selector(".nav-project-row")
     sidebar = page.locator("#primary-sidebar")
     scrollers = """el => [...el.querySelectorAll('*')].filter(e =>
-        ['auto','scroll'].includes(getComputedStyle(e).overflowY) && e.scrollHeight>e.clientHeight+1).map(e=>e.className)"""
+        ['auto','scroll'].includes(getComputedStyle(e).overflowY) && e.scrollHeight>e.clientHeight+1).map(e=>e.id || e.className)"""
     main_top = lambda: page.locator(".nav-row-main").evaluate("el => el.getBoundingClientRect().top")
     # Three zones (DESIGN "Shell"): a window this short cannot hold the pinned zones, so the column itself is the
     # ONE scroller with Main sticky at its top, and the Projects list shows every row in flow (no inner scroller).
@@ -280,7 +292,8 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
     page.set_viewport_size({"width": 844, "height": 320})
     page.locator('[data-nav-page="dashboard"]').click()
     page.locator('[data-dashboard-tab="costs"]').click()
-    page.wait_for_function("document.querySelector('#cost-known-limit').textContent==='$25.00 of $200.00'")
+    page.wait_for_function(  # a whole-dollar limit reads in whole dollars (DESIGN "A limit's card")
+        "document.querySelector('#cost-spent').textContent==='$25' && document.querySelector('#cost-of').textContent==='of $200'")
     for width in [390, 641, 768, 981]:
         page.set_viewport_size({"width": width, "height": 600})
         if width <= 640:

@@ -43,6 +43,7 @@ from pathlib import Path
 import pytest
 
 from tests.settings_browser_helpers import commit_row, open_settings
+from tests.settings_section_helpers import show_card
 from tests.separate_ui_support import (
     CADDY_ENV,
     CERT_SUBJECT,
@@ -712,7 +713,7 @@ def test_a_settings_row_reports_the_restart_the_core_requires(stack):
             def open_home():
                 page.locator('[data-nav-page="settings"]').click()
                 open_settings(page, "", timeout=30_000)
-                page.locator("#page-settings [data-settings-card]").wait_for(state="visible", timeout=30_000)
+                show_card(page, timeout=30_000)  # beside a page, the card is the pane the list's Ouroboros row opens
 
             open_home()
             wait_until(lambda: "OUROBOROS_SKILLS_REPO_PATH" not in session.api("GET", "/api/settings", None)["json"]

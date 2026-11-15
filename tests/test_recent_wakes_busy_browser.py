@@ -58,8 +58,12 @@ def test_the_busy_sentence_stands_over_the_rows_already_read(engine_ui, client, 
     region.scroll_into_view_if_needed()
     setup_browser.capture(page, name + "-read")
     phase["busy"] = True
-    page.locator('[data-dashboard-tab="logs"]').click()  # showing the tab again reads the panel again
-    page.locator('[data-dashboard-tab="consciousness"]').click()
+    # Showing the tab again reads the panel again. In one column the page stands under Back and its name, in
+    # place of the list (DESIGN "A section with pages"), so its Back returns to the list first.
+    for tab in ("logs", "consciousness"):
+        if not page.locator(f'[data-dashboard-tab="{tab}"]').is_visible():
+            page.locator('#page-dashboard [data-dashboard-list-back]').click()
+        page.locator(f'[data-dashboard-tab="{tab}"]').click()
     warning = region.locator('p[role="status"][data-tone="warn"]')
     try:
         warning.wait_for()

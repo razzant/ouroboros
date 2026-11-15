@@ -602,9 +602,11 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         paintRows();
     };
     const offStore = store.subscribe((view) => { readAccounts(view); paintCard(); paintRows(); }, { visible: () => false });
-    // A skill's lifecycle and an update's status, as the shell hears them.
+    // A skill's lifecycle and an update's status, as the shell hears them. The socket's state is the card's first word:
+    // its open and close repaint the card and read nothing (a reconnect's read is settings.js's).
     const offs = [getContributions().onLifecycle(() => renew(['skills'])),
-        ...['update_status_ready', 'update_progress_changed'].map((type) => ctx.ws?.on?.(type, () => renew(['update'])))];
+        ...['update_status_ready', 'update_progress_changed'].map((type) => ctx.ws?.on?.(type, () => renew(['update']))),
+        ...['open', 'close'].map((type) => ctx.ws?.on?.(type, () => paintCard()))];
     root.addEventListener('click', onClick);
     cardEl?.addEventListener('click', onClick);
     searchEl.addEventListener('input', onType);

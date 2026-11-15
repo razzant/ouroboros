@@ -114,10 +114,14 @@ def test_refused_resumes_and_a_refused_start_stay_dated_on_their_rows(room_ui, m
                         lambda rows, raw=None, **reads: work_fields(rows, raw, attempts=ATTEMPTS, **reads))
     transport = _transport(room_ui["page"])
     page = open_app(room_ui, transport, theme="light", viewport={"width": 1148, "height": 808})
-    clock = page.evaluate("""(at) => { const d = new Date(at);
-        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }""", REFUSED)
-    pressed = page.evaluate("""(at) => new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })""",
-                            PRESSED)
+    # The instants are fixed when this module is collected and the browser reads them later: a shard that passes
+    # midnight dates them, as work_status.js `clock` does for any instant not of today. The expected words follow
+    # the same day the browser is in.
+    stamp = """(at) => { const d = new Date(at); return new Date().toDateString() === d.toDateString()
+        ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }"""
+    clock = page.evaluate(stamp, REFUSED)
+    pressed = page.evaluate(stamp, PRESSED)
     trigger(page).click()
     opened = wait_facts(page, "main", lambda f: len(f["rows"]) == 4 and all(item["name"] for item in f["rows"]),
                         "four named rows in Main")
