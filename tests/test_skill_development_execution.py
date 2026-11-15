@@ -84,8 +84,9 @@ def test_keyless_first_review_obeys_generic_auto_grant_policy(development, monke
 
 def test_a_skill_left_on_over_its_review_is_named_on_the_works_card(development, monkeypatch):
     """A review that finds problems in one of Ouroboros's own skills still leaves it on (the job's automatic first
-    enable), and the mind may turn such a skill on itself: both reach the card of the work that did it, the skill
-    once, with the audit row naming the review's state. A skill whose review passed adds nothing."""
+    enable), and the mind may turn such a skill on itself, also by a grant that lets a waiting turn-on through: each
+    reaches the card of the work that did it, the skill once, with the audit row naming the review's state. A skill
+    whose review passed, or that ends off, adds nothing."""
     import ouroboros.review_substrate as substrate
     from ouroboros.task_results import load_task_result, write_task_result
     from tests import _contributor_packet_shared as shared
@@ -94,9 +95,10 @@ def test_a_skill_left_on_over_its_review_is_named_on_the_works_card(development,
     ctx = registry._ctx
     ctx.task_constraint = None
     monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
+    monkeypatch.setenv("OUROBOROS_REVIEW_MAX_CYCLES", "5")  # three reviews in one work
     write_task_result(drive, ctx.task_id, "running", chat_id=42)
     hard = json.dumps([{"item": "no_repo_mutation", "verdict": "FAIL", "severity": "critical", "reason": "It commits."}])
-    answers = {"demo": hard, "calm": "[]\nNO_FINDINGS"}
+    answers = {"demo": hard, "held": hard, "calm": "[]\nNO_FINDINGS"}
     current = []
 
     def answer(request, slot, actor, *, retry_state, pending_invocation_checkpoint):
@@ -108,16 +110,18 @@ def test_a_skill_left_on_over_its_review_is_named_on_the_works_card(development,
     def part():
         return (load_task_result(drive, ctx.task_id, strict=True) or {}).get("review_overrides", {}).get("skills")
 
-    for name in ("calm", "demo"):
+    for name in ("calm", "held", "demo"):
         payload = _write_ext_skill(drive / "skills" / "external", name, permissions=[],
                                    plugin_body="def register(api):\n    return None\n", extra_frontmatter='plugin_api: "2.0"\n')
         _mark_self_authored(payload, drive)
+        if name == "held":
+            save_enabled(drive, name, False, actor="agent_tool")  # an explicit Off: the review's end leaves it off
         current.append(name)
         result = run_skill_review_lifecycle_blocking(ctx, name)
         assert result["status"] == ("clean" if name == "calm" else "blockers"), result
-        assert load_enabled(drive, name), "the review job turned its author's skill on, findings or not"
-        if name == "calm":
-            assert part() is None, "a passed review names nothing"
+        assert load_enabled(drive, name) is (name != "held"), "the review job turned its author's skill on, findings or not"
+        if name != "demo":
+            assert part() is None, "a passed review names nothing, and neither does a skill that ends off"
     after_review = part()
     assert (after_review["count"], after_review["seen"]) == (1, ["demo"])
     assert {key: after_review["latest"][key] for key in ("skill", "reason", "door", "task_id")} == {
@@ -133,6 +137,23 @@ def test_a_skill_left_on_over_its_review_is_named_on_the_works_card(development,
     assert (audit["demo"]["review_status"], audit["demo"]["review_gate_reason"]) == (
         "blockers", "blockers_allowed_by_advisory_enforcement")
     assert (audit["calm"]["review_status"], audit["calm"]["review_stale"]) == ("clean", False)
+    # The action names a skill only when it ends on: an enable that did not take, a grant that left it waiting and a
+    # grant that let its waiting turn-on through, at the action's own step after the job.
+    import ouroboros.review_overrides as overrides
+    import ouroboros.skill_lifecycle_actions as actions
+
+    named = []
+    monkeypatch.setattr(overrides, "note_skill_over_review", lambda _ctx, skill, gate, door: named.append((skill, door, bool(gate))))
+    monkeypatch.setattr(actions, "_caller_action_error", lambda *_a: ("", {}))  # an admitted action: its end is what counts
+    held_hash = actions.find_skill(drive, "held", repo_path="").content_hash
+    for action, outcome in (("enable", {"ok": True, "enabled": False}), ("grant", {"ok": True, "turn_on_when_ready": "not_ready"}),
+                            ("grant", {"ok": True, "turn_on_when_ready": "enabled"})):
+        monkeypatch.setattr(actions, "run_lifecycle_job_blocking", lambda outcome=outcome, **_kw: dict(outcome))
+        actions.run_skill_action(ctx, "held", action, expected_content_hash=held_hash, repo_path="")
+    assert named == [], "the grant's turn-on was reported, yet the skill is off: nothing is named"
+    save_enabled(drive, "held", True, actor="turn_on_when_ready")
+    actions.run_skill_action(ctx, "held", "grant", expected_content_hash=held_hash, repo_path="")
+    assert named == [("held", "turned_on", True)]
 
 
 def test_free_replay_refreshes_disabled_auto_flow_without_another_panel(development, monkeypatch):

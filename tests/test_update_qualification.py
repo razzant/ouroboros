@@ -360,6 +360,9 @@ def test_check_writes_exact_real_git_range_and_preflight_reads_unqualified_items
         "sha": target, "subject": "Incoming qualification", "reason": "critical_findings",
         "outcome": 'review FAIL: critical findings; author continued: accepted — "Read the finding."'}]
     assert qualification.qualification_summary(result["qualification"])["landed_over_review"] == 1
+    again = letter.refresh_after_check(_status(current_sha=old, running_sha=base, latest_sha=target), drive_root=drive)
+    assert again["qualification"]["landed_over_review"] == result["qualification"]["landed_over_review"], (
+        "a later check of the same range keeps its rows")
     assert "landed over a review FAIL or no verdict" in material
     for name, counter, expected in (("none", None, []), ("unread", "{not json", "absent")):
         other = tmp_path / name

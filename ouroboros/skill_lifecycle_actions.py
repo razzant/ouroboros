@@ -419,8 +419,13 @@ def run_skill_action(
                                     result_message=(lambda value: "Access granted; " + value["setup_error"] if value.get("setup_error") else "") if action == "grant" else None,
                                     progress_target=_progress),
     )
-    if action == "enable" and not _owner_actor and result.get("ok") and result.get("enabled"):
+    if not _owner_actor and result.get("ok"):  # the mind's own action left the skill on: the work's card says over what
         from ouroboros.review_overrides import note_skill_over_review
 
-        note_skill_over_review(ctx, skill_name, result.get("review_gate"), "turned_on")  # on the work's card
+        if action == "enable" and result.get("enabled"):
+            note_skill_over_review(ctx, skill_name, result.get("review_gate"), "turned_on")
+        elif action == "grant" and result.get("turn_on_when_ready") == "enabled":  # the grant let a waiting turn-on through
+            granted = find_skill(drive, skill_name, repo_path=repo_path)
+            if granted is not None and granted.enabled:
+                note_skill_over_review(ctx, skill_name, granted.review.gate_for(granted.content_hash), "turned_on")
     return audit(result)
