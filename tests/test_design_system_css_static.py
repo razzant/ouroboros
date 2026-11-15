@@ -193,3 +193,49 @@ def test_has_guard_reads_every_selector_position():
     assert [(line, unscoped_has(selectors)) for line, selectors in selectors_by_line(css)] == [
         (3, True), (4, False), (5, True), (6, False), (7, False), (8, True), (9, False), (10, True), (12, True), (13, False),
         (14, False), (15, True)]
+
+
+# Principle 9's static seam: this guard catches the exact form the stylesheet can state without a DOM walk — a rule
+# whose selector explicitly names a shared `.scroll-fade-y` scroller and a descendant that is sticky/fixed and painted.
+# Portalled floating glass, the composer and a table head are the named allowed forms; an opaque edge in any other
+# explicit descendant is a cut. Rules such as `.logs-filters` whose ancestor relationship exists only in markup are
+# deliberately outside this static check and remain visual evidence.
+SCROLLER_DESCENDANT = re.compile(r"(?:\.scroll-fade-y|#chat-messages|\.chat-messages|\.document-reader-body|\.rw-shade)\s+[^{}]*")
+POSITIONED = re.compile(r"\bposition\s*:\s*(?:sticky|fixed)\b", re.I)
+PAINT = re.compile(r"\bbackground(?:-color)?\s*:\s*([^;]+)", re.I)
+
+
+def positioned_opaque_scroller_descendants(css):
+    css = without_comments(css)
+    violations = []
+    for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", css):
+        selector, body = match.group(1).strip(), match.group(2)
+        if not SCROLLER_DESCENDANT.search(selector) or not POSITIONED.search(body):
+            continue
+        paint = PAINT.search(body)
+        if not paint:
+            continue
+        value = paint.group(1).strip().lower()
+        if value in {"none", "transparent", "initial", "inherit", "unset"}:
+            continue
+        lower_selector = selector.lower()
+        if "backdrop-filter" in body.lower() or "table" in lower_selector or "thead" in lower_selector \
+                or "composer" in lower_selector or "#chat-input-area" in lower_selector:
+            continue
+        violations.append(selector)
+    return violations
+
+
+def test_scroller_edges_do_not_gain_opaque_positioned_descendants():
+    actual = [str(path.relative_to(ROOT)) for path in first_party_sheets()
+              if positioned_opaque_scroller_descendants(path.read_text(encoding="utf-8"))]
+    assert not actual, "Opaque sticky/fixed paint must not cover a moving scroller: " + ", ".join(actual)
+
+    broken = ".scroll-fade-y .bad-edge { position: sticky; top: 0; background: var(--bg-primary); }"
+    assert positioned_opaque_scroller_descendants(broken), "the guard must fire on an opaque cut"
+    allowed = """
+        .scroll-fade-y .composer { position: fixed; background: var(--surface-float); backdrop-filter: var(--glass); }
+        .scroll-fade-y table thead { position: sticky; top: 0; background: var(--surface-object); }
+        .scroll-fade-y .quiet { position: sticky; top: 0; background: transparent; }
+    """
+    assert not positioned_opaque_scroller_descendants(allowed), "composer, table heads and transparent edges stay allowed"

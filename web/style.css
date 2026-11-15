@@ -1006,7 +1006,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
     display: flex;
     gap: 8px;
     padding: 12px 16px 10px;
-    border-bottom: 1px solid rgba(var(--neutral-rgb), 0.04);
     flex-shrink: 0;
 }
 
@@ -1019,7 +1018,6 @@ html[data-layout="stack"] .resize-handle { display: none; }
     flex-wrap: wrap;
     gap: 10px;
     padding: 12px 16px;
-    border-bottom: 1px solid rgba(var(--neutral-rgb), 0.04);
     flex-shrink: 0;
 }
 
@@ -1146,7 +1144,6 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
 .files-preview-header {
     flex-wrap: wrap;
     padding: 16px 20px 12px;
-    border-bottom: 1px solid var(--divider);
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
@@ -1571,6 +1568,12 @@ html[data-layout="docked"] .app-page-lead .files-crumb-sep { flex: none; font-si
 }
 .scroll-fade-y[data-scroll-above] { --scroll-fade-top: var(--scroll-fade-edge); }
 .scroll-fade-y[data-scroll-below] { --scroll-fade-bottom: var(--scroll-fade-edge); }
+/* Build B for the owner’s frame comparison: one root attribute keeps the room’s historical crisp top without
+   changing the shared scroller or its bottom edge. The candidate default is the fade above. */
+[data-room-top="crisp"] :is(#chat-messages, .chat-messages) {
+    -webkit-mask-image: none;
+    mask-image: none;
+}
 
 .page-header .spacer { flex: 1; }
 
@@ -3578,7 +3581,6 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
 .chat-live-card[data-expanded="1"] > .chat-live-timeline,
 .chat-episode-history[open] > .chat-live-timeline {
     display: flex;
-    border-top: 1px solid rgba(var(--neutral-rgb), 0.05);
     max-height: 420px;
     overflow-y: auto;
 }
@@ -8821,9 +8823,9 @@ body.keyboard-open .project-panel .project-panel-bar {
     padding-top: calc(max(0px, var(--chrome-inset) - var(--keyboard-short) * 1000) + var(--inset-top));
     padding-bottom: max(0px, var(--chrome-inset) - var(--keyboard-short) * 1000);
     z-index: calc(var(--z-page-header) + 1);
-    background: var(--bg-primary);
+    background: transparent;
 }
-body.keyboard-open .project-panel .project-panel-bar { background: rgb(var(--shell-rgb)); }
+body.keyboard-open .project-panel .project-panel-bar { background: transparent; }
 
 body.keyboard-open #page-chat.active #chat-messages,
 body.keyboard-open .chat-instance-panel .chat-messages {
@@ -10642,7 +10644,6 @@ html[data-layout="stack"] .project-panel {
     align-items: center;
     gap: var(--space-2);
     padding: var(--space-3) var(--space-4) var(--space-3) var(--space-5);
-    border-bottom: 1px solid var(--divider);
 }
 
 /* Name, type and size are selectable text like the document: declared, so the macOS window's

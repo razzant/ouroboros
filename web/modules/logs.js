@@ -93,7 +93,7 @@ export function initLogs({ ws, state, mount }) {
     // own quiet action at its end; the history line and the empty line live in the card.
     const page = document.createElement('div');
     page.id = 'page-logs';
-    page.className = 'dashboard-body settings-logs-panel';
+    page.className = 'dashboard-body settings-logs-panel scroll-fade-y';
     page.innerHTML = `
         <div class="logs-filters"><div class="logs-kinds" id="log-filters" role="group" aria-label="Show" data-scroll-x>${
             Object.entries({ '': 'All', ...LOG_CATEGORIES }).map(([key, label]) => `<button type="button" class="filter-chip skills-category" data-log-kind="${key}">${label}<span class="skills-category-count"></span></button>`).join('')
@@ -105,6 +105,7 @@ export function initLogs({ ws, state, mount }) {
         </section>
     `;
     mount.appendChild(page);
+    bindScrollFade(page);  // the Logs panel is mounted after the app-wide pass; its newest end is hidden at first paint
 
     const filtersDiv = page.querySelector('#log-filters');
     bindScrollFade(filtersDiv, { axis: 'x' });  // a phone's one scrolling line fades where chips hide

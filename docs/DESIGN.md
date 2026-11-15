@@ -35,7 +35,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
 **Principles**
 
 1. **The room is plain.** Page, sidebar and panel backgrounds are the room colour or
-   one step off it. Never a gradient, glow, wash, texture or animation behind content.
+   one step off it. Never a decorative gradient, glow, wash, texture or animation behind content.
 2. **Objects rest; they are not outlined.** A bubble, card or group is one flat fill
    on the *rest* shadow: no gradient on it and no light along its edge. What floats over moving content (the work list, menus, the
    composer field, dialogs, the drawer, ↓ latest) takes the *float* shadow. Inside an object a
@@ -119,6 +119,8 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    section's list, a navigation row, a limit's card, a glyph), and one quantity on one screen is
    read from one snapshot and written one way; a new part appears only when the old one cannot do
    the job, and then replaces it everywhere.
+
+9. **Moving content never ends on a line.** Where it scrolls past what stays—a bar, a strip, a sheet's head, a menu's edge or the composer—it fades over the one shared edge, only while something is hidden there; nothing opaque is laid over it. What floats over it is one glass, while the Widgets board keeps its crisp edges (owner 20.10).
 
 **Seed (light | dark)**
 
@@ -1270,7 +1272,7 @@ preference when it opens and on every reconnect; there is no file watcher.
     text size; compact surfaces and cards keep `--type-body`. A table in
     either renderer scrolls sideways only when its columns cannot fit even
     wrapped, and only then is it a named keyboard region (`Scrollable
-    table`) whose sides that still hide columns fade. No stacked row cards,
+    table`) whose hidden sides use the shared fade. No stacked row cards,
     no guessing a table's purpose from its words, no smaller text to make it
     fit.
   - A thematic break is a `--divider` hairline with section spacing.
@@ -2615,8 +2617,8 @@ controls remain live; the unfinished checkpoint never erases the outcome.
 ### Widgets board
 
 The Widgets page is a board of live cards. The owner arranges the board; each
-widget's content belongs to its author. The board scrolls with crisp edges: no
-fade dims a card where the list cuts it.
+widget's content belongs to its author. The board scrolls with crisp edges: its
+cards keep their edges rather than taking the shared fade.
 
 - **One surface per card.** A card is its head (title; a framed card's status and
   Start; the ⋮ menu and the move grip) over its content: a frame lies on the card
@@ -3410,13 +3412,13 @@ draws one close glyph and one More glyph (`web/modules/page_icons.js`).
 One component (`web/modules/page_header.js`) draws every page's header and the Project panel's, as one row
 except the narrow toolbar below. No decorative icon. On docked, a section without pages that the column already
 names shows no title: its tabs or Files' location take that place and its actions the end, on Main's line, so the
-bar has two ends as Main's does; tabs wrap and never scroll, a location that does not fit scrolls inside it (it
+bar has two ends as Main's does; tabs and strips scroll with the shared fade, a location that does not fit scrolls inside it (it
 rests at the folder you are in, no folder wider than the bar's start), and in the macOS window its empty parts
 still move the window. A section with pages names its two columns (A section with pages). A header with nothing to
-show draws no bar, and its page starts at the window's top edge: the band under the macOS title bar stays the
-window's (owner 22.10), the page's first row starts below it, and the Widgets board's cards pass under it with
-crisp edges (owner 20.10), as a room's feed does (owner 21.10), while a plain press in the empty band still moves
-the window. A Project shows its name. In the stack layout the row is at most 56 px and is the only header row:
+show draws no bar, and its page starts at the window's top edge: the band under the macOS title bar draws nothing
+(owner 22.10), the page's first row starts below it, and the Widgets board's cards pass under it with crisp edges
+(owner 20.10), while a plain press in the empty band still moves the window. A Project shows its name. In the stack
+layout the row is at most 56 px and is the only header row:
 the leading control (Ouroboros's picture at a room or a section's list, Back on a page), the destination's name,
 its status, then a room's consciousness chip and Panic; a page's tabs stand at the top of the page, never as a
 second header row, and Files' location and its actions return above the list (below). The name wins over the
@@ -3466,8 +3468,8 @@ and, during a campaign, `Evolution ›`
 `/review`'s picker). In Main and Project, the bar has no continuous backing strip:
 the title and status share one floating capsule (`--chip-float`, non-shrinking
 mark and caret with inline inset), and each command is its own floating capsule
-(owner 21.10). No band, mask or clip is drawn under or between them, so the capsules float over the transcript
-(owner 2026-11-01). A failure or approximation note hangs under the bar; a page
+(owner 21.10). No opaque band is drawn under or between them; the feed uses the shared edge fade while the
+capsules stay glass. A failure or approximation note hangs under the bar; a page
 has no caption line, its sidebar row and its tabs name it.
 
 ### Doors and containers
@@ -3504,9 +3506,8 @@ reach covers a neighbour or is clipped (audit №4, owner 2026-10-28T22:09Z); so
 disclosure's summary and a field. In a capsule's open levels on a narrow phone a value
 keeps only its drawn height. Nothing that acts is hidden until hover
 there (a Project row's menu is reached by its long press).
-No page scrolls sideways at any width; only code, tables and a bar's
-Files location scroll sideways, inside themselves, with a fade where content
-hides. Text wraps before it widens a column. A pinch only magnifies (owner 23.10): while it
+A page's strips may scroll sideways inside themselves with the shared fade; code, tables and a bar's
+Files location do too. Text wraps before it widens a column. A pinch only magnifies (owner 23.10): while it
 holds, the room keeps its size and a sideways finger pans the magnified page instead
 of moving the drawer.
 
