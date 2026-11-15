@@ -33,7 +33,7 @@ ElementStub.prototype.dispatchEvent = function (event) {
 
 const settle = async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setTimeout(resolve, 0)); };
 
-function fixture({ history = [], details = {}, continues = {}, chatId = 1 } = {}) {
+function fixture({ history = [], details = {}, continues = {}, chatId = 1, hold = {} } = {}) {
     const reads = [];
     const env = installDom(async (url, init = {}) => {
         const path = String(url);
@@ -41,6 +41,8 @@ function fixture({ history = [], details = {}, continues = {}, chatId = 1 } = {}
             return { ok: true, json: async () => continues[path.split('/').at(-2)] || { ok: false, error: 'not admitted' } };
         }
         if (path.startsWith('/api/tasks/')) reads.push(path.split('/').pop().split('?')[0]);
+        // A read the test holds open answers only when the test releases it.
+        if (path.startsWith('/api/tasks/') && hold[path.split('/').pop().split('?')[0]]) await hold[path.split('/').pop().split('?')[0]];
         // `null` is a record the host does not have: its real answer, a 404.
         if (path.startsWith('/api/tasks/') && details[path.split('/').pop().split('?')[0]] === null) {
             return { ok: false, status: 404, json: async () => ({ error: 'task not found' }) };
@@ -432,6 +434,41 @@ test('after a Main reload whose census arrives before the history draws the card
         await settle();
         assert.equal(f.card('w-1'), null, 'no card before the history is read');
         await f.instance.refreshHistory({ revision: 1 });
+        await settle();
+        assertFollowed(f, f.card('w-1'));
+    } finally { f.close(); }
+});
+
+test('a record read the reload started and Main left before its answer changes nothing away; the return reconciles', async () => {
+    // Quiet rooms (PR #2951): Main left while the replay's read of the moved work's record is in flight neither draws
+    // the answer nor reads again while away; shown again, it takes the state and follows the admitted link.
+    const history = [
+        { role: 'user', text: 'audit the projects in their own room', ts: '2026-10-10T11:59:00Z', chat_id: 1, source: 'web',
+            history_id: 'h-1', row_address: 'row:1@h#1' },
+        { role: 'system', system_type: 'project_started', chat_id: 1, task_id: 'w-1', project_id: 'p-1', project_name: 'Audit',
+            task_name: 'Audit the projects', text: 'Audit › Audit the projects · Started', ts: '2026-10-10T12:00:00Z',
+            history_id: 'h-2' },
+    ];
+    let release;
+    const hold = { 'w-1': new Promise((resolve) => { release = resolve; }) };
+    const f = fixture({ history, hold, details: { 'w-1': failedDetail(continuedBy()) } });
+    const census = { task_bindings: bindings, projects: [{ id: 'p-1', name: 'Audit' }], active_chat_activities: [successorRow()] };
+    try {
+        f.state(census);
+        await settle();
+        await f.instance.refreshHistory({ revision: 1 });
+        await settle();
+        assert.ok(f.reads.includes('w-1'), 'the replayed card reads its record');
+        const asked = f.reads.length;
+        f.instance.leave();
+        delete hold['w-1'];
+        release();
+        await settle();
+        assert.equal(f.card('w-1-c1'), null, 'nothing is drawn while Main is away');
+        assert.equal(f.card('w-1').hidden, false, 'the old card stays as it was left');
+        assert.equal(f.reads.length, asked, 'no new read while away');
+        f.instance.stay();
+        f.state(census);
         await settle();
         assertFollowed(f, f.card('w-1'));
     } finally { f.close(); }

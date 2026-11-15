@@ -370,12 +370,12 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
 
     /**
      * Cards a history replay mounted after the last `/api/state` was read meet that census now: a reload's state can
-     * arrive before its history draws the cards, and the next census is a poll away.
+     * arrive before its history draws the cards, and the next census is a poll away. It starts no Continue asks of its
+     * own: a card it reconciles reads its record through the room's missing-work path, which stays quiet while away.
      */
     function refresh() {
         if (!censusRead) return;
         if (isMain) reconcile();
-        askContinued();
     }
 
     /**
