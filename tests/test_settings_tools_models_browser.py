@@ -20,7 +20,7 @@ import pytest
 from tests import test_subscription_setup_browser as setup_browser
 from tests.settings_browser_helpers import (
     HOME, commit_row, go_back, open_entry, open_settings, press_editor_save, search_settings, setting_row, settings_page, top_path)
-from tests.settings_section_helpers import header_back, lead_name, show_card
+from tests.settings_section_helpers import header_back, lead_name, show_card, show_page
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
@@ -325,12 +325,6 @@ _RECORD_CATALOGUE_READERS = """() => {
 }"""
 
 
-def _show_page(page, name):
-    """Show the page `name` as its sidebar row does (pressed in place, so a phone's closed drawer needs no opening)."""
-    page.locator(f'#primary-sidebar [data-nav-page="{name}"]').first.evaluate("row => row.click()")
-    page.wait_for_function("name => document.getElementById(`page-${name}`)?.classList.contains('active')", arg=name)
-
-
 @pytest.mark.parametrize("width,height", SIZES)
 def test_models_from_search_a_role_saves_through_its_writer_and_the_context_door_posts_nothing(subscription_ui, width, height):
     page, server = _page(subscription_ui, width, height)
@@ -339,9 +333,9 @@ def test_models_from_search_a_role_saves_through_its_writer_and_the_context_door
     # of the home's reads is the catalogue.
     show_card(page)
     page.evaluate(_RECORD_CATALOGUE_READERS)
-    _show_page(page, "skills")
+    show_page(page, "skills")
     subscription_ui["reads"].clear()
-    _show_page(page, "settings")
+    show_page(page, "settings")
     for _ in range(200):  # its storage read, one of the answers it reads each time, has reached the server
         if any(urlparse(url).path == "/api/storage" for url in subscription_ui["reads"]):
             break

@@ -10,7 +10,7 @@ import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
 from tests.settings_browser_helpers import HOME, home_answer, open_settings, search_settings, settings_page, top_path
-from tests.settings_section_helpers import card_needs, header_back, lead_name, show_card
+from tests.settings_section_helpers import card_needs, header_back, lead_name, show_card, show_page
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
@@ -86,8 +86,15 @@ def test_the_home_answers_from_passive_reads_and_the_card_lists_what_waits(subsc
     dialog.wait_for(state="detached")
     assert "restart:restart" in card_needs(page)
     ui["settings"]["_meta"]["restart_state"] = {**WAITING, "restart_required": False, "restart_keys": []}
-    page.evaluate("() => window.__ouroSettings.open('')")
+    # The list reads its answers when it comes on screen (settings.js look, #3470), not at a press beside it: Settings
+    # shown again after another page reads what waits again.
+    show_page(page, "skills")
+    ui["reads"].clear()
+    show_page(page, "settings")
     page.wait_for_function("() => !document.querySelector('#page-settings [data-needs=restart]')")
+    # That read is the list's own again: the engine's passive roster, asked exactly, and nothing that starts or refreshes.
+    assert [url for url in ui["reads"] if _passive_roster(url)], ("the list asks the engine's passive roster again", ui["reads"])
+    assert not _starts(ui), ui["reads"]
     assert not card.locator("[data-being-count]").is_visible(), "nothing waits: the card says who it is and its state"
     page.close()
 
