@@ -1315,4 +1315,7 @@ export function initUpdates({ mount, state, ws }) {
         letterMeasureOwed = true;
         requestAnimationFrame(measureLetter);
     });
+    // An owed measure is taken when the body gets a box, whichever door showed it: its page opened from the
+    // Dashboard's list by the row already chosen changes no tab and announces nothing (dashboard.js openLevel).
+    if (typeof ResizeObserver === 'function') new ResizeObserver(() => measureLetter()).observe(letterBody);
 }
