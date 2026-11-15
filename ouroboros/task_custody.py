@@ -241,10 +241,10 @@ def own_child_drives(canonical_root: Any, task_id: str, *, store_row: Optional[D
     ``store_row`` (the HTTP artifact view) keeps only layouts its canonical row
     records, before any directory IO: there, scratch existence does not authorize
     a SQLite read. Other callers keep discovering the layouts that exist. ``strict``
-    is for a reader whose only source these layouts are: a layout that is a directory
-    and could not be opened raises, unknown and never absent.
+    is for a reader whose only source these layouts are: a layout that could not be opened
+    raises, unknown and never absent, unless its path is missing or is no directory itself.
     """
-    from ouroboros.confined_files import confined_directory, root_spellings
+    from ouroboros.confined_files import confined_directory, real_directory, root_spellings
 
     spellings = root_spellings(canonical_root)
     canonical, tid = spellings[0], validate_task_id(task_id)
@@ -258,7 +258,7 @@ def own_child_drives(canonical_root: Any, task_id: str, *, store_row: Optional[D
             with confined_directory(canonical, drive.relative_to(canonical).parts):
                 found.append(drive)
         except OSError:
-            if strict and drive.is_dir() and not drive.is_symlink():
+            if strict and real_directory(drive):
                 raise
             continue
     return found
