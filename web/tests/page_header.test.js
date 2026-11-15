@@ -88,6 +88,17 @@ test('Restart and the budget are the same nodes, placed by layout: the row on a 
     const bar = { clientWidth: 500 };
     const narrow = bindHeaderControlPlacement({ headerActions: actions, budgetPill: budget, shade, bar });
     assert.deepEqual(shade.extras.children.map((c) => c.name), ['restart', 'budget'], 'a 500px bar: in the Shade');
+    for (const width of [0, 500]) {
+        bar.clientWidth = width;
+        listeners.get('ouro:layout-changed')({ detail: { layout: 'docked' } });
+        assert.deepEqual(shade.extras.children.map((c) => c.name), ['restart', 'budget'], 'hidden and returned: no move that could strand restored focus');
+    }
+    bar.clientWidth = 900;
+    listeners.get('ouro:layout-changed')({ detail: { layout: 'docked' } });
+    assert.deepEqual(shade.extras.children, [], 'a visible wider bar still moves its controls');
+    bar.clientWidth = 0;
+    listeners.get('ouro:layout-changed')({ detail: { layout: 'docked' } });
+    assert.deepEqual(toolbar.children.map((c) => c.name), ['actions', 'budget', 'status'], 'a hidden wide bar keeps its row too');
     narrow();
     const wideToolbar = node('toolbar');
     const wideActions = node('actions', wideToolbar);

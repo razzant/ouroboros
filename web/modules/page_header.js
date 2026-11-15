@@ -200,6 +200,8 @@ export function bindHeaderControlPlacement({ headerActions, budgetPill = null, s
         || (Number(bar?.clientWidth) > 0 && bar.clientWidth < HEADER_FULL_ROW_MIN_WIDTH);
     // Called with the layout name by the layout switch, with entries by the observer, with nothing at bind.
     const place = (arg) => {
+        // A retained room out of sight has no width. Keep its controls where the return captured them.
+        if (bar?.clientWidth === 0) return;
         const next = compact(typeof arg === 'string' ? arg : currentLayout()) ? 'shade' : 'row';
         if (next === placed) return;
         placed = next;
