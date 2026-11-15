@@ -825,8 +825,10 @@ def test_a_press_on_a_head_or_grip_ends_where_it_is_released_even_over_its_own_f
                 during = lifted()
                 page.mouse.up()
                 heard = inner.evaluate("() => window.__heard")
-                # The place's outline goes with the next layout, an animation frame after the release.
-                page.wait_for_timeout(150)
+                # The place's outline goes with the next layout, an animation frame after the release (masonry.js lays out
+                # in one requestAnimationFrame): read the board after two frames, not after a wall-clock pause that a
+                # runner whose frames come slower than it would report as a card still moving.
+                page.evaluate("() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))")
                 released = board_state()
                 page.wait_for_timeout(250)
                 placed = {"stored": stored_order(page), "shown": visual_order(page)}
