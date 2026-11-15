@@ -67,6 +67,8 @@ CLOSURE_FIELDS = ("closed_reason", "closed_at", "closed_by_task_id", "closed_act
 SECRET_FIELDS = ("secret_request", "secret_outcome", "secret_save")
 # The owner closes in one tap; a closure without the owner's words records this sentence.
 OWNER_CLOSE_REASON = "Closed by the owner without an answer."
+# A closure note no room can show: its card left no row in readable, stable history.
+DELIVERY_NO_TARGET = "no_target"
 # The host's own act when it delivers a late answer; a Project room's other live roots hear the words as the room's context.
 LATE_ANSWER_ROUTE_FACT = "Host fact: delivered in this room only; the host sent it to no work in another room."
 
@@ -92,9 +94,12 @@ def delivery_dismissed(block: Any) -> bool:
 
 
 def question_delivery_settled(block: Any) -> bool:
-    """Typed delivery is authority; the old discharge stamp is a legacy fallback."""
+    """Typed delivery is authority; the old discharge stamp is a legacy fallback. A closure note
+    owed nowhere (``retire_closure_owed_nowhere``) is settled and never called delivered."""
     if not isinstance(block, dict):
         return False
+    if (block.get("delivery") or {}).get("state") == DELIVERY_NO_TARGET:
+        return True
     delivery = question_delivery_projection(block)
     return delivery["state"] == "delivered" if delivery else bool(block.get("discharged_at"))
 
@@ -472,6 +477,30 @@ def dismiss_unknown_delivery(drive_root: Any, task_id: str, *, quiz_id: str, req
 
     _mutate_projection(drive_root, task_id, mutate)
     return outcome
+
+
+def retire_closure_owed_nowhere(drive_root: Any, task_id: str, quiz_id: str) -> bool:
+    """An explicit closure whose card no room shows (the publication import found no witness in
+    readable, stable history) owes its note nowhere: the debt becomes ``no_target`` with
+    ``no_publication_target``, never ``delivered`` and never a guessed room; the closed record
+    stays. Only a closure whose attempt already found no address qualifies, so a live author's
+    mail went ahead of the row; an answer keeps its debt."""
+    retired: List[str] = []
+
+    def mutate(quizzes: Dict[str, Dict[str, Any]]) -> Any:
+        block = quizzes.get(str(quiz_id))
+        delivery = dict((block or {}).get("delivery") or {})
+        if (not block or block.get("state") != STATE_CLOSED or "publication_chat_id" in block
+                or (delivery.get("kind"), delivery.get("state"), delivery.get("reason_code"))
+                != ("closure", "owed", "publication_address_unknown")):
+            return _KEEP
+        delivery.update(state=DELIVERY_NO_TARGET, reason_code="no_publication_target", retired_at=utc_now_iso())
+        block["delivery"] = delivery
+        retired.append(str(quiz_id))
+        return True
+
+    _mutate_projection(drive_root, task_id, mutate)
+    return bool(retired)
 
 
 def mark_discharged(drive_root: Any, task_id: str, quiz_id: str) -> Dict[str, Any]:
