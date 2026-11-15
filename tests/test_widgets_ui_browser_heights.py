@@ -1103,7 +1103,10 @@ _CANVAS = """(() => {
     fit();
 })();
 """
-_TAIL = '<button id="tail" style="position:absolute;bottom:0;height:20px">Bottom control</button>'
+# Its words fit its 20 px in every engine's fonts: with the default button font, Linux WebKit's text stands 3 px below
+# the box, and that overflow is the document's real end (the frame then follows 503, not the 500 the tests mean).
+_TAIL = ('<button id="tail" style="position:absolute;bottom:0;height:20px;box-sizing:border-box;padding:0 6px;'
+         'font:12px/14px sans-serif">Bottom control</button>')
 # Grows to exactly its frame's height when the test asks (8 px default body margins).
 _GROWS = ("const root = document.getElementById('root');"
           "root.style.cssText = 'height:200px;position:relative';"
