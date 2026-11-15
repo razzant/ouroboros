@@ -162,6 +162,7 @@ export function bindPageHeader(header, { lead = null, actions = null } = {}) {
         for (const { node, bar, how, home } of moves) {
             if (docked) bar[how](node); else home.after(node);
         }
+        if (under) under.hidden = docked;
         header.toggleAttribute('data-lead', docked);  // the bar's two ends: style.css lays them on one line
         // An engine drops focus from a node it moves: the owner's place in the page stays where it was.
         if (active?.isConnected && doc.activeElement !== active) active.focus?.({ preventScroll: true });

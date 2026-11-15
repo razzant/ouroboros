@@ -997,7 +997,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
     flex-direction: column;
     min-width: 0;
     min-height: 0;
-    overflow: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
     border-right: 1px solid var(--divider);
     background: rgba(var(--neutral-rgb), 0.02);
 }
@@ -1072,9 +1073,9 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
 }
 
 .files-list {
-    flex: 1;
+    flex: none;
     min-height: 0;
-    overflow: auto;
+    overflow: visible;
     overscroll-behavior: contain;
     padding: 8px;
 }

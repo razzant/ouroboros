@@ -1,4 +1,4 @@
-import { bindPageHeader, renderPageHeader } from './page_header.js';
+import { bindPageHeader, renderPageHeader, revealStripChoice } from './page_header.js';
 import { PAGE_ICONS, SHELL_ICONS, strokeIcon } from './page_icons.js';
 import { bindScrollFade } from './scroll_fade.js';
 import { escapeHtmlAttr, escapeHtmlText as escapeHtml } from './utils.js';
@@ -18,20 +18,13 @@ const CHOOSE_A_FILE = 'Choose a file to preview it.';
 // The preview's own sentences are prose in the reading face; a file's text keeps the code face (style.css).
 const previewNote = (text) => Object.assign(document.createElement('p'), { className: 'files-empty', textContent: text });
 
-export function initFiles({ state: appState, setBeforePageLeave, layers = null } = {}) {
-    const page = document.createElement('div');
-    page.id = 'page-files';
-    page.className = 'page app-page-glass';
-    page.innerHTML = `
+export function filesPageTemplate() {
+    return `
         ${renderPageHeader({
             page: 'files',
             actionsHtml: '<button class="btn btn-default" id="files-refresh">Refresh</button>',
         })}
-        <div class="files-layout" data-files-view="list">
-            <section class="files-sidebar">
-                <div class="files-toolbar">
-                    <input id="files-search" class="ui-control" name="files-filter" type="text" aria-label="Filter current folder" placeholder="Filter current folder...">
-                </div>
+        <div class="app-page-tabs files-band">
                 <div class="files-browser-header">
                     <div id="files-breadcrumb" class="files-breadcrumb"></div>
                     <div class="files-browser-actions">
@@ -40,7 +33,13 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
                         <button class="btn btn-default" id="files-new-dir" title="Create folder">+ Folder</button>
                     </div>
                 </div>
-                <div id="files-list" class="files-list scroll-fade-y" tabindex="0" aria-label="Files in current folder"></div>
+        </div>
+        <div class="files-layout" data-files-view="list">
+            <section class="files-sidebar">
+                <div class="files-toolbar">
+                    <input id="files-search" class="ui-control" name="files-filter" type="text" aria-label="Filter current folder" placeholder="Filter current folder...">
+                </div>
+                <div id="files-list" class="files-list" tabindex="0" aria-label="Files in current folder"></div>
             </section>
             <section class="files-preview">
                 <div class="files-preview-back">
@@ -73,6 +72,13 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             </div>
         </div>
     `;
+}
+
+export function initFiles({ state: appState, setBeforePageLeave, layers = null } = {}) {
+    const page = document.createElement('div');
+    page.id = 'page-files';
+    page.className = 'page app-page-glass';
+    page.innerHTML = filesPageTemplate();
     document.getElementById('content').appendChild(page);
 
     const layoutEl = page.querySelector('.files-layout');
@@ -99,24 +105,11 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     const previewEl = page.querySelector('.files-preview');
     const backBtn = page.querySelector('[data-files-back]');
     backBtn.insertAdjacentHTML('afterbegin', `<span aria-hidden="true">${SHELL_ICONS.back}</span>`);
-    // On a desk the folder's location starts the bar and its own actions join Refresh at the end; in the stack
-    // layout they stay over the list they act on (docs/DESIGN.md "Page header"). In the bar a long location scrolls
-    // inside it: it rests at its end, the folder you are in, after each path and whenever the bar gives it another
-    // width (the page shown, the layout switched, the window resized), and a folder the keyboard reaches comes
-    // wholly into view, where an engine would stop at partly. Only the strip scrolls. Files lives as long as the app
-    // (app.js builds it once and keeps no handle; its window and document listeners below have no destroy either),
-    // so these bindings live as long and keep no disposer.
+    // The location and actions share the page's band; the filter scrolls with the folder list. Moving the same
+    // controls keeps their listeners and focus. A long location reveals its current folder inside the strip alone.
     bindPageHeader(page.querySelector('.app-page-header'), {
         lead: breadcrumbEl, actions: page.querySelector('.files-browser-actions') });
-    const revealFolder = (crumb) => {
-        if (!crumb || !breadcrumbEl.clientWidth) return;
-        const view = breadcrumbEl.getBoundingClientRect();
-        const box = crumb.getBoundingClientRect();
-        const inset = Math.max(0, Math.min(parseFloat(getComputedStyle(breadcrumbEl).scrollPaddingInlineStart) || 0,
-            (view.width - box.width) / 2));
-        if (box.left < view.left + inset) breadcrumbEl.scrollLeft -= view.left + inset - box.left;
-        else if (box.right > view.right - inset) breadcrumbEl.scrollLeft += box.right - view.right + inset;
-    };
+    const revealFolder = (crumb) => revealStripChoice(breadcrumbEl, crumb);
     const revealCurrentFolder = () => revealFolder(breadcrumbEl.lastElementChild);
     bindScrollFade(breadcrumbEl, { axis: 'x' });
     if (typeof ResizeObserver === 'function') new ResizeObserver(revealCurrentFolder).observe(breadcrumbEl);
@@ -181,7 +174,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         placeStatus();
         const single = singlePane();
         syncLayer(single && view === 'file');
-        if (single && changed && view === 'list') listEl.scrollTop = listScroll;
+        if (single && changed && view === 'list') sidebarEl.scrollTop = listScroll;
         // Focus never stays on what just left the screen (the pane put away, or Back once both panes fit): it goes
         // to Back on a file shown alone, otherwise to the file's row.
         const lost = layoutEl.contains(active) && !active.getClientRects().length;
@@ -479,7 +472,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
 
     // The list's place survives the file shown in front of it: a list out of sight forgets its scroll.
     listEl.addEventListener('scroll', () => {
-        if (listEl.getClientRects().length) listScroll = listEl.scrollTop;
+        if (listEl.getClientRects().length) listScroll = sidebarEl.scrollTop;
     }, { passive: true });
     // Back to folder, and the layer's own close (Escape, the system Back, Telegram's Back): the list again, the draft
     // kept for its row, focus on that row.
@@ -565,7 +558,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
             showPane('list');
         }
         state.rootPath = data.root_path || state.rootPath;
-        if ((data.path || '.') !== state.path) listEl.scrollTop = listScroll = 0;  // another folder: from its first row
+        if ((data.path || '.') !== state.path) sidebarEl.scrollTop = listScroll = 0;  // another folder: from its first row
         state.path = data.path || '.';
         state.parentPath = data.parent_path || '.';
         state.entries = Array.isArray(data.entries) ? data.entries : [];
