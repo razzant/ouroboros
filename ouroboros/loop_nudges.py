@@ -20,7 +20,7 @@ from ouroboros.outcomes import _ROOT_WRITE_TOOLS, extract_final_answer, result_u
 # consumes it (upstream 0463c6bb); the historical private name stays bound here so
 # loop.py's re-export and every existing caller keep addressing one object.
 from ouroboros.skill_readiness import skill_names_touched_by_trace as _skill_names_touched_by_trace  # noqa: F401 -- historical name
-from ouroboros.tool_error_words import check_cause
+from ouroboros.tool_error_words import check_cause, red_check_phrase
 from ouroboros.tools.registry import ToolRegistry
 
 
@@ -410,7 +410,6 @@ def _pre_delivery_facts(tools: ToolRegistry, drive_root: Any, task_id: str, llm_
     pipe and an agent-defined criterion were said when the check ran and stay on the record. A part already told
     (``told``, ``red_told``) is left out."""
     from ouroboros.config import get_task_review_mode
-    from ouroboros.tool_error_words import red_check_phrase
     from ouroboros.tools.review_result import required_root_wave
 
     lines: List[str] = []
@@ -446,7 +445,7 @@ def _pre_delivery_facts(tools: ToolRegistry, drive_root: Any, task_id: str, llm_
         lines += [
             "Before delivery: the last recorded check did not pass, and no recorded check has passed since.",
             f"Check: {_named_red_check(red)}.",
-            f"This answer is read by: {_reader_fact(tools._ctx)}; if you finish now, the task's details will say: "
+            f"This answer is read by: {_reader_fact(tools._ctx)}; if you finish now, a clean ending's details will say: "
             f"\"{red_check_phrase({'verification_red': red})}\"",
             "Ways forward: " + ("change the result or the check, or run the check again as it is (verify_and_record); or "
                                 if can_check else "change the result; or ")
@@ -513,8 +512,8 @@ def _maybe_inject_finalization_nudges(
     emit_progress: Callable[[str], None],
 ) -> bool:
     """One-shot pre-finalization injections that each re-loop (return True): the authoring
-    handover fact, the skill finalization reminder, the one pre-delivery notice
-    (``_pre_delivery_notice``) and the adapter's answer-protocol marker. Extracted from
+    handover fact, the skill finalization reminder, the pre-delivery notice (``_claim_pre_delivery_notice``: each
+    of its two parts once) and the adapter's answer-protocol marker. Extracted from
     run_llm_loop to keep it under the method size gate."""
     if drive_root is None:
         return False

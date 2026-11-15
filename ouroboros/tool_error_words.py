@@ -12,7 +12,7 @@ the step and what happened to it, never a tool name, its result text or a path (
 ``verification_red_unreconciled`` read one sentence too, true and misleading where a corrected check had passed since.
 ``red_check_phrase`` reads the fact the record holds (``objective.verification_red``,
 ``_outcome_receipts.red_check_fact``): why the check did not pass, in the words of the card's "Check did not pass"
-row, and whether any check passed after it; never the command or a path. Browser twin:
+row where it has one, and whether any check passed after it; the command and paths stay in the receipt. Browser twin:
 ``web/modules/verification_presentation.js`` (``redCheckPhrase``), pinned by the same fixture.
 """
 
@@ -127,7 +127,7 @@ def red_check_phrase(objective: Any) -> str:
     fact = objective.get("verification_red") if isinstance(objective, dict) else None
     if not isinstance(fact, dict):
         return ""
-    after, more = _int(fact.get("passed_after")) or 0, _int(fact.get("more")) or 0
+    after, more = max(_int(fact.get("passed_after")) or 0, 0), max(_int(fact.get("more")) or 0, 0)
     head = (f"A recorded check did not pass ({check_cause(fact)}); {after} check{'' if after == 1 else 's'} passed "
             "after it, none recorded as a rerun of it" if after
             else f"The last recorded check did not pass ({check_cause(fact)}); no check passed after it")

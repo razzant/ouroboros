@@ -878,7 +878,7 @@ def red_check_fact(receipts: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     if not reds:
         return None
     red = reds[-1]
-    later = valid[next(index for index, receipt in enumerate(valid) if receipt is red) + 1:]
+    later = valid[len(valid) - valid[::-1].index(red):]  # what follows its newest receipt
     kind, code, matched = str(red.get("contract_kind") or ""), red.get("returncode"), red.get("matched")
     observed = kind == "artifact_observation"
     text = " ".join(str((red.get("summary") if observed else red.get("check")) or "").split())

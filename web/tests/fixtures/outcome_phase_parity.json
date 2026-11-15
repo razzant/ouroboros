@@ -1019,6 +1019,12 @@
       "acceptance_clause": "A recorded check did not pass (no exit code); 1 check passed after it, none recorded as a rerun of it; 1 more failed check has no recorded passing rerun."
     },
     {
+      "name": "a check killed by a signal, with two other checks still red",
+      "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "objective": {"status": "not_evaluated", "source": "none", "warning": "verification_red_unreconciled", "warnings": ["verification_red_unreconciled"], "verification_red": {"kind": "explicit_command", "exit_code": -9, "signal": "SIGKILL", "matched": null, "expected_match": "substring", "passed_after": 0, "more": 2}}}},
+      "phase": "done", "headline": "Done",
+      "acceptance_clause": "The last recorded check did not pass (killed by SIGKILL); no check passed after it; 2 more failed checks have no recorded passing rerun."
+    },
+    {
       "name": "a path observation that did not find a named file, none passed after it",
       "record": {"status": "completed", "reason_code": "final_message", "outcome_axes": {"execution": {"status": "ok", "reason_code": "final_message"}, "objective": {"status": "not_evaluated", "source": "none", "warning": "verification_red_unreconciled", "warnings": ["verification_red_unreconciled"], "verification_red": {"kind": "artifact_observation", "exit_code": null, "signal": "", "matched": null, "expected_match": "substring", "paths_named": 1, "passed_after": 0, "more": 0}}}},
       "phase": "done", "headline": "Done",
