@@ -452,7 +452,7 @@ def test_the_main_chat_a_finger_and_the_keyboard(direct_server_with_data, monkey
                 sheet = page.evaluate(_SHEET)
                 seen[f"main_tier_{tier or 'default'}"] = sheet
                 assert not page.query_selector(".confirm-dialog") and sheet is not None, ("a tier asks nothing first and leaves the sheet open", tier)
-                assert sheet["scope"] == f"{word or 'Default · Standard'} · for Main and its new helpers; no running work follows it now", sheet
+                assert sheet["scope"] == f"{word or 'Default · Standard'} · for Main and its new subagents; no running work follows it now", sheet
                 assert sheet["reset"] is bool(tier), ("Default stands beside the strip only while there is a choice to leave", sheet)
                 _close_sheet(page)
                 closed = page.evaluate(_CAPSULE, MAIN_CAPSULE)

@@ -398,7 +398,7 @@ test('a tier press saves the room\'s own tier at once and keeps the sheet open; 
     const r = room({ tiers: { main: 'fast', default: 'standard' } });
     await r.open();
     assert.deepEqual(r.tierView(), { checked: [], ring: ['fast'], busy: false, reset: false,
-        scope: 'Default · Fast as Main · for new work here and its new helpers without a tier of their own; running work keeps its own' }, 'a follower takes Main\'s tier: it wears the ring');
+        scope: 'Default · Fast as Main · for new work here and its new subagents without a tier of their own; running work keeps its own' }, 'a follower takes Main\'s tier: it wears the ring');
     let answer;
     r.tierAnswer.value = new Promise((resolve) => { answer = resolve; });
     await r.chooseTier('economy');
@@ -408,7 +408,7 @@ test('a tier press saves the room\'s own tier at once and keeps the sheet open; 
     assert.equal(await r.controls.pendingSave(), true);
     assert.ok(r.sheet(), 'a tier is no pick: the sheet stays open');
     assert.deepEqual(r.tierView(), { checked: ['economy'], ring: [], busy: false, reset: true,
-        scope: 'Flex · for new work here and its new helpers without a tier of their own; running work keeps its own' });
+        scope: 'Flex · for new work here and its new subagents without a tier of their own; running work keeps its own' });
     assert.deepEqual([r.tierWord(), r.refreshes.at(-1), r.controls.hasPendingSave()], ['Flex', true, false]);
     // The chosen tier again is no act; the answer's own tier is the one shown.
     await r.chooseTier('economy');
@@ -442,7 +442,7 @@ test('Default returns the room to the tier it would take without one; a refused 
     await r.controls.pendingSave();
     assert.deepEqual(r.tierPosts(), [{ processing: '', project_id: 'p7' }]);
     assert.deepEqual(r.tierView(), { checked: [], ring: ['economy'], busy: false, reset: false,
-        scope: 'Default · Flex as Main · for new work here and its new helpers without a tier of their own; running work keeps its own' });
+        scope: 'Default · Flex as Main · for new work here and its new subagents without a tier of their own; running work keeps its own' });
     assert.equal(r.tierWord(), 'Flex');
     r.tierAnswer.value = { ok: true, project_id: 'other', processing_choice: 'fast' };
     await r.chooseTier('fast');
@@ -493,18 +493,18 @@ test('what a tier applies to: a room\'s new work, or Main and the running works 
         r.controls.destroy();
         return said;
     };
-    assert.equal(await scope(), 'Default · Standard · for Main, 2 running works that follow it and their new helpers',
+    assert.equal(await scope(), 'Default · Standard · for Main, 2 running works that follow it and their new subagents',
         'a work with its own tier, a queued one, one off Main and one unconfirmed do not follow Main\'s tier');
-    assert.equal(await scope({ census: works.slice(0, 1) }), 'Default · Standard · for Main, 1 running work that follows it and their new helpers');
-    assert.equal(await scope({ census: works.slice(3, 4) }), 'Default · Standard · for Main and its new helpers; no running work follows it now');
-    assert.equal(await scope({ complete: false }), 'Default · Standard · for Main, the running works that follow it and their new helpers',
+    assert.equal(await scope({ census: works.slice(0, 1) }), 'Default · Standard · for Main, 1 running work that follows it and their new subagents');
+    assert.equal(await scope({ census: works.slice(3, 4) }), 'Default · Standard · for Main and its new subagents; no running work follows it now');
+    assert.equal(await scope({ complete: false }), 'Default · Standard · for Main, the running works that follow it and their new subagents',
         'an incomplete census is never counted');
-    assert.equal(await scope({ tiers: { main: 'economy', default: 'standard' } }), 'Flex · for Main, 2 running works that follow it and their new helpers');
+    assert.equal(await scope({ tiers: { main: 'economy', default: 'standard' } }), 'Flex · for Main, 2 running works that follow it and their new subagents');
     // A room's tier is for its new work only.
     const r = room({ choice: { kind: 'model', model: GLM, use_local: false } });
     r.controls.syncState(r.state({ works, works_complete: true, supervisor_ready: true }));
     await r.open();
-    assert.equal(r.tierView().scope, 'Default · Standard · for new work here and its new helpers without a tier of their own; running work keeps its own');
+    assert.equal(r.tierView().scope, 'Default · Standard · for new work here and its new subagents without a tier of their own; running work keeps its own');
     r.controls.destroy();
 });
 

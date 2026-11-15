@@ -514,9 +514,9 @@ export function openCardModel(record) {
         const own = String(now.processing?.choice || '');
         const tier = workTier(now);
         const stated = own ? tierWord(own) : fmt('Default · {tier}', { tier: tierWord(tier || 'standard') });
-        // The tier this work runs on, its own or Default's (Main's included), reaches its new helpers without one.
-        const scope = now.queued ? tr('processing.scope.work_queued_helpers', 'for this work when it starts, and its new helpers without a tier of their own')
-            : tr('processing.scope.work_helpers', 'for this work from its next call and its new helpers without a tier of their own; the running call and started helpers keep theirs');
+        // The tier this work runs on, its own or Default's (Main's included), reaches its new subagents without one.
+        const scope = now.queued ? tr('processing.scope.work_queued_helpers', 'for this work when it starts, and its new subagents without a tier of their own')
+            : tr('processing.scope.work_helpers', 'for this work from its next call and its new subagents without a tier of their own; the running call and started subagents keep theirs');
         return {
             choice: own, resolved: tier, busy,
             ultrafast: offersUltrafast({ support: tierSupport(store.index(), route, 'ultrafast'), choice: own }),
