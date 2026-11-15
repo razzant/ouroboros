@@ -1099,9 +1099,9 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         task_done_event["typed_routing_action"] = str(evt.get("typed_routing_action") or "").strip()
     if isinstance(artifact_bundle, dict):
         task_done_event["artifact_bundle"] = artifact_bundle
-    for key in ("cancel_origin", "finalization_recovery"):  # what the status fold reads beside the axes
-        if isinstance(final_task_result.get(key), dict):
-            task_done_event[key] = dict(final_task_result[key])
+    for name in ("cancel_origin", "finalization_recovery"):  # what the status fold reads beside the axes
+        if isinstance(final_task_result.get(name), dict):
+            task_done_event[name] = dict(final_task_result[name])
     if final_task_result.get("terminal_origin"):
         task_done_event["terminal_origin"] = str(final_task_result["terminal_origin"])
     review_status = final_task_result.get("review_status") if isinstance(final_task_result, dict) else None

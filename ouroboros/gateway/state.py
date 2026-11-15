@@ -467,9 +467,9 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
         display["model_waits"] = served_waits(data["model_waits"])
     if data.get("status") or data.get("outcome_axes"):
         display["outcome_axes"] = normalize_outcome_axes(data)
-    for key in ("cancel_origin", "finalization_recovery"):  # the stop and the adopted answer the status fold reads beside the axes
-        if isinstance(data.get(key), dict):
-            display[key] = dict(data[key])
+    for name in ("cancel_origin", "finalization_recovery"):  # the stop and the adopted answer the status fold reads beside the axes
+        if isinstance(data.get(name), dict):
+            display[name] = dict(data[name])
     if synthesis:
         display["root_phase_checkpoint"] = {"post_task_synthesis": synthesis}
     if _answer_stored(synthesis):
