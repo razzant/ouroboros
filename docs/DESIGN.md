@@ -120,7 +120,7 @@ gradient behind content or on an object, and no glows, textures, outlines or neu
    read from one snapshot and written one way; a new part appears only when the old one cannot do
    the job, and then replaces it everywhere.
 
-9. **Moving content never ends on a line.** Content fades past stationary bars, strips, sheet heads, menus and the full composer, including its capsule line. The shared edge appears only while content waits beyond it; nothing opaque covers it. Floating controls use one glass; the Widgets board keeps crisp edges (owner 20.10).
+9. **Moving content never ends on a line.** Content fades past stationary bars, strips, sheet heads, menus and the full composer, including its capsule line whatever the room's top treatment. The shared edge appears only while content waits beyond it; nothing opaque covers it. Floating controls use one glass; Widgets keeps crisp edges (owner 20.10).
 
 **Seed (light | dark)**
 
