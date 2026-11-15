@@ -37,5 +37,8 @@ test('a file shown alone names its folder in the shell layer; beside the list it
     assert.equal(layers.page().back.title, 'Files › notes/work');
     context.syncLayer(false);
     assert.equal(layers.size(), 0); assert.equal(closed, 1, 'wide layout takes no Back step');
+    state.path = '/';
+    context.syncLayer(true);
+    assert.equal(layers.page().back.label, 'Files', 'the filesystem root has a name too');
     layers.destroy();
 });
