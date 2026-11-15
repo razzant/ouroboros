@@ -603,24 +603,26 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
     page = _open(engine_ui, 720, 801)
     engine = engine_ui['engine']
     try:
-        page.evaluate("""theme => { document.documentElement.dataset.theme = theme;
-            document.documentElement.style.setProperty('--sidebar-width', '180px'); }""", theme)
+        page.evaluate("theme => { document.documentElement.dataset.theme = theme; }", theme)
         _goto(page, 'files')
         _location(page, DEEP)
         page.evaluate("""() => { window.__filesNodes = ['files-breadcrumb', 'files-new-file', 'files-new-dir']
             .map(id => document.getElementById(id)); document.getElementById('files-new-file').focus(); }""")
         handle = page.locator('#primary-sidebar > .resize-handle').bounding_box()
         start_x = handle['x'] + handle['width'] / 2
+        # The sidebar now clamps to its own minimum (owner 14.11); a drag follows the shown box
+        # (DESIGN.md:3228). Keep the same 175px/160px content probes, measured from that actual start.
+        start_width = page.locator('#primary-sidebar').bounding_box()['width']
         page.mouse.move(start_x, handle['y'] + handle['height'] / 2)
         page.mouse.down()
         # Check during the drag as well as after release, without a window resize event.
-        page.mouse.move(start_x + 545 - 180, handle['y'] + handle['height'] / 2, steps=12)
+        page.mouse.move(start_x + 545 - start_width, handle['y'] + handle['height'] / 2, steps=12)
         page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 175")
         page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
         setup_browser.capture(page, f'files-sidebar-drag-{engine}-{theme}')
         assert page.locator('#files-breadcrumb').evaluate("el => el.closest('.files-browser-header') !== null")
         assert page.evaluate("document.activeElement === window.__filesNodes[1]")
-        page.mouse.move(start_x + 560 - 180, handle['y'] + handle['height'] / 2)
+        page.mouse.move(start_x + 560 - start_width, handle['y'] + handle['height'] / 2)
         page.mouse.up()
         page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 160")
         # Reveal Paste through the real file menu, making the action group wider than the available column.
