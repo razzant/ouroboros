@@ -16,7 +16,7 @@ import pytest
 
 from ouroboros import working_checkpoint as wc
 from ouroboros.task_results import STATUS_RUNNING, STATUS_SCHEDULED, load_task_result, write_task_result
-from ouroboros.work_stop import INTERRUPTED_SELECTION, interrupted_selection
+from ouroboros.work_stop import INTERRUPTED_SELECTION, continuation_refusal, interrupted_selection
 from supervisor.events_budget import HOLD_SAVED_WORK, budget_hold_fact
 from tests._budget_pause_exact_helpers import _install_queue, _loop_ctx
 from tests.test_restart_retention import _pool_events, _queued
@@ -878,3 +878,50 @@ def test_the_saved_row_decoder_reads_the_outer_queue_time_first(outer, nested, e
 # R1 #1805 (``direct_pause.retain_direct_hold`` stamping a numeric ``queued_at`` on a failed inline park's
 # hold) is retired with the in-process park: a direct turn is a conversation-lane RUNNING row whose pause
 # the supervisor parks like any carried task's, so no hold of that kind is minted here any more.
+
+
+def _schedule_born(root, workers, task_id):
+    """A running work a schedule started: its row and its receipt say the occurrence was handed to a worker."""
+    occurrence = {"schedule_id": "daily-review", "token": "occ-1", "dispatch": "possible"}
+    task = workers.RUNNING[task_id]["task"]
+    task.update(metadata={"schedule_occurrence": occurrence}, admitted_dispatch="possible")
+    write_task_result(root, task_id, STATUS_RUNNING, chat_id=0, admitted_dispatch="possible", schedule_admission={
+        "token": "occ-1", "schedule_id": "daily-review", "dispatch": "possible", "task": {"id": task_id}})
+
+
+@pytest.mark.parametrize("launched", [False, True], ids=["unlaunched", "already-launched"])
+def test_a_named_schedule_born_continuation_returns_by_itself(tmp_path, monkeypatch, launched):
+    """#3192: once a scheduled work ran, its receipt says ``possible``; that is no evidence against returning the saved
+    step an acknowledged restart named, so it returns and is sent once, from its saved step. The other direction: a
+    named continuation whose next attempt is already recorded as launched is held, never sent again."""
+    import queue as stdqueue
+
+    from supervisor.restart_retention import prepare_restart_returns
+    from supervisor.schedule_occurrence import restore_verdict
+    from tests.test_owner_wait_restart import InertProcess
+
+    queue, _state, workers = _install_queue(tmp_path, monkeypatch)
+    _pool_events(workers, monkeypatch)
+    _working_run(tmp_path, workers, "digest")
+    _schedule_born(tmp_path, workers, "digest")
+    assert prepare_restart_returns(tmp_path, workers.RUNNING, workers.PENDING, transaction_id="tx-update") == {"digest"}
+    _ack(tmp_path, "tx-update")
+    if launched:  # a launcher stamped the successor's attempt before the stop's restore read it
+        write_task_result(tmp_path, "digest", STATUS_RUNNING, chat_id=0, admitted_dispatch_attempt=2)
+
+    _stop_and_boot(queue, workers)
+    [row] = workers.PENDING
+    assert restore_verdict(row) != "replay", "the schedule's receipt still says the work ran"
+    commands = stdqueue.Queue()
+    workers.WORKERS[0] = affirm_ready(workers.Worker(0, InertProcess(), commands))
+    monkeypatch.setattr(workers, "repo_writer_task_allowed", lambda _task: True)
+    workers.assign_tasks()
+    if launched:
+        assert commands.empty() and not workers.RUNNING
+        assert continuation_refusal(row)["reason"] == "dispatch_outcome_unknown"
+        return
+    assert budget_hold_fact(row) is None
+    sent = commands.get_nowait()
+    assert (sent["id"], sent["_attempt"], sent["_working_recovery"]["cause"]) == ("digest", 2, "restart")
+    assert commands.empty() and set(workers.RUNNING) == {"digest"} and not workers.PENDING
+
