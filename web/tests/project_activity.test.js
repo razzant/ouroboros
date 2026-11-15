@@ -328,8 +328,10 @@ test('a waiting Project\'s line says its question in the question\'s own opening
     // Another question never borrows them, and a row that arrives without words says none: the sentence stands.
     const other = reconcileProjectRooms(rooms, body({ 42: room([{ ...item, quiz_id: 'other' }]) }, [], gap)).rooms;
     assert.deepEqual([other.get('42').ask, line(other).text], [undefined, sentence]);
-    const wordless = reconcileProjectRooms(rooms, body({ 42: room([item]) }, [{ ...row, question: '  ' }])).rooms;
-    assert.equal(line(wordless).text, sentence);
+    for (const blank of ['  ', '**   **', '` `']) {  // markers around nothing are no words either
+        const wordless = reconcileProjectRooms(rooms, body({ 42: room([item]) }, [{ ...row, question: blank }])).rooms;
+        assert.deepEqual([wordless.get('42').ask, line(wordless).text], [undefined, sentence], JSON.stringify(blank));
+    }
     assert.equal(line(reconcileProjectRooms(new Map(), body({ 42: room([item]) }, [])).rooms).text, sentence, 'never read: the sentence');
     // What only the owner can do outranks an unanswered question, and an answer whose delivery is unknown is no
     // question to answer: each keeps its own sentence though the body carries the question's row.
@@ -355,6 +357,7 @@ test('a waiting Project\'s line says its question in the question\'s own opening
     assert.equal(questionWords('x'.repeat(200), 160), `${'x'.repeat(159)}…`, 'the cut keeps max characters, the ellipsis one of them');
     assert.equal(questionWords('x'.repeat(160), 160), 'x'.repeat(160), 'a line that fits is not cut');
     assert.equal(questionWords(null), '');
+    assert.equal(questionWords('** Step 1:** check ` x ` '), 'Step 1: check x', 'a marker leaves no space behind');
 });
 
 test('a mark\'s words: its place\'s label and new messages, in one phrase', () => {

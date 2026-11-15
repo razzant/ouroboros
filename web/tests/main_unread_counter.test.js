@@ -255,7 +255,8 @@ const projectsNav = { paint: () => paints.push('list'),
     unreadRows: () => [...lastProjectRows.filter((row) => row._unread), ...beyond.filter(isUnread)] };
 function patchProjectActivityMarkers() { paints.push('marks'); paintNavToggles(); }
 globalThis.api = { renderProjectsNav, observeMainRevision, mainUnreadCount, rows: () => lastProjectRows,
-    mainWaits: (waits) => { if (waits) projectRooms.set('1', { owner: true }); else projectRooms.delete('1'); paintNavToggles(); } };`, context);
+    mainWaits: (waits) => { if (waits) projectRooms.set('1', { owner: true }); else projectRooms.delete('1'); paintNavToggles(); },
+    projectsWait: (waits) => { projectActivityIndex.aggregate.owner = waits; paintNavToggles(); } };`, context);
     return {
         context, answers, paints, toggle, api: context.api,
         // Each row the list holds, by id: whether the list holds it unread.
@@ -287,11 +288,14 @@ test("a Project row is unread by the same count as Main's number: its revision, 
     assert.equal(read.dot(), 'none', 'no Project unread, Main read: no dot');
     assert.equal(read.toggle.attrs['aria-label'], 'Open navigation');
     assert.equal(read.answers.length, 0, 'nothing unread asks after no other client');
-    // Main's own wait lights the picture with no Project waiting, and the owner's move outranks new messages.
+    // Main's own wait lights the picture with no Project waiting, a Project's wait with Main at rest, and the
+    // owner's move outranks new messages.
     for (const lit of [read, h]) {
-        lit.api.mainWaits(true);
-        assert.deepEqual([lit.dot(), lit.toggle.attrs['aria-label']], ['dot owner', 'Open navigation · something waits for you']);
-        lit.api.mainWaits(false);
+        for (const waits of [lit.api.mainWaits, lit.api.projectsWait]) {
+            waits(true);
+            assert.deepEqual([lit.dot(), lit.toggle.attrs['aria-label']], ['dot owner', 'Open navigation · something waits for you']);
+            waits(false);
+        }
     }
     assert.deepEqual([read.dot(), h.dot()], ['none', 'dot unread']);
 });

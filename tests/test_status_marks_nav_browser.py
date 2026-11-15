@@ -353,9 +353,9 @@ QUESTION_WORDS = 'The line is up. One step is yours: switch the local test on in
 def test_the_picture_on_ouroboross_card_says_the_owners_move_for_main_and_the_projects(nav_ui, tmp_path):
     """Ouroboros's picture on his card stands for the rooms the list may hold out of sight (owner 15.11, 6A): while a
     Project asks, the 7px amber fact dot stands on the picture's top-right rim, ringed in the card's own fill, and the
-    card's words and tooltip say where the wait is; work or new messages alone never light it; Main's own question
-    lights it beside Main's own mark. The waiting Project's row says its question in the question's own opening
-    words. Docked and in the phone's open drawer alike."""
+    card's words for readers say a Project waits and its tooltip that something does; work or new messages alone
+    never light it; Main's own question lights it beside Main's own mark. The waiting Project's row says its
+    question in the question's own opening words. Docked and in the phone's open drawer alike."""
     ui = nav_ui
     facts = {'engine': ui['engine']}
     asking = PROJECTS[2]['id']
