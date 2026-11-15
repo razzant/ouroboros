@@ -153,7 +153,7 @@ export function initSettings(ctx = {}) {
         if (!panes() || levels.length || ownChosen || opening || !shown() || saved !== lastFirst) return;
         // Open a resolved page directly: unknown-path search paints the home and queues ensurePage again.
         // Landing never overwrites the device's choice, including while its registry cannot be read.
-        open(target, { under: 0, remember: false });
+        open(target, { under: 0, remember: false, quiet: true });
     };
     let panesBefore = null;
     function placeOverview(level) {
@@ -204,10 +204,10 @@ export function initSettings(ctx = {}) {
 
     // `opener` is the control that opened the level, where focus returns: WebKit does not focus a pressed button.
     // A jump-owned or unsaved level comes back as left; a closed clean page is drawn anew.
-    function open(path, { row, under, opener, view = '', remember = true }) {
+    function open(path, { row, under, opener, view = '', remember = true, quiet = false }) {
         const parent = path.split('/')[0];
         if (!under && path.includes('/') && HOME_ROWS.some(row => row.to === parent) && settingsPageFor(parent)) {
-            open(parent, { under: 0, opener, remember });
+            open(parent, { under: 0, opener, remember, quiet });
             under = levels.length;
         }
         if (remember && !under && path !== lastFirst) {
@@ -233,7 +233,7 @@ export function initSettings(ctx = {}) {
         levelsEl.append(level.el);
         levels.push(level);
         if (!kept) mount(level, row);
-        paint({ row, opened: level });
+        paint({ row, opened: level, quiet });
     }
 
     function mount(level, row) {

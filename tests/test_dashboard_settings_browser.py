@@ -357,7 +357,7 @@ def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, widt
         assert back.count() == 0, leave
         focus = page.evaluate("""() => ({row: document.activeElement?.dataset.settingsOpen,
             ring: getComputedStyle(document.activeElement).outlineStyle,
-            input: document.activeElement?.dataset.returnFocus})""")
+            input: document.activeElement?.dataset.returnFocus, html: document.activeElement?.outerHTML.slice(0, 500)})""")
         assert focus['row'] == f'dashboard:{tab}', focus
         assert focus['input'] == ('keyboard' if leave == 'Escape' else 'pointer'), focus
         assert (focus['ring'] != 'none') == (leave == 'Escape'), focus

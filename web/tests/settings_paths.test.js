@@ -498,6 +498,21 @@ test('app.js: Settings pressed again goes to pressedAgain and closes the open dr
 
 // The first-level page two panes land on is the one last opened on this device (docs/DESIGN.md "Settings"), kept across
 // loads; a stored page no longer registered falls back to Models.
+test('passive landing keeps a restored home row focused; an explicitly opened page still takes focus', async (t) => {
+    const { env, content, state, showPage, layers } = world(t);
+    registerSettingsPage('test-focus', { title: 'Focus', mount() {} });
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage });
+    layout(t, controls, content, { on: true });
+    const row = content.querySelector('[data-settings-open="tools"]');
+    row.focus();
+    state.activePage = 'settings';
+    env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: 'settings' } }));
+    await settle();
+    assert.equal(env.document.activeElement, row);
+    await controls.open('test-focus'); await settle();
+    assert.equal(env.document.activeElement.dataset.settingsPage, 'test-focus');
+});
+
 test('two panes land on the first-level page last opened on this device, or on Models when it is gone', async (t) => {
     const saved = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
     const store = new Map();
