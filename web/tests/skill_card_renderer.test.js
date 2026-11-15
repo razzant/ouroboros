@@ -207,6 +207,16 @@ test('a passed review stays the evidence while a newer round has no verdict: one
     assert.doesNotMatch(detailsReview(renderInstalledSkillCard(waiting)), /ui-chip/, 'no verdict yet is no chip, never a green pending');
     // Without a newer round the passed review is said alone, beside its verdict.
     assert.equal(reviewSentence(skill()), 'Reviewed on this computer · passed.');
+    // Allowed to run is not passed: findings, an author's acceptance and Cyber Pro's judgment each say what they are.
+    const runs = (reason, facts = {}) => reviewSentence(skill({ review_gate: { executable_review: true, blocking_reason: reason }, ...facts }));
+    assert.equal(runs('blockers_allowed_by_advisory_enforcement', { review_status: 'blockers' }), 'Review found problems; it may still run.');
+    for (const [reason, facts] of [['cyber_authority', { review_status: 'pending' }], ['cyber_authority', { review_status: 'blockers', review_stale: true }],
+        ['author_accepted_advisory', { review_status: 'clean', review_stale: true }], ['author_accepted_advisory', { review_status: 'pending' }]]) {
+        assert.equal(runs(reason, facts), 'No review passed its current files; it may still run.', `${reason} ${JSON.stringify(facts)}`);
+    }
+    assert.equal(runs('cyber_authority', { review_status: 'blockers' }), 'Review found problems; it may still run.');
+    assert.equal(runs('cyber_authority'), 'Reviewed on this computer · passed.', 'a current clean verdict passed, whoever admits it');
+    assert.equal(runs('author_accepted_advisory', { review_status: 'warnings' }), 'Reviewed on this computer · passed with notes.');
     assert.match(detailsReview(renderInstalledSkillCard(skill())), /data-tone="ok"[^>]*>clean</);
 });
 

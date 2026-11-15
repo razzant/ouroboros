@@ -225,6 +225,10 @@ def test_repeated_skill_finish_preserves_critic_evidence_and_runs_the_current_by
         raw_actor_records=[{"slot_id": "critic", "status": "ok"}],
     ))
     save_enabled(ctx.drive_root, "demo", True)
+    from tests._store_shared import read_result, seed_result
+
+    ctx.task_id = "skill-work"
+    seed_result(ctx.drive_root, "skill-work", {"status": "running"})
     binding = ResolvedResourceBinding(profile="self_modification", root="skill_payload", operation="review",
         base_path=directory, target_path=directory, source="test", skill_name="demo", state_drive_root=ctx.drive_root)
     for revision in (1, 2):
@@ -240,6 +244,10 @@ def test_repeated_skill_finish_preserves_critic_evidence_and_runs_the_current_by
         projected = _review_fields(loaded, github_token_configured=False)
         assert projected["review_stale"] and projected["executable_review"]
         assert projected["reviewed_content_hash"] == original_hash
+        # It was on when its author accepted files no review passed: the work's card names it, once.
+        named = read_result(ctx.drive_root, "skill-work")["review_overrides"]["skills"]
+        assert (named["count"], named["seen"]) == (1, ["demo"])
+        assert (named["latest"]["reason"], named["latest"]["door"]) == ("no_review_verdict", "author_finish")
         if kind == "script":
             actual = json.loads(skill_exec._handle_skill_exec(ctx, skill="demo", script="hello.py"))
             assert actual["exit_code"] == 0

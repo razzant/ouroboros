@@ -224,3 +224,18 @@ def test_blockers_veto_nothing_outside_a_strict_source_and_no_input_names_the_re
                for status in ("clean", "warnings", "blockers", "pending") for stale in (False, True)
                for acceptance in (None, {"strict_review": True})}
     assert "blocker_findings_under_blocking_enforcement" not in reasons
+    # What an executable gate runs over is named for the work card: problems, no verdict, or nothing at all for a
+    # current pass, a gate that is off and an acceptance basis of the host or the owner.
+    from ouroboros.skill_review_status import runs_over
+
+    def over(status, **facts):
+        return runs_over(skill_review_gate(status, stale=facts.pop("stale", False), current_hash="d" * 64, **facts))
+
+    cyber = access == "cyber_pro"
+    assert over("blockers") == "review_problems"
+    assert over("blockers", acceptance={"strict_review": True}) == ("review_problems" if cyber else "")
+    assert over("blockers", stale=True) == over("pending") == ("no_review_verdict" if cyber else "")
+    assert over("clean") == over("warnings") == runs_over(None) == runs_over({}) == ""
+    trusted = {"basis": "trusted", "release_digest": "d" * 64}
+    assert skill_review_gate("pending", stale=False, current_hash="d" * 64, acceptance=trusted)["executable_review"]
+    assert over("pending", acceptance=trusted) == ""

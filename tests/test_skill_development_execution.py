@@ -82,6 +82,59 @@ def test_keyless_first_review_obeys_generic_auto_grant_policy(development, monke
     assert len(panels) == 1
 
 
+def test_a_skill_left_on_over_its_review_is_named_on_the_works_card(development, monkeypatch):
+    """A review that finds problems in one of Ouroboros's own skills still leaves it on (the job's automatic first
+    enable), and the mind may turn such a skill on itself: both reach the card of the work that did it, the skill
+    once, with the audit row naming the review's state. A skill whose review passed adds nothing."""
+    import ouroboros.review_substrate as substrate
+    from ouroboros.task_results import load_task_result, write_task_result
+    from tests import _contributor_packet_shared as shared
+
+    registry, _repo, drive, _panels = development
+    ctx = registry._ctx
+    ctx.task_constraint = None
+    monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
+    write_task_result(drive, ctx.task_id, "running", chat_id=42)
+    hard = json.dumps([{"item": "no_repo_mutation", "verdict": "FAIL", "severity": "critical", "reason": "It commits."}])
+    answers = {"demo": hard, "calm": "[]\nNO_FINDINGS"}
+    current = []
+
+    def answer(request, slot, actor, *, retry_state, pending_invocation_checkpoint):
+        actor.raw_text = answers[current[-1]]
+        return actor
+
+    monkeypatch.setattr(substrate.ReviewCoordinator, "_run_slot", shared.golden_physical_seam([], answer=answer))
+
+    def part():
+        return (load_task_result(drive, ctx.task_id, strict=True) or {}).get("review_overrides", {}).get("skills")
+
+    for name in ("calm", "demo"):
+        payload = _write_ext_skill(drive / "skills" / "external", name, permissions=[],
+                                   plugin_body="def register(api):\n    return None\n", extra_frontmatter='plugin_api: "2.0"\n')
+        _mark_self_authored(payload, drive)
+        current.append(name)
+        result = run_skill_review_lifecycle_blocking(ctx, name)
+        assert result["status"] == ("clean" if name == "calm" else "blockers"), result
+        assert load_enabled(drive, name), "the review job turned its author's skill on, findings or not"
+        if name == "calm":
+            assert part() is None, "a passed review names nothing"
+    after_review = part()
+    assert (after_review["count"], after_review["seen"]) == (1, ["demo"])
+    assert {key: after_review["latest"][key] for key in ("skill", "reason", "door", "task_id")} == {
+        "skill": "demo", "reason": "review_problems", "door": "after_review", "task_id": ctx.task_id}
+    # The mind's own switch: the same skill counts once, the latest says how it came to be on.
+    for name in ("calm", "demo"):
+        save_enabled(drive, name, False, actor="agent_tool")
+        assert json.loads(registry.execute("toggle_skill", {"skill": name, "enabled": True}))["enabled"] is True
+    turned_on = part()
+    assert (turned_on["count"], turned_on["seen"], turned_on["latest"]["door"]) == (1, ["demo"], "turned_on")
+    rows = [json.loads(line) for line in (drive / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    audit = {row["skill"]: row for row in rows if row.get("type") == "owner_api_action" and row.get("action") == "skill_enable"}
+    assert (audit["demo"]["review_status"], audit["demo"]["review_gate_reason"]) == (
+        "blockers", "blockers_allowed_by_advisory_enforcement")
+    assert (audit["calm"]["review_status"], audit["calm"]["review_stale"]) == ("clean", False)
+
+
 def test_free_replay_refreshes_disabled_auto_flow_without_another_panel(development, monkeypatch):
     registry, _repo, drive, panels = development
     registry._ctx.task_constraint = None

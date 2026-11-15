@@ -591,7 +591,8 @@ def _app_lines(facts):
 def test_the_app_line_is_the_python_line_for_every_recorded_part_and_for_none():
     """``card_line`` and ``reviewGateLine`` say the same line for one fact: each part only when recorded (an old field
     with no ``continued`` or ``landed`` shows no zero), the author's reason cut at the same character, a non-ASCII
-    one too, and nothing for an absent or malformed fact."""
+    one too, a skill left on over its review named alone and counted when several, and nothing for an absent or
+    malformed fact."""
     latest = {"at": "2026-11-12T10:00:00+00:00", "reason": "critical_findings", "task_id": "w", "text": "finding"}
     author = {"at": "2026-11-12T10:01:00+00:00", "disposition": "accepted", "rationale": "the lock order is intended",
               "reason": "review_quorum", "record_id": "rec-1"}
@@ -605,6 +606,11 @@ def test_the_app_line_is_the_python_line_for_every_recorded_part_and_for_none():
             "rationale": "why"}}}, {"continued": {"count": 1}}, {"landed": landed},
         None, {}, {"count": 0}, {"count": "3"}, {"count": True}, {"continued": {"count": 0}, "landed": {}}, "fact",
     ]
+    skill = {"skill": "weather", "reason": "review_problems", "door": "turned_on", "at": "2026-11-15T10:00:00+00:00"}
+    facts += [{"skills": {"count": 1, "latest": skill, "seen": ["weather"]}},
+              {"skills": {"count": 1, "latest": {**skill, "reason": "no_review_verdict"}}},
+              {"count": 1, "latest": latest, "skills": {"count": 3, "latest": {**skill, "skill": "calendar"}}},
+              {"skills": {"count": 1}}, {"skills": {"count": 0, "latest": skill}}]
     edges = "\x1c\x85﻿\xa0 \t"  # the cut drops only ASCII space and control space, in both twins (REV6 A3)
     facts += [{"continued": {"count": 1, "latest": {"rationale": "a" * 78 + edge + "b" * 10}}} for edge in edges]
     expected = [
@@ -616,6 +622,9 @@ def test_the_app_line_is_the_python_line_for_every_recorded_part_and_for_none():
         f'Review: author continued 1× over review quorum (latest: accepted — "{chr(0x1f642) * 79}…")',
         "Review: author continued 1× (latest: deferred)", 'Review: author continued 1× (latest: "why")',
         "Review: author continued 1×", "Review: landed over a FAIL or no verdict: 2 commits", *[""] * 7,
+        'Review: skill "weather" left on over review problems', 'Review: skill "weather" left on with no review verdict',
+        'Review: FAIL or no verdict 1× (latest: critical findings) · 3 skills left on over review problems or no verdict '
+        '(latest: "calendar")', 'Review: skill "unknown" left on over review problems or no verdict', "",
         *[f'Review: author continued 1× (latest: "{"a" * 78}{edge}…")' for edge in edges[:4]],
         *['Review: author continued 1× (latest: "' + "a" * 78 + '…")'] * 2,
     ]

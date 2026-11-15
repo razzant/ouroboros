@@ -55,6 +55,7 @@ export const isMadeHere = (skill) => !installFacts(skill) && ['external', 'self_
 // Host reasons that admit these bytes without a critic PASS (fixture parity tests pin this list).
 export const INSTALL_ACCEPTANCE_REASONS = ['trusted_source', 'owner_skip', 'owner_edit', 'self_check'];
 const acceptedAs = (skill) => String(skill?.review_gate?.blocking_reason || '');
+const RUNS_WITHOUT_PASS = new Set(['blockers_allowed_by_advisory_enforcement', 'author_accepted_advisory', 'cyber_authority']);
 
 // The files differ from the installed release (UX §5.3: a neutral fact). Who changed
 // them is known only when the owner's edit is recorded for these exact bytes.
@@ -599,6 +600,12 @@ export function reviewSentence(skill) {
         return `Ouroboros read it before accepting it and recorded why: “${boundedText(notes, 240)}”.`;
     }
     if (ready && skill.review_profile === 'native_seed') return 'Comes with the app; it runs without a separate review.';
+    // Allowed to run is not a passed review (twin of `skill_review_status.runs_over`): the gate's own reasons to run a
+    // payload over findings, on its author's acceptance or on Cyber Pro's judgment never read as "passed".
+    if (ready && RUNS_WITHOUT_PASS.has(acceptedAs(skill)) && (skill.review_stale || !['clean', 'warnings'].includes(skill.review_status))) {
+        return skill.review_status === 'blockers' && !skill.review_stale ? 'Review found problems; it may still run.'
+            : 'No review passed its current files; it may still run.';
+    }
     // A passed review stays the evidence while a newer round of the same files has no verdict yet.
     const job = ready && reviewJob(skill);
     const again = job && (reviewRunningNow(skill, false) || reviewRunOutcome(job).label === 'pending')

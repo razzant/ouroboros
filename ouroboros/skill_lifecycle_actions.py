@@ -364,6 +364,8 @@ def run_skill_action(
                 "actor": actor, "task_id": task_id, "skill": skill_name,
                 "client_host": str(getattr(ctx, "_skill_owner_client_host", "") or ""),
                 "content_hash": result.get("content_hash") or expected_content_hash,
+                "review_status": result.get("review_status"), "review_stale": result.get("review_stale"),
+                "review_gate_reason": (result.get("review_gate") or {}).get("blocking_reason"),
                 "requested_items": list(items or []), "ok": bool(result.get("ok")),
                 "enable_after_grant": _enable_after_grant,
                 "granted_key_count": len(result.get("granted_keys") or []),
@@ -417,4 +419,8 @@ def run_skill_action(
                                     result_message=(lambda value: "Access granted; " + value["setup_error"] if value.get("setup_error") else "") if action == "grant" else None,
                                     progress_target=_progress),
     )
+    if action == "enable" and not _owner_actor and result.get("ok") and result.get("enabled"):
+        from ouroboros.review_overrides import note_skill_over_review
+
+        note_skill_over_review(ctx, skill_name, result.get("review_gate"), "turned_on")  # on the work's card
     return audit(result)

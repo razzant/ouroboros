@@ -7,9 +7,10 @@ outcome: the ``review_advisory_override`` event, the counter ``state/advisory_ov
 ``review_status``) and the work's card fact ``review_overrides`` on its root task's document, a count and the latest,
 never a row per decision. A wave still open is no outcome yet: the call that collects it counts how it ended, and
 an author who goes on over it unread or unsettled counts it then, once per review record.
-``note_author_continuation`` adds its ``continued`` part and ``note_override_landing`` its ``landed`` part. The card
-shows each part only when recorded (absent is unknown, not zero), in the app (``web/modules/review_gate_card.js``,
-live from the event) and in its Telegram completion message (``card_line``).
+``note_author_continuation`` adds its ``continued`` part, ``note_override_landing`` its ``landed`` part and
+``note_skill_over_review`` its ``skills`` part (a skill left on in this work although no review passed its current
+files). The card shows each part only when recorded (absent is unknown, not zero), in the app
+(``web/modules/review_gate_card.js``, live from the event) and in its Telegram completion message (``card_line``).
 
 Every outcome returns to the author before Git, so a commit usually lands from a later call naming the
 reviewed attempt, which keeps the reason (``review_override_reason``); a wave handed back still open stands at what
@@ -39,6 +40,9 @@ _FAIL_REASONS = frozenset({"critical_findings", "parse_failure"})  # the panel's
 _CHECK_REASONS = frozenset({"preflight", "tests_preflight_blocked"})  # the free checks ahead of the panel
 _OPEN = "review_late_result_pending"  # a wave still open: no outcome yet (``review_ledger.reduce_verdict``)
 _SPACE = " \t\n\r\f\v"  # the cut drops only these, as ``headOf`` does in the app
+# What a skill was left on over, in the card line's words (``SKILL_OVER`` and ``SKILL_EITHER`` in review_gate_card.js).
+_SKILL_OVER = {"review_problems": "over review problems", "no_review_verdict": "with no review verdict"}
+_SKILL_EITHER = "over review problems or no verdict"
 
 
 def _head(text: Any, limit: int = 300) -> str:
@@ -255,6 +259,28 @@ def note_override_landing(ctx: Any, commit_sha: str) -> None:
         log.warning("The landing of %s over a review outcome was not recorded", commit_sha, exc_info=True)
 
 
+def note_skill_over_review(ctx: Any, skill: str, gate: Any, door: str) -> None:
+    """A skill that is on in this work although no review passed its current files (``skill_review_status.runs_over``):
+    the work's ``skills`` part, each skill once, the latest with what it was left on over and how (``door``: the mind
+    turned it on, it was on after its review, or its author accepted its files). Without a work nothing is written:
+    the owner's own switch and a review started from the Skills page leave the skill's card and the audit row. Best
+    effort like every record here; it never changes the skill."""
+    from ouroboros.skill_review_status import runs_over
+
+    reason = runs_over(gate)
+    if not (reason and skill):
+        return
+    latest = {"skill": str(skill), "reason": reason, "door": str(door), "at": utc_now_iso(),
+              "task_id": str(getattr(ctx, "task_id", "") or "")}
+
+    def keep(fact: Dict[str, Any]) -> Dict[str, Any]:
+        part = fact.get("skills") if isinstance(fact.get("skills"), dict) else {}
+        seen = [name for name in part.get("seen") or [] if name != latest["skill"]] + [latest["skill"]]
+        return {**fact, "skills": {"count": len(seen), "latest": latest, "seen": seen}}
+
+    _keep_on_work(ctx, keep)
+
+
 def _counted(part: Any) -> int:
     count = part.get("count") if isinstance(part, dict) else None
     return count if type(count) is int and count > 0 else 0  # an absent or malformed part is unknown: no line shows it
@@ -284,6 +310,11 @@ def card_line(fact: Any) -> str:
     if landed := _counted(fact.get("landed")):
         over = "it" if parts else "a FAIL or no verdict"
         parts.append(f"landed over {over}: {landed} commit{'' if landed == 1 else 's'}")
+    if skills := _counted(fact.get("skills")):
+        last = fact["skills"].get("latest") if isinstance(fact["skills"].get("latest"), dict) else {}
+        name = f'"{last.get("skill") or "unknown"}"'
+        parts.append(f"skill {name} left on {_SKILL_OVER.get(str(last.get('reason') or ''), _SKILL_EITHER)}" if skills == 1
+                     else f"{skills} skills left on {_SKILL_EITHER} (latest: {name})")
     return "Review: " + " · ".join(parts) if parts else ""
 
 
