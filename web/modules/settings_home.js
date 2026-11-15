@@ -15,9 +15,10 @@ import { confirmAndSendRestart, headerBudgetPresentation } from './chat_activity
 import { routeSource, shortName } from './chat_model_routes.js';
 import { accountName, accountRows, claudexorStatus, facetReadState, familyLabel, READ_OK } from './claudexor_status_store.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { normalizeConsciousness, parseRoster } from './consciousness_api.js';
+import { PLACES_CHANGED_EVENT, normalizeConsciousness, parseRoster } from './consciousness_api.js';
 import { headlineView } from './consciousness_dashboard.js';
 import { consciousnessMark } from './consciousness_words.js';
+import { getContributions } from './contributions.js';
 import { refreshActionKind, verificationBadge } from './harness_accounts.js';
 import { harnessPresentation } from './harness_presentation.js';
 import { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
@@ -357,9 +358,9 @@ export const homeFactsSeen = () => seenFacts || {};
 /**
  * Draw the home into `root` and take its presses. `open(path, { row, opener })` opens a row's page or door; `ctx`
  * is the shell's (`ws`, `showPage`, `readSettings`, `stateSnapshots`). Answers `{ mark(path), search(words), refresh(),
- * dispose() }`: `mark` names the row whose page is shown beside the home; `search` puts words into the search field and
- * shows their results, until the first press on them (words the owner typed stay); `refresh` reads the facts again
- * and repaints.
+ * hide(), dispose() }`: `mark` names the row whose page is shown beside the home; `search` puts words into the search
+ * field and shows their results, until the first press on them (words the owner typed stay); `refresh(names)` says the
+ * home is on screen, reads those sources (all of them when it comes on screen) and repaints; `hide` says it is not.
  */
 export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatus, ask = openConfirmDialog } = {}) {
     root.innerHTML = `<div class="settings-column settings-home-column">
@@ -392,9 +393,10 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     let needs = [];
     let shownQuery = '';
     let handed = '';  // the words `search` put into the field, until the owner types there
-    let serial = 0;
     let busy = '';
     let needsHtml = '';
+    let hidden = true;          // off screen until the shell shows it (`refresh`); off screen it starts no read
+    const flights = new Map();  // a source -> its read in flight: `{ controller, again }`
 
     function paintCard() {
         const being = beingState({ connected: ctx.ws?.isConnected?.() !== false, state: facts.state });
@@ -465,48 +467,70 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     };
     const READS = {
         settings: () => ctx.readSettings(),
-        tools: () => fetchJson('/api/mcp/status', { cache: 'no-store' }),
-        skills: () => readSkills(),
-        places: () => fetchJson('/api/places', { cache: 'no-store' }),
-        update: () => apiClient.updateStatus(),
-        storage: () => fetchJson('/api/storage', { cache: 'no-store' }),
-        autostart: () => apiClient.desktopAutostart(),
+        tools: (signal) => fetchJson('/api/mcp/status', { cache: 'no-store', signal }),
+        skills: (signal) => readSkills({ signal }),
+        places: (signal) => fetchJson('/api/places', { cache: 'no-store', signal }),
+        update: (signal) => apiClient.updateStatus({ signal }),
+        storage: (signal) => fetchJson('/api/storage', { cache: 'no-store', signal }),
+        autostart: (signal) => apiClient.desktopAutostart({ signal }),
         // The roster and the windows the engine last observed, as Costs reads them: it starts and refreshes nothing.
-        roster: async () => (storeRead() ? facts.roster : fetchJson('/api/claudexor/status?view=quota', { cache: 'no-store' })),
-    };
-    async function read(name, run) {
-        try { facts[name] = (await READS[name]()) ?? null; } catch { facts[name] = null; }
-        if (name === 'roster') readAccounts();
-        if (run === serial) paint();
-    }
-    async function readState(run) {
-        const snapshots = ctx.stateSnapshots;
-        if (!snapshots?.latest?.() && snapshots?.gate) {
-            const request = await snapshots.gate(false);
+        roster: async (signal) => (storeRead() ? facts.roster : fetchJson('/api/claudexor/status?view=quota', { cache: 'no-store', signal })),
+        // The app's state snapshot, through the page's one sequencer: a read in flight is waited for, not doubled, and
+        // its order keeps an older body from replacing a newer one.
+        state: async () => {
+            const snapshots = ctx.stateSnapshots;
+            const request = await snapshots?.gate?.(false);
             if (request) await readStateSnapshot(snapshots, request);
-        }
-        facts.state = snapshots?.latest?.() ?? null;
-        if (run === serial) paint();
+            return snapshots?.latest?.();
+        },
+    };
+    // One read of a source at a time: asked again while it runs, it runs once more after it. Its answer is painted
+    // unless its own request was dropped (the list left the screen, or is gone).
+    function read(name) {
+        const flight = flights.get(name);
+        if (flight) { flight.again = true; return flight.done; }
+        const mine = { controller: new AbortController(), again: false };
+        flights.set(name, mine);
+        mine.done = (async () => {
+            let fact;
+            try { fact = (await READS[name](mine.controller.signal)) ?? null; } catch { fact = null; }
+            if (flights.get(name) === mine) flights.delete(name);
+            if (mine.controller.signal.aborted) return;
+            facts[name] = fact;
+            if (name === 'roster') readAccounts();
+            paint();
+            if (mine.again) await read(name);
+        })();
+        return mine.done;
     }
     const readDevice = () => {
         facts.device = { theme: globalThis.window?.ouroTheme?.choice, notify: readNotifyPrefs(globalThis.localStorage), dictation: dictationWord() };
     };
-    function refresh() {
-        const run = ++serial;
+    // The list on screen reads `names` (every source when it comes on screen) and repaints what the window knows.
+    function refresh(names = Object.keys(READS)) {
+        hidden = false;
         readDevice();
         facts.state = ctx.stateSnapshots?.latest?.() || facts.state;
         readAccounts();
         paint();
-        void readState(run);
-        return Promise.all(Object.keys(READS).map((name) => read(name, run)));
+        return Promise.all(names.map(read));
     }
+    // Off screen: the reads in flight are dropped and free their connections; none starts until it is shown again.
+    function hide() {
+        hidden = true;
+        flights.forEach((flight) => flight.controller.abort());
+        flights.clear();
+    }
+    // A page left, a save, a change the shell announces: while the list is on screen, the sources they concern.
+    const renew = (names) => { if (!hidden && root.getClientRects?.().length) void refresh([...new Set(names)]); };
+    const rowAt = (where) => HOME_ROWS.find((row) => row.to === String(where || '').split('/')[0]);
 
     async function runNeed(row) {
         busy = `${row.kind}:${row.id}`;
         paintCard();
         try {
             if (row.run === 'restart') await confirmAndSendRestart({ openConfirmDialog: ask, ws: ctx.ws });
-            else if (row.run) await read(row.run, serial);
+            else if (row.run) await read(row.run);
         } finally {
             busy = '';
             paint();
@@ -547,8 +571,27 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         spend();
     };
     const onType = () => { handed = ''; paintList(); };
-    // A setting saved while the home is on screen may start or end a wait for a restart: the document is read again.
-    const onSaved = () => { if (root.getClientRects?.().length) void read('settings', serial); };
+    // A setting saved while the home is on screen may start or end a wait for a restart: the document is read again,
+    // with the other sources of its page's row (an entry's write names its row, not its page).
+    const onSaved = (event) => {
+        const { page, row } = event.detail || {};
+        renew(['settings', ...(rowAt(page ?? [...ROWS, ...HAND_WRITTEN].find((each) => each.id === row)?.page)?.reads || [])]);
+    };
+    // Where the owner is in Settings. A door leaves Settings before its destination is shown, so its source is not
+    // read from here; the destination owns its own read.
+    let at = '';
+    const onWhere = (event) => {
+        const where = String(event.detail?.path || '').split('/')[0];
+        const left = where === at ? null : rowAt(at);
+        at = where;
+        if (left) renew(left.reads);
+    };
+    const onPlaces = () => renew(['places']);
+    const onTools = (event) => {
+        if (hidden || !root.getClientRects?.().length) return;
+        facts.tools = event.detail;
+        paint();
+    };
     // A choice of this device made on a page beside the list (the theme's strip, a notification switch) is the list's
     // answer at once. Their own modules store it from the document's handlers (theme.js, notifications.js); the window
     // hears the same press after the document, so the choice is stored by then.
@@ -559,10 +602,16 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         paintRows();
     };
     const offStore = store.subscribe((view) => { readAccounts(view); paintCard(); paintRows(); }, { visible: () => false });
+    // A skill's lifecycle and an update's status, as the shell hears them.
+    const offs = [getContributions().onLifecycle(() => renew(['skills'])),
+        ...['update_status_ready', 'update_progress_changed'].map((type) => ctx.ws?.on?.(type, () => renew(['update'])))];
     root.addEventListener('click', onClick);
     cardEl?.addEventListener('click', onClick);
     searchEl.addEventListener('input', onType);
     globalThis.window?.addEventListener?.('ouro:settings-updated', onSaved);
+    globalThis.window?.addEventListener?.(PLACES_CHANGED_EVENT, onPlaces);
+    globalThis.window?.addEventListener?.('ouro:mcp-status-updated', onTools);
+    globalThis.window?.addEventListener?.('ouro:settings-page-shown', onWhere);
     const DEVICE_EVENTS = ['click', 'keydown', 'change'];
     DEVICE_EVENTS.forEach((type) => globalThis.window?.addEventListener?.(type, onDevice));
     paint();
@@ -579,13 +628,18 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
             searchEl.parentElement?.scrollIntoView?.({ block: 'start' });
         },
         refresh,
+        hide,
         dispose() {
-            serial += 1;
+            hide();
             offStore();
+            offs.forEach((off) => off?.());
             root.removeEventListener('click', onClick);
             cardEl?.removeEventListener('click', onClick);
             searchEl.removeEventListener('input', onType);
             globalThis.window?.removeEventListener?.('ouro:settings-updated', onSaved);
+            globalThis.window?.removeEventListener?.(PLACES_CHANGED_EVENT, onPlaces);
+            globalThis.window?.removeEventListener?.('ouro:mcp-status-updated', onTools);
+            globalThis.window?.removeEventListener?.('ouro:settings-page-shown', onWhere);
             DEVICE_EVENTS.forEach((type) => globalThis.window?.removeEventListener?.(type, onDevice));
         },
     };

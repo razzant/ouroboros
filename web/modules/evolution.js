@@ -588,14 +588,14 @@ export function initEvolution({ ws, state, mount, stateSnapshots = null, dialog 
         cards: [{ label: 'Cycles after your tasks' }, { label: 'What to work on', solo: true, rows: ['OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE'] }],
         custom: (row) => `<div class="ui-segment-group" role="group" aria-labelledby="setting-${row.id}-name">${row.control.options.map((option) =>
             `<button type="button" class="ui-segment" data-setting-control data-evo-when="${option.value}" aria-pressed="false">${option.label}</button>`).join('')}</div>`
-            + '<span class="settings-row-field" data-evo-every hidden><span class="settings-row-unit">N</span><input class="ui-control" data-evo-n value="3" inputmode="numeric" autocomplete="off" aria-label="Every how many tasks"></span>' });
+            + '<span class="settings-row-field" data-evo-every hidden><span class="settings-row-unit">N</span><input class="ui-control" data-setting-control data-evo-n value="3" inputmode="numeric" autocomplete="off" aria-label="Every how many tasks"></span>' });
     cycles.querySelector('#setting-OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE')?.setAttribute('placeholder', 'For example: faster start, fewer repeated questions');
     function paintWhen(read) {
         const value = CODECS.evolutionWhen.read(read), count = cycles.querySelector('[data-evo-n]');
         if (!value || !count) return;
         press(cycles.querySelectorAll('[data-evo-when]'), (button) => button.dataset.evoWhen === whenMode(value));
         count.parentElement.hidden = whenMode(value) !== 'every_n';
-        if (whenMode(value) === 'every_n' && document.activeElement !== count) count.value = value[1].slice(8);
+        if (whenMode(value) === 'every_n') count.value = value[1].slice(8);
     }
     // A choice is saved when it is pressed; the count when its field is left or on Enter.
     const onWhen = (event) => {
