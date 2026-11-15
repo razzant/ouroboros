@@ -263,7 +263,7 @@ def test_a_tool_servers_page_saves_its_entry_keeps_typed_text_and_remove_asks_fi
     _settled(page, "tools").locator('[data-entry-id="github"]').wait_for(state="visible")
     editor = open_entry(page, "github")
     assert top_path(page) == "tools/github"
-    assert editor.locator(".settings-page-title").inner_text() == "GitHub"
+    assert page.locator("#page-settings [data-settings-lead-name]").inner_text() == "GitHub"
     assert page.locator("#page-settings > .app-page-header [data-shell-back]").inner_text().strip() == "Tools"
     name = editor.locator('[data-mcp-field="name"]')
     name.fill("GitHub (work)")
