@@ -229,7 +229,8 @@ def queue_snapshot_observation(snapshot: Dict[str, Any], *, boot: bool = False) 
     """Date the existing queue observation, without asserting current capacity.
 
     Context, scheduling receipts and cancellation observations share the same
-    freshness bound as live ownership. Counts belong to the captured snapshot;
+    freshness bound as live ownership. Row counts belong to the captured snapshot,
+    the pool's counts to the certificate this stamp dates (``load_queue_document``);
     even a fresh observation is not a reservation or a continuously live view.
     """
     stamp = queue_stamp(snapshot, boot=boot)

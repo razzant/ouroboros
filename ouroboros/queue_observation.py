@@ -3,7 +3,9 @@
 The publisher (``supervisor/queue_publication.py``) writes large task values once per
 document, by content address under ``$shared``; ``load_queue_document`` expands them, so
 every reader sees whole rows, and keeps the parsed document of one file identity
-(mtime, size, inode) so repeated readers do not parse the same bytes again.
+(mtime, size, inode) so repeated readers do not parse the same bytes again. The
+heartbeats and the pool's counts are read from the certificate (``queue.alive``) when
+it names the document's generation.
 """
 
 import os
@@ -22,6 +24,12 @@ _monotonic = time.monotonic
 #: A ``queue.alive`` stamp older than this proves no live supervisor to its readers (``task_status``);
 #: the publisher refreshes it well inside this bound.
 QUEUE_ALIVE_FRESH_SEC = 10.0
+#: The pool's counts (``queue_publication._pool_counts``). They move with every boot, retirement and reap,
+#: with no row changing, so the certificate carries them (``queue.alive`` ``pool``) and a document keeps them as
+#: of its own write; ``load_queue_document`` gives its readers the certified ones.
+POOL_COUNT_KEYS = ("max_workers", "worker_total", "parked_worker_count", "busy_worker_count",
+                   "acting_worker_count", "booting_count", "reaping_count", "retiring_count",
+                   "assignable_idle_workers", "lane_carrier_total", "memory_admission")
 
 _CACHE: Dict[pathlib.Path, tuple] = {}  # path -> (identity, expanded document)
 _CACHE_LOCK = threading.Lock()
@@ -143,7 +151,12 @@ def load_queue_document(drive_root, name="queue_snapshot.json", *, fresh: bool =
     if name == "queue_snapshot.json":
         from ouroboros.model_wait import execution_elapsed_seconds, quota_waited_seconds
 
-        heartbeats = queue_stamp(document).get("heartbeats") or {}
+        stamp = queue_stamp(document)
+        pool = stamp.get("pool")
+        if isinstance(pool, dict) and pool_observation_status(document) == "observed":
+            # The certificate's counts are as of its stamp, the document's as of the document's own write.
+            document.update((key, pool[key]) for key in POOL_COUNT_KEYS if key in pool)
+        heartbeats = stamp.get("heartbeats") or {}
         now = time.time()
         for row in document.get("running") or []:
             if not isinstance(row, dict):

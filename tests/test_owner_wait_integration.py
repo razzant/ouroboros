@@ -18,6 +18,7 @@ import pytest
 
 from devtools.benchmarks.common.server_runner import _api
 from ouroboros.owner_mailbox import write_owner_message
+from ouroboros.queue_observation import load_queue_document
 from tests._browser_candidate import wait_clone as wait_clone
 from tests.system_e2e.harness import (
     ArtifactOracle,
@@ -186,7 +187,7 @@ def test_owner_wait_preserves_form_and_lends_one_worker(wait_clone, local_form, 
 
             task_b = server.submit(f"[{_OTHER_TASK}] Open the independent local browser page.")
             assert gate.arrived.wait(120), f"B never executed in the lent slot: {oracle.queue_snapshot()}"
-            both = oracle.queue_snapshot()
+            both = load_queue_document(server.data_root)  # the pool's counts, certified on queue.alive
             assert {task_a, task_b} <= oracle.running_ids()
             assert both["acting_worker_count"] == 1 and both["parked_worker_count"] == 1
             assert _running(oracle, task_b)["worker_id"] != parked["worker_id"]
