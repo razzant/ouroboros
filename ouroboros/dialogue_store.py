@@ -138,7 +138,8 @@ def present(root: Any) -> bool:
 
 
 def encode(row: Dict[str, Any]) -> str:
-    """The exact text a chain line held: ``append_jsonl``'s own encoding, without the newline."""
+    """The exact text a chain line held, without the newline: the encoding the chat logs were written in while they
+    were files. Chain coordinates were measured on it, so it never follows ``append_jsonl``'s."""
     return json.dumps(row, ensure_ascii=False)
 
 

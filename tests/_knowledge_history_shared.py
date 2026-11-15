@@ -38,10 +38,12 @@ def _field(root, row, field):
 
     scope = row["address"]["scope"]
     shelf = pathlib.Path(root) / ("memory" if scope == "global" else f"projects/{scope[len('project:'):]}")
-    raw = (shelf / "knowledge_history.jsonl").read_bytes()
-    line = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
-    offset = raw.index(line)
-    assert offset == 0 or raw[offset - 1:offset] == b"\n" and raw.count(line) == 1
+    offsets, at = [], 0
+    for line in (shelf / "knowledge_history.jsonl").read_bytes().split(b"\n"):
+        if line and json.loads(line) == row:
+            offsets.append(at)
+        at += len(line) + 1
+    (offset,) = offsets
     return _read(root, {"kind": "entry", "journal": f"knowledge:{scope}", "offset": offset, "field": [field]})
 
 

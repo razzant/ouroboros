@@ -9,7 +9,7 @@ import vm from 'node:vm';
 
 import * as readAhead from '../modules/read_ahead.js';
 import { forgetProjectPreviews } from '../modules/chat_preview.js';
-import { IDLE_SUMMARY } from '../modules/project_activity.js';
+import { IDLE_SUMMARY, pictureOwner } from '../modules/project_activity.js';
 import { markView, paintStatusMark } from '../modules/status_mark.js';
 
 const source = readFileSync(new URL('../app.js', import.meta.url), 'utf8').replace(/\r\n?/g, '\n');
@@ -231,7 +231,7 @@ function listHarness({ host = {}, beyond = [], seen = {}, main = [90, 90] } = {}
     const toggle = { attrs: {}, querySelector: (selector) => (selector === '.status-mark' ? mark : null),
         setAttribute(name, value) { this.attrs[name] = value; } };
     const context = vm.createContext({
-        ...readAhead, markView, paintStatusMark, IDLE_SUMMARY, forgetProjectPreviews, beyond, paints,
+        ...readAhead, markView, paintStatusMark, IDLE_SUMMARY, pictureOwner, forgetProjectPreviews, beyond, paints,
         navState: { activeProjectId: null },
         state: { mainVisibleRevision: main[0], mainSeenRevision: main[1], mainSeenLoaded: true, activePage: 'files',
             projectSeenRevision: seen },
@@ -254,7 +254,9 @@ const isUnread = ${IS_UNREAD};
 const projectsNav = { paint: () => paints.push('list'),
     unreadRows: () => [...lastProjectRows.filter((row) => row._unread), ...beyond.filter(isUnread)] };
 function patchProjectActivityMarkers() { paints.push('marks'); paintNavToggles(); }
-globalThis.api = { renderProjectsNav, observeMainRevision, mainUnreadCount, rows: () => lastProjectRows };`, context);
+globalThis.api = { renderProjectsNav, observeMainRevision, mainUnreadCount, rows: () => lastProjectRows,
+    mainWaits: (waits) => { if (waits) projectRooms.set('1', { owner: true }); else projectRooms.delete('1'); paintNavToggles(); },
+    projectsWait: (waits) => { projectActivityIndex.aggregate.owner = waits; paintNavToggles(); } };`, context);
     return {
         context, answers, paints, toggle, api: context.api,
         // Each row the list holds, by id: whether the list holds it unread.
@@ -286,6 +288,16 @@ test("a Project row is unread by the same count as Main's number: its revision, 
     assert.equal(read.dot(), 'none', 'no Project unread, Main read: no dot');
     assert.equal(read.toggle.attrs['aria-label'], 'Open navigation');
     assert.equal(read.answers.length, 0, 'nothing unread asks after no other client');
+    // Main's own wait lights the picture with no Project waiting, a Project's wait with Main at rest, and the
+    // owner's move outranks new messages.
+    for (const lit of [read, h]) {
+        for (const waits of [lit.api.mainWaits, lit.api.projectsWait]) {
+            waits(true);
+            assert.deepEqual([lit.dot(), lit.toggle.attrs['aria-label']], ['dot owner', 'Open navigation · something waits for you']);
+            waits(false);
+        }
+    }
+    assert.deepEqual([read.dot(), h.dot()], ['none', 'dot unread']);
 });
 
 test('a message read in full in another room leaves the counts without moving a cursor', () => {

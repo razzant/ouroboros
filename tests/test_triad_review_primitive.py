@@ -143,6 +143,5 @@ def test_emit_review_model_error_events(tmp_path):
 
     emit_review_model_error_events(ctx, parsed, source="skill_review", skill_name="demo")
 
-    data = (logs / "events.jsonl").read_text(encoding="utf-8")
-    assert '"review_model_error"' in data
-    assert '"skill": "demo"' in data
+    data = [json.loads(line) for line in (logs / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert any(row["type"] == "review_model_error" and row.get("skill") == "demo" for row in data)
