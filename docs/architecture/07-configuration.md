@@ -6,7 +6,7 @@ Settings have one home and default; the table projects `config.SETTINGS_DEFAULTS
 
 Paths use `OUROBOROS_*` overrides or `launch_roots`' pre-import `APP_ROOT` (`~/Ouroboros`). A direct server defaults `REPO_DIR` to its checkout; with only `APP_ROOT` it refuses if `~/Ouroboros/data` may contain memory. `resolve_port_file` moves only the hosting root's port file. Unset work roots follow witness basis: older data uses `~/Ouroboros`, otherwise `APP_ROOT`; unknown refuses. `settings.json` under the data root requires its lock for writes. `secret_masking.py` repairs only disk-recognized placeholders before env precedence, never masking real env credentials. With `OUROBOROS_SETTINGS_SHA256`, `settings_integrity.py` treats the isolated child's seeded snapshot as an owner-authored trust root: reads verify every byte without a sibling lock; all writers refuse.
 
-`openrouter_attribution.py` owns paid OpenRouter app identity (canonical URL, `X-OpenRouter-Title`); forks use their own URL.
+`openrouter_attribution.py` owns app identity (URL, title, categories; forks own theirs); compatible endpoints get it only at `https://openrouter.ai`:443, no userinfo, on a no-redirect client or unlabelled.
 
 ### Reading and writing the settings document
 
