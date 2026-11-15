@@ -267,6 +267,19 @@ def test_refused_source_keeps_resume_for_rechecking_and_unknown_without_a_stop_s
     assert raw["reasons"][0]["code"] == "held" and raw["reasons"][0]["text"] == "Held"
 
 
+def test_the_word_beside_finalizing_follows_the_cards_status_fold():
+    """``shown_outcome`` says the stored lifecycle except where the card's fold reads otherwise: a delivered adopted
+    answer is ``completed`` there as on its card, one still owed stays ``failed``, an author's stop is ``cancelled``."""
+    cut = {"lifecycle": {"status": "failed"}, "execution": {"status": "infra_failed", "reason_code": "finalization_incomplete"}}
+    adopted = lambda answer: {"status": "failed", "reason_code": "finalization_incomplete", "outcome_axes": cut,  # noqa: E731
+                              "terminal_origin": "model_final", "finalization_recovery": {"answer": answer}}
+    assert ws.shown_outcome(adopted("delivered")) == "completed"
+    assert ws.shown_outcome(adopted("owed")) == "failed"
+    assert ws.shown_outcome({"status": "failed", "reason_code": "worker_crash_signal"}) == "failed"
+    assert ws.shown_outcome({"status": "completed", "outcome_axes": _AUTHOR_STOP_AXES, "result": "partial"}) == "cancelled"
+    assert ws.shown_outcome({"status": "completed"}) == "completed" and ws.shown_outcome({"status": "running"}) == "running"
+
+
 def test_owner_question_is_a_wait_on_the_owner_and_a_gap_is_unconfirmed():
     asked = row("t", owner_wait={"quiz_id": "q1", "owner_wait_state": "waiting", "quiz_state": "open"})
     state = ws.classify_member(asked)
