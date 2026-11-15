@@ -299,6 +299,22 @@ test('a field laid out at attach is measured in its first frame, with no observe
         'a later report at the same width writes nothing');
 });
 
+test('a content-sized field and a hidden one ask no first frame', async (t) => {
+    // The first frame is the measured mode's alone: in content mode a measurement would pin a height the engine keeps
+    // growing, and a hidden field has no width to wrap at until its reveal reports.
+    for (const [label, options, field] of [['content', { fieldSizing: true }, new Field()],
+        ['hidden', {}, new Field({ width: 0 })]]) {
+        const engine = installEngine(options);
+        try {
+            attachChatInputSizing(field);
+            await null;
+            assert.equal(engine.pending(), 0, `${label}: no frame is asked`);
+            engine.flush();
+            assert.deepEqual(field.writes, [], `${label}: nothing is written`);
+        } finally { engine.restore(); }
+    }
+});
+
 test('a font that finishes loading re-measures the same width once, in a frame', async (t) => {
     const engine = installEngine();
     t.after(engine.restore);
