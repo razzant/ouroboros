@@ -200,8 +200,13 @@ def _stdin_source(stdin: Any) -> Tuple[Any, Optional[BinaryIO]]:
         return subprocess.DEVNULL, None
     if isinstance(stdin, (bytes, bytearray, str)):
         owned = tempfile.TemporaryFile()
-        owned.write(stdin.encode("utf-8") if isinstance(stdin, str) else bytes(stdin))
-        owned.seek(0)
+        try:
+            owned.write(stdin.encode("utf-8") if isinstance(stdin, str) else bytes(stdin))
+            owned.seek(0)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                owned.close()
+            raise
         return owned, owned
     return stdin, None
 
@@ -345,17 +350,22 @@ def _work_location(cmd: Sequence[Any], cwd: Any, env: Optional[Dict[str, str]]) 
 
 def run(cmd: Sequence[Any], **kwargs: Any) -> subprocess.CompletedProcess:
     """``subprocess.run`` for a command that may act on a work folder: unchanged (the very same call, ``input`` bytes
-    read from a file as in the work domain: ``_stdin_source``) unless its folder is the work domain's
-    (``_work_location``); then it runs there (``run_in_work``) with its own options —
-    ``input``/``stdin``, captured or streamed output, ``text``/``encoding``/``errors``, ``timeout`` and ``check`` —
+    read from a file as in the work domain, ``_stdin_source``, or from the stdlib's pipe when no temporary file can be
+    made) unless its folder is the work domain's (``_work_location``); then it runs there (``run_in_work``) with its
+    own options — ``input``/``stdin``, captured or streamed output, ``text``/``encoding``/``errors``, ``timeout`` and
+    ``check`` —
     and only Git's and the locale's variables crossing (``_forwarded``). Absolute work paths in its arguments take
     the container's spelling; any other argument is the command's own to read there."""
     where = _work_location(cmd, kwargs.get("cwd"), kwargs.get("env"))
     if not where:
         if isinstance(kwargs.get("input"), (bytes, bytearray)) and kwargs.get("stdin") is None:
-            source, owned = _stdin_source(kwargs.pop("input"))
-            with owned:
-                return subprocess.run(cmd, stdin=source, **kwargs)
+            try:
+                source, owned = _stdin_source(kwargs["input"])
+            except OSError:
+                log.debug("No temporary file for a command's input; it rides the stdlib's pipe", exc_info=True)
+            else:
+                with owned:
+                    return subprocess.run(cmd, **{**kwargs, "input": None, "stdin": source})
         return subprocess.run(cmd, **kwargs)
     capture = kwargs.pop("capture_output", False)
     stdout = subprocess.PIPE if capture else kwargs.pop("stdout", None)
