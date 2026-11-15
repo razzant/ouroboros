@@ -900,10 +900,11 @@ def recorded_commit_source(ctx, reference, state):
     the reference's task and staged binding, settled (a running or UNKNOWN wave is no terminal outcome). A paid wave keeps
     its attempt row, which is then the source under its own attempt number, unchanged and never copied; otherwise only
     a record that dispatched nothing (``NOT_DISPATCHED``, the ceiling's or another pre-send refusal) stands, as a
-    seatless ``review_only`` outcome with the record's own verdict facts and the reason its row kept when the call that
-    met it counted it: the budget fence's kind, the gate's own reason for a wave that failed before its send, the missed
-    quorum of a wave that sent nothing; a free replay (the ceiling, a pending wave) kept none, and a continuation over
-    it counts it. Missing paid evidence is never read as a free refusal, and nothing here is written. ``None`` otherwise."""
+    seatless ``review_only`` outcome with the record's own verdict facts and a kept reason that lets no continuation
+    count twice what its own call counted: the budget fence's kind, the missed quorum of a wave that sent nothing, the
+    gate's own reason for a wave that failed before its send (outside Cyber Pro that live row kept none, so its count
+    may be one short). A free replay (the ceiling, a pending wave) keeps none, and a continuation over it counts it.
+    Missing paid evidence is never read as a free refusal, and nothing here is written. ``None`` otherwise."""
     from ouroboros.review_ledger import VERDICT_NOT_DISPATCHED, ledger_root, load_record
     from ouroboros.review_state import CommitAttemptRecord, make_repo_key
 

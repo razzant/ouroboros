@@ -137,6 +137,14 @@ def test_three_versions_recover_sources_and_author_facts_in_every_delivery(stage
     assert missing["status"] == "source_unavailable" and missing["gaps"]
     assert len(missing["rounds"]) == 3
     assert REASON in [r["reason"] for r in missing["decision_rows"] if r["remark"] == "Explicit author decision"]
+    if own_folder:
+        # The folder that holds none of this surface's rows cannot be read: the gap names it, the other's rounds stay.
+        broken = drive if surface == "commit" else own
+        (broken / "state").mkdir(parents=True, exist_ok=True)
+        (broken / "state" / "advisory_review.json").write_text("{broken", encoding="utf-8")
+        partial = review_dispute_history(drive_root=drive, attempts_root=own, repo_root=root, task_id=TASK)
+        assert [r["review_record_id"] for r in partial["rounds"]] == records
+        assert [gap["source"].get("folder") for gap in partial["gaps"] if "attempt bindings" in gap["reason"]] == [str(broken)]
 
 
 def test_legacy_missing_binding_is_a_gap_and_other_tasks_are_not_swept_in(tmp_path):
