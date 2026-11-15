@@ -27,9 +27,11 @@ import zipfile
 import pytest
 
 from ouroboros import work_domain
-from tests.test_execution_domain import _registry, attached, section
+from tests.test_execution_domain import _registry, attached, posix_host, section
 from tests.test_execution_domain import env as env  # fixture
 from tests.test_work_domain import _git, _managed, _work_repo, service_effects_on
+
+pytestmark = posix_host  # every flow runs under a policy naming ``execution``
 
 
 def _records(env):

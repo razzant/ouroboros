@@ -20,7 +20,7 @@ import pytest
 
 from ouroboros import work_domain
 from tests._safety_fixtures import disable_safety
-from tests.test_execution_domain import _registry, attached, fake_docker, section
+from tests.test_execution_domain import _registry, attached, fake_docker, posix_host, section
 from tests.test_execution_domain import env as env  # fixture
 
 _EFFECTS = frozenset({"open", "os.mkdir", "os.remove", "os.rename", "os.replace", "os.rmdir", "os.chmod",
@@ -84,6 +84,7 @@ def _managed(env, monkeypatch, **extra):
     return fake_docker(env, monkeypatch)
 
 
+@posix_host
 def test_the_service_performs_no_pathname_effect_on_a_work_tree(env, monkeypatch):
     """Every tool over a managed work repository — write, edit, patch (add, update, delete with its recovery
     copy), read, list (flat and tree), search, Git status, diff and history — works, and the service itself
@@ -118,6 +119,7 @@ def test_the_service_performs_no_pathname_effect_on_a_work_tree(env, monkeypatch
     assert attached(docker, "git") and attached(docker, "mv -f") and not docker.records()
 
 
+@posix_host
 def test_a_work_root_swapped_for_a_link_reaches_nothing_of_the_service(env, monkeypatch):
     """The employee makes the workspace's folder a link to a service folder after the task began. Which domain an
     operation belongs to is read from its spelling, so the write goes to the container, the service's own read
@@ -143,6 +145,7 @@ def test_a_work_root_swapped_for_a_link_reaches_nothing_of_the_service(env, monk
     assert attached(docker, "mv -f"), wrote  # the write was the container's, resolved in its own namespace
 
 
+@posix_host
 def test_a_failing_work_domain_never_falls_back_to_the_service(env, monkeypatch):
     """When the container refuses or the service has no Docker CLI, writes, Git and reads fail typed; nothing is
     done on the service instead, and the work tree is unchanged."""
@@ -159,6 +162,7 @@ def test_a_failing_work_domain_never_falls_back_to_the_service(env, monkeypatch)
     assert "⚠️" in wrote and "GIT_ERROR" in status and (repo / "a.txt").read_text() == "one\n"
 
 
+@posix_host
 def test_work_domain_stdin_and_stdout_cross_byte_exact(env, monkeypatch):
     """A real pipe consumer in the container (dash, whose asynchronous list's stdin is /dev/null before explicit
     redirections): every byte the service sends arrives and returns unchanged, NUL and invalid UTF-8 included."""
@@ -170,6 +174,7 @@ def test_work_domain_stdin_and_stdout_cross_byte_exact(env, monkeypatch):
     assert not docker.records()
 
 
+@posix_host
 def test_a_native_run_receives_its_inputs_and_returns_verified_outputs_through_the_work_domain(env, monkeypatch, tmp_path):
     """The material flow of a native run on a work repository: its selected inputs are delivered into the staging
     root as bytes the work domain unpacks; its private copy is made there by the work domain's Git (the
@@ -228,6 +233,7 @@ def test_a_native_run_receives_its_inputs_and_returns_verified_outputs_through_t
     assert not docker.records()  # every launch's group was confirmed ended and its record retired
 
 
+@posix_host
 def test_work_outputs_return_as_checked_bytes_and_a_planted_link_returns_nothing_of_the_service(env, monkeypatch):
     """A run's file outputs come back as bytes the service checks: a work file through the confined intake into the
     task's artifacts, a work folder as the container's tar stream (each member a requested regular file, hashed as
