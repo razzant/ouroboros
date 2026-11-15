@@ -299,6 +299,12 @@ def test_logs_sidebar_return_restores_reading_when_one_column_reopens_the_select
                 expect(body).to_be_visible()
                 page.evaluate(_SETTLE_RESTORE_FRAMES)
                 assert abs(body.evaluate("box => box.scrollTop") - place) <= 2, "the selected Logs row restores its reader"
+            centers = page.evaluate("""() => ['[data-shell-back]', '[data-dashboard-lead-name]',
+                '[data-log-kind=""]', '#btn-clear-logs'].map(selector => {
+                    const r = document.querySelector('#page-dashboard ' + selector).getBoundingClientRect();
+                    return r.y + r.height / 2;
+                })""")
+            assert max(centers) - min(centers) <= 2, "a tablet keeps return, caption, filters and Clear on one line"
             assert not errors, errors
         finally:
             browser.close()
