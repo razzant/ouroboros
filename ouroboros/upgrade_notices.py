@@ -11,7 +11,9 @@ to keep folding it, part by part. The per-call ceiling went the other way: the
 owner retired it on every install, a configured value included, so each install
 with a settings document hears once what bounds a command, an in-slot wait and the
 silence before attention now. Blocking reviews went that way too: an install that had them
-hears once that the setting is gone and what still holds. (Which reviewers run is no longer a notice
+hears once that the setting is gone and what still holds. The limit of requests at once per model
+became the owner's own number: an install whose document still shows the 3 earlier releases saved by
+themselves hears once that it now reads as not set. (Which reviewers run is no longer a notice
 of this module: the review lanes became rows of the subagent catalog, and the
 migration's own one-time report — ``server_maintenance._startup_review_pool_notice``
 — says which rows run now.)
@@ -39,6 +41,7 @@ OPTIONAL_BOUNDS_NOTICE_KEY = "optional_bounds_notified"
 LEGACY_MEMORY_NOTICE_KEY = "legacy_memory_notified"
 COMMAND_TIMEOUT_NOTICE_KEY = "command_timeout_notified"
 REVIEW_ENFORCEMENT_NOTICE_KEY = "review_enforcement_notified"
+MODEL_CAP_NOTICE_KEY = "model_cap_notified"
 _CALL_CEILING_KEY = "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC"
 _REVIEW_ENFORCEMENT_KEY = "OUROBOROS_REVIEW_ENFORCEMENT"
 # The old dialogue writer's retelling; its cursor file alone holds no retelling to tell about.
@@ -150,6 +153,26 @@ def review_enforcement_notice(document: Optional[Mapping[str, Any]], environ: Ma
             "message and the update description name it.")
 
 
+def model_cap_notice(document: Optional[Mapping[str, Any]], settings: Mapping[str, Any]) -> str:
+    """The owner-facing sentence that a saved 3 in "Requests at once per model" reads as not set (owner 13.11, 6A).
+
+    Owed while the document still shows the value the read seam blanks: the seam itself is asked
+    (``settings_scales.unchosen_saved_document``), never a second copy of its rule, and the startup view must read
+    the limit as not chosen. The words claim no choice: the 3 is the number earlier releases saved by themselves.
+    A save that writes the blank or the format marker before delivery ends that evidence (Colab's launch writes its
+    document whole before the server starts), and such an install hears nothing: a blank shows no 3.
+    """
+    from ouroboros.settings_scales import MODEL_CAP_KEY, model_cap_value, unchosen_saved_document
+
+    if not isinstance(document, Mapping) or document.get(MODEL_CAP_KEY) in (None, ""):
+        return ""
+    if unchosen_saved_document(document).get(MODEL_CAP_KEY) != "" or model_cap_value(settings.get(MODEL_CAP_KEY)) is not None:
+        return ""
+    return ('⚙️ "Requests at once per model" held 3 on this install, the number earlier versions saved by themselves. '
+            "It now reads as not set: Ouroboros no longer limits API models (the provider's own limits still apply), "
+            "and the built-in local model keeps 3. If 3 was your choice, enter it again in Settings → Models → More.")
+
+
 def legacy_memory_facts(root: Any) -> Optional[Dict[str, Any]]:
     """How much memory the old dialogue writer left, as the chronicle imported it; ``None`` = unknown.
 
@@ -244,6 +267,10 @@ def startup_upgrade_notices(settings: Mapping[str, Any]) -> None:
             text = review_enforcement_notice(_raw_settings_document(), os.environ)
             if text:
                 owed.append((REVIEW_ENFORCEMENT_NOTICE_KEY, text, "review_enforcement_notice"))
+        if not state.get(MODEL_CAP_NOTICE_KEY):
+            text = model_cap_notice(_raw_settings_document(), settings or {})
+            if text:
+                owed.append((MODEL_CAP_NOTICE_KEY, text, "model_cap_notice"))
         if not state.get(LEGACY_MEMORY_NOTICE_KEY) and message_bus.DATA_DIR:
             try:
                 text = legacy_memory_notice(legacy_memory_facts(message_bus.DATA_DIR))

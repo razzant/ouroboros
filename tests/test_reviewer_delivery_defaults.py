@@ -459,3 +459,22 @@ def test_an_install_that_had_blocking_hears_once_that_it_is_gone(notice_world, m
     assert texts == ([BLOCKING_GONE] if owed else [])
     assert ("review_enforcement_notified" in notice_world.state) is owed
     assert notice_world.notices.review_enforcement_notice({"OUROBOROS_REVIEW_ENFORCEMENT": "blocking"}, {}) == BLOCKING_GONE
+
+
+@pytest.mark.parametrize("document, view, owed", [
+    ({"OUROBOROS_MODEL_MAX_CONCURRENCY": 3}, {}, True),
+    ({"OUROBOROS_MODEL_MAX_CONCURRENCY": 3, "_model_cap_format": 1}, {}, False),  # a 3 saved as the owner's number
+    ({"OUROBOROS_MODEL_MAX_CONCURRENCY": 5}, {}, False),
+    ({"OUROBOROS_MODEL_MAX_CONCURRENCY": ""}, {}, False),  # a blank shows no 3, whoever wrote it
+    ({"OUROBOROS_MODEL_MAX_CONCURRENCY": 3}, {"OUROBOROS_MODEL_MAX_CONCURRENCY": 4}, False),  # the start reads a number
+    (None, {}, False),
+])
+def test_an_install_whose_saved_3_reads_as_not_set_hears_it_once(notice_world, monkeypatch, document, view, owed):
+    """Owner 13.11, 6A: the 3 every earlier release saved in "Requests at once per model" reads as not set, and the
+    install hears one sentence about it once, while its document still shows that 3 to the read seam."""
+    monkeypatch.setattr(notice_world.notices, "_raw_settings_document", lambda: document)
+    notice_world.notices.startup_upgrade_notices(view)
+    notice_world.notices.startup_upgrade_notices(view)
+    texts = [text for _chat, text, kw in notice_world.sent if kw["system_type"] == "model_cap_notice"]
+    assert len(texts) == (1 if owed else 0) and ("model_cap_notified" in notice_world.state) is owed
+    assert not owed or ("reads as not set" in texts[0] and "If 3 was your choice" in texts[0])
