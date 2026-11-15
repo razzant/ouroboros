@@ -61,8 +61,8 @@ html[data-layout="stack"] #page-settings .settings-lead-col { gap: var(--space-2
    its page (40rem up to the shell's switch) the first-level page has no Back, so the control stays. */
 @container sectionplace (max-width: calc(40rem - 0.02px)) {
     /* Collapse the empty lead after Search moves, never hide a focused field while its resize frame waits. */
-    html[data-layout="stack"] #page-settings[data-section-view="home"] > .app-page-header:has([data-settings-search-slot]:empty) { grid-template-areas: "leading title toolbar"; }
-    html[data-layout="stack"] #page-settings[data-section-view="home"] > .app-page-header .app-page-lead:has([data-settings-search-slot]:empty) { display: none; }
+    html[data-layout="stack"] #page-settings[data-section-view="home"] > .app-page-header[data-search-in-home] { grid-template-areas: "leading title toolbar"; }
+    html[data-layout="stack"] #page-settings[data-section-view="home"] > .app-page-header[data-search-in-home] .app-page-lead { display: none; }
     html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header > .app-page-leading,
     html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header .app-page-title-row { display: none; }
     html[data-layout="stack"] #page-settings[data-section-view="page"] > .app-page-header { grid-template-areas: "lead lead lead"; }

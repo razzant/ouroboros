@@ -70,6 +70,7 @@ export function initSettings(ctx = {}) {
         </div>`;
     document.getElementById('content').appendChild(page);
     const shell = page.querySelector('.settings-shell');
+    const header = page.querySelector('.app-page-header');
     const homeEl = page.querySelector('[data-settings-home]');
     const levelsEl = page.querySelector('.settings-levels');
     const headerBack = page.querySelector('.app-page-header [data-settings-back]');
@@ -131,6 +132,7 @@ export function initSettings(ctx = {}) {
         const inHome = currentLayout() === 'stack' && !panes();
         const parent = inHome ? cardHome : searchSlot;
         if (!searchField || !parent) return;
+        header.toggleAttribute('data-search-in-home', inHome);
         if (searchField.parentElement === parent && (!inHome || parent.firstChild === searchField)) return;
         const active = searchField.contains(document.activeElement) ? document.activeElement : null;
         if (inHome) parent.insertBefore(searchField, parent.firstChild);
