@@ -217,8 +217,10 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_wr
             expect(allowance).to_have_value("12.75")
             # Owner 14.11: a door from Settings keeps its return in the destination's header on every layout.
             _shoot(page, f"{engine}-settings-costs-return")
-            back = page.locator('#page-dashboard > .app-page-header').get_by_role('button', name='Back to Settings', exact=True)
+            back = page.locator('#page-dashboard > .app-page-header [data-shell-back]')
             expect(back).to_be_visible()
+            expect(back).to_have_text('Settings')
+            assert back.get_attribute('aria-label').startswith('Back to Settings')
             back.click()
             expect(home).to_be_visible()
             assert page.errors.unexpected() == [], page.errors.report()
