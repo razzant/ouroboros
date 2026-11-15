@@ -28,6 +28,7 @@ const CHAT_INPUT_HISTORY_KEY = 'ouro_chat_input_history';
 // The host icons a "+" item may name (`icon`); other names draw from the control glyphs a skill may name.
 const PLUS_ICONS = {
     attach: fluentIcon('attach', 16, 'regular'),
+    search: fluentIcon('search', 16, 'regular'),
 };
 
 /** The composer inside the room's `.chat-input-wrap`; chat.js mounts it and namespaces its `chat-*` ids in a Project.

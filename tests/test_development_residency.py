@@ -121,7 +121,7 @@ def test_the_public_schema_says_what_true_costs_and_a_subject_caller_omits_it():
     schema = next(tool for tool in get_tools() if tool.name == "start_task").schema
     description = schema["parameters"]["properties"][KEY]["description"]
     assert "every mode" in description and "chapter map" in description
-    # The custom codec drops parameter descriptions: the lead it actually sends carries the conditions, once.
+    # start_task reaches the custom codec without parameter descriptions: the lead it sends carries the conditions, once.
     wire = project_function_tools_to_openai_custom([{"type": "function", "function": schema}]).wire_tools()[0]
     lead = (wire.get("custom") or wire)["description"].split("\n")[0]
     clause = ("Set context_requires_development=true only when the task itself needs the whole development handbook in "

@@ -1253,7 +1253,7 @@ def _no_tool_final_answer(
                 emit_progress(note)
                 llm_trace["reasoning_notes"].append(note)
                 _loop()._arm_delivery_control(tools, limit_ctx, llm_trace)
-                return held("subagent_handoff", "pre_delivery_notice" if notice else "")
+                return held("subagent_handoff", (_hold_cause(tools._ctx) or "pre_delivery_notice") if notice else "")
             from ouroboros.owner_hurry import latched
             # The mind reads its review before it decides (owner 11.10); the rows themselves are the news.
             review_rows, review_present = ([], False) if resume_candidate or latched(tools._ctx) else (
