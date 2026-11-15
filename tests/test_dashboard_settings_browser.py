@@ -264,7 +264,9 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     back.click()
     page.wait_for_selector("#dashboard-panel-consciousness.active")
     model_row = page.locator(row("consciousness-model"))
-    assert model_row.evaluate("el => el === document.activeElement && getComputedStyle(el).outlineStyle === 'none'")
+    focus = model_row.evaluate("""el => ({focused: el === document.activeElement, ring: getComputedStyle(el).outlineStyle,
+        input: el.dataset.returnFocus, active: document.activeElement?.outerHTML.slice(0,500)})""")
+    assert focus['focused'] and focus['ring'] == 'none', focus
     model_row.click()
     page.locator('[data-settings-page="models/role/consciousness"]:visible').wait_for()
     page.keyboard.press("Escape")

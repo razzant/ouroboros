@@ -5,6 +5,21 @@ import { capturePagePlace, createPageNavigation, canLeavePage, openInitialPage }
 
 const settle = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
 
+test('the pressed opener survives a microtask between click listeners but never outlives the dispatch', async () => {
+    let onClick;
+    const focused = {}, button = {}, target = { closest: () => button };
+    const doc = { activeElement: focused, addEventListener: (_, handler) => { onClick = handler; }, removeEventListener() {} };
+    const nav = createPageNavigation({ doc, capture: opener => opener });
+    const event = { target, eventPhase: 1 };
+    onClick(event);
+    await settle(); // WebKit may checkpoint before the destination's listener; a pointer does not focus its button.
+    event.eventPhase = 3;
+    assert.equal(nav.capture(), button);
+    event.eventPhase = 0;
+    assert.equal(nav.capture(), focused, 'a later programmatic move cannot borrow that old click');
+    nav.destroy();
+});
+
 test('only keyboard dismissals ask the returned place to show its focus ring', async () => {
     const layers = createLayerStack({ win: null, doc: null }), restored = [];
     const doc = { addEventListener() {}, removeEventListener() {} };
@@ -22,7 +37,7 @@ test('only a forward jump without a named row lands at the top; vetoes, map choi
     const calls = [], doc = { addEventListener() {}, removeEventListener() {} };
     let allow = true;
     const nav = createPageNavigation({ layers, doc, canLeave: () => allow, land: () => calls.push('top'),
-        capture: () => ({ key: 'chat', label: 'Main', restore: () => calls.push('restore') }) });
+        capture: () => ({ key: 'chat', label: 'Main', restore: () => { calls.push('restore'); } }) });
     const commit = () => calls.push('show');
     await nav.go('skills', commit);
     assert.deepEqual(calls.splice(0), ['show', 'top']);

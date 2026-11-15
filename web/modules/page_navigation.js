@@ -5,10 +5,7 @@ import { pageLabel } from './pages.js';
 export function createPageNavigation({ layers, capture, canLeave, land = () => {}, doc = document } = {}) {
     let serial = 0;
     let pressed = null;
-    const onPress = (event) => {
-        pressed = event.target?.closest?.('button, a, [role="button"], [role="tab"]') || event.target;
-        queueMicrotask(() => { pressed = null; });
-    };
+    const onPress = (event) => { pressed = event; };
     doc.addEventListener('click', onPress, true);
 
     function clear() {
@@ -17,7 +14,11 @@ export function createPageNavigation({ layers, capture, canLeave, land = () => {
         for (const layer of returns) layer.returnTo.release?.();
     }
 
-    const currentPlace = () => capture(pressed || doc.activeElement);
+    const currentPlace = () => {
+        // WebKit checkpoints microtasks between click listeners without focusing the pressed button.
+        const target = pressed?.eventPhase ? pressed.target : null;
+        return capture(target?.closest?.('button, a, [role="button"], [role="tab"]') || target || doc.activeElement);
+    };
     async function go(key, commit, { map = false, row = '', origin = currentPlace(), current = () => true } = {}) {
         // A source owns its claim until this commit; covering its room then transfers ownership to the destination.
         if (await canLeave(key) === false || !current()) return false;
