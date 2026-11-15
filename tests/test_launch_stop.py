@@ -1039,8 +1039,11 @@ def test_a_root_task_stops_only_a_finished_producers_kept_service_and_a_delegate
         assert "SERVICE_STOP_BLOCKED" in refused and _answers(port), refused
         monkeypatch.setattr(services, "active_tool_profile", real_profile)
 
-        unreasoned = registry.execute("stop_service", {"service_id": launch_id})
+        unreasoned_result = registry.execute_result("stop_service", {"service_id": launch_id})
+        unreasoned = unreasoned_result.text
         assert "SERVICE_STOP_REFUSED" in unreasoned and "a reason is required" in unreasoned and _answers(port)
+        # The typed refusal the classifier's native row pairs with (TOOL_ARG_ERROR:SERVICE_STOP_REFUSED).
+        assert (unreasoned_result.status, unreasoned_result.code) == ("error", "TOOL_ARG_ERROR"), unreasoned_result
 
         _queue_view(drive)
         unknown = _payload(registry.execute("stop_service", {"service_id": launch_id, "reason": "cleanup"}))
@@ -1059,8 +1062,10 @@ def test_a_root_task_stops_only_a_finished_producers_kept_service_and_a_delegate
         assert _kept_view(drive)["services"][0]["state"] == "running"
 
         _queue_view(drive)
-        too_long = registry.execute("stop_service", {"service_id": launch_id, "reason": "x" * 1001})
+        too_long_result = registry.execute_result("stop_service", {"service_id": launch_id, "reason": "x" * 1001})
+        too_long = too_long_result.text
         assert "SERVICE_STOP_REFUSED" in too_long and "longer than 1000 characters" in too_long and _answers(port)
+        assert (too_long_result.status, too_long_result.code) == ("error", "TOOL_ARG_ERROR"), too_long_result
         done = registry.execute("stop_service", {"service_id": launch_id, "reason": "integrated; preview not needed"})
         receipt = _payload(done)
         assert receipt["outcome"] == "stopped" and receipt["actor"] == "agent:integrator", receipt

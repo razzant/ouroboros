@@ -266,7 +266,7 @@ def test_registered_outputs_are_production_whatever_their_size_and_a_missing_one
 
     registry, active, _outside = project
     ctx, site = registry._ctx, active / "site"
-    (site / "existing.txt").write_text("already here\n", encoding="utf-8")
+    (site / "existing.txt").write_bytes(b"already here\n")  # these bytes: Windows text mode would write CRLF
     missing = _run(registry, "run_command", site, ["missing.txt"])
     assert missing.code == "ARTIFACT_OUTPUT_ERROR" and not (site / "missing.txt").exists(), missing.text
     trace = {"tool_calls": [_trace_item("run_command", {"outputs": ["missing.txt"]}, missing)]}
