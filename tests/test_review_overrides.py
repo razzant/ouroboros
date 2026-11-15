@@ -354,6 +354,21 @@ def test_a_continuation_over_a_wave_handed_back_open_goes_over_what_its_record_s
     assert after["continued"]["latest"]["reason"] == fence and after["continued"]["count"] == fact["continued"]["count"] + 1
     assert after["landed"]["count"] == fact["landed"]["count"] + 1
     assert landed_outcome(ctx.drive_root, "e" * 40) == "no review verdict: review wave budget insufficient"
+    # A free replay is counted by the first continuation over it, which also leaves its decision on the record (the
+    # gate notes it there first). Retried after Git refused and after another outcome took the card's latest place,
+    # the rebuilt row finds it counted: one more continuation, no second outcome.
+    ctx._author_commit_source = rebuilt("refused")
+    records["refused"]["author_decision"] = {"disposition": "accepted", "rationale": WHY}
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
+    first = _fact(ctx.drive_root, "root-1")
+    assert (first["count"], first["latest"]["reason"]) == (after["count"] + 1, "review_cycles_exhausted")
+    _decide(ctx, "critical_findings", "another task of this work met a FAIL")
+    assert rebuilt("refused").review_override_reason == "review_cycles_exhausted"
+    ctx._author_commit_source = rebuilt("refused")
+    note_author_continuation(ctx, {"disposition": "accepted", "rationale": WHY})
+    retried = _fact(ctx.drive_root, "root-1")
+    assert retried["count"] == first["count"] + 1 and retried["latest"]["reason"] == "critical_findings"
+    assert retried["continued"]["count"] == first["continued"]["count"] + 1
 
 
 def test_an_open_wave_never_overwrites_a_reason_its_attempt_keeps(tmp_path, monkeypatch):
