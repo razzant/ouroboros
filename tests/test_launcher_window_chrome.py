@@ -13,6 +13,10 @@ style mask, asking a full-screen window once to leave, and refuses unknown, hidd
 Where the native qualification (macOS 26.4) saw AppKit behave otherwise than assumed, the stand-ins
 do what it saw. None of this is a native macOS run: pixels, gestures and AppKit's real geometry
 belong to that qualification (ARCHITECTURE §3 "Navigation and shared UI contracts").
+
+On Windows each desktop window is fitted to its screen's working area: WinForms stand-ins pin the fit's
+contract on every CI OS, and one case opens a real oversized pywebview window in a child process where
+Windows, pywebview and pythonnet are present (elsewhere it skips and says why).
 """
 from __future__ import annotations
 
@@ -21,6 +25,7 @@ import re
 import sys
 import threading
 import types
+from collections import namedtuple
 from pathlib import Path
 
 import pytest
@@ -42,9 +47,13 @@ class Hook:
         self.handlers.append(fn)
         return self
 
-    def fire(self):
+    def __isub__(self, fn):
+        self.handlers.remove(fn)
+        return self
+
+    def fire(self, *args):
         for handler in list(self.handlers):
-            handler()
+            handler(*args)
 
 
 class Rect:
@@ -323,6 +332,7 @@ def mac(monkeypatch):
                                   main=MainThread(), pywebview=types.ModuleType("webview"))
     state.pywebview.windows = []
     monkeypatch.setattr(wc, "_MACOS", True)
+    monkeypatch.setattr(wc, "_WINDOWS", False)  # a Windows runner: the fit's own before_show is test_on_windows_...
     monkeypatch.setattr(wc, "_classes", {})
     monkeypatch.setattr(wc, "_tracked", [], raising=False)
     monkeypatch.setattr(wc, "_transfer", None, raising=False)
@@ -440,9 +450,11 @@ def assert_ordinary(native):
 def test_the_leaf_is_inert_off_macos(monkeypatch):
     monkeypatch.setattr(wc, "_MACOS", False)
     monkeypatch.setattr(wc, "_LINUX", False)  # GTK's one before_show: test_on_gtk_...
+    monkeypatch.setattr(wc, "_WINDOWS", False)  # Windows' one before_show: test_on_windows_...
     monkeypatch.setattr(wc, "host_palette", lambda: "")  # the room off macOS: test_launcher_appearance
     window = Window(NSWindow())
     wc.WindowChrome().attach(window)
+    wc.fit_to_work_area(window)  # the setup window's seam (launcher_onboarding)
     assert not (window.events.before_show.handlers or window.events.before_load.handlers or window.events.closed.handlers)
 
 
@@ -824,6 +836,7 @@ def gtk(monkeypatch):
     """The Linux path. No ``gi`` exists here: the leaf only uses what pywebview's backend module already holds."""
     monkeypatch.setattr(wc, "_MACOS", False)
     monkeypatch.setattr(wc, "_LINUX", True)
+    monkeypatch.setattr(wc, "_WINDOWS", False)
 
 
 @pytest.mark.parametrize("theme,room", [
@@ -1996,43 +2009,223 @@ def test_without_its_webview_the_window_stays_ordinary(mac, monkeypatch):
     assert native.appearances == []
 
 
-def test_only_the_main_window_gets_the_integrated_bar(mac, monkeypatch):
-    """``Background`` owns the main window; the first-run setup window keeps its ordinary bar and, like every
-    window, opens in the room colour of the Mac's appearance (its page then paints the saved choice)."""
-    from ouroboros import launcher_background as lb
+def desktop_windows(monkeypatch, native):
+    """The main window as ``Background`` attaches it, then the setup window as ``launcher_onboarding`` makes it, each
+    over its own ``native()``."""
     from ouroboros import launcher_onboarding
 
-    monkeypatch.setattr(lb, "indicator_class", lambda: None)
-    background = lb.Background(lambda: None, lambda: 1, threading.Event())
-    main = Window(NSWindow())
+    monkeypatch.setattr(launcher_background, "indicator_class", lambda: None)
+    background = launcher_background.Background(lambda: None, lambda: 1, threading.Event())
+    main = Window(native())
     main.events.closing, main.events.shown = Hook(), Hook()
     background.attach(main)
-    assert background.chrome._before_show in main.events.before_show.handlers
-    assert main.events.before_load.handlers == [background.chrome._navigation_finished]
-
-    created = {}
-    fake = types.ModuleType("webview")
+    fake, menu = types.ModuleType("webview"), types.ModuleType("webview.menu")
     fake.windows = []
-    menu = types.ModuleType("webview.menu")
     menu.Menu = lambda title, items: types.SimpleNamespace(title=title, items=items)
     menu.MenuAction = lambda title, function: types.SimpleNamespace(title=title, function=function)
 
     def create_window(title, url=None, js_api=None, **kwargs):
-        created["window"] = Window(NSWindow())
-        fake.windows.append(created["window"])
-        return created["window"]
+        fake.windows.append(Window(native()))
+        return fake.windows[-1]
 
     fake.create_window, fake.start = create_window, lambda *args, **kwargs: None
     monkeypatch.setitem(sys.modules, "webview", fake)
     monkeypatch.setitem(sys.modules, "webview.menu", menu)
     launcher_onboarding.present_first_run_onboarding({}, 1, open_external_url=lambda url: {"ok": False})
-    setup = created["window"]
+    return background, main, fake.windows[0]
+
+
+def test_only_the_main_window_gets_the_integrated_bar(mac, monkeypatch):
+    """``Background`` owns the main window; the first-run setup window keeps its ordinary bar and, like every
+    window, opens in the room colour of the Mac's appearance (its page then paints the saved choice)."""
+    background, main, setup = desktop_windows(monkeypatch, NSWindow)
+    assert background.chrome._before_show in main.events.before_show.handlers
+    assert main.events.before_load.handlers == [background.chrome._navigation_finished]
     assert setup.events.before_load.handlers == []
     setup.events.before_show.fire()
     assert room(setup.native)(Appearance("DarkAqua")) == DARK_ROOM
     assert room(setup.native)(Appearance("Aqua")) == LIGHT_ROOM
     assert_ordinary(setup.native)
     assert setup.native.appearances == [], "no page can force the setup window's appearance"
+
+
+Size = namedtuple("Size", "Width Height")  # System.Drawing's two, as the fit reads and makes them
+Point = namedtuple("Point", "X Y")
+
+
+def work_area(left, top, width, height):
+    """``Screen.WorkingArea``: a screen less its taskbar, in the pixels its forms are measured in."""
+    return types.SimpleNamespace(Left=left, Top=top, Right=left + width, Bottom=top + height, Width=width, Height=height)
+
+
+class WinForm:
+    """pywebview 5.4's WinForms form as the fit touches it. Like WinForms it never gets smaller than its minimum, and
+    it records every property written; it has nothing that shows, hides or maximizes it."""
+
+    def __init__(self, size, least, at, visible=True):
+        vars(self).update(Load=Hook(), Shown=Hook(), written=[], MinimumSize=Size(*least), Size=Size(*size),
+                          Location=Point(*at), Visible=visible)
+
+    def __setattr__(self, name, value):
+        if name in ("Load", "Shown"):
+            return  # ``form.Load += handler`` rebinds the event the form already holds
+        if name == "Size":
+            value = Size(max(value.Width, self.MinimumSize.Width), max(value.Height, self.MinimumSize.Height))
+        self.written.append(name)
+        vars(self)[name] = value
+
+    Left, Top = property(lambda self: self.Location.X), property(lambda self: self.Location.Y)
+
+
+@pytest.fixture
+def winforms(monkeypatch):
+    """The Windows path: ``System.Drawing`` and ``System.Windows.Forms`` as ``_fit`` imports them, over one screen whose
+    working area is a 1366×768 laptop's less its taskbar until the test sets another."""
+    state = types.SimpleNamespace(area=work_area(0, 0, 1366, 728))
+    monkeypatch.setattr(wc, "_MACOS", False)
+    monkeypatch.setattr(wc, "_LINUX", False)
+    monkeypatch.setattr(wc, "_WINDOWS", True)
+    monkeypatch.setattr(launcher_appearance, "_WINDOWS", False)  # the caption and the room: test_launcher_appearance
+    drawing, forms = types.ModuleType("System.Drawing"), types.ModuleType("System.Windows.Forms")
+    drawing.Size, drawing.Point = Size, Point
+    forms.Screen = types.SimpleNamespace(FromControl=lambda form: types.SimpleNamespace(WorkingArea=state.area))
+    monkeypatch.setitem(sys.modules, "System.Drawing", drawing)
+    monkeypatch.setitem(sys.modules, "System.Windows.Forms", forms)
+    return state
+
+
+def test_on_windows_a_window_larger_than_its_screen_is_fitted_and_one_that_fits_is_untouched(winforms, monkeypatch,
+                                                                                             caplog):
+    """Both desktop windows through their own seams. pywebview asks for 1100×750 over a 800×500 minimum (main) and
+    980×780 over 840×640 (setup); WinForms scales both by the display and top-aligns a form taller than the area."""
+    def loaded(main, setup):
+        made = iter([main, setup])
+        _background, *windows = desktop_windows(monkeypatch, lambda: next(made))
+        for window in windows:
+            window.events.before_show.fire()
+            assert window.native.written == [] and len(window.native.Shown.handlers) == 1
+            window.native.Load.fire(window.native, None)
+        return main, setup
+
+    # A 1366×768 laptop at 150 %; its main window starts hidden (a quiet start).
+    main, setup = loaded(WinForm((1650, 1125), (1200, 750), (0, 0), visible=False),
+                         WinForm((1470, 1170), (1260, 960), (0, 0)))
+    for form, least in ((main, Size(1200, 728)), (setup, Size(1260, 728))):
+        assert (form.MinimumSize, form.Size, form.Location) == (least, Size(1366, 728), Point(0, 0))
+        assert form.written == ["MinimumSize", "Size", "Location"]  # the minimum first, and no other property
+    assert main.Visible is False
+    # WinForms may scale by the display after Load instead: the first Shown fits again, then lets go of the form.
+    vars(setup).update(MinimumSize=Size(1260, 960), Size=Size(1470, 1170), written=[])
+    for form in (main, setup):
+        form.Shown.fire(form, None)
+        assert form.Shown.handlers == [], "a restore from the tray or the owner's own size is never fitted again"
+    assert (setup.MinimumSize, setup.Size) == (Size(1260, 728), Size(1366, 728))
+    assert len(main.written) == 3, "already inside its screen: the second pass writes nothing"
+
+    # The same laptop at 100 %, the windows on a second screen whose taskbar is on top: 22 and 52 pixels too tall.
+    winforms.area = work_area(1920, 40, 1366, 728)
+    main, setup = loaded(WinForm((1100, 750), (800, 500), (2053, 29)), WinForm((980, 780), (840, 640), (2113, 40)))
+    assert (main.Size, main.Location, setup.Size, setup.Location) == (
+        Size(1100, 728), Point(2053, 40), Size(980, 728), Point(2113, 40))
+    assert main.written == setup.written == ["Size", "Location"]  # a minimum that fits stays the owner's floor
+
+    # A 1920×1080 screen at 100 %: both fit, so neither Load nor Shown writes a property.
+    winforms.area = work_area(0, 0, 1920, 1040)
+    for form in loaded(WinForm((1100, 750), (800, 500), (410, 145)), WinForm((980, 780), (840, 640), (470, 130))):
+        form.Shown.fire(form, None)
+        assert form.written == [] and form.Shown.handlers == []
+    assert not [record for record in caplog.records if record.name == wc.log.name]
+
+
+def test_on_windows_a_fit_that_fails_is_logged_and_never_reaches_pywebview_or_winforms(winforms, monkeypatch, caplog):
+    def refuse(form):
+        raise RuntimeError("no screen")
+
+    monkeypatch.setattr(sys.modules["System.Windows.Forms"].Screen, "FromControl", refuse)
+    form = WinForm((1470, 1170), (1260, 960), (0, 0))
+    window = Window(form)
+    wc.fit_to_work_area(window)
+    window.events.before_show.fire()
+    form.Load.fire(form, None)
+    form.Shown.fire(form, None)
+    assert form.written == [] and form.Shown.handlers == []
+    assert caplog.text.count("was not fitted to its screen") == 2
+    formless = Window(None)  # pywebview made no form
+    wc.fit_to_work_area(formless)
+    formless.events.before_show.fire()
+    assert "takes no handlers" in caplog.text
+    wc.fit_to_work_area(None)
+
+
+# The child of the native case: a real pywebview window asked for more than any screen shows, its form's bounds and
+# its screen's working area read on the UI thread once pywebview says it is shown.
+FIT_PROBE = r"""
+import json, sys
+
+def say(**fact):
+    print(json.dumps(fact), flush=True)
+
+try:
+    import clr
+    import webview
+except ImportError as error:
+    say(skip=f"pywebview or pythonnet is not installed: {error}")
+    sys.exit(0)
+from System import Environment, Func, Type
+if not Environment.UserInteractive:
+    say(skip="no interactive desktop session")
+    sys.exit(0)
+sys.path.insert(0, sys.argv[2])
+from ouroboros.launcher_window_chrome import fit_to_work_area
+
+window = webview.create_window("Ouroboros fit probe", html="<p>fit</p>", width=4000, height=3000, min_size=(4000, 3000))
+if sys.argv[1] == "fitted":
+    fit_to_work_area(window)
+
+def shown():
+    form = window.native
+
+    def read():
+        from System.Windows.Forms import Screen
+        bounds, area = form.Bounds, Screen.FromControl(form).WorkingArea
+        say(form=[bounds.Left, bounds.Top, bounds.Right, bounds.Bottom],
+            area=[area.Left, area.Top, area.Right, area.Bottom])
+
+    try:
+        form.Invoke(Func[Type](read))
+    finally:
+        window.destroy()
+
+window.events.shown += shown
+webview.start()
+"""
+
+
+def test_on_windows_a_real_oversized_window_opens_inside_its_screen_only_with_the_fit(record_property):
+    """The fit's one native run: WinForms, its DPI scaling and its events are real here. Each child owns one window for
+    a few seconds; a child that outlives its deadline is killed with its whole process tree (``tests/group_run``). The
+    measurement is the child's one line, whatever pythonnet's shutdown then exits with."""
+    if sys.platform != "win32":
+        pytest.skip("the fit is WinForms' (Windows); macOS and Linux window managers constrain a window themselves")
+    from tests.group_run import run_in_group
+
+    seen = {}
+    for mode in ("unfitted", "fitted"):
+        child = run_in_group([sys.executable, "-c", FIT_PROBE, mode, str(ROOT)], timeout=90, cwd=ROOT)
+        facts = [json.loads(line) for line in child.stdout.splitlines() if line.startswith("{")]
+        assert facts, (mode, child.returncode, child.stdout, child.stderr)
+        if "skip" in facts[-1]:
+            pytest.skip(facts[-1]["skip"])
+        seen[mode] = facts[-1]
+    record_property("form_and_working_area_ltrb", json.dumps(seen))  # the run's before and after
+    print("form and working area as left, top, right, bottom:", json.dumps(seen))
+
+    def inside(fact):
+        (left, top, right, bottom), area = fact["form"], fact["area"]
+        return area[0] <= left and area[1] <= top and right <= area[2] and bottom <= area[3]
+
+    assert not inside(seen["unfitted"]), ("pywebview's own window already fits: this run proves nothing", seen)
+    assert inside(seen["fitted"]), seen
 
 
 def _read(rel: str) -> str:
