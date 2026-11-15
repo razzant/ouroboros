@@ -304,11 +304,14 @@ def _update_row(row: Dict[str, Any], change, data_dir: Optional[Any] = None) -> 
 
 
 def _recorded_terminal(task_id: str, results_root: Any) -> bool:
-    """Positive lifecycle evidence only: an unreadable or missing record is not terminal (a missing one by its typed row)."""
+    """Positive lifecycle evidence only: an unreadable or missing record is not terminal (a missing one by its typed row).
+    A row its writer derived as a stable final (``task_store.stable_finals``) answers from its columns, unread."""
     try:
         from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
-        from ouroboros.task_store import exists
+        from ouroboros.task_store import exists, stable_finals
         root = _wt._data_dir(results_root)  # a recurring GC asking about an owner with no record reads no document
+        if stable_finals(root, [task_id]).get(str(task_id)):
+            return True
         record = load_effective_task_result(root, task_id, materialize_artifacts=False) if exists(root, task_id) else {}
         return (record or {}).get("status") in FINAL_STATUSES
     except Exception:
@@ -343,6 +346,7 @@ def live_lineage_processes(results_root: Any, task_id: str) -> List[int]:
             _fingerprint_matches, _owned_service_row, _service_group_survives_leader, custody_record_id,
         )
         from ouroboros.task_status import load_effective_task_result
+        from ouroboros.task_store import stated_roots
         from ouroboros import workspace_executor as executor
 
         root = _wt._data_dir(results_root)
@@ -363,6 +367,11 @@ def live_lineage_processes(results_root: Any, task_id: str) -> List[int]:
             return lineage[member] in owners
 
         custody = read_custody(root, every_drive=True)
+        named = {str(entry.get("owner_task") or entry.get("task_id") or "") for entry in custody.records}
+        named.update(str(row.get("owner_task") or "") for row in custody.rows)
+        # The root each recorded owner's own body states, in one read (what its effective read answers);
+        # ``ours`` reads whole only an owner that states none or is redirected by a retry.
+        lineage.update(stated_roots(root, named - owners))
         active: List[int] = [-1] if custody.blind or not custody.readable else []
         stamped = set()
         for entry in custody.records:

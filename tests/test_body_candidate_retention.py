@@ -227,6 +227,30 @@ def count_debt_reads(monkeypatch):
     return calls
 
 
+def test_the_owner_checks_decode_only_rows_their_columns_cannot_answer(tmp_path, monkeypatch):
+    """Whether a copy's owner ended and whether a recorded process belongs to its lineage are asked for each expired
+    copy on every custody pass: a stable final row answers from its columns and an owner's stated root from one
+    statement, so only a row that states none is decoded (#3399: 7 decodes, 2.5 MB per copy on a live stand)."""
+    from types import SimpleNamespace
+    from ouroboros import launch_custody, store
+
+    write_task_result(tmp_path, "cand", "completed", root_task_id="cand")
+    write_task_result(tmp_path, "kid", "running", root_task_id="cand", parent_task_id="cand")
+    write_task_result(tmp_path, "other", "running", root_task_id="other")
+    write_task_result(tmp_path, "unrooted", "running")  # its body states no root: read whole, as before
+    records = [{"owner_task": owner, "host_pid": pid, "unconfirmed_since": "2026-11-15T00:00:00Z", "record_id": owner}
+               for owner, pid in (("kid", 4242), ("other", 4343), ("unrooted", 4444))]
+    monkeypatch.setattr(launch_custody, "read_custody", lambda *_a, **_k: SimpleNamespace(
+        records=records, rows=[], blind=False, readable=True))
+    decoded, materialize = [], store.materialize
+    monkeypatch.setattr(store, "materialize", lambda tid, *rest: decoded.append(tid) or materialize(tid, *rest))
+    assert body._recorded_terminal("cand", tmp_path) is True and decoded == [], "a stable final answers unread"
+    assert body._recorded_terminal("kid", tmp_path) is False and decoded == ["kid"], "a running row is read"
+    decoded.clear()
+    assert body.live_lineage_processes(tmp_path, "cand") == [4242], "only the lineage's process holds the copy"
+    assert sorted(decoded) == ["cand", "unrooted"], "the copy's own row and the owner that states no root"
+
+
 def test_a_pass_of_held_candidates_reads_the_kept_debts_once(tmp_path, monkeypatch):
     """Every verdict shares the first one's read: three candidates held by their debts, however many passes repeat them."""
     data, contexts = finished_candidates(tmp_path, monkeypatch, 3)
