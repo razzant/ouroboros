@@ -161,7 +161,7 @@ def light_local_notice(settings: Mapping[str, Any]) -> str:
     """The owner-facing sentences that an empty Light model now follows its local box for every call (owner,
     2026-11-15), owed once to an install this moves: a cloud Main, an empty Light and its box ticked. Before, only
     some Light calls read the box (project names, interface translation, a Presence Light turn); memory
-    consolidation, the Light helpers, the reading of review verdicts, duplicate checks and an inheriting Safety
+    consolidation, the Light subagents, the reading of review verdicts, duplicate checks and an inheriting Safety
     Supervisor ran on Main, and the sentences name those. The Safety ones are said only where a check is asked and
     inherits Light (its own model, a deployment's checker and Safety off in both modes do not move), the Fallback
     walk only where a chain is set; the last one only while no local model is configured. Judged once, at the first
@@ -181,7 +181,7 @@ def light_local_notice(settings: Mapping[str, Any]) -> str:
     checks = checker() is None and not text("OUROBOROS_MODEL_SAFETY") and any(
         normalize_safety_mode(settings.get(key)) != "off"
         for key in ("OUROBOROS_SAFETY_MODE", "OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"))
-    moved = "memory consolidation, Light helper agents, review verdict reading and duplicate checks"
+    moved = "memory consolidation, Light subagents, review verdict reading and duplicate checks"
     said = ("⚙️ An empty Light model now follows its “Use the local model for this role” box everywhere. Here the box is ticked and "
             f"Main is a cloud model, so {'Safety checks, ' if checks else ''}{moved} now run on the local model too, "
             f"instead of {main or 'Main'}.")

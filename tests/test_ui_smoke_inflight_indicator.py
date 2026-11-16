@@ -57,6 +57,29 @@ def _observe_census(route, state, evidence):
         raise
 
 
+# Who asked for each census read, recorded as it starts. A gated read keeps its reader's stack
+# (state_snapshots.js readStateSnapshot): a room's own read names chat.js refreshHeaderControlState, the page's
+# poll app.js refreshProjectsNav.
+_RECORD_STATE_READERS = """(() => {
+    const fetch = window.fetch;
+    window.__stateReaders = [];
+    window.fetch = (url, init) => {
+        if (String(url).split('?')[0].endsWith('/api/state')) window.__stateReaders.push(String(new Error().stack));
+        return fetch(url, init);
+    };
+})();"""
+
+
+def _reader(stack):
+    """'room', 'page poll', or the recorded stack itself when it names neither (or both)."""
+    stack = stack or "no reader recorded"
+    room, page_poll = "refreshHeaderControlState" in stack, "refreshProjectsNav" in stack
+    return "room" if room and not page_poll else "page poll" if page_poll and not room else stack
+
+
+_STATUS = "() => document.querySelector('#chat-status')?.textContent.trim()"
+
+
 @pytest.mark.ui_browser
 def test_ui_smoke_chat_inflight_indicator_lifecycle(direct_server_with_data, request):  # noqa: F811
     """The header follows the /api/state census; a typing frame is only a receipt."""
@@ -71,10 +94,42 @@ def test_ui_smoke_chat_inflight_indicator_lifecycle(direct_server_with_data, req
     # and the typing receipt is driven through the window.__ouroWs debug hook,
     # which is exactly the surface the browser exercises for real WS frames.
     url = direct_server_with_data["url"]
-    state = {"rows": [], "reads": 0, "fixture_generation": 0}
+    state = {"rows": [], "reads": 0, "fixture_generation": 0, "hold": False}
+    held = []
 
     def _census(route):
+        if state["hold"]:
+            evidence.checkpoint("read_held", url=route.request.url)
+            held.append(route)
+            return
         _observe_census(route, state, evidence)
+
+    def _held_read():
+        """The next census read, unanswered, and who asked for it (the page reads one census at a time)."""
+        for _ in range(300):
+            if held:
+                reader = _reader(page.evaluate("() => window.__stateReaders.at(-1)"))
+                evidence.checkpoint("reader", reader=reader)
+                return held.pop(0), reader
+            page.wait_for_timeout(50)
+        raise AssertionError("no census read started within 15 s")
+
+    def _turn(n):
+        return [{"activity_id": f"act-smoke-{n}", "chat_id": 1, "project_id": "",
+                 "client_message_id": f"msg-smoke-{n}", "kind": "direct_chat",
+                 "phase": "thinking", "started_at": float(n)}]
+
+    def _receipt(n):
+        evidence.checkpoint("typing_emit_start", turn=n)
+        page.evaluate("""n => window.__ouroWs.emit('typing', {
+            type: 'typing', chat_id: 1, activity_id: `act-smoke-${n}`, client_message_id: `msg-smoke-${n}`,
+            phase: 'thinking', kind: 'direct_chat'})""", n)
+        evidence.checkpoint("typing_emit_returned", turn=n)
+
+    def _rows(rows):
+        state["rows"] = rows
+        state["fixture_generation"] += 1
+        evidence.checkpoint("fixture_rows_changed", fixture_generation=state["fixture_generation"], rows=rows)
 
     try:
         with sync_playwright() as pw:
@@ -83,8 +138,9 @@ def test_ui_smoke_chat_inflight_indicator_lifecycle(direct_server_with_data, req
             evidence = FailureEvidence(page, browser, output_dir(request.config),
                                        request.node.nodeid, "chromium")
             evidence.details.update(production_generation="unavailable",
-                                    request_initiator="unavailable; typing and project poll are possible readers")
+                                    request_initiator="each read's stack, window.__stateReaders")
             with evidence:
+                page.add_init_script(_RECORD_STATE_READERS)
                 page.route("**/api/state*", _census)
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 status_badge = page.locator("#chat-status")
@@ -98,43 +154,35 @@ def test_ui_smoke_chat_inflight_indicator_lifecycle(direct_server_with_data, req
                     timeout=10_000,
                 )
 
-                # Off the chat page the 3 s header poll is paused, so the census
-                # read that follows the receipt is the receipt's own (the 20 s
-                # projects poll is the only other reader).
-                page.click('[data-nav-page="settings"]')
-                evidence.checkpoint("left_chat")
-                page.wait_for_timeout(300)
-                reads_before = state["reads"]
-                evidence.checkpoint("reads_before", reads_before=reads_before)
+                # Main on screen reads the census through the page's 3 s poll (app.js), one read at a time
+                # (state_snapshots.js): a forced read asked while one is in flight starts the moment it settles,
+                # a poll tick is never queued behind it. Held unanswered, each read shows who asked for it.
+                page.wait_for_function("() => window.__ouroWs?.isConnected?.() === true", timeout=30_000)
+                state["hold"] = True
+                read, reader = _held_read()
+                for _ in range(5):  # what the boot or the socket's open still had in flight is answered as asked
+                    if reader == "page poll":
+                        break
+                    _observe_census(read, state, evidence)
+                    read, reader = _held_read()
+                assert reader == "page poll", reader
+                _observe_census(read, state, evidence)
+                read, reader = _held_read()
+                assert reader == "page poll", f"with no receipt the room read the census itself: {reader}"
 
-                # The census now lists the direct turn; the typing receipt (it
-                # carries the submission's client_message_id) pulls that census
-                # at once instead of waiting for the next poll.
-                state["rows"] = [{
-                    "activity_id": "act-smoke-1", "chat_id": 1, "project_id": "",
-                    "client_message_id": "msg-smoke-1", "kind": "direct_chat",
-                    "phase": "thinking", "started_at": 1.0,
-                }]
-                state["fixture_generation"] += 1
-                evidence.checkpoint("fixture_rows_changed", fixture_generation=state["fixture_generation"],
-                                    rows=state["rows"])
-                evidence.checkpoint("typing_emit_start")
-                page.evaluate("""() => {
-                    if (window.__ouroWs) {
-                        window.__ouroWs.emit('typing', {
-                            type: 'typing',
-                            chat_id: 1,
-                            activity_id: 'act-smoke-1',
-                            client_message_id: 'msg-smoke-1',
-                            phase: 'thinking',
-                            kind: 'direct_chat'
-                        });
-                    }
-                }""")
-                evidence.checkpoint("typing_emit_returned")
-
-                # In-flight state: reached through the receipt's own census read. The header
-                # names the census phase in the task-phase words (#1740: 'Thinking', no dots).
+                # The typing receipt (it carries the submission's client_message_id) arrives while the page's read
+                # is in flight; that read, asked before the turn began, answers the census without it. The receipt
+                # pulls the census at once: the next read is the room's own, not the page's next poll.
+                _receipt(1)
+                _observe_census(read, state, evidence)
+                _rows(_turn(1))
+                read, reader = _held_read()
+                assert reader == "room", f"the receipt pulled no census read of its own: {reader}"
+                assert page.evaluate(_STATUS) in {"Online", "Ready"}, "the receipt alone moved the header"
+                state["hold"] = False
+                _observe_census(read, state, evidence)
+                # In-flight state, from the receipt's own read: the header names the census phase in the
+                # task-phase words (#1740: 'Thinking', no dots).
                 page.wait_for_function(
                     """() => {
                         const el = document.querySelector('#chat-status');
@@ -143,9 +191,6 @@ def test_ui_smoke_chat_inflight_indicator_lifecycle(direct_server_with_data, req
                     timeout=5_000,
                 )
                 evidence.checkpoint("thinking_visible")
-                evidence.checkpoint("assert_census_read", reads=state["reads"], reads_before=reads_before)
-                assert state["reads"] > reads_before, "the receipt did not pull the census"
-                page.click('[data-nav-page="chat"]')
 
                 # Dots indicator visible (main chat instance id is #typing-indicator)
                 typing_el = page.locator("#typing-indicator")
@@ -153,10 +198,7 @@ def test_ui_smoke_chat_inflight_indicator_lifecycle(direct_server_with_data, req
 
                 # A typing frame alone never lights the header: with the census
                 # empty again, another receipt settles the page at Online.
-                state["rows"] = []
-                state["fixture_generation"] += 1
-                evidence.checkpoint("fixture_rows_changed", fixture_generation=state["fixture_generation"],
-                                    rows=state["rows"])
+                _rows([])
                 evidence.checkpoint("completion_and_typing_emit_start")
                 page.evaluate("""() => {
                     if (window.__ouroWs) {
@@ -188,6 +230,30 @@ def test_ui_smoke_chat_inflight_indicator_lifecycle(direct_server_with_data, req
                 )
                 typing_el.wait_for(state="hidden", timeout=5_000)
                 evidence.checkpoint("idle_and_dots_hidden")
+
+                # Main behind another page is away and quiet (PR #2951, room_retire.js): a receipt draws nothing
+                # there, and Main catches up when it shows again.
+                page.click('[data-nav-page="settings"]')
+                evidence.checkpoint("left_chat")
+                page.wait_for_timeout(300)
+                reads_before = state["reads"]
+                evidence.checkpoint("reads_before", reads_before=reads_before)
+                _rows(_turn(3))
+                _receipt(3)
+                page.wait_for_timeout(1_000)
+                assert page.evaluate(_STATUS) in {"Online", "Ready"}, "an away Main drew the receipt's census"
+                page.click('[data-nav-page="chat"]')
+                # Back, Main catches up as after a reconnect: its census read names the census phase.
+                page.wait_for_function(
+                    """() => {
+                        const el = document.querySelector('#chat-status');
+                        return el && el.textContent.trim() === 'Thinking';
+                    }""",
+                    timeout=5_000,
+                )
+                evidence.checkpoint("thinking_visible_after_return")
+                evidence.checkpoint("assert_census_read", reads=state["reads"], reads_before=reads_before)
+                assert state["reads"] > reads_before, "the return did not read the census"
     except PlaywrightError as exc:
         if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
             pytest.skip(str(exc))

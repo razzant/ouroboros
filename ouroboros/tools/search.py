@@ -461,7 +461,8 @@ def _web_search_ddgs(query: str, *, _max_attempts: int = 3) -> str:
 
 def _web_search_deepseek(ctx: ToolContext, query: str, connection: str = "") -> str:
     """DeepSeek's own Search API (``gateways/search_api.py``), an explicit Source only: the query as written in
-    one physical attempt whose price stays unknown, never read as free; an ambiguous send is never repeated."""
+    one physical attempt priced from its pinned quote (``_usage_settlement``), else unknown, never read as free;
+    an ambiguous send is never repeated."""
     from ouroboros._usage_wait import close_after_model_send
     from ouroboros.deadline_utils import physical_dispatch_timeout
     from ouroboros.llm_attempt import _PhysicalSendNotStarted
@@ -478,9 +479,14 @@ def _web_search_deepseek(ctx: ToolContext, query: str, connection: str = "") -> 
         raise RuntimeError(f"DeepSeek connection {connection} is not configured" if connection
                            else "DEEPSEEK_API_KEY is not configured")
     scope = _accounting_scope(ctx, "web_search.deepseek")
+    from ouroboros.pricing_catalog import pin_tariff
+
+    # This key's per-request quote and currency, pinned before the send; settlement prices the answer it got.
+    pinned = pin_tariff({"provider": "deepseek", "base_url": DEEPSEEK_BASE_URL, "api_key": api_key}, search=True,
+                        drive_root=scope.drive_root)
     request = AttemptRequest(model="", provider="deepseek", force_unknown_reservation=True, drive_root=scope.drive_root,
                              task_id=scope.task_id, root_task_id=scope.root_task_id, parent_task_id=scope.parent_task_id,
-                             category=scope.category, source=scope.source)
+                             category=scope.category, source=scope.source, cost_evidence=pinned)
     _search_progress(ctx, f"🔍 Trying DeepSeek web search: {sanitize_tool_result_for_log(str(query or ''))[:100]}")
     client = web_search_openai_client(api_key=api_key, base_url=DEEPSEEK_BASE_URL,
                                       timeout=_web_search_transport_timeout(ctx), follow_redirects=False)

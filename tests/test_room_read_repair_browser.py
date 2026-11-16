@@ -27,7 +27,7 @@ from tests.system_e2e.harness import (
     wait_until,
 )
 from tests.test_main_notice_browser import (
-    CARD_NAME, _NAV_FACTS, _around, _history, _nav, _open_drawer, _open_project, _prefs, _scroll_to, _shot,
+    CARD_NAME, _around, _history, _nav, _open_drawer, _open_project, _prefs, _scroll_to, _shot,
 )
 from tests.test_owner_wait_integration import wait_clone as clone_fixture
 from tests.ui_chat_viewport_smoke import _CAPTURE_TEST_SOCKET
@@ -88,8 +88,18 @@ def _read_ahead(page, chat):
     return {value for lo, hi in held for value in range(lo, hi + 1)}
 
 
-def _count(page, project):
-    return page.evaluate(_NAV_FACTS, project["id"])["projects_count"]
+def _unread(page, project):
+    """The Project's row says its unread with its mark; only Main has a number (DESIGN "Unread": the list header's
+    total was removed by the owner). Which rows were read is said exactly by the read-ahead revisions."""
+    return page.evaluate("""id => {
+        const row = document.querySelector(`.nav-project-row[data-project-id="${id}"]`);
+        return Boolean(row?.hasAttribute('data-unread')) && !document.querySelector('#nav-projects-count');
+    }""", project["id"])
+
+
+def _wait_unread(page, project):
+    page.wait_for_function("""id => document.querySelector(`.nav-project-row[data-project-id="${id}"]`)
+        ?.hasAttribute('data-unread')""", arg=project["id"], timeout=45_000)
 
 
 def _sideways(page, feed, mark, facts):
@@ -175,10 +185,9 @@ def test_a_wide_notice_is_read_once_all_of_it_was_in_view_and_rows_under_a_notic
                     task = wait_until(lambda: next((row["task"] for row in oracle.events("task_received")
                         if marker in str(row.get("task", {}).get("text") or "")), None), 60)
                     assert wait_durable_result(oracle, task["id"], timeout=120)["status"] == "completed"
-                    page.wait_for_function(
-                        "() => document.querySelector('#nav-projects-count')?.textContent.trim() === '5'", timeout=45_000)
+                    _wait_unread(page, project)
                     seen_before = (_prefs(page).get("project_seen_revision") or {}).get(project["id"], 0)
-                    capture.checkpoint("1-away-five-unread")
+                    capture.checkpoint("1-away-unread")
 
                     # ---- the short notice lands under a notice the room holds over its last lines ----
                     assert page.evaluate(_HOLD_TOAST, "A notice held over the conversation's last lines for this "
@@ -197,16 +206,15 @@ def test_a_wide_notice_is_read_once_all_of_it_was_in_view_and_rows_under_a_notic
                     assert short["seen"][0] <= short["top_on_screen"] and held["left"] < short["right"], short
                     page.wait_for_timeout(1500)
                     revision = short["revisions"][str(chat)]
-                    assert revision not in _read_ahead(page, chat) and _count(page, project) == "5"
+                    assert revision not in _read_ahead(page, chat) and _unread(page, project)
                     _shot(page, request, "T1-short-notice-under-a-held-notice")
                     capture.checkpoint("2-under-a-notice")
                     page.evaluate("() => { for (const toast of document.querySelectorAll("
                                   "'#page-chat .toast-stack--room .toast')) toast.dispose?.(); }")
                     page.wait_for_function("() => !document.querySelector('#page-chat .toast-stack--room .toast')")
                     # Its end is a reading moment: no scroll, the reader is already at the short notice.
-                    page.wait_for_function(
-                        "() => document.querySelector('#nav-projects-count')?.textContent.trim() === '4'", timeout=30_000)
-                    assert _read_ahead(page, chat) == {revision}
+                    wait_until(lambda: _read_ahead(page, chat) == {revision} or None, 30)
+                    assert _read_ahead(page, chat) == {revision} and _unread(page, project)
                     _shot(page, request, "T2-short-notice-read-once-the-notice-is-gone")
 
                     # ---- the wide notice: panned with only its top rows in the band, then with all of it ----
@@ -221,7 +229,7 @@ def test_a_wide_notice_is_read_once_all_of_it_was_in_view_and_rows_under_a_notic
                     _sideways(page, feed, wide_mark, wide)
                     page.wait_for_timeout(1500)
                     wide_revision = wide["revisions"][str(chat)]
-                    assert wide_revision not in _read_ahead(page, chat) and _count(page, project) == "4"
+                    assert wide_revision not in _read_ahead(page, chat) and _unread(page, project)
                     _shot(page, request, "W1-wide-panned-with-its-lower-rows-out-of-view")
                     capture.checkpoint("3-panned-partly")
                     _sideways(page, feed, wide_mark, {**wide, "pre": {**code, "scroll_width": code["width"]}})  # back to 0
@@ -229,9 +237,8 @@ def test_a_wide_notice_is_read_once_all_of_it_was_in_view_and_rows_under_a_notic
                     page.wait_for_timeout(800)
                     assert wide_revision not in _read_ahead(page, chat), "its box whole is not its content whole"
                     _sideways(page, feed, wide_mark, wide)
-                    page.wait_for_function(
-                        "() => document.querySelector('#nav-projects-count')?.textContent.trim() === '3'", timeout=30_000)
-                    assert _read_ahead(page, chat) == {revision, wide_revision}
+                    wait_until(lambda: _read_ahead(page, chat) == {revision, wide_revision} or None, 30)
+                    assert _read_ahead(page, chat) == {revision, wide_revision} and _unread(page, project)
                     prefs = _prefs(page)
                     assert (prefs.get("project_seen_revision") or {}).get(project["id"], 0) == seen_before  # no cursor moved
                     _shot(page, request, "W2-wide-read-once-all-of-it-was-in-view")
@@ -242,8 +249,8 @@ def test_a_wide_notice_is_read_once_all_of_it_was_in_view_and_rows_under_a_notic
                     page.wait_for_function("() => window.__testSockets?.[0]?.readyState === WebSocket.OPEN")
                     page.locator(f'{feed} .chat-bubble[data-system-type="main_notice"]').filter(
                         has_text=wide_mark).wait_for(timeout=30_000)
-                    page.wait_for_function(
-                        "() => document.querySelector('#nav-projects-count')?.textContent.trim() === '3'", timeout=30_000)
+                    _wait_unread(page, project)  # the Project's own answer and its unread notices stay unread
+                    assert _read_ahead(page, chat) == {revision, wide_revision}
 
                     def address(rows, mark):
                         return [row.get("row_address") for row in rows if mark in str(row.get("text") or "")]
@@ -284,7 +291,9 @@ def test_a_repaired_reply_target_joins_its_project_and_a_quiet_run_keeps_its_wor
 
     tag = uuid.uuid4().hex[:12]
     target_mark, reply_mark = f"REPAIRED_TARGET_{tag}", f"LEGACY_REPLY_{tag}"
-    sentence = f"Checked the disk and the gateway; nothing needed you. [QUIET_WORDS_{tag}]"
+    # One sentence: the browser boundary projects a closing sentence's first sentence (completion_gist.py, PR #3262),
+    # so the run's mark stands inside it.
+    sentence = f"Checked the disk and the gateway [QUIET_WORDS_{tag}]; nothing needed you."
     data = tmp_path / "instance" / "data"
     data.mkdir(parents=True)
     project = create_project(data, "repair-room", name="Repair room")

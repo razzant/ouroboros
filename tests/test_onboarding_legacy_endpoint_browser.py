@@ -189,8 +189,12 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
         report["frames"]["accounts-narrow"] = _frame(page, evidence, "accounts-390x844", card)
         page.set_viewport_size({"width": 980, "height": 780})
 
-        # Models: the legacy server is a usable source with its own discovery; official OpenAI stays a choice.
-        page.click('#next-btn')
+        # Models: the legacy server is a usable source with its own discovery; official OpenAI stays a choice. The step
+        # opens with its own read of the draft's catalog, which lists that server once with the key saved for it.
+        with page.expect_response('**/api/onboarding/model-catalog') as step_read:
+            page.click('#next-btn')
+        assert step_read.value.status == 200, step_read.value.text()
+        assert [call["authorization"] for call in _listed(legacy_calls)] == [f"Bearer {LEGACY_KEY}"]
         main = page.locator('[data-model-role="main"]')
         expect(main.locator('[data-model-role-source]')).to_have_value('api:openai-compatible')
         options = main.locator('[data-model-role-source] option').evaluate_all(
@@ -297,15 +301,19 @@ def test_reopened_setup_reaches_and_keeps_a_legacy_compatible_pair(direct_server
         expect(meta).to_contain_text(legacy_url)
         base.fill(dedicated_url)
         expect(status).to_have_text('Not saved')
-        page.click('#next-btn')
-        listed_before = len(_listed(legacy_calls))
+        with page.expect_response('**/api/onboarding/model-catalog') as step_read:
+            page.click('#next-btn')
+        assert step_read.value.status == 200, step_read.value.text()
+        listed_before, dedicated_before = len(_listed(legacy_calls)), len(_listed(dedicated_calls))
         with page.expect_response('**/api/openai-compatible/models') as discovery:
             page.click('#load-compatible-models')
         assert discovery.value.status == 200, discovery.value.text()
-        # A keyless dedicated address now serves the built-in source; the legacy key stays home.
+        # A keyless dedicated address now serves the built-in source; the legacy key stays home, from the step's own
+        # read of this draft's catalog and from discovery alike.
         report["dedicated_discovery_request"] = discovery.value.request.post_data_json
         assert report["dedicated_discovery_request"] == {"baseUrl": dedicated_url, "apiKey": "", "apiKeySetting": "OPENAI_COMPATIBLE_API_KEY"}
-        assert [call["authorization"] for call in _listed(dedicated_calls)] == [None]
+        assert [call["authorization"] for call in _listed(dedicated_calls)[dedicated_before:]] == [None]
+        assert {call["authorization"] for call in _listed(dedicated_calls)} == {None}
         assert len(_listed(legacy_calls)) == listed_before
         report["frames"]["dedicated-models"] = _frame(page, evidence, "models-dedicated-draft")
         # Official OpenAI stays a supported explicit choice beside the compatible endpoint.

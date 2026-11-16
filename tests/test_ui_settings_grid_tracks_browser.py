@@ -109,14 +109,23 @@ def test_action_results_reflow_before_their_text_is_squeezed(role_ui, theme):
     The synthetic translation stresses the existing rendered controls, not a copy
     of their markup. Containment alone passed the old, unreadable two-column row.
     At 360/280px the result gets the row's full width (2px rounding tolerance),
-    rather than the old 95/15px sliver. At 640px both still fit on the same line.
+    rather than the old 95/15px sliver. At 640px, with the product's own label, the
+    two actions (Save and Discard changes) and the result still share a line. With
+    the long translation at 640px the outcome depends on the engine's fonts (the two
+    actions and the result's 12rem took 629 of 640 px on macOS, while the Linux
+    runner drew Save alone 312 px wide), so that step checks the rule itself from
+    the widths this engine drew: beside the actions at the result's minimum or more
+    when they and it fit, else its own full line (DESIGN "a row too narrow for both
+    gives it its own line"), and never a sliver.
     """
     from playwright.sync_api import expect
 
     ui, seen = role_ui, {}
     roles.configure_mixed(ui)
     page = ui['page']
-    page.set_viewport_size({'width': 1100, 'height': 750})
+    # Settings' list stands beside the page from 40rem (docs/DESIGN.md "Settings"): the window leaves the editor's
+    # column at least the 640 px the widest step asks for.
+    page.set_viewport_size({'width': 1440, 'height': 750})
     page.add_init_script(f"localStorage.setItem('ouroboros.theme', {json.dumps(theme)})")
     form = roles.open_agent(ui, 'native')
     form.locator('[data-subagent-field="recommended_use"]').fill('An edited description.')
@@ -131,26 +140,49 @@ def test_action_results_reflow_before_their_text_is_squeezed(role_ui, theme):
     status = row.locator('.ui-result')
     expect(status).to_contain_text('Roster temporarily unavailable')
     status.evaluate("e => e.textContent = 'Der Modellkatalog ist momentan nicht erreichbar. Die gespeicherte Auswahl bleibt erhalten; bitte versuchen Sie die Aktualisierung erneut.'")
-    button.evaluate("e => e.textContent = 'Modellkatalog erneut aktualisieren'")
     row.evaluate("e => { window.actionReadingRow = e; window.actionReadingButton = e.firstElementChild; }")
-    for width in (640, 360, 280):
+    long_label = 'Modellkatalog erneut aktualisieren'
+    for label, width, step in (('Save', 640, '640'), (long_label, 640, '640-long'), (long_label, 360, '360'),
+                               (long_label, 280, '280')):
+        button.evaluate("(e, label) => { e.textContent = label; }", label)
         row.evaluate("(e, w) => { e.style.width = w + 'px'; e.style.maxWidth = '100%'; }", width)
         page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
         row.scroll_into_view_if_needed()
-        seen[str(width)] = row.evaluate("""e => {
+        assert row.evaluate("e => e.getBoundingClientRect().width") == pytest.approx(width, abs=1), "the step is the row's width"
+        # `used`: the shown actions' widths and the gap after each, as this engine drew them; `least`: the result's
+        # minimum (`--result-copy-min-width`) resolved in pixels by a probe that is gone before the next read.
+        seen[step] = row.evaluate("""e => {
             const box = e.getBoundingClientRect(), action = e.firstElementChild.getBoundingClientRect();
             const text = e.querySelector('.ui-result').getBoundingClientRect();
+            const shown = [...e.children].filter(c => !c.hidden && !c.classList.contains('ui-result'));
+            const gap = parseFloat(getComputedStyle(e).columnGap) || 0;
+            const probe = document.createElement('span');
+            probe.style.cssText = 'position:absolute;visibility:hidden;width:var(--result-copy-min-width)';
+            e.append(probe);
+            const least = probe.getBoundingClientRect().width;
+            probe.remove();
             return {width: box.width, text: text.width, textTop: text.top,
                 actionBottom: action.bottom, actionRight: action.right - box.right,
+                actions: shown.map(c => Math.round(c.getBoundingClientRect().width)),
+                used: shown.reduce((sum, c) => sum + c.getBoundingClientRect().width + gap, 0), least,
                 overflow: e.scrollWidth - e.clientWidth};
         }""")
-        setup_browser.capture(page, f"action-results-{theme}-{width}")
+        setup_browser.capture(page, f"action-results-{theme}-{step}")
     where = json.dumps(seen, indent=2)
     for width in (360, 280):
         result = seen[str(width)]
         assert result["text"] >= result["width"] - 2, f"the long result needs its own readable line:\n{where}"
         assert result["textTop"] >= result["actionBottom"] - 1, f"the result wraps under its action:\n{where}"
     assert seen["640"]["textTop"] < seen["640"]["actionBottom"], f"keep the result beside its action when it fits:\n{where}"
+    # The long label at 640: the rule from the widths drawn here, whatever the fonts. Beside the actions only with the
+    # result's minimum or more, on its own line only with the row's whole width; within 2 px of the edge either holds.
+    long = seen["640-long"]
+    beside = long["textTop"] < long["actionBottom"] and long["text"] >= long["least"] - 1
+    own_line = long["textTop"] >= long["actionBottom"] - 1 and long["text"] >= long["width"] - 2
+    slack = long["width"] - (long["used"] + long["least"])
+    assert long["least"] > 100, f"the result's minimum was measured:\n{where}"
+    assert (beside if slack > 2 else own_line if slack < -2 else beside or own_line), (
+        f"a long result beside its actions when they and its minimum fit, else on its own line (slack {slack:.1f}):\n{where}")
     assert all(v["overflow"] <= 1 and v["actionRight"] <= 1 for v in seen.values()), where
     # Reflow preserves the actual node, focus and action; no reconstructed lookalike.
     button.focus()

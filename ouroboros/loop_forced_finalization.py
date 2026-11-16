@@ -828,7 +828,7 @@ def _call_forced_model_once(
     ctx: _RoundLimitContext, *, initial_messages: Any = None, admitted_request: Any = None,
     admission: Optional[Dict[str, Any]] = None,
 ) -> str:
-    from ouroboros.model_slots import task_model_binding
+    from ouroboros.model_slots import task_model_binding, task_processing_preference
     from ouroboros.model_wait import current_model_wait
     from ouroboros.subagent_bootstrap import is_configured_api_child
 
@@ -906,6 +906,9 @@ def _call_forced_model_once(
             candidate_predicate=candidate_predicate if admitted_request is not None else None,
             model_role=role,
             model_account_override=account,
+            # The work's own tier, as its rounds and the priced wrap-up copy ask it (task_pacing).
+            processing_preference=task_processing_preference(
+                {"task_metadata": getattr(owner_ctx, "task_metadata", {})}, model_role=role),
             # A forced final belongs to the loop invocation that is finishing, so it
             # continues that same active turn instead of opening a new one.
             model_turn_state=getattr(owner_ctx, "model_turn_state", None),

@@ -45,8 +45,24 @@ MESSAGE_0120 = {
 }
 
 
+def _join_turn_carriers(timeout=60.0):
+    """Every turn carrier of this Host's own lane table ends before the table and roots are given back. Spelled with
+    core names a 7.10 core has, so the module keeps its promise (``join_host_lane_carriers`` came later)."""
+    from supervisor import queue, workers
+    from supervisor.inline_carrier import InlineCarrier
+
+    with queue._queue_lock:  # a carrier is registered and started under Q: none is seen half-started
+        carriers = [slot.proc for slot in workers.WORKERS.values() if isinstance(slot.proc, InlineCarrier)]
+    for carrier in carriers:
+        carrier.join(timeout)
+        assert not carrier.is_alive(), f"a turn carrier did not end within {timeout}s"
+
+
 @pytest.fixture
 def turn_door(tmp_path, monkeypatch):
+    from tests.conversation_carrier_support import host_lane
+
+    host_lane(monkeypatch, tmp_path)  # the Host serves alone over tmp_path: no supervisor queue of its own
     p.connect_place(tmp_path, connector="bridge", provider="chat", account_id="a", conversation_id="r",
                     wakes=["any_message"])
     monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
@@ -78,6 +94,8 @@ def turn_door(tmp_path, monkeypatch):
         client.app.state.host_service_context.presence_runner = lambda **kw: run_presence_turn(
             repo_dir=tmp_path, drive_root=tmp_path, agent_factory=lambda **_kw: Model(), **kw)
         yield tmp_path, client, payload, seen
+        _join_turn_carriers()  # its carriers settle after the waiters: that tail stays in this world
+        client.app.state.host_service_context.presence_runner = None  # the runner leaves with its root
 
 
 def _post(client, payload, **extra):

@@ -298,7 +298,8 @@ def record_started_custody(
     resource_ref: Dict[str, Any], capture_mode: str, processing: Mapping[str, Any] | None = None,
     prompt_cache_ttl: Mapping[str, Any] | None = None,
     continuation_of: str = "", capture_id: str = "", snapshot_task_id: str = "", max_seconds_basis: str = "",
-    row_effort: Optional[str] = None, plan_facts: Optional[dict] = None, daemon_store_id: str = "", engine_ref: Optional[dict] = None,
+    row_effort: Optional[str] = None, row_processing: Optional[str] = None, plan_facts: Optional[dict] = None,
+    daemon_store_id: str = "", engine_ref: Optional[dict] = None,
 ) -> Tuple[str, bool]:
     """Write the one STARTED custody row, including the source binding: ``(run id custody holds, durable)``.
 
@@ -370,6 +371,7 @@ def record_started_custody(
         shape={
             "effort": route.effort, "access": access, "mode": authority.mode,
             **({"row_effort": str(row_effort)} if row_effort is not None else {}),
+            **({"row_processing": str(row_processing)} if row_processing is not None else {}),
             "isolation": authority.isolation, "delegated": authority.delegated,
             "root": root, "max_seconds": seconds, "max_seconds_basis": str(max_seconds_basis or ""),
             "capture_mode": capture_mode,

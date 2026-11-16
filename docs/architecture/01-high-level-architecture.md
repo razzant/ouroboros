@@ -148,7 +148,8 @@ ouroboros/ — agent core and shared runtime (§6)
   observability.py, redaction.py, source_retention.py, shared_values.py — private CAS: elements stored once, gzip-1, hardlinks (§10)
   evidence_packs.py, evidence_packer.py — per-task xz packs (maintenance job, §5); verified addressed reads, missing ≠ `evidence_corrupt` (PERSISTENCE)
   finalization_timing.py — final-event phase fields and `task_finalization_timing` (§6)
-  process_logging.py — per-process logging bootstrap; the server is the sole `server.log` writer; the launcher copies the server pipe, byte-capped, into `agent_stdout.log`
+  process_logging.py — bounded diagnostic output and logging; server writes `server.log`, launcher copies into `agent_stdout.log`
+  browser_output.py — Playwright driver stderr joins that buffer; stdout stays protocol
   model_send_seal.py — the invariant `model-visible ⟺ logged` for `model_send` (docs/MODEL_SEND_OBSERVABILITY.md)
   cancel_intents.py — durable cancel-intent projection with claim-generation fencing; the one ingress `request_cancel`; fail-closed reads (§5; §10 invariants 14–15)
   owner_hurry.py — owner "hurry": a typed task-local latch and one line for the running work, never a chat message (§5)
@@ -172,7 +173,7 @@ ouroboros/ — agent core and shared runtime (§6)
   _outcome_receipts.py, _outcome_tool_errors.py — receipt parsing and the one canonical receipt identity (§10 invariant 16); tool-trace status vocabularies, re-exported by `outcomes.py`
   code_intelligence.py, code_intelligence_architecture.py — internal code inventory in a derived cache without source bodies; architecture facts over the pinned domain/contract carriers (Code navigation below)
   code_navigation.py, code_occurrences.py, code_import_candidates.py, code_search_rg.py — `query_code` views, token/import evidence, import candidates with explicit ambiguity, optional ripgrep for `search_code` behind the protected/secret gates (Code navigation below)
-  pricing.py, usage_accounting.py, usage_admission.py, _usage_wait.py — exact-route provider-catalog lookup with nullable estimates, no static tariffs (they go stale); physical attempts (reserved → dispatched → settled|unresolved) under global/root/group and review-wave admission (§6 Budget tracking)
+  pricing.py, usage_accounting.py, usage_admission.py, _usage_wait.py — exact-route catalog lookup, nullable estimates; physical attempts (states: §6) under global/root/group and review-wave admission (§6 Budget tracking)
   physical_attempt_context.py — frozen context-fit facts, including the memory view kind, carried by one physical model attempt (§6 Context fitting)
   _usage_rows.py, _usage_money.py, _usage_response.py, usage_ledger.py — the reducer, Decimal cash, the usage normalizer, row rules and the money lock (§6 Usage ledger substrate vs. accounting policy)
   _usage_cache_splits.py — process-local cache split by task/provider/route/review; a missing entry prices a full cache write (§6)
@@ -195,7 +196,7 @@ ouroboros/ — agent core and shared runtime (§6)
   model_wait.py — quota/auth waits bound to the task or phase owner (§6 Quota and auth waits)
   owner_model.py, lead_fact.py — the owner's durable work-local primary and its wake; a work's published lead (§6)
   transport_custody.py — typed transport facts for the physical-attempt custody seam
-  openrouter_attribution.py — canonical OpenRouter application attribution, centralized so forks do not compete under one identity (§7)
+  openrouter_attribution.py — app identity (§7)
   openai_chat_custom.py, openai_chat_dispatch.py — direct-OpenAI Chat function→custom codec and its dispatch policy: custom first, exact-dialect fallback, task-local `none` last
   request_wire_contract.py, request_wire_resolution.py, request_wire_receipts.py, request_wire_attempt.py, request_wire_custom_validation.py, request_wire_recovery.py, request_wire_temperature.py, effort_evidence.py — exact-route wire compatibility (§6 Context fitting, retry, and compaction; §10 invariant 13)
   anthropic_native_custody.py — whole-block replay custody for Anthropic native reasoning on the same route

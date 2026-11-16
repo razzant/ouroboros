@@ -22,6 +22,7 @@ from ouroboros import store, store_switch
 from ouroboros.store import StoreMigrating
 from ouroboros.store_import import ensure_current_store
 from ouroboros.task_results import write_task_result
+from tests.conversation_carrier_support import lone_host_world as lone_host_world  # noqa: F401 -- fixture
 from tests.test_store_import import fixture_root
 from tests.test_store_switch import Owner, git
 from tests.test_store_switch import target_repo as _switch_target_repo
@@ -142,6 +143,7 @@ def test_pause_door_answers_migrating_inside_the_window_and_proceeds_outside(tmp
     assert outside.status_code == 200 and calls == [("t1", "r1", None)], "a bare body declares nobody"
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_presence_door_answers_migrating_inside_the_window_and_proceeds_outside(tmp_path, monkeypatch):
     from ouroboros.gateway.host_service import create_host_service_app
     from tests.test_host_service_api import _seed_presence_behavior, _seed_token

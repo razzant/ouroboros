@@ -17,9 +17,11 @@ from tests.test_launcher_handoff_stop import native_guard  # noqa: F401
 @pytest.fixture(autouse=True)
 def _host_lane_roots(tmp_path, monkeypatch):
     """A Host-only process: its turns run on the disclosed degraded executor in this process (no pool generation)."""
-    from tests.conversation_carrier_support import host_lane
+    from tests.conversation_carrier_support import host_lane, join_host_lane_carriers
 
     host_lane(monkeypatch, tmp_path)
+    yield
+    join_host_lane_carriers()  # its carriers settle after the waiters: that tail stays in this world
 
 
 @pytest.fixture(autouse=True)

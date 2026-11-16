@@ -5477,7 +5477,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     align-self: stretch;
     margin-inline-end: var(--capsule-end-gutter);
 }
-:is(.chat-model-mode, .chat-context-mode, .chat-subagents-mode)[data-disabled="true"] .chat-context-strip {
+:is(.chat-context-mode, .chat-subagents-mode)[data-disabled="true"] .chat-context-strip {
     opacity: 0.5;
     pointer-events: none;
 }
@@ -5493,7 +5493,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     pointer-events: none;
     transition: left 0.2s cubic-bezier(0.2, 0.8, 0.2, 1), width 0.2s, background 0.2s;
 }
-:is(.chat-model-mode, .chat-context-mode, .chat-subagents-mode) .chat-seg {
+:is(.chat-context-mode, .chat-subagents-mode) .chat-seg {
     position: relative;
     display: flex;
     align-items: center;
@@ -5511,12 +5511,12 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .chat-seg-text {
     display: block;
 }
-:is(.chat-model-mode, .chat-context-mode, .chat-subagents-mode) .chat-seg:focus-visible {
+:is(.chat-context-mode, .chat-subagents-mode) .chat-seg:focus-visible {
     outline: 2px solid var(--focus-accent-border);
     outline-offset: -2px;
 }
 @media (hover: hover) {
-    :is(.chat-model-mode, .chat-context-mode, .chat-subagents-mode) .chat-seg:not([aria-checked="true"]):not([data-disabled="true"]):hover {
+    :is(.chat-context-mode, .chat-subagents-mode) .chat-seg:not([aria-checked="true"]):not([data-disabled="true"]):hover {
         color: var(--text-primary);
     }
 }
@@ -5533,7 +5533,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 .chat-subagents-mode[data-mode="off"] {
     --mode-ink: var(--status-neutral-fg);
 }
-:is(.chat-subagents-strip, .chat-model-strip) .chat-context-thumb { left: var(--thumb-left, 0); width: var(--thumb-width, 0); }
+.chat-subagents-strip .chat-context-thumb { left: var(--thumb-left, 0); width: var(--thumb-width, 0); }
 .chat-subagents-mode .chat-seg { justify-content: center; min-width: var(--touch-target-min); box-sizing: border-box; }
 .chat-subagents-mode .chat-seg[data-disabled="true"] { color: var(--text-disabled); cursor: default; }
 .chat-subagents-core { color: var(--text-meta); }
@@ -5732,13 +5732,19 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 /* Model (DESIGN "Composer owner controls"; composer_model.js): the first capsule, the model new work in this room
    starts on. Its glyph is the mark of the source that model is reached through, lit like a ring's arc only while the
-   room chose its own; the capsule itself stays neutral, like its neighbours. Its strip is the family's mode strip
-   (Main · the recent models · Search) under the strip's crimson wash (a chosen value never stands on a grey plate);
-   its ink stays neutral: a model is not a level. */
-.chat-model-mode { --mode-fill: var(--accent-14); }
+   room chose its own; the capsule itself stays neutral, like its neighbours. A tier other than Standard follows the
+   model in the accent's word. A press opens the Model sheet (model_sheet.js); the capsule itself never opens inline. */
 .chat-model-mode .chat-capsule-glyph { color: var(--text-meta); }
 .chat-model-mode[data-own="true"] .chat-capsule-glyph { color: var(--tone-crimson-word); }
 .chat-model-mode .chat-capsule-glyph .model-source-mark { width: 15px; height: 15px; }
+.chat-model-mode .chat-capsule-tier {
+    margin: 0;
+    margin-inline: calc(-1 * var(--space-2)) var(--space-3);
+    color: var(--tone-crimson-word);
+    font-weight: 600;
+}
+.chat-model-mode .chat-capsule-tier::before { content: "·"; margin-inline-end: var(--space-1); color: var(--text-disabled); }
+.chat-model-mode[data-sheet-open="true"] { border-color: var(--focus-accent-border); }
 .model-source-mark { display: block; flex: 0 0 auto; }
 .model-source-initial {
     display: grid;
@@ -5750,18 +5756,51 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     font-weight: 700;
     line-height: 1;
 }
-.chat-model-mode .chat-seg[aria-checked="true"] { color: var(--text-primary); }
-.chat-model-mode .chat-seg-text { display: flex; align-items: center; gap: 5px; }
-.chat-model-find svg { flex: 0 0 auto; width: 13px; height: 13px; }
-html[data-layout="stack"] .chat-model-find-word { display: none; }
-/* Search: the strip becomes a field on the composer's line and the capsule takes the line, the other controls stepping
-   aside; its suggestions float above the row, where the hint stood. */
-.chat-toolbar-row[data-owner-search] > :not(.chat-model-mode) { display: none; }
-.chat-model-mode[data-search="true"] { flex: 1 1 auto; }
-.chat-model-mode[data-search="true"]:focus-within { border-color: var(--focus-accent-border); }
-.chat-model-mode[data-search="true"] :is(.chat-capsule-body, .chat-model-strip) { flex: 1 1 auto; min-width: 0; max-width: none; }
-.chat-model-mode[data-search="true"] > .ui-hint { display: none; }
-html[data-layout="stack"] .chat-model-mode[data-search="true"] .chat-capsule-head { display: none; }
+/* The Model sheet: the popups' floating material above its anchor (a composer row, a work's fact), so nothing under it
+   moves. From the top: what the caller puts first, the field, the list scrolling inside itself, and the tier strip at
+   its foot. In the stack layout it is a bottom sheet over a scrim, the whole width less the popups' margin. */
+.ui-popup.model-sheet {
+    display: flex;
+    flex-direction: column;
+    width: min(440px, var(--ui-popup-max-width));
+    max-height: min(560px, var(--ui-popup-max-height));
+    padding: var(--space-2);
+    overflow: hidden;
+}
+.model-sheet[aria-busy="true"] :is(.model-sheet-list, .card-model-acts) { pointer-events: none; opacity: 0.6; }
+.model-sheet > .chat-model-search {
+    flex: 0 0 auto;
+    height: 36px;
+    margin-bottom: var(--space-1);
+    border-radius: var(--radius-inner);
+    background: var(--surface-tray);
+}
+.model-sheet > .chat-model-search:focus-within { box-shadow: inset 0 0 0 1px var(--focus-accent-border); }
+.model-sheet-list { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.model-sheet-scrim { position: fixed; inset: 0; z-index: calc(var(--z-popover) - 1); background: var(--scrim); }
+/* Unplaced, it names its own height bound, which an expanded quotation in its head takes a third of. */
+.model-sheet[data-sheet="bottom"] {
+    --ui-popup-max-height: min(78vh, calc(100dvh - 2 * var(--space-5)));
+    position: fixed;
+    inset: auto var(--space-2) calc(var(--space-2) + env(safe-area-inset-bottom, 0px)) var(--space-2);
+    width: auto;
+    max-height: var(--ui-popup-max-height);
+    padding-top: var(--space-1);
+}
+/* Under a phone keyboard the sheet stands at the top of what is visible, so its field and list stay above the keys. */
+body.keyboard-open .model-sheet[data-sheet="bottom"] {
+    --ui-popup-max-height: calc(var(--vvh) - 2 * var(--space-2));
+    inset: calc(var(--inset-top) + var(--space-2)) var(--space-2) auto var(--space-2);
+}
+.model-sheet-grab {
+    flex: 0 0 auto;
+    align-self: center;
+    width: 36px;
+    height: 4px;
+    margin: var(--space-1) 0 var(--space-2);
+    border-radius: 2px;
+    background: rgba(var(--neutral-rgb), 0.22);
+}
 .chat-model-search {
     display: flex;
     align-items: center;
@@ -5769,7 +5808,7 @@ html[data-layout="stack"] .chat-model-mode[data-search="true"] .chat-capsule-hea
     flex: 1 1 auto;
     min-width: 0;
     height: 100%;
-    padding: 0 var(--space-3) 0 var(--space-2);
+    padding: 0 var(--space-3) 0 var(--space-3);
     color: var(--text-meta);
     cursor: text;
 }
@@ -5787,20 +5826,14 @@ html[data-layout="stack"] .chat-model-mode[data-search="true"] .chat-capsule-hea
     font: inherit;
     letter-spacing: inherit;
 }
-.chat-model-query::placeholder { color: var(--text-disabled); }
-/* The suggestions: the popups' floating material above the row (as wide as the row in the stack layout), scrolling
-   inside itself under the rule line. A row is one model through one source: the source's mark, the model, then its
-   window when known, the source and how the source is paid. Where a row cannot hold both on one line (a narrow pane,
-   a long model name) the facts go under the name; wrapped lines share its start, and the name keeps its line. */
-.ui-popup.chat-model-list {
-    display: flex;
-    flex-direction: column;
-    width: 400px;
-    max-height: min(440px, var(--ui-popup-max-height));
-    padding: var(--space-1);
-    overflow: hidden;
+@media (pointer: coarse) {
+    .chat-model-query { font-size: max(16px, 1em); }  /* a phone does not zoom the page into the field */
 }
-html[data-layout="stack"] .ui-popup.chat-model-list { width: var(--ui-popup-anchor-width); }
+.chat-model-query::placeholder { color: var(--text-disabled); }
+/* The list: a grid the field drives. A row is one model through one source: its pick cell (the source's mark, the
+   model, then its window when known, the source and how it is paid or its price) and its Pin. Where a row cannot hold
+   both on one line (a narrow pane, a long model name) the facts go under the name; wrapped lines share its start, and
+   the name keeps its line. */
 .chat-model-rows {
     flex: 1 1 auto;
     min-height: 0;
@@ -5810,27 +5843,34 @@ html[data-layout="stack"] .ui-popup.chat-model-list { width: var(--ui-popup-anch
 }
 .chat-model-row {
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0 var(--space-2);
-    min-height: 34px;
-    padding: 5px var(--space-3);
+    align-items: stretch;
     border-radius: var(--radius-inner);
     color: var(--text-primary);
     font-size: var(--type-body);
     line-height: var(--line-body);
     cursor: pointer;
 }
+.chat-model-cell {
+    display: flex;
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0 var(--space-2);
+    min-width: 0;
+    min-height: 34px;
+    padding: 5px var(--space-2) 5px var(--space-3);
+    border-radius: var(--radius-inner);
+}
 .chat-model-row[data-active="true"] { background: var(--menu-item-hover); }
 @media (hover: hover) {
     .chat-model-row:hover { background: var(--menu-item-hover); }
 }
 @media (pointer: coarse) {
-    .chat-model-row { min-height: var(--touch-target-min); }
+    .chat-model-cell { min-height: var(--touch-target-min); }
 }
 .chat-model-row[aria-selected="true"] { background: var(--accent-12); color: var(--accent-light); }
-.chat-model-row :is(svg, .model-source-mark) { flex: 0 0 auto; width: 14px; height: 14px; color: var(--text-meta); }
-.chat-model-row[aria-selected="true"] :is(svg, .model-source-mark) { color: inherit; }
+.chat-model-row :is(.chat-model-cell > svg, .model-source-mark) { flex: 0 0 auto; width: 14px; height: 14px; color: var(--text-meta); }
+.chat-model-row[aria-selected="true"] :is(.chat-model-cell > svg, .model-source-mark) { color: inherit; }
 /* The name never leaves its mark's line: it is at most the line less the mark, so only the facts ever wrap. */
 .chat-model-row-id { flex: 1 1 auto; min-width: 0; max-width: calc(100% - 14px - var(--space-2)); overflow: hidden; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 .chat-model-row-facts, .chat-model-row-tag { flex: 0 0 auto; color: var(--text-meta); font-size: var(--type-meta); white-space: nowrap; }
@@ -5843,21 +5883,73 @@ html[data-layout="stack"] .ui-popup.chat-model-list { width: var(--ui-popup-anch
     overflow-wrap: anywhere;
     text-align: start;
 }
+.chat-model-row[aria-selected="true"] :is(.chat-model-row-facts, .chat-model-row-tag) { color: inherit; }  /* full ink: AA on the fill */
 :is(.chat-model-typed, .chat-model-door) .chat-model-row-id { color: var(--text-secondary); }
-.chat-model-section, .chat-model-note, .chat-model-rule {
+.chat-model-fold { display: inline-flex; flex: 0 0 auto; color: var(--text-meta); transition: transform 0.18s; }
+.chat-model-sources[aria-expanded="true"] .chat-model-fold { transform: rotate(90deg); }
+/* A row's Pin: the Project rows' pin glyph in a target of its own beside the facts. Under a mouse an unpinned row's
+   Pin shows on the row's hover or keyboard focus; a pinned row's always shows, stronger; under a finger every row's
+   shows, a finger's width. */
+.chat-model-pin-cell { display: flex; flex: 0 0 auto; align-items: center; }
+.chat-model-pin {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 100%;
+    min-height: 32px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-inner);
+    background: transparent;
+    color: var(--text-disabled);
+    cursor: pointer;
+    opacity: 0;
+}
+.chat-model-pin svg { width: 15px; height: 15px; }
+.chat-model-pin[aria-pressed="true"] { color: var(--text-meta); opacity: 1; }
+.chat-model-pin[aria-pressed="true"] svg { fill: currentColor; }  /* a pinned row's pin is filled, an offered one drawn */
+.chat-model-row[aria-selected="true"] .chat-model-pin[aria-pressed="true"] { color: inherit; }
+.chat-model-row:is(:hover, [data-active="true"]) .chat-model-pin { opacity: 1; }
+.chat-model-row[data-active-cell="1"] .chat-model-pin { outline: 2px solid var(--focus-accent-border); outline-offset: -2px; color: var(--text-primary); }
+@media (hover: hover) {
+    .chat-model-pin:hover { color: var(--text-primary); background: rgba(var(--neutral-rgb), 0.08); }
+}
+@media (pointer: coarse) {
+    .chat-model-pin { width: var(--touch-target-min); opacity: 1; }
+}
+.chat-model-pin:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: -2px; opacity: 1; }
+.chat-model-section, .chat-model-note {
     margin: 0;
     padding: var(--space-2) var(--space-3) 2px;
     color: var(--text-meta);
     font-size: var(--type-meta);
 }
 .chat-model-section { font-weight: 500; }
-.chat-model-rule {
+/* The tier strip at the sheet's foot (processing_choice.js): the shared strip, Default beside it while there is a
+   choice to leave, then what the choice applies to and what the tier under the mouse or focus means on this route,
+   in a box as tall as its tallest explanation (hidden copies stacked in its one cell), so nothing jumps while a
+   pointer moves. A tier taken without a choice of its own wears a ring; one this route does not list is quieter. */
+.model-tier {
     flex: 0 0 auto;
-    margin-top: var(--space-1);
-    padding-bottom: var(--space-1);
+    margin-top: var(--space-2);
+    padding: var(--space-2) var(--space-2) 0;
     border-top: 1px solid rgba(var(--neutral-rgb), 0.08);
-    color: var(--text-secondary);
 }
+.model-tier-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.model-tier-seg[data-resolved="true"] { box-shadow: inset 0 0 0 1px rgba(var(--neutral-rgb), 0.28); color: var(--text-primary); }
+.model-tier-seg[data-support="unlisted"]:not([aria-checked="true"]) { color: var(--text-disabled); }
+.model-tier :is(.model-tier-seg, .model-tier-default)[aria-disabled="true"] { cursor: progress; opacity: var(--control-disabled-opacity); }
+.model-tier-scope, .model-tier-means, .model-tier-sizer { margin: 0; overflow-wrap: anywhere; }
+.model-tier-scope { margin-top: var(--space-2); color: var(--text-secondary); font-size: var(--type-meta); }
+.model-tier-meansbox { display: grid; margin-top: 2px; }
+.model-tier-meansbox > *, .model-tier-sizer > * { grid-area: 1 / 1; }
+.model-tier-means, .model-tier-sizer {
+    min-height: calc(2em * var(--line-meta));
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+.model-tier-sizer { display: grid; visibility: hidden; pointer-events: none; }
 /* The Main chat's confirming sheet (the shared confirm dialog's content): what Main becomes, and its facts. */
 .chat-model-sheet-row {
     display: flex;
@@ -5951,17 +6043,10 @@ button.card-model-fact:focus-visible { outline: 2px solid var(--focus-accent-bor
 .card-model[data-basis="fallback"] .card-model-lead { flex-shrink: 0; }
 .card-model-caret { display: inline-flex; flex: 0 0 auto; color: var(--text-meta); }
 .card-model-pending { color: var(--text-primary); }
-/* Its popover, on the popups' floating material and anchored to the fact, so nothing in the transcript moves: whose
-   model this is, this work's own acts, then the capsule's field and list of models. */
-.ui-popup.card-model-pop {
-    display: flex;
-    flex-direction: column;
-    width: min(400px, var(--ui-popup-max-width));
-    max-height: min(480px, var(--ui-popup-max-height));
-    padding: var(--space-1);
-    overflow: hidden;
-}
-.card-model-pop[aria-busy="true"] { pointer-events: none; opacity: 0.6; }
+/* Its sheet's head (the Model sheet, model_sheet.js): whose model this is, a refusal said where it was pressed, then
+   this work's own acts while it runs on a fallback. */
+.card-model-head { display: flex; flex: 0 0 auto; flex-direction: column; }
+.card-model-tier { color: var(--text-meta); }
 .card-model-pop-title {
     flex: 0 0 auto;
     margin: 0;
@@ -5971,6 +6056,14 @@ button.card-model-fact:focus-visible { outline: 2px solid var(--focus-accent-bor
     overflow-wrap: anywhere;
 }
 .card-model-pop-line { margin: 0; }
+.card-model-served {
+    margin: 0;
+    padding: 0 var(--space-3) var(--space-1);
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    overflow-wrap: anywhere;
+}
+.card-model-served:empty::before { content: "\00a0"; }  /* a held line keeps its height until its receipt arrives */
 .card-model-cited { color: var(--user-sender); white-space: pre-wrap; }
 .card-model-cited-note { display: block; margin-top: var(--space-1); }
 /* An expanded quotation scrolls within the popover, leaving its toggle and model choices reachable. */
@@ -6019,15 +6112,6 @@ button.card-model-fact:focus-visible { outline: 2px solid var(--focus-accent-bor
 .card-model-act-label { flex: 0 0 auto; font-weight: 500; }
 /* What the act does goes under its name where the line cannot hold both. */
 .card-model-act-sub { flex: 1 1 14ch; min-width: 0; color: var(--text-meta); font-size: var(--type-meta); overflow-wrap: anywhere; }
-.card-model-pop > .chat-model-search {
-    flex: 0 0 auto;
-    height: 34px;
-    margin: var(--space-1) 0;
-    border-radius: var(--radius-inner);
-    background: var(--surface-tray);
-}
-.card-model-pop > .chat-model-search:focus-within { box-shadow: inset 0 0 0 1px var(--focus-accent-border); }
-.card-model-list { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
 
 
 /* Trays (DESIGN.md design bible; an object is ui.css .ui-card, which every card takes in its markup). Inside an object
@@ -8590,6 +8674,12 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
 .widget-media video {
     max-width: 100%;
     border-radius: var(--radius-inner);
+}
+
+/* An image is a <figure>: without this the browser's own 40px side margins inset it. */
+figure.widget-media {
+    margin-inline: 0;
+    margin-bottom: 0;
 }
 
 .widget-media audio {

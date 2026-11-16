@@ -35,6 +35,7 @@ import { errorWords } from './ui_primitives.js';
 import { motionMs, reducedMotion } from './motion.js';
 import { roomCoversMain } from './layout.js';
 import { closingLine } from './settled_card.js';
+import { closeModelSheet } from './model_sheet.js';
 
 // The closed list rises back as it fades (room_work.css rw-unfold, reversed).
 const SHADE_FOLDS = [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-6px)' }];
@@ -1153,13 +1154,15 @@ export function createRoomWork({
         update: schedule,
         extras,
         close: () => close({ restoreFocus: false }),
-        // The room leaves the screen: the list closes and the saved passage no longer applies.
+        // The room leaves the screen: the list closes, a Model sheet its composer or a card opened closes, and the saved
+        // passage no longer applies.
         leave() {
             navigationIntent += 1;
             // Main stays mounted behind a Project. Cancel the shared reading claim too, so an
             // outstanding canonical question read cannot scroll or focus that obscured room.
             reading.cancel();
             close({ restoreFocus: false });
+            closeModelSheet({ within: page });
             showBack(null);
         },
         isOpen: () => open,

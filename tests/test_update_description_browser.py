@@ -633,11 +633,14 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     on Updates (announcing only the page). Read all is offered and opens the whole text to its last paragraph; a
     passive refresh of the same text keeps the open DOM and the owner's selection; Show less folds it; the subtabs
     still switch; a short text, read on entry or saved the same way, offers no button until a narrower window folds
-    some of it."""
+    some of it; on a phone a long text saved behind the Dashboard's list offers Read all once Updates is opened from
+    the list."""
     ui, engine = letter_ui, letter_ui["engine"]
     output = diagnostic_directory(tmp_path, "update-description-away", publish=True)
     large = FIXTURE["large"]
-    short = "\n\n".join(FIXTURE["small"]["text"].split("\n\n")[:2])  # about five lines at the owner's width
+    # About four lines in the Updates page's column at the owner's width: with Dashboard's list beside the open page
+    # (PR #3369) that column is narrower than the whole content area the first two paragraphs were sized for.
+    short = FIXTURE["small"]["text"].split("\n\n")[0]
     current = {"status": _status(large, {**_letter(large, "ready"), "text": short})}
     sockets = []
 
@@ -729,11 +732,38 @@ def test_read_all_follows_a_description_saved_while_the_dashboard_is_away(letter
     assert back["more"] is None and back["content"] <= back["height"] + 1, back
 
     # 6. A narrower window (or interface size) folds some of it: Read all comes, and goes at the owner's width again.
-    page.set_viewport_size({"width": 860, "height": OWNER_WINDOW["height"]})
+    # A phone's column folds it. There a Dashboard brought back by the sidebar may give its page up for its list (each
+    # showing resets the open page, dashboard.js onPageShown; only a row pressed in the visit keeps it); the owner then
+    # opens Updates from the list. Either way the letter is read on Updates.
+    page.set_viewport_size({"width": 320, "height": OWNER_WINDOW["height"]})
     page.evaluate(FRAMES)
+    if not page.locator("#dashboard-panel-updates").is_visible():
+        page.click('[data-dashboard-tab="updates"]')
+        page.wait_for_selector("#dashboard-panel-updates", state="visible")
+        page.evaluate(FRAMES)
     shot("04-short-narrow")
     narrow = letter("short-narrow")
     assert narrow["more"] == "Read all" and narrow["content"] > narrow["height"], narrow
     page.set_viewport_size(OWNER_WINDOW)
     page.evaluate(FRAMES)
     assert letter("short-owner-width")["more"] is None
+
+    # 7. On a phone the Dashboard's list stands in place of its page. A long description saved while the list shows
+    # is measured once the owner opens Updates from the list: pressing the row that is already chosen changes no tab
+    # (dashboard.js openLevel), so the body's own size is the door, and Read all is offered.
+    page.set_viewport_size({"width": 320, "height": OWNER_WINDOW["height"]})
+    page.evaluate(FRAMES)
+    if page.locator("#dashboard-panel-updates").is_visible():
+        page.click("[data-dashboard-list-back]")
+        page.wait_for_selector("#dashboard-panel-updates", state="hidden")
+    current["status"] = _status(large, {**_letter(large, "ready"), "text": large["text"]})
+    sockets[-1].send(SAVED)
+    shows(large["text"])
+    page.evaluate(FRAMES)
+    assert page.evaluate("document.querySelector('#updates-letter-body').clientHeight") == 0, "rendered behind the list"
+    page.click('[data-dashboard-tab="updates"]')
+    page.wait_for_selector("#dashboard-panel-updates", state="visible")
+    page.evaluate(FRAMES)
+    shot("05-long-from-list")
+    from_list = letter("long-from-list")
+    assert from_list["more"] == "Read all" and from_list["content"] > from_list["height"] > 0, from_list

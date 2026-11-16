@@ -7,6 +7,7 @@ from __future__ import annotations
 import pytest
 from tests import test_subscription_role_routes_browser as roles
 from tests.settings_browser_helpers import open_settings, settings_page
+from tests.settings_section_helpers import header_back
 from tests.test_agents_settings_browser import ASKS, RosterServer
 
 pytestmark = [pytest.mark.ui_browser]
@@ -94,7 +95,9 @@ def test_duplicate_is_an_unsaved_agent_whose_page_names_its_twin_until_the_engin
     form.locator("[data-subagent-duplicate]").click()
     copy = _level(page, "agents/new").locator("[data-subagent-row]")
     copy.wait_for(state="visible")
-    assert _level(page, "agents/new").locator("[data-settings-back]").inner_text().strip() == "gpt-test-0"
+    # Its Back, in the section's header, leads to the twin it was copied from, named by its route.
+    back = header_back(page)
+    assert back.is_visible() and back.get_attribute("aria-label") == "Back to gpt-test-0"
     # Named on the page BEFORE any Save, tinted as an error, in the agents' names (a page has no numbers).
     meta = copy.locator("[data-subagent-meta]")
     assert "gpt-test-0 runs the same engine as gpt-test-0" in meta.text_content()

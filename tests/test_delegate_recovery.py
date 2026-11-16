@@ -13,10 +13,9 @@ from tests._run_wait_shared import wake_now
 
 
 
-@pytest.mark.parametrize("door", ["self_restart", "managed_update"])
-def test_planned_restart_doors_name_saved_delegates_as_work_returns(tmp_path, monkeypatch, door,
-                                                                  stub_delegate_engines):
-    """Native waits use their own carrier; saved delegates still need a working return."""
+def _drive_door(tmp_path, monkeypatch, door, *, killed):
+    """Run a planned restart door (the agent's own restart or a managed update) up to wherever a test raises
+    ``InputReached``; ``killed`` answers that door's worker teardown. Returns the running rows it starts from."""
     import server
     from ouroboros import body_adoption, delegate_recovery as recovery, owner_wait
     from ouroboros.gateway import control
@@ -30,14 +29,6 @@ def test_planned_restart_doors_name_saved_delegates_as_work_returns(tmp_path, mo
     monkeypatch.setattr(workers, "direct_chat_turns", lambda: [])
     monkeypatch.setattr(owner_wait, "prepare_owner_wait_handoffs", lambda *_a: {"native-wait"})
     monkeypatch.setattr(recovery, "prepare_planned_restart_handoffs", lambda *_a, **_k: set(running))
-    prepare_returns = retention.prepare_restart_returns
-    observed = []
-    def prepared(*args, **kwargs):
-        returns = prepare_returns(*args, **kwargs)
-        transaction = recovery._read_restart_transaction(tmp_path, kwargs["transaction_id"])
-        observed.append((kwargs["owner_wait_ids"], returns, transaction))
-        raise InputReached  # Stop before any process teardown or restart request.
-    monkeypatch.setattr(retention, "prepare_restart_returns", prepared)
     if door == "self_restart":
         monkeypatch.setattr(body_adoption, "bind_restart", lambda fn, *_a: fn)
         monkeypatch.setattr(server, "_safe_restart_serialized", lambda *_a, **_k: (True, "ok"))
@@ -46,8 +37,7 @@ def test_planned_restart_doors_name_saved_delegates_as_work_returns(tmp_path, mo
         monkeypatch.setattr(server, "_request_restart_exit", lambda: pytest.fail("no real restart"))
         monkeypatch.setattr(queue, "name_queue_returns", lambda pending, _reason: pending)
         ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING=running, PENDING=[],
-                              load_state=lambda: {}, safe_restart=lambda **_k: (True, "ok"),
-                              kill_workers=lambda **_k: pytest.fail("no process teardown"))
+                              load_state=lambda: {}, safe_restart=lambda **_k: (True, "ok"), kill_workers=killed)
         with pytest.raises(InputReached):
             server._perform_supervisor_restart(ctx)
     else:
@@ -55,14 +45,74 @@ def test_planned_restart_doors_name_saved_delegates_as_work_returns(tmp_path, mo
         monkeypatch.setattr(workers, "close_repo_writer_admission", lambda *_a: None)
         monkeypatch.setattr(workers, "open_repo_writer_admission", lambda: None)
         monkeypatch.setattr(workers, "drain_repo_writers", lambda: [])
-        monkeypatch.setattr(workers, "kill_workers_for_update", lambda **_k: pytest.fail("no process teardown"))
+        monkeypatch.setattr(workers, "kill_workers_for_update", lambda **kwargs: killed(**kwargs) or [])
         monkeypatch.setattr(control.update_progress, "advance", lambda *_a: None)
         monkeypatch.setattr(retention, "capture_update_returns", lambda *_a, **_k: {"rows": {}})
         with pytest.raises(InputReached):
             control._stop_repo_writers("update")
+    return running
+
+
+@pytest.mark.parametrize("door", ["self_restart", "managed_update"])
+def test_planned_restart_doors_name_saved_delegates_as_work_returns(tmp_path, monkeypatch, door,
+                                                                  stub_delegate_engines):
+    """Native waits use their own carrier; saved delegates still need a working return."""
+    from ouroboros import delegate_recovery as recovery
+    from supervisor import restart_retention as retention
+
+    prepare_returns = retention.prepare_restart_returns
+    observed = []
+    def prepared(*args, **kwargs):
+        returns = prepare_returns(*args, **kwargs)
+        transaction = recovery._read_restart_transaction(tmp_path, kwargs["transaction_id"])
+        observed.append((kwargs["owner_wait_ids"], returns, transaction))
+        raise InputReached  # Stop before any process teardown or restart request.
+    monkeypatch.setattr(retention, "prepare_restart_returns", prepared)
+    running = _drive_door(tmp_path, monkeypatch, door, killed=lambda **_k: pytest.fail("no process teardown"))
     waits, returns, transaction = observed[0]
     assert waits == {"native-wait"} and returns == {"child1"}
     assert transaction["return_ids"] == ["child1"] and set(transaction["task_ids"]) == set(running)
+    assert not stub_delegate_engines
+
+
+@pytest.mark.parametrize("door", ["self_restart", "managed_update", "aborting_update", "self_restart_unnamed"])
+def test_planned_restart_doors_name_late_work_into_their_own_transaction_after_the_stop(tmp_path, monkeypatch, door,
+                                                                                    stub_delegate_engines):
+    """#3192: once its workers are down, each returning door names the work that arrived after it named its returns
+    into the transaction it prepared itself (``restart_retention.name_late_returns``), never before the stop; an
+    update whose stop does not quiesce (a service survives) aborts and adds no names, and a planned restart whose own
+    naming failed gives the late step no transaction to add to."""
+    from ouroboros import delegate_recovery as recovery, process_custody
+    from ouroboros.gateway import control
+    from supervisor import restart_retention as retention
+
+    events = []
+    def named(root, transaction_id):
+        events.append(("named", transaction_id, recovery.active_restart_transaction(root).get("transaction_id")))
+        raise InputReached  # the door's exit is not this test's
+    monkeypatch.setattr(retention, "name_late_returns", named)
+    if door == "self_restart_unnamed":
+        def unnamed(*_a, **_k):
+            raise OSError("disk")
+        monkeypatch.setattr(retention, "prepare_restart_returns", unnamed)
+    if door == "aborting_update":
+        monkeypatch.setattr(process_custody, "quiesce_custodied_services", lambda _root: (False, ["custody:kept"]))
+        stop = control._stop_repo_writers
+
+        def stopped(reason):
+            events.append(("blocked", tuple(stop(reason))))
+            raise InputReached  # the update would abort here
+        monkeypatch.setattr(control, "_stop_repo_writers", stopped)
+    _drive_door(tmp_path, monkeypatch, {"aborting_update": "managed_update", "self_restart_unnamed": "self_restart"}.get(
+        door, door), killed=lambda **_k: events.append(("killed",)))
+    if door == "aborting_update":
+        assert events == [("killed",), ("blocked", ("custody:kept",))], "an aborting update names nothing"
+        return
+    if door == "self_restart_unnamed":
+        assert [event[:2] for event in events] == [("killed",), ("named", "")], "a failed naming adds nothing late"
+        return
+    [kill, (step, transaction_id, active)] = events
+    assert kill == ("killed",) and step == "named" and transaction_id and transaction_id == active
     assert not stub_delegate_engines
 
 

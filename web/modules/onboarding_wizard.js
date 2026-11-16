@@ -213,6 +213,7 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
         if (Array.isArray(response.items)) adoptModelCatalog(response);
         if (state.agentsConnected.length) void refreshModelSources({ asked: false });
         state.spendGaps = response.known_spend_gaps;  // what this draft's limits cannot count, said on the limits step
+        state.partlyCounted = response.partly_counted_spend;
         refreshSummary();
     }
 
@@ -301,13 +302,18 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
     }
 
     // The limits step's line: what the last answered preview of this draft could not count; none while a preview failed.
-    const gapsShown = () => spendGapsWords(agentsStep?.previewError ? [] : state.spendGaps);
+    const gapsShown = () => (agentsStep?.previewError ? '' : spendGapsWords(state.spendGaps, state.partlyCounted));
+
+    // Its words are composed (data-i18n-fmt): a language change says them again, as Dashboard › Costs does.
+    function paintGaps() {
+        const gaps = document.getElementById('budget-gaps');
+        if (gaps) Object.assign(gaps, { textContent: gapsShown(), hidden: !gapsShown() });
+    }
 
     function syncCurrentStepActionState() {
         const next = document.getElementById('next-btn');
         if (next) next.disabled = nextButtonShouldBeDisabled();
-        const gaps = document.getElementById('budget-gaps');
-        if (gaps) Object.assign(gaps, { textContent: gapsShown(), hidden: !gapsShown() });
+        paintGaps();
         const quick = document.getElementById('quick-start-btn');
         if (quick) quick.hidden = !hasModelSubscription();
         const error = root.querySelector('.wizard-error');
@@ -1560,12 +1566,14 @@ import { checkerFieldsNote, checkerReads, deploymentNote } from './settings_poli
 
     applyModelDefaults();
     root.addEventListener('focusin', clearFooterOnFocus);
+    window.addEventListener('ouro:language-changed', paintGaps);
     window.addEventListener('pagehide', (event) => {
         consciousness.leave();  // every departure retires a Start not sent yet; the form itself survives the back/forward cache
         if (event.persisted) return;
         disposed = true;
         consciousness.dispose();
         root.removeEventListener('focusin', clearFooterOnFocus);
+        window.removeEventListener('ouro:language-changed', paintGaps);
         disposeLanguage?.();
         catalogGeneration += 1;
         catalogRequest?.abort();

@@ -298,7 +298,7 @@ def test_no_choice_is_asked_when_main_is_chosen_or_unambiguous(tmp_path, monkeyp
 
 
 def test_settings_names_what_the_limits_cannot_count(tmp_path, monkeypatch):
-    """`_meta.known_spend_gaps`, said under the limits on Dashboard › Costs (pricing.known_spend_gaps)."""
+    """`_meta.known_spend_gaps`, said under the limits on Dashboard › Costs (pricing.spend_coverage)."""
     direct = settings_read(tmp_path, monkeypatch, {"OPENAI_API_KEY": "k", "OUROBOROS_MODEL": "openai::gpt-5.6-sol"})
     assert direct["_meta"]["known_spend_gaps"][0] == "all model roles", "a direct key has no catalog price"
     routed = settings_read(tmp_path, monkeypatch, {"OPENROUTER_API_KEY": "k"})
