@@ -1275,7 +1275,7 @@ html[data-layout="stack"] .files-browser-header > .files-breadcrumb { flex-basis
 
 /* The folder's list and the chosen file side by side while the page has room for the list's widest column and a
    working file beside it (360 + 340); a narrower page (a phone, a narrow window) shows the list first and the file
-   once one is chosen, with the folder's named Back in the band (files.js). Only there does a row say its edits are unsaved and
+   once one is chosen, with a round Back to its folder in the band (files.js). Only there does a row say its edits are unsaved and
    a new file's draft keep a row of its own, the two ways back to a draft. */
 .files-layout { container: files / inline-size; }
 .files-entry.is-draft,

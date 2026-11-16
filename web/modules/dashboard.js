@@ -149,7 +149,7 @@ export function focusSettingRow(panel, id) {
  * last shown, Logs the first time), named by its chosen row; narrower, the Dashboard opens as
  * its list, and a pressed row opens its page as a level (`☰` gives way to Back, then the page's name, in one row),
  * one `page: true` layer, so Escape, the system's Back and Telegram's Back return to the list. A page opened from a
- * jump gets the shell's named return instead. Each row says its
+ * jump gets the shell's return (the round Back) instead. Each row says its
  * page's current answer where the Settings home already knows it (settings_home.js homeAnswers): no read starts here.
  */
 export function initDashboard({ state, ws, layers = null, openSettings = null, stateSnapshots = null }) {

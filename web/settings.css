@@ -53,7 +53,7 @@ html[data-layout="docked"] #page-settings > .app-page-header[data-lead] { grid-t
 }
 
 /* A phone keeps Search in the list, including when it holds two panes. Its one header row shows the place,
-   or the named Back and its level; an empty page column adds no caption row. */
+   or the round Back and its level; an empty page column adds no caption row. */
 html[data-layout="stack"] #page-settings > .app-page-header {
     grid-template-areas: "leading title toolbar";
 }
