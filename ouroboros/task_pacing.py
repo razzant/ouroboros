@@ -816,14 +816,14 @@ def prepared_wrapup_candidate(
     turn, so the candidate is built from that same owner slot."""
     from ouroboros.llm_claudexor import cache_key_for_model
     from ouroboros.loop_llm_call import _prepare_main_messages
-    from ouroboros.model_slots import task_model_binding, task_processing_preference
+    from ouroboros.model_slots import acting_model_role, task_model_binding, task_processing_preference
     from ouroboros.model_wait import current_model_wait
     from ouroboros.send_clock import MainSendClock, main_clock_policy
     from ouroboros.transcript_prefix import append_reasoning_retirement_fact, retire_main_reasoning
 
     owner_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     waiter = current_model_wait()
-    role, account = task_model_binding({"model_role": getattr(ctx, "model_role", ""),
+    role, account = task_model_binding({"model_role": acting_model_role(owner_ctx, model_role=getattr(ctx, "model_role", "")),
         "task_metadata": getattr(owner_ctx, "task_metadata", {})},
         context_fit_plan=getattr(owner_ctx, "context_fit_plan", None),
         overrides=waiter.overrides if waiter else None)

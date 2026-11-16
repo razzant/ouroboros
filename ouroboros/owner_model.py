@@ -398,8 +398,8 @@ PROCESSING_WORDS = {"standard": "Standard", "fast": "Fast", "economy": "Flex (ec
                     "": "the default"}
 
 
-def restore_current(ctx: Any, messages: list | None = None) -> None:
-    """A saved route never outranks a primary written since that checkpoint."""
+def restore_current(ctx: Any, messages: list | None = None) -> bool:
+    """Restore a newer durable primary; report whether it replaced the saved acting route."""
     if apply_current(ctx):
         from ouroboros.llm import LLMClient
 
@@ -407,3 +407,5 @@ def restore_current(ctx: Any, messages: list | None = None) -> None:
             messages[:] = LLMClient.sanitize_reasoning_on_model_switch(
                 messages, ctx.active_model, ctx.active_model_override)
         ctx.active_model, ctx.active_use_local = ctx.active_model_override, ctx.active_use_local_override
+        return True
+    return False

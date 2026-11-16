@@ -520,6 +520,7 @@ def _rebind_context_fit_plan(
     credential_profile_id: Optional[str] = None,
     start_mode: Optional[str] = None,  # the task's mode: a new route may lower it; a return to the primary resumes its held view
     route_is_preference: bool = False,  # ``model_route`` is the account a send will prefer (a restore), not one observed serving
+    reasoning_effort: Optional[str] = None,  # the effort of the send this prepares; None: the acting one (``active_effort``)
 ) -> Tuple[Any, str]:
     if plan is None or not all(
         hasattr(plan, name) for name in ("max_projection", "low_projection", "core_sha256")
@@ -563,19 +564,23 @@ def _rebind_context_fit_plan(
     bound = bool(scope) and (route.get("provider") != "claudexor" or bool((route.get("options") or {}).get("account_fingerprint")))
     window = resolve_window(evidence, output_reserve, bound=bound, observation_fp=scope)  # before density: it caps the key
     window_tokens, known_window = window.total_equivalent, window.usable is not None
+    shape = {"provider": str(route.get("provider") or ""),  # the request as the next send shapes it, as a round measures it
+             "reasoning_effort": str((getattr(tools._ctx, "active_effort", "") if reasoning_effort is None
+                                      else reasoning_effort) or "")}
     ratio, carried = anchor.density if anchor is not None else _route_calibration_ratio(
         None,  # canonical evidence root (one observation store)
         str(getattr(evidence, "route_fp", "") or ""), str(route.get("model") or model),
-        min(estimate_context_prompt_tokens(messages, tool_schemas, provider=str(route.get("provider") or "")), window.usable or math.inf),
+        min(estimate_context_prompt_tokens(messages, tool_schemas, **shape), window.usable or math.inf),
         view_kind=plan.view_kind), None  # compared at the size that can be sent
     if anchor is not None and route_window_kwargs(evidence)["window_basis"] != "estimator":  # that stays raw, as in a round
         ratio, carried = anchor.view_terms(estimate_context_prompt_tokens(  # the view sized below, not the one last shown
-            plan.reproject_transcript(messages, start_mode or preferred), tool_schemas, provider=str(route.get("provider") or "")))
+            plan.reproject_transcript(messages, start_mode or preferred), tool_schemas, **shape))
     rebound = replace(
         plan,
         preferred_mode=preferred,
         model=str(route.get("model") or model),
-        provider=str(route.get("provider") or ""),
+        provider=shape["provider"],
+        start_reasoning_effort=shape["reasoning_effort"],
         route_fp=str(getattr(evidence, "route_fp", "") or ""),
         status=str(getattr(evidence, "status", "") or ""),
         stale=bool(getattr(evidence, "stale", False)),
@@ -587,9 +592,9 @@ def _rebind_context_fit_plan(
     ).reproject_for_route(  # the shown view kept while this route admits it (``WindowRecord.admitted``), else narrowed
         window_tokens=window_tokens, known_window=known_window, ratio=estimator_ratio(evidence, ratio), measured_input_tokens=carried, admitted=True,
         output_reserve=output_reserve, tool_schemas=tool_schemas, start_mode=start_mode, current_messages=messages,
-        room_if_narrowed=True)
+        room_if_narrowed=True, reasoning_effort=shape["reasoning_effort"])
     mode = rebound.initial_mode
-    projected_prompt_tokens = rebound.projected_tokens_with_tools(mode, tool_schemas)
+    projected_prompt_tokens = rebound.projected_tokens_with_tools(mode, tool_schemas, **shape)
     shown = messages[0] if messages else None
     messages[:] = rebound.reproject_transcript(messages, mode)
     rewrite_view(tools._ctx, getattr(tools._ctx, "task_id", ""), "route_rebind")
@@ -1073,7 +1078,8 @@ def _reproject_actual_overflow_low(ctx: _RoundModelCallContext) -> None:
         window_tokens=window or 0, known_window=window is not None,
         ratio=fit.measurement.measurement_density, output_reserve=int(plan.output_reserve_tokens),
         tool_schemas=ctx.tool_schemas, start_mode="max", current_messages=ctx.messages, select_mode="low",
-        measured_input_tokens=fit.measurement.reprojection_input_tokens, admitted=True)
+        measured_input_tokens=fit.measurement.reprojection_input_tokens, admitted=True,
+        reasoning_effort=str(getattr(ctx, "active_effort", "") or ""))  # the shape the round measured
     mode = ctx.context_fit_plan.initial_mode
     ctx.messages[:] = ctx.context_fit_plan.reproject_transcript(ctx.messages, mode)
     rewrite_view(ctx.tools._ctx, ctx.task_id, "low_retry")

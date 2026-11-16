@@ -864,9 +864,9 @@ def _tool_results_fact(usage: Dict[str, Any]) -> str:
 
 
 def _context_components(ctx: Any, *, measured: bool) -> list:
-    """Largest blocks, complete units and schemas, on the same calibrated basis."""
+    """Largest blocks, complete units and schema segment, calibrated for the current request shape."""
     from ouroboros.context_compaction import context_units
-    from ouroboros.context_fit import estimate_context_prompt_tokens
+    from ouroboros.context_fit import estimate_context_prompt_tokens, tool_schema_tokens
     from ouroboros.context_view_facts import block_label
 
     density = float(ctx.accumulated_usage.get("_context_measurement_density") or 1.0) if measured else 1.0
@@ -882,7 +882,8 @@ def _context_components(ctx: Any, *, measured: bool) -> list:
             block = chunk.get("content")
             label = block_label(message, i, block[0] if isinstance(block, list) and block else block, ctx.context_fit_plan)
             sizes.append((label, int(estimate_context_prompt_tokens([chunk]) * density)))
-    sizes.append(("tool schemas", int(estimate_context_prompt_tokens([], ctx.tool_schemas) * density)))
+    sizes.append(("tool schemas", int(tool_schema_tokens(ctx.tool_schemas,
+        provider=getattr(ctx.context_fit_plan, "provider", ""), reasoning_effort=getattr(ctx, "active_effort", "")) * density)))
     return sorted(sizes, key=lambda item: item[1], reverse=True)[:3]
 
 

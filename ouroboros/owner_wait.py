@@ -175,7 +175,7 @@ def _wait_bound_fields(ctx: Any) -> dict:
 
 
 def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
-                       round_idx: int, tool_schemas: list, seen: set) -> dict:
+                       round_idx: int, tool_schemas: list, seen: set, *, context_view: tuple | None = None) -> dict:
     """The loop's exact continuation values, never Python handles.
 
     ONE serializer for every same-ID continuation (owner wait, review park,
@@ -183,11 +183,21 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
     trace, usage, route, delivery candidate, admission-seal and owner-source
     identities, owner directives — so a second serializer could only drift from this one.
     """
+    if context_view is not None:
+        # Pricing a forced call that never sent must not become the next ordinary call's view.
+        # Keep current dialogue/tool results, projected from the pre-price plan's retained sources;
+        # only this saved copy changes. The live forced call (legacy soft landing) keeps its own fit.
+        from copy import copy
+
+        ctx = copy(ctx)
+        ctx.context_fit_plan, ctx.active_context_mode = context_view
+        messages = ctx.context_fit_plan.reproject_transcript(messages, ctx.active_context_mode)
     candidate = getattr(ctx, "_delivery_candidate", None)
     cost_ceiling = getattr(ctx, "_cost_ceiling", None)
     model_wait = getattr(ctx, "model_wait_context", None)
     model_state = model_wait.continuation_state() if model_wait is not None else {}
     from ouroboros.settings_integrity import captured_cognition
+    from ouroboros.model_slots import acting_model_role
 
     return {
         "task_id": ctx.task_id, "task_attempt": int(getattr(ctx, "task_attempt", None) or 1),
@@ -204,7 +214,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "nanny_activity": {key: getattr(ctx, key, None) for key in (
             "_nanny_metered_progress", "_nanny_delegate_baseline",
         )},
-        "context_model_role": getattr(getattr(ctx, "context_fit_plan", None), "model_role", ""),
+        "context_model_role": acting_model_role(ctx),
         # The task's own start (mode, cause): a restore's new fit is not it (``context_fit.restored_start``).
         "context_start": list(getattr(getattr(ctx, "context_fit_plan", None), "start", None) or ("", "")),
         # Exposure facts gate automatic compaction; a resumed task keeps them, and the journal boundary of its first
@@ -1212,7 +1222,9 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     ctx._route_binding = None  # the first round compares to the restored acting route (route_choice.round_route)
     from ouroboros.owner_model import restore_current
 
-    restore_current(ctx, messages)
+    applied = restore_current(ctx, messages)
+    # Only a newer durable owner act moves the saved actor; pending tool choices belong to the next ordinary call.
+    ctx._restored_context_model_role = (ctx.active_role_override if applied else state.get("context_model_role")) or ""
     candidate = state.get("delivery_candidate")
     ctx._delivery_candidate = DeliveryCandidate(**{key: value for key, value in candidate.items()
         if key != "repair_attempted"}) if candidate else None
@@ -1243,6 +1255,56 @@ def _conversation_account(ctx: Any, messages: list, role: str, account: Any) -> 
         plan=getattr(ctx, "context_fit_plan", None))[1]
 
 
+def _continuation_fit_route(ctx: Any, state: dict, messages: list, *, initial_effort: str | None = None) -> tuple:
+    """Preview the next ordinary send through the existing route owners, on private copies.
+
+    Start restores the saved choice; rebind already has it. Both read newer owner acts
+    and following slots as the loop does, then pending tool choices. Nothing acknowledges
+    an act, consumes an override, changes an account pin or moves the saved budget tail.
+    """
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from ouroboros import owner_model, route_choice
+    from ouroboros.loop_routes import pending_runtime_route
+    from ouroboros.model_slots import task_model_binding
+
+    preview = SimpleNamespace(**vars(ctx))
+    if initial_effort is not None:
+        preview.__dict__.update(deepcopy(state.get("route") or {}))
+    preview.task_metadata = deepcopy(getattr(ctx, "task_metadata", {}) or {})
+    preview.primary_route = deepcopy(getattr(preview, "primary_route", None))
+    waiter = getattr(ctx, "model_wait_context", None)
+    preview.model_wait_context = SimpleNamespace(overrides=deepcopy(getattr(waiter, "overrides", {}) or {}))
+    if initial_effort is not None:
+        preview.route_choice = route_choice.restored_choice(preview, state)
+        preview._route_binding = None
+    owner_model.restore_current(preview)
+    acting = preview.active_model, preview.active_use_local
+    if current := route_choice.round_route(preview, None, acting):
+        preview.active_model_override, preview.active_use_local_override = current
+    preview.active_model, preview.active_use_local, effort = pending_runtime_route(preview, *acting,
+        str(getattr(preview, "active_effort", None) or initial_effort or ""))
+    role, account = task_model_binding(
+        {"model_role": getattr(preview, "active_role_override", None) or state.get("context_model_role"),
+         "task_metadata": preview.task_metadata}, context_fit_plan=getattr(preview, "context_fit_plan", None),
+        overrides=preview.model_wait_context.overrides)
+    return {"model": preview.active_model, "use_local_model": preview.active_use_local,
+            "model_role": role, "task_metadata": preview.task_metadata, "credential_profile_id": account,
+            "model_route": _conversation_account(preview, messages, role, account), "model_route_preferred": True}, effort
+
+
+def context_start_route(ctx: Any, task: dict, state: dict, initial_effort: str, *, resolver: Any = None) -> tuple:
+    """The first fit asks about the route the restored loop will send, without changing its task."""
+    from ouroboros.context_fit import RouteQuestion
+
+    if resolver is not None:  # realtime owns its route question and forbids cold recovery
+        return resolver, initial_effort
+    if not state:
+        return RouteQuestion(task), initial_effort
+    route, effort = _continuation_fit_route(ctx, state, state["messages"], initial_effort=initial_effort)
+    return RouteQuestion(task, route_fields=route), effort
+
+
 def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     """Rebind the restored route's context-fit plan; returns ``(plan, mode)``.
 
@@ -1253,24 +1315,18 @@ def rebind_restored_route(tools: Any, state: dict, messages: list) -> tuple:
     that answer. Dates are read anew; an account the conversation names without a usable record is asked about."""
     from ouroboros.loop import _rebind_context_fit_plan, get_context_mode
     from ouroboros.memory_floor import MODES
-    from ouroboros.model_slots import task_model_binding
     from ouroboros.continuation_tools import reconcile_restored_tools
     from ouroboros.context_fit import restored_start
     from ouroboros.context_timing import timed
 
     ctx = tools._ctx
     ctx.context_fit_plan = restored_start(ctx.context_fit_plan, state.get("context_start"))  # before every rebind
-    model_wait = getattr(ctx, "model_wait_context", None)
-    role, account = task_model_binding(
-        {"model_role": getattr(ctx, "active_role_override", None) or state.get("context_model_role"), "task_metadata": ctx.task_metadata},
-        context_fit_plan=ctx.context_fit_plan,
-        overrides=model_wait.overrides if model_wait is not None else None,
-    )
+    selected, effort = _continuation_fit_route(ctx, state, messages)
     owner, ran = get_context_mode(), getattr(ctx, "active_context_mode", None)
-    route = dict(model=ctx.active_model,
-        use_local=ctx.active_use_local, preferred_mode=owner,
+    route = dict(model=selected["model"],
+        use_local=selected["use_local_model"], preferred_mode=owner, reasoning_effort=effort,
         tool_schemas=state["tool_schemas"],
-        model_role=role, model_route=_conversation_account(ctx, messages, role, account), credential_profile_id=account,
+        model_role=selected["model_role"], model_route=selected["model_route"], credential_profile_id=selected["credential_profile_id"],
         route_is_preference=True,
     )
     plan, mode = _rebind_context_fit_plan(ctx.context_fit_plan, tools, messages, **route,

@@ -498,10 +498,59 @@ def _forced_state_facts(ctx: _RoundLimitContext, llm_trace: Dict[str, Any]) -> s
         return ""
 
 
+def _plan_for_acting_route(plan: Any, ctx: _RoundLimitContext) -> bool:
+    """Whether Main's plan names the forced call's acting role, model and locality.
+    A local route's plan names provider ``local``, as ``gateway.settings._active_main_route`` resolves it."""
+    from ouroboros.model_slots import acting_model_role
+    from ouroboros.provider_models import provider_for_model
+
+    model = str(getattr(ctx, "active_model", "") or "")
+    local = bool(getattr(ctx, "active_use_local", False)) or provider_for_model(model) == "local"
+    owner = getattr(getattr(ctx, "tools", None), "_ctx", None)
+    role = acting_model_role(owner, model_role=getattr(ctx, "model_role", ""))
+    return (plan is not None and str(getattr(plan, "model", "") or "") == model
+            and (str(getattr(plan, "provider", "") or "") == "local") == local
+            and (not role or getattr(plan, "model_role", "") == role))
+
+
+def _bind_forced_route(ctx: _RoundLimitContext) -> bool:
+    """Fit the acting route before a forced candidate is priced or sent. A cold restore may have fitted a pending
+    route for the next ordinary round, with another model, role, locality or effort; forced preparation does not
+    consume that choice. On rebind failure, another route's plan stays unmeasured; a matching route still measures
+    the acting effort (``_forced_physical_context``). True when fitted here; ordinary work that follows a priced
+    candidate never sent refits its own round's route from the loop's plan (``loop_routes.bind_round_route``)."""
+    from ouroboros.context_fit import effort_lengthens_request
+
+    tools = getattr(ctx, "tools", None)
+    tools_ctx = getattr(tools, "_ctx", None)
+    plan = getattr(tools_ctx, "context_fit_plan", None)
+    if plan is None or (_plan_for_acting_route(plan, ctx) and not effort_lengthens_request(
+            getattr(plan, "provider", ""), getattr(plan, "start_reasoning_effort", ""), ctx.active_effort)):
+        return False
+    try:
+        from ouroboros.model_slots import acting_model_role, task_model_binding
+        from ouroboros.owner_wait import _conversation_account
+
+        waiter = getattr(tools_ctx, "model_wait_context", None)
+        role, account = task_model_binding({"model_role": acting_model_role(tools_ctx, model_role=getattr(ctx, "model_role", "")),
+            "task_metadata": getattr(tools_ctx, "task_metadata", {})},
+            context_fit_plan=plan, overrides=getattr(waiter, "overrides", None))
+        _loop()._rebind_context_fit_plan(
+            plan, tools, ctx.messages, model=ctx.active_model, use_local=ctx.active_use_local,
+            tool_schemas=list(getattr(ctx, "tool_schemas", None) or []), model_role=role, credential_profile_id=account,
+            model_route=_conversation_account(tools_ctx, ctx.messages, role, account), route_is_preference=True,
+            start_mode=getattr(tools_ctx, "active_context_mode", None), reasoning_effort=ctx.active_effort)
+    except Exception:
+        log.debug("Forced rail kept the restored plan of another route", exc_info=True)
+        return False
+    return True
+
+
 @finalization_child_scope()
 def _prepare_forced_prompt(
     ctx: _RoundLimitContext, prompt: str, llm_trace: Dict[str, Any],
 ) -> str:
+    _bind_forced_route(ctx)
     _loop()._drain_forced_owner_directives(ctx, llm_trace)
     _loop()._finalize_forced_services(ctx, llm_trace)
     tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
@@ -798,13 +847,13 @@ def _forced_physical_context(ctx: _RoundLimitContext, messages: List[Dict[str, A
     The transport finalizer sizes a rendered Nano's reply from the bound context, so the
     priced lookahead and the send it admits are measured ONCE and share the allowance
     (their clock-free identity still matches). None without a Main plan for the acting
-    model: the send then goes out under the caller's ceiling, as before. A local task's
+    route (``_plan_for_acting_route``): the send then goes out under the caller's ceiling, as before. A local task's
     lookahead builds a remote candidate (disclosed): the equality promise is remote-only.
     """
     tools_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     plan = getattr(tools_ctx, "context_fit_plan", None)
     from ouroboros.transcript_prefix import forget_attempt_prefix, rewrite_epoch, with_attempt_prefix
-    if plan is None or str(ctx.active_model or "") != str(getattr(plan, "model", "") or ""):
+    if not _plan_for_acting_route(plan, ctx):
         return forget_attempt_prefix(ctx)
     from ouroboros.context_anchor import main_input_anchor
     from ouroboros.context_fit import measure_main_fit
@@ -828,7 +877,7 @@ def _call_forced_model_once(
     ctx: _RoundLimitContext, *, initial_messages: Any = None, admitted_request: Any = None,
     admission: Optional[Dict[str, Any]] = None,
 ) -> str:
-    from ouroboros.model_slots import task_model_binding, task_processing_preference
+    from ouroboros.model_slots import acting_model_role, task_model_binding, task_processing_preference
     from ouroboros.model_wait import current_model_wait
     from ouroboros.subagent_bootstrap import is_configured_api_child
 
@@ -844,7 +893,7 @@ def _call_forced_model_once(
     if physical is None:
         physical = _forced_physical_context(ctx, initial_messages if initial_messages is not None else ctx.messages)
     waiter = current_model_wait()
-    role, account = task_model_binding({"model_role": getattr(ctx, "model_role", ""),
+    role, account = task_model_binding({"model_role": acting_model_role(owner_ctx, model_role=getattr(ctx, "model_role", "")),
         "task_metadata": getattr(owner_ctx, "task_metadata", {})},
         context_fit_plan=getattr(owner_ctx, "context_fit_plan", None),
         overrides=waiter.overrides if waiter else None)

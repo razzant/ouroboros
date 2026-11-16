@@ -170,6 +170,12 @@ def resolve_processing_preference(role: str = "", *, override: str | None = None
     return normalize_processing_preference(role_value or global_value)
 
 
+def acting_model_role(ctx: object, *, model_role: str = "") -> str:
+    """The explicit call, cold-restored actor, then live fit; never a pending tool choice."""
+    return str(model_role or getattr(ctx, "_restored_context_model_role", "")
+               or getattr(getattr(ctx, "context_fit_plan", None), "model_role", "") or "")
+
+
 def task_model_binding(task: dict, *, context_fit_plan: object = None,
                        overrides: dict | None = None) -> tuple[str, str | None]:
     """Bind an acting call to its explicit role, active fit plan or frozen actor.
