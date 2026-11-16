@@ -431,7 +431,7 @@ ESCALATE_TOOL_SCHEMA: Dict[str, Any] = {
         "Offer 0-6 real alternatives: none for an open question the human answers in their own words; with "
         "options, mark your recommendation with recommended=true. A substantive position you or a helper set "
         "aside is one of them, at its strongest, with its cost and why you set it aside. By default, state the "
-        "assumption you continue under and keep working; the card stays answerable, from Main after the task ends "
+        "assumption you continue under and keep working. A card stays answerable, from Main after the task ends "
         "too, and a late answer still arrives. Set wait_for_answer=true on a live root, including an ordinary "
         "conversation, when the next step is irreversible or costly to redo, or the work cannot go on without the "
         "answer; your judgment decides. A requested wait starts after this tool batch, without model calls; one "

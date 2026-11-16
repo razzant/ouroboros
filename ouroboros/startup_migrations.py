@@ -161,7 +161,7 @@ def migrate_question_publications(root, *, rebuild=False, legacy=False):
     return {"bound": len(publications), "unknown": len(unknowns) - retired, **({"retired": retired} if retired else {})}
 
 
-def retire_closures_owed_nowhere(root, verdicts=None, *, mail_settled=False) -> int:
+def retire_closures_owed_nowhere(root, verdicts=None) -> int:
     """A closed question whose card left no row in readable, stable history (``publication_address_missing``)
     owes its closure note nowhere once its attempt found no address (``owner_quiz.retire_closure_owed_nowhere``),
     and its ``question:`` unknown leaves with it. ``verdicts``: the import's own, the one row a closure's delivery
@@ -174,8 +174,7 @@ def retire_closures_owed_nowhere(root, verdicts=None, *, mail_settled=False) -> 
     for key, facts in (obligations.members(root, "unknowns") if verdicts is None else verdicts).items():
         if (key.startswith("question:") and isinstance(facts, dict)
                 and facts.get("reason") == "publication_address_missing"
-                and retire_closure_owed_nowhere(root, str(facts.get("task_id") or ""), str(facts.get("quiz_id") or ""),
-                                                mail_settled=mail_settled)):
+                and retire_closure_owed_nowhere(root, str(facts.get("task_id") or ""), str(facts.get("quiz_id") or ""))):
             obligations.remove(root, "unknowns", key)
             retired += 1
     return retired

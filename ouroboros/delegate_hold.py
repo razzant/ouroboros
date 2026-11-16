@@ -308,7 +308,8 @@ def hold_step(
 ) -> str:
     """Round-top step for a latched hold.
 
-    Returns "" (no latch — dispatch normally), "resume" (material new input in
+    Returns "" (no latch, or a receipt taken at the previous top that goes out now even
+    past a latch still active — dispatch normally), "resume" (material new input in
     the transcript; dispatch this round), "park" (the host armed the hold's own
     warm sleep: the caller parks it now, without a model call, and its wake is
     the next round top's), or "terminal" (control wake, refused wait, or failed

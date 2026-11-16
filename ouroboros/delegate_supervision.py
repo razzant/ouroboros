@@ -1160,7 +1160,7 @@ def _replay(ctx: Any, run_ids: list[str]) -> tuple[Optional[ToolResult], dict[st
 
 def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "", *, questions: Any = None) -> ToolResult:
     """Publish one wake of the runs a wait selected and render it: the ONE wake record (``pending_wake``:
-    its mail, question and coordination ids) that the delivered text's acknowledgement retires. An earlier
+    its loop-control, question and coordination ids) that the delivered text's acknowledgement retires. An earlier
     wake still unacknowledged is returned instead (``_replay``). A terminal another collector is still
     retaining is read again on the body's beat until it is retained (the task's own cancel or deadline
     ends that); nothing else waits here."""
@@ -1246,7 +1246,7 @@ def _publish(ctx: Any, descriptor: dict[str, Any], woke_by: str = "", *, questio
         "wake_id": wake_id,
         "attempt_key": _attempt_key(ctx),
         "payload": payload,
-        "mailbox_ids": [
+        "mailbox_ids": [  # empty now that a wake carries only loop controls; an older body's wake kept its mail ids
             str(item.get("msg_id") or "") for item in wakes
             if str(item.get("msg_id") or "") and str(item.get("kind") or "") not in _LOOP_CONTROL_KINDS
         ],

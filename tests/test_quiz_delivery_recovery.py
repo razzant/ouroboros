@@ -386,10 +386,12 @@ def test_a_closure_no_room_shows_retires_its_note_and_leaves_current_questions(r
         assert startup_migrations.prepare_startup_state(runtime.root)["question_publications"] == {}
 
 
-def test_an_owner_closure_retires_only_once_its_authors_letter_is_settled(runtime):
+@pytest.mark.parametrize("author", ["running", "finished"])
+def test_an_owner_closure_retires_only_once_its_authors_letter_is_settled(runtime, monkeypatch, author):
     """The owner closed an older body's question whose card no room shows; the delivery attempt recorded the missing
-    address and stopped before its letter to the living author. No door retires that note yet: the author is still
-    owed the letter and the owner keeps the forced retry. Once the letter is written, the import retires it."""
+    address and wrote no letter. A living author is still owed it, so no door retires that note yet and the owner
+    keeps the forced retry; once the letter is written, the import retires it. A finished author's terminal status
+    never turns back, so no letter can reach it and the import retires the note at once."""
     from ouroboros import startup_migrations
     from ouroboros.owner_quiz import mark_quiz_history_written, record_quiz_delivery_failure
     from tests.test_main_decisions import older_body_ask
@@ -399,12 +401,48 @@ def test_an_owner_closure_retires_only_once_its_authors_letter_is_settled(runtim
     older_body_ask(runtime.root, tid, "closed", chat_id=1)
     assert startup_migrations.prepare_startup_state(runtime.root)["question_publications"] == {"bound": 0, "unknown": 1}
     assert record_closed(runtime.root, tid, quiz_id="closed", reason="Withdrawn", actor="owner", request_id="close-1")["ok"]
-    record_quiz_delivery_failure(runtime.root, tid, "closed", "publication_address_unknown")  # stopped before the letter
+    record_quiz_delivery_failure(runtime.root, tid, "closed", "publication_address_unknown")  # no letter was written
+    if author == "finished":
+        monkeypatch.setattr(queue, "RUNNING", {})
+        write_task_result(runtime.root, tid, "completed", result="finished")
+        assert startup_migrations.migrate_question_publications(runtime.root, legacy=True)["retired"] == 1
+        assert not block(runtime, "closed")["delivery"].get("mailbox_at")
+        assert block(runtime, "closed")["delivery"]["state"] == "no_target"
+        return
     assert "retired" not in startup_migrations.migrate_question_publications(runtime.root, legacy=True)
     assert block(runtime, "closed")["delivery"]["state"] == "owed"
     mark_quiz_history_written(runtime.root, tid, "closed", receipt="mailbox_at")  # the letter reached its author
     assert startup_migrations.migrate_question_publications(runtime.root, legacy=True)["retired"] == 1
     assert block(runtime, "closed")["delivery"]["state"] == "no_target"
+
+
+@pytest.mark.parametrize("author", ["live", "finished"])
+def test_the_owner_closing_a_card_no_room_shows_settles_its_letter_before_the_note_retires(runtime, monkeypatch, author):
+    """The owner closes an older body's question whose card left no row in readable, stable history. Its delivery
+    attempt finds no address: a living author first gets the closure letter in its mailbox, then the note retires as
+    ``no_target``; a finished author is owed no letter and the note retires in the same attempt."""
+    from ouroboros import obligations, startup_migrations
+    from ouroboros.gateway.task_decision import answer_decision
+    from ouroboros.owner_mailbox import drain_owner_entries
+    from tests.test_main_decisions import older_body_ask
+
+    tid = runtime.task["id"]
+    older_body_ask(runtime.root, tid, "closed", chat_id=1)
+    assert startup_migrations.prepare_startup_state(runtime.root)["question_publications"] == {"bound": 0, "unknown": 1}
+    assert obligations.members(runtime.root, "unknowns")[f"question:{tid}:closed"]["reason"] == "publication_address_missing"
+    if author == "finished":
+        monkeypatch.setattr(queue, "RUNNING", {})
+        write_task_result(runtime.root, tid, "completed", result="finished")
+    status, reply = asyncio.run(answer_decision(runtime.root, {
+        "request_id": "close-1", "decision_id": f"quiz:{tid}:closed", "action": "close", "reason": "Withdrawn"}))
+    assert status == 200 and reply["state"] == "closed"
+    letters = [entry for entry in drain_owner_entries(runtime.root, tid, set()) if entry["kind"] == "quiz_closed"]
+    assert len(letters) == (1 if author == "live" else 0)
+    delivery = block(runtime, "closed")["delivery"]
+    assert (delivery["state"], delivery["reason_code"]) == ("no_target", "no_publication_target")
+    assert bool(delivery.get("mailbox_at")) == (author == "live")
+    assert f"question:{tid}:closed" not in obligations.members(runtime.root, "unknowns")
+    assert not [row for row in chat_rows(runtime.root) if row.get("type") == "quiz_closed"]
 
 
 def test_photo_material_serves_exact_selected_bytes_at_existing_artifact_endpoint(tmp_path):

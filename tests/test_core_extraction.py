@@ -183,8 +183,10 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # the asking side (a shared cause framed at its reach, no new card for an applicable answer already
     # in view, open cards kept consistent with it) and says the rest in fewer words, so its lead still fits
     # whole beside its bare structure on the direct-OpenAI custom route; nothing else changed (7a1e368b... before).
+    # Rolled again after review: "A card stays answerable, from Main after the task ends too" stands as its own
+    # sentence again, a fact of every card; nothing else changed (c54daa33... before).
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "c54daa33a49ed4103045b6a1568f0ea58e0aed56680dcf96f802177563e6c3f3"
+        "6a522316bb44bb5c0f3c25e77fa555ad231022b830f05aa9c27396714663da2e"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)
