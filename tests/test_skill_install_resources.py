@@ -212,7 +212,7 @@ def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):
         assert json.loads(execute(ctx, script))['stdout'].strip() == '22'
 
 
-def test_npm_postinstall_opt_in_produces_a_real_feature(tmp_path, monkeypatch):
+def test_npm_postinstall_opt_in_produces_a_real_feature(tmp_path, monkeypatch, pinned_path_node):
     if not shutil.which('npm') or not shutil.which('node'):
         pytest.skip('npm/node are not installed')
     name = 'fixture-postinstall'

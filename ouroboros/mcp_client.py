@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import ipaddress
-import json
 import logging
 import os
 import re
@@ -666,6 +665,7 @@ def _transport_factory(cfg: MCPServerConfig, host_env: Optional[Dict[str, str]] 
         # The SDK merges a plain dict onto its defaults. Windows env names are
         # case-insensitive: canonical names prevent a second Path/PATH entry.
         from ouroboros.execution_domain import attached_launch
+        from ouroboros.node_runtime import forward_playwright_node
         from ouroboros.process_scope import installation_scope_entries
         from ouroboros.skill_mcp import work_start  # a skill-bound server: its skill's environment and work copy
 
@@ -680,6 +680,8 @@ def _transport_factory(cfg: MCPServerConfig, host_env: Optional[Dict[str, str]] 
         # a task session's ``host_env`` adds that task's scope marker and guard address last.
         env = {**installation_scope_entries(),
                **{key.upper() if IS_WINDOWS else key: value for key, value in start_env.items()}}
+        if launch is None:  # a managed executor keeps its own runtime, never a host driver path
+            forward_playwright_node(env)  # explicit config/host choices retain authority
         selected = {"env": env} if env else {}
         if cwd:
             selected["cwd"] = cwd

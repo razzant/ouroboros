@@ -21,6 +21,7 @@ sha256sum pyproject.toml uv.lock requirements-runtime.lock Ouroboros.spec \
     scripts/bundle_linux_gtk.py scripts/build_appimage.sh > "$EVIDENCE/build-inputs.sha256"
 bash scripts/download_python_standalone.sh
 bash scripts/download_node_standalone.sh
+export PLAYWRIGHT_NODEJS_PATH="$PWD/node-standalone/bin/node"
 bash scripts/download_ripgrep_standalone.sh
 PY="$PWD/python-standalone/bin/python3"
 BUILD_ENV="$OUROBOROS_TEST_TEMP_ROOT/build-venv"
@@ -57,6 +58,7 @@ PY
 mkdir -p dist/Ouroboros/bin
 cp packaging/cli/ouroboros packaging/cli/install-ouroboros-cli dist/Ouroboros/bin/
 chmod +x dist/Ouroboros/bin/*
+"$PY" scripts/download_node_standalone.py --replace-playwright dist/Ouroboros
 bash scripts/build_appimage.sh
 cp dist/*.AppImage "$EVIDENCE/"
 cp dist/Ouroboros/_internal/linux-gtk/manifest.json "$EVIDENCE/gtk-manifest.json"

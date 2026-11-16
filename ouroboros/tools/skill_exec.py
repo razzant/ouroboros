@@ -30,7 +30,7 @@ from ouroboros.skill_loader import (
     skill_review_gate,
     summarize_skills,
 )
-from ouroboros.execution_domain import build_dir, skill_state_dir  # runtime state where the skill's processes run
+from ouroboros.execution_domain import build_dir, current as current_execution_domain, skill_state_dir
 from ouroboros.work_skill_payloads import launch as work_launch  # managed: the reviewed payload's verified work copy
 from ouroboros.skill_readiness import grant_gap_sentence
 from ouroboros.skill_review import review_skill as _review_skill_impl
@@ -46,7 +46,7 @@ from ouroboros.tools.process_facts import publish_process_facts as _publish_proc
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.shell import _kill_process_group
 from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
-from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
+from ouroboros.tools.tool_result import TOOL_CODE_SPECS, ToolResult, _publish_tool_result, completed_local_read
 from ouroboros.usage_accounting import current_usage_scope, record_unmetered_external_dispatch
 from ouroboros.utils import append_jsonl, utc_now_iso
 
@@ -83,19 +83,18 @@ _FORBIDDEN_ENV_FORWARD_KEYS = FORBIDDEN_SKILL_SETTINGS
 def _resolve_runtime_binary(runtime: str) -> Tuple[Optional[str], str]:
     """Resolve a skill runtime binary: ``(path, "")`` or ``(None, reason)``.
 
-    The reason (when known) carries the node health verdicts verbatim so the
-    surface error can say WHY nothing was usable, not just that it was not.
+    The reason keeps the node health verdicts verbatim, explaining why no runtime was usable.
     """
     import sys
     if runtime == "node":
-        # The skill-family precedence (bundled, healthy PATH, prepared managed Node) and its reasons:
-        # node_runtime.select_skill_node_runtime, which platform_layer re-exports.
+        # Skill-family node precedence is owned by platform_layer.select_skill_node_runtime: the pin's reviewed Node
+        # where the pin governs this host (a skill waits while it is unprepared; only a run asks for it, never this
+        # lookup, which availability and skill lists read too), else bundled-first with a health ROLLBACK to a working
+        # PATH node. A provably dead candidate is never selected.
         try:
             from ouroboros.platform_layer import select_skill_node_runtime
             selected, info = select_skill_node_runtime()
-            if selected:
-                return selected, ""
-            return None, info
+            return (selected, "") if selected else (None, info)
         except Exception as exc:
             # An unexpected selector failure must not be invisible: the PATH
             # scan below still runs, but the operator sees WHY the skill-family
@@ -157,9 +156,12 @@ def _scrub_env(
             if val is None or val == "":
                 continue
             env[canonical if canonical in protected_upper else key] = str(val)
+    from ouroboros.node_runtime import forward_playwright_node
     from ouroboros.process_scope import installation_scope_entries
 
     env.update(installation_scope_entries())
+    if current_execution_domain() is None:  # a managed work domain supplies its own runtime, never a host path
+        forward_playwright_node(env)
     env["OUROBOROS_SKILL_NAME"] = skill_name
     env["OUROBOROS_SKILL_STATE_DIR"] = str(skill_state_dir_path)
     return env
@@ -631,8 +633,6 @@ def _handle_list_skills(ctx: ToolContext, *, name: str = "", offset: int = 0,
 
 
 def _skill_review_refusal(ctx: ToolContext, code: str, text: str) -> str:
-    from ouroboros.tools.tool_result import TOOL_CODE_SPECS, ToolResult, _publish_tool_result
-
     return _publish_tool_result(ctx, ToolResult(status=TOOL_CODE_SPECS[code].status, code=code, text=text))
 
 
@@ -767,8 +767,6 @@ def _author_finish_existing_skill_review(
     if preflight is not None and not cyber:
         return {"error": _skill_review_refusal(ctx, "TOOL_ERROR", "SKILL_REVIEW_ERROR: deterministic preflight did not pass for the current payload.")}
     if preflight is not None:
-        from ouroboros.utils import append_jsonl, utc_now_iso
-
         preflight_facts = {"content_hash": current_hash, "status": preflight.status,
                            "findings": list(preflight.findings or []), "error": preflight.error}
         append_jsonl(ctx.drive_logs() / "events.jsonl", {
@@ -930,7 +928,6 @@ def _skill_deps_exec_block(drive_root: pathlib.Path, loaded: Any) -> str:
         f"dependencies are not ready (status={deps_status!r}). "
         "toggle_skill enabled=true installs them (no review is needed for packages); then execute."
     )
-
 
 
 def _non_executable_review_message(prefix: str, skill_name: str, status: str, *, stale: bool = False,
@@ -1102,13 +1099,18 @@ def _handle_skill_exec(
             runtime_binary = str(isolated) if isolated is not None else runtime_binary
     except Exception:
         log.debug("Could not resolve isolated Python runtime", exc_info=True)
+    runtime_unavailable = ""
     if runtime_binary is None:
         reason = (f"is not in the allowlist {sorted(_ALLOWED_RUNTIMES)}" if runtime not in _ALLOWED_RUNTIMES
                   else "has no available binary on PATH")
-        return (
+        runtime_unavailable = (
             f"⚠️ SKILL_EXEC_ERROR: skill {skill_name!r} declared runtime {runtime!r} {reason}."
             + (f" ({runtime_unavailable_reason})" if runtime_unavailable_reason else "")
         )
+        from ouroboros.node_runtime import pinned_node_wait
+
+        if runtime != "node" or not pinned_node_wait()[1]:  # waiting for the pin's Node: refused after the checks below
+            return runtime_unavailable
 
     def _canonical_declared_path(declared_name: str) -> Optional[pathlib.Path]:
         name = declared_name.strip()
@@ -1183,6 +1185,11 @@ def _handle_skill_exec(
     refusal = _grant_refusal(loaded.name, grants)
     if refusal:
         return refusal
+    if runtime_unavailable:  # only a call that would run asks for the pin's Node (single-flight), then waits for it
+        from ouroboros.server_boot import request_pinned_node
+
+        request_pinned_node()
+        return runtime_unavailable
     env = _scrub_env(
         manifest_env_keys=list(loaded.manifest.env_from_settings or []),
         skill_state_dir_path=state_dir,

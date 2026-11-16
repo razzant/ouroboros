@@ -38,6 +38,9 @@
 # Canonical working-view metadata/projections belong to D03. Plan author-source
 # retention belongs to the D06 review stack and reaches D05's source store lazily.
 
+# The pin's Node is prepared single-flight by D11's boot owner (server_boot.request_pinned_node);
+# its acting consumers ask it lazily: D07 attach, D14 skills/companions, D06 gate Node lane.
+
 [meta]
 reference_tree = "ouroboros_v7_wip @ 9f691656e7e756c483f72ef549418c0e7a1b8054 (frozen)"
 population_rule = "git-tracked *.py under ouroboros/ and supervisor/, plus server.py and launcher.py"
@@ -1372,6 +1375,7 @@ lazy_only = [
   "D06->D03",
   "D06->D05",
   "D06->D08",
+  "D06->D11",
   "D06->D14",
   "D06->D15",
   "D07->D03",

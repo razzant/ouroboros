@@ -1221,8 +1221,9 @@ def _resolve_bundled_payload(candidates_for: Callable[[pathlib.Path], List[pathl
 
 
 def resolve_bundled_node() -> Optional[str]:
-    """Locate the bundled signed Node; callers own health and PATH preference (§1)."""
-    return _resolve_bundled_payload(embedded_node_candidates)
+    """The pin's Node (shipped, prepared, or exact at any base), else None (``node_runtime.reviewed_host_node``)."""
+    from ouroboros.node_runtime import reviewed_host_node
+    return reviewed_host_node(_resolve_bundled_payload(embedded_node_candidates))
 
 
 def resolve_bundled_ripgrep() -> Optional[str]:
@@ -1578,8 +1579,7 @@ def resume_process(pid: int) -> bool:
         return False
 
 
-# Preserve import order without the node_runtime -> platform_layer eager cycle.
-# PEP 562 re-exports retain callers' spellings (ARCHITECTURE §1 "Platform substrate").
+# Lazy PEP 562 compatibility exports avoid node_runtime's eager cycle (ARCHITECTURE §1 "Platform substrate").
 _NODE_RUNTIME_REEXPORTS = (
     "NodeRuntimeHealth",
     "node_runtime_health",
