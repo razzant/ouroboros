@@ -305,7 +305,9 @@ def test_the_real_sdk_reports_accepted_refused_and_unreachable_without_stopping_
         receiver.server.shutdown()
         receiver.server.server_close()
         logger.error("synthetic failure with the receiver gone")
-        sentry_sdk.flush(timeout=5)
+        # Until the transport gives up (flush returns as soon as it has): urllib3 tries four connects, and Windows
+        # refuses each one to a closed loopback port only after its SYN retries, about two seconds.
+        sentry_sdk.flush(timeout=30)
         gone = status(None)
     finally:
         logger.removeHandler(handler)
