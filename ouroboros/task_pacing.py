@@ -823,7 +823,8 @@ def prepared_wrapup_candidate(
 
     owner_ctx = getattr(getattr(ctx, "tools", None), "_ctx", None)
     waiter = current_model_wait()
-    role, account = task_model_binding({"model_role": getattr(ctx, "model_role", ""),
+    role, account = task_model_binding({"model_role": getattr(ctx, "model_role", "") or getattr(
+        owner_ctx, "_restored_context_model_role", ""),
         "task_metadata": getattr(owner_ctx, "task_metadata", {})},
         context_fit_plan=getattr(owner_ctx, "context_fit_plan", None),
         overrides=waiter.overrides if waiter else None)

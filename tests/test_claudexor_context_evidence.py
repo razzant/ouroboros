@@ -416,19 +416,111 @@ def test_the_fits_route_question_runs_beside_the_build_and_repeats_only_before_a
     assert early.max_projection.system_content_json == plain.max_projection.system_content_json
 
 
-def test_an_early_answer_that_would_narrow_memory_yields_to_the_usual_points_answer(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cold", [False, True])
+def test_an_early_answer_that_would_narrow_memory_yields_to_the_usual_points_answer(tmp_path, monkeypatch, cold):
     """The horizon guard: the pool answered the early question with a smaller account (Low here); the question asked
     again at the usual point names a larger one, and the plan is that answer's: the mind sees no less than today."""
-    from ouroboros import context_fit as cf
+    from types import SimpleNamespace
+    from ouroboros import context_fit as cf, owner_wait
     from ouroboros.llm import LLMClient
 
     answers = [_catalog("account-a", "identity-a", 70_000), _catalog("account-b", "identity-b", 872_000)]
     for value in answers:
         value["models"][0]["contextWindow"] = value["models"][0]["maxContextWindow"]
     monkeypatch.setattr(LLMClient, "claudexor_model_catalog", staticmethod(lambda *_a, **_kw: copy.deepcopy(answers.pop(0))))
-    plan, spans = _built(monkeypatch, tmp_path, lambda task: cf.RouteQuestion(task, cf.resolve_context_fit_route))
+    task = {**TASK, "model": "openai::gpt-6-sol"} if cold else TASK
+
+    def question(original):
+        if not cold:
+            return cf.RouteQuestion(original, cf.resolve_context_fit_route)
+        # The original task names another transport. The saved actor's first fit must
+        # keep RouteQuestion's early-answer guard and its route on the second read.
+        state = {"route": {"active_model": MODEL, "active_use_local": False, "active_effort": "none",
+                           "route_choice": {"kind": "explicit", "source": "switch_model"}},
+                 "messages": [], "context_model_role": "main"}
+        resolver, effort = owner_wait.context_start_route(SimpleNamespace(task_metadata={}), original, state, "high")
+        assert effort == "none" and original == task
+        return resolver
+
+    plan, spans = _built(monkeypatch, tmp_path, question, task=task)
     assert not answers and spans["work"]["catalog_calls"] == 2
+    assert plan.model == MODEL and task["model"] == ("openai::gpt-6-sol" if cold else MODEL)
     assert (plan.initial_mode, plan.model_route["credentialProfileId"]) == ("max", "account-b")
+
+
+@pytest.mark.parametrize("pending", [False, True], ids=["saved", "pending"])
+def test_a_cold_starts_failed_route_read_answers_for_the_route_it_asked_about(tmp_path, monkeypatch, pending):
+    """A failed saved or pending route read cannot borrow the original task's other transport's 40k refusal."""
+    from types import SimpleNamespace
+    from ouroboros import config, context, context_fit as cf, owner_wait, server_runtime
+    from ouroboros.context_window import record_observation, route_observation_scope
+
+    settings = {"OUROBOROS_MODEL": MODEL, "OPENAI_API_KEY": "sk-fixture"}  # a keyed route scopes its observations
+    monkeypatch.setattr(config, "runtime_settings", lambda: dict(settings))
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(server_runtime, "apply_runtime_provider_defaults", lambda s: (s, False, []))
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    monkeypatch.setattr(context, "_context_fit_route", lambda *_a, **_kw: (_ for _ in ()).throw(TimeoutError("read")))
+    task = {**TASK, "model": "openai::gpt-6-sol"}
+    record_observation(tmp_path, route_observation_scope(cf._context_route(task)[0], settings), refused=40_000)
+    state = {"route": {"active_model": MODEL, "active_use_local": False, "active_effort": "none",
+                       "route_choice": {"kind": "explicit", "source": "switch_model"}},
+             "messages": [], "context_model_role": "main"}
+    if pending:
+        state["route"].update(active_model=task["model"], active_model_override=MODEL)
+    resolver, effort = owner_wait.context_start_route(SimpleNamespace(task_metadata={}), task, state, "high")
+    core = cf.ContextCore("Core", "BIBLE", "# Architecture\n\n" + "Whole source book. " * 2_000, "", "Identity",
+                          "Facts", '"Assignment"', False)
+    plan = cf.build_context_fit_plan(None, core, task, preferred_mode="max", route_resolver=resolver,
+                                     reasoning_effort=effort)
+    assert (plan.model, plan.provider, plan.status, plan.window_tokens) == (MODEL, "claudexor", "failed", 0)
+    assert plan.start == ("max", "") and task["model"] == "openai::gpt-6-sol"
+    assert state["route"].get("active_model_override") == (MODEL if pending else None)
+
+
+@pytest.mark.parametrize("window", [75_000, 85_000])
+@pytest.mark.parametrize("late,effort,walks", [("openai", "high", 2), ("openai", "none", 1), ("openrouter", "high", 1)],
+                         ids=["ladder-opened", "same-shape-openai", "same-shape-provider"])
+def test_a_late_answer_on_another_provider_walks_again_only_where_the_request_shape_changed(monkeypatch, window, late,
+                                                                                            effort, walks):
+    """Settings moved Main from the engine to another provider while the guard's early answer narrowed the view: the
+    usual point's answer names the same window, reserves and density. The plan is that answer's, and so is its view:
+    walked again where the provider changes the request's shape (direct OpenAI reasoning sends the longer custom
+    ladder, ``context_fit._request_shapes``); otherwise the walk it has holds that view already. 15.11.2026 (Astra):
+    the engine's walk stayed for direct OpenAI, 496 tokens of memory where its own fit holds 16,895."""
+    from ouroboros import context_fit as cf, memory_view as mv
+    from tests import _memory_view_synthetic as syn
+
+    tools = [{"type": "function", "function": {"name": f"fixture_{n}", "description": "Read fixture.", "parameters": {
+        "type": "object", "properties": {"path": {"type": "string", "description": "A path."}}, "required": ["path"]}}}
+        for n in range(60)]  # small enough for a custom catalog to carry
+    snap = syn.snapshot(room_facts=syn.room("1", lane2=100), conversations=[], story=syn.pages(10, 2_000))
+    core = cf.ContextCore("Core", "BIBLE", "# Architecture\n\n" + "Whole source book. " * 2_000, "", "Identity", "Facts",
+                          json.dumps("Assignment. " + "Retained evidence. " * 1_000), False,
+                          memory_view_json=mv.snapshot_json(snap))
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    monkeypatch.setattr(cf, "_context_route", lambda _task: ({"provider": "claudexor", "model": "fixture"}, {}))
+    asked, walked, walk = [], [], cf._view_projections
+    monkeypatch.setattr(cf, "_view_projections", lambda *a, **kw: walked.append(kw["provider"]) or walk(*a, **kw))
+
+    def stated(provider):
+        return ({"provider": provider, "model": "fixture", "options": {"account_fingerprint": "fixture-fp"}},
+                ce.CapabilityEvidence(window, "confirmed", "metadata", "fixture-route"))
+
+    def question(_task, **_kw):  # the engine when the build asks; Settings moved by the usual point
+        asked.append(late if asked else "claudexor")
+        return stated(asked[-1])
+
+    def build(resolver):
+        return cf.build_context_fit_plan(None, core, {"id": "late", "chat_id": 1}, preferred_mode="max",
+                                         tool_schemas=tools, reasoning_effort=effort, route_resolver=resolver)
+
+    plan = build(cf.RouteQuestion({"id": "late"}, question))
+    assert asked == ["claudexor", late] and walked == ["claudexor", late][:walks]  # one more walk for a new shape only
+    fresh = build(lambda *_a, **_kw: stated(late))  # the late provider's answer from the start
+    assert (plan.provider, plan.initial_mode, plan.start) == (fresh.provider, fresh.initial_mode, fresh.start)
+    for mode in ("max", "low", "nano"):
+        assert plan.projection(mode).system_content_json == fresh.projection(mode).system_content_json, mode
 
 
 def test_the_memory_view_receipt_names_the_kind_and_age_of_its_window_evidence(tmp_path, monkeypatch, catalog):

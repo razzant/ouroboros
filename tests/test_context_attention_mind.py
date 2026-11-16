@@ -169,9 +169,11 @@ def test_memory_step_passes_the_actual_window_and_current_transcript(tmp_path, m
         p.reproject_transcript = lambda messages, mode: [{"role": "system", "content": system}, *messages[1:]]
 
         def reproject_for_route(*, window_tokens, known_window, ratio, output_reserve, admitted,
-                                tool_schemas, start_mode, current_messages, refused_tokens, measured_input_tokens):
+                                tool_schemas, start_mode, current_messages, refused_tokens, measured_input_tokens,
+                                reasoning_effort):
             assert measured_input_tokens is None  # this fixture has no prepared-input anchor
             assert admitted is True  # a view under way is read at the line its own requests go out at
+            assert reasoning_effort == "high"  # the round's effort: the request shape its measurement counted
             seen.append({"window": window_tokens, "known": known_window, "mode": start_mode,
                          "messages": list(current_messages), "schemas": list(tool_schemas),
                          "reserve": output_reserve, "refused": refused_tokens})

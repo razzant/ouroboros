@@ -191,8 +191,8 @@ def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: I
 
     ``story`` is its tokens. ``allowance`` is the memory room that frame leaves (``None``: an unknown window, no fact). ``floor_need``
     is the books, core, knowledge with scratchpad and runtime facts (``dynamic_head_text`` and ``dynamic_text``:
-    Health, recent activity, skills, drive state too), assignment, reply reserve and work room; ``zero_need`` adds the tool
-    schemas, ``need`` my memory in its ordinary forms (task lines collapsed, nothing cut):
+    Health, recent activity, skills, drive state too), the connections map Max shows, assignment, reply reserve and work
+    room; ``zero_need`` adds the tool schemas, ``need`` my memory in its ordinary forms (task lines collapsed, nothing cut):
     ``story`` (``unfolded``: its pages no part or account holds yet) and ``room``. Measures only: the start
     alone chooses the mode, and the mind judges what to fold.
     """
@@ -200,7 +200,8 @@ def max_room_fact(snapshot: Optional[mv.MemoryViewSnapshot], core: Any, books: I
         return None
     base = view_tokens(core.base_prompt) + view_tokens(core.bible_md)
     parts = {"books": max(0, sum(map(view_tokens, books)) - base), "core": base + view_tokens(core.semi_stable_text),
-             "knowledge, scratchpad and runtime facts": view_tokens(core.dynamic_head_text) + view_tokens(core.dynamic_text)}
+             "knowledge, scratchpad and runtime facts": view_tokens(core.dynamic_head_text) + view_tokens(core.dynamic_text),
+             **({"connections": view_tokens(core.connections[0])} if core.connections[0] else {})}  # Max's map (``_system_blocks``)
     parts["assignment"] = max(0, fixed - schemas - sum(parts.values()))  # the task's messages and their framing
     ordinary = ordinary_level(snapshot) if snapshot else mv.FULL_VIEW
     memory = {"story": tokens_of(mv.story_chars(snapshot, ordinary)) if snapshot else story, "room": tokens_of(mv.room_chars(snapshot, ordinary)) if snapshot else 0,
@@ -318,7 +319,7 @@ def measure_text(fact: Mapping[str, Any], *, parts: bool = False, pages: Optiona
     (``unfolded_pages`` of the same snapshot) names how many unfolded pages there are and where they pile up."""
     zero = fact["window"] - fact["zero_need"]
     unfolded = pages_text(pages) if pages is not None else f"pages no part or account holds yet {fact['unfolded']:,}"
-    return (f"window {fact['window']:,}; books, core, knowledge, scratchpad, runtime facts, assignment, reply reserve and work room "
+    return (f"window {fact['window']:,}; books, core, knowledge, scratchpad, runtime facts, connections, assignment, reply reserve and work room "
             f"{fact['floor_need']:,}{f' ({floor_parts(fact)})' if parts else ''}; tool schemas {fact['schemas']:,}; with "
             f"no memory shown {'headroom' if zero >= 0 else 'over by'} {abs(zero):,}; my memory "
             f"{fact['story'] + fact['room']:,} = story {fact['story']:,} ({unfolded}) + rooms {fact['room']:,}, "
@@ -879,7 +880,7 @@ def reprojected(captured: mv.MemoryViewSnapshot, fresh: mv.MemoryViewSnapshot) -
 
 def counterfactual_starts(plan: Any, snapshots: Mapping[str, mv.MemoryViewSnapshot]) -> Dict[str, Any]:
     """Each named memory fitted as a fresh start of this plan's one captured frame by the start's own fitter
-    (``context_fit._view_projections``): the same core, books, assignment, tool schemas the start priced, window
+    (``context_fit._view_projections``): the same core, books, assignment, tool schemas in the shape the start priced, window
     record, reply and working reserves, density and owner mode; nothing else is read. A host step's section is
     priced at the address its capture would publish (``section_floor.predicted_section``) and nothing is written: no
     view receipt, calibration, checkpoint or plan. When no view holds the whole input, the start's own rescue applies
@@ -912,7 +913,7 @@ def counterfactual_starts(plan: Any, snapshots: Mapping[str, mv.MemoryViewSnapsh
                 window_tokens=record.total_equivalent, known_window=record.usable is not None,
                 output_reserve=plan.output_reserve_tokens, window_record=record, ratio=ratio,
                 working_reserve_tokens=plan.working_reserve_tokens, work_room_levels=snapshot.spec.work_room_levels,
-                retain=predicted_section)
+                retain=predicted_section, provider=plan.provider, reasoning_effort=getattr(plan, "start_reasoning_effort", ""))
         rescued = False
         try:
             try:

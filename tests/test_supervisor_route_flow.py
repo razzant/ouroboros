@@ -226,6 +226,9 @@ def test_restart_restores_frozen_binding_and_later_switch(tmp_path, monkeypatch,
     ctx = registry._ctx
     task = selected_task()
     ctx.task_metadata = copy.deepcopy(task)
+    # Dispatch binds the delegator's frozen model as the child's own route, and its opening records that choice
+    # (``route_choice.bind_task_route``, ``open_route``): explicit, so Main's later model never moves it.
+    ctx.route_choice = {"kind": "explicit", "source": "configured_row"}
     role = "light" if switch == "role" else "subagent:cognition"
     ctx.context_fit_plan = replace(ctx.context_fit_plan, model_role=role)
     ctx.active_model = "claudexor::codex=owner-switch" if switch != "none" else task["parent_cognitive_route"]["model"]

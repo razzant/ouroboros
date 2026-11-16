@@ -1313,6 +1313,7 @@ def _coarsen_memory_view(ctx: Any, fit: Any, *, saving: Optional[int] = None, sl
         ratio=measurement.measurement_density,
         output_reserve=int(plan.output_reserve_tokens), tool_schemas=ctx.tool_schemas, start_mode=mode,
         current_messages=ctx.messages, measured_input_tokens=measurement.reprojection_input_tokens,
+        reasoning_effort=str(getattr(ctx, "active_effort", "") or ""),  # the shape the round measured
         refused_tokens=(int(saving) if saving or (saving == 0 and slack)  # a slack-only ask states no excess
                         else max(1, int(measurement.capacity_deficit_tokens or 0))),
         **({"slack_tokens": int(slack)} if slack else {}),

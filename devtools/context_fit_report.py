@@ -223,7 +223,7 @@ def measure_core(core, schemas, *, root, window, reserve, mode='max', prepared=N
         phase='prepared_candidate' if prepared is not None else 'task_preparation',
         input_basis='minimum_bound_not_a_candidate' if failure else 'measured_candidate',
         estimator=('estimate_context_prompt_tokens over the serialized messages and tools, chars/4' if fit else
-                   'plan-side minimum bound (_request_tokens + tool_schema_tokens), chars/4'),
+                   'plan-side minimum bound (the fit\'s one count of messages and tools), chars/4'),
         diagnostic_notes=['No live host: feature tools/instructions, dynamic tool notices and provider wire are absent.',
                           f'Density is a cold estimate of {ratio}; no account-scoped window observations are inferred.',
                           'Figures are chars/4 estimates, never provider tokens: the input is the serialized request, section rows '

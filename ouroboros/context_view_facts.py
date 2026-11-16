@@ -49,7 +49,7 @@ def block_label(message, index, block, plan):
 def memory_facts(plan, mode, messages=()):
     """Start facts of an integrating focus, only while this exact memory part is absent from visible facts rows:
     on the owner's Max with a known window, the host's measure of the start's Max room part by part (books, core,
-    knowledge and runtime facts, assignment, reply reserve, work room, tool schemas) and how the start settled;
+    knowledge and runtime facts, connections, assignment, reply reserve, work room, tool schemas) and how the start settled;
     my memory: the story with its pages no part or account holds yet (how many, their tokens, the rooms holding
     most of them) and the rooms' lines; what this view shows only by address; marks and waiting classes
     with their count, oldest date, list reader and closure act.
