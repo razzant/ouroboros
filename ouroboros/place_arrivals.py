@@ -22,6 +22,8 @@ _IMPORTED = _ARRIVAL + " AND json_extract(body, '$.historical_import') IS NOT NU
 # its stored position. ``dialogue_room_reading`` keys these very expressions; ``reading_key`` mirrors them.
 READING_TIME = "COALESCE(json_extract(body,'$.source_order.time'),ts)"
 READING_ORDER = "COALESCE(json_extract(body,'$.source_order.order'),-1)"
+
+
 def _room_seek(place):
     """The captured rooms of the place ``place`` names (a parameter or a column), through the room index."""
     return (f"SELECT chat_id FROM dialogue INDEXED BY dialogue_place_rooms WHERE {_ARRIVAL} AND {_PLACE}={place} "

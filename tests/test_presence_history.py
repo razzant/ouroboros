@@ -958,10 +958,10 @@ def test_main_keeps_its_own_newest_page_after_a_bulk_import_into_a_place_room(tm
     a place arrival, so its conversation probes leave rooms holding them out: 11,000 imported rows stored after
     Main's own leave Main's newest page whole, at the cost a 2,000-row import leaves. What Main shows from
     elsewhere stays: a chat-less legacy row, another non-Project room's row, a private Main contact and a focus's
-    narration stored under the place room. Finding those rooms and listing the store's rooms costs one statement
-    and one row each, whatever the places and rooms: forty more captured rooms in five more places add no
-    statement and no row handed to Python, where a statement per place and a row per room each waited for the
-    interpreter lock on the owner's busy server (#3399)."""
+    narration stored under the place room. Finding those rooms (one statement after the index check) and listing
+    the store's rooms (one row) cost the same whatever the places and rooms: forty more captured rooms in five
+    more places add no statement and no row handed to Python, where a statement per place and a row per room each
+    waited for the interpreter lock on the owner's busy server (#3399)."""
     import math
 
     from ouroboros.gateway import history
