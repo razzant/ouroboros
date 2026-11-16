@@ -1153,6 +1153,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
 """
 
 
+@posix_host
 def test_a_skill_bound_mcp_server_inside_the_mappings_gets_its_state_and_key_and_no_service_path(env, monkeypatch):
     """A skill folder inside the work mappings starts as installed in the pinned executor, with its scripts'
     environment: the work domain's own state folder, its granted key and its own packages. No service search or
@@ -1209,6 +1210,7 @@ def test_a_skill_bound_mcp_server_inside_the_mappings_gets_its_state_and_key_and
                for value in crossing.values() for part in str(value).split(os.pathsep))
 
 
+@posix_host
 def test_a_skill_bound_mcp_server_starts_its_verified_work_copy_in_the_pinned_executor(env, monkeypatch, tmp_path):
     """Connect tools' row, managed, its skill installed outside every mapping: binding and the Connect preview copy and
     start nothing (the preview names what the work domain will start); each real start (listing, call) runs the
