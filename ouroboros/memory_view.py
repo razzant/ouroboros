@@ -1244,7 +1244,7 @@ def _status_lines(status: Mapping[str, Any], refusals: Tuple[Dict[str, Any], ...
         return []
     lines = [f"Story status: the helper retelling is folded {status['folded']} of {status['total']} blocks; "
              f"{status['open_records']} retold records are still open ({status['open_rows']} rows, "
-             f"{status['open_chars']} chars of retelling; future folds use helper route {status['helper_route']})."]
+             f"{status['open_chars']} chars; future folds use helper route {status['helper_route']})."]
     for refusal in refusals:  # the retelling's own id is not the helper's answer
         read = (f"its answer: read_file(root='runtime_data', path='{refusal['path']}')" if refusal.get("path")
                 else "its answer was not retained")
