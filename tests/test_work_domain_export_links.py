@@ -11,6 +11,11 @@ import tarfile
 import pytest
 
 from ouroboros import work_domain
+from tests.test_execution_domain import posix_host
+
+# ``export_tree`` serves only an execution domain (its callers route work paths alone), which a Windows service host
+# refuses; its intake writes through directory descriptors, which Windows does not offer.
+pytestmark = posix_host
 
 
 def _stream(monkeypatch, members, *, mode=0o644):

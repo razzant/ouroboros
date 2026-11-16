@@ -232,7 +232,7 @@ def test_the_owner_checks_decode_only_rows_their_columns_cannot_answer(tmp_path,
     copy on every custody pass: a stable final row answers from its columns and an owner's stated root from one
     statement, so only a row that states none is decoded (#3399: 7 decodes, 2.5 MB per copy on a live stand)."""
     from types import SimpleNamespace
-    from ouroboros import launch_custody, store
+    from ouroboros import launch_custody, store, task_store
 
     write_task_result(tmp_path, "cand", "completed", root_task_id="cand")
     write_task_result(tmp_path, "kid", "running", root_task_id="cand", parent_task_id="cand")
@@ -249,6 +249,10 @@ def test_the_owner_checks_decode_only_rows_their_columns_cannot_answer(tmp_path,
         records=records, rows=[], blind=False, readable=True))
     decoded, materialize = [], store.materialize
     monkeypatch.setattr(store, "materialize", lambda tid, *rest: decoded.append(tid) or materialize(tid, *rest))
+    asked, capture = [], task_store.capture
+    monkeypatch.setattr(task_store, "capture", lambda conn, sql, *rest: asked.append(sql) or capture(conn, sql, *rest))
+    # An owner with no record answers by its absent row: a custody pass at rest asks no body (tests/test_cost_live_set.py).
+    assert body._recorded_terminal("gone", tmp_path) is False and not [sql for sql in asked if "task_bodies" in sql]
     assert body._recorded_terminal("cand", tmp_path) is True and decoded == [], "a stable final answers unread"
     assert body._recorded_terminal("kid", tmp_path) is False and decoded == ["kid"], "a running row is read"
     assert body._recorded_terminal("ws", tmp_path) is False and decoded[-1] == "ws", "so is a finalizing one"

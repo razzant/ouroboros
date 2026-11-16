@@ -310,10 +310,12 @@ def _recorded_terminal(task_id: str, results_root: Any) -> bool:
     try:
         from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
         from ouroboros.task_store import exists, stable_finals
-        root = _wt._data_dir(results_root)  # a recurring GC asking about an owner with no record reads no document
+        root = _wt._data_dir(results_root)
+        if not exists(root, task_id):  # a recurring GC asking about an owner with no record asks no body row
+            return False
         if stable_finals(root, [task_id]).get(str(task_id)):
             return True
-        record = load_effective_task_result(root, task_id, materialize_artifacts=False) if exists(root, task_id) else {}
+        record = load_effective_task_result(root, task_id, materialize_artifacts=False)
         return (record or {}).get("status") in FINAL_STATUSES
     except Exception:
         log.debug("candidate owner status unavailable for %s", task_id, exc_info=True)

@@ -49,13 +49,21 @@ class _Trap:
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(16)
+        # Closing a listener ends an accept() blocked on it on macOS, never on Linux, where the thread would wait for
+        # one more connection and outlive the test (conftest thread hygiene). The loop looks at a stop flag between
+        # short waits instead, and close() joins it.
+        self.sock.settimeout(0.1)
         self.port = self.sock.getsockname()[1]
-        threading.Thread(target=self._serve, daemon=True).start()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
 
     def _serve(self):
-        while True:
+        while not self._stop.is_set():
             try:
                 conn, _ = self.sock.accept()
+            except socket.timeout:
+                continue
             except OSError:
                 return
             with conn:
@@ -67,7 +75,10 @@ class _Trap:
                     pass
 
     def close(self):
+        self._stop.set()
+        self._thread.join(timeout=10)  # a tunnel being answered takes at most its 5 s read
         self.sock.close()
+        assert not self._thread.is_alive(), "the trap's thread outlived its close"
 
 
 def _evidence(name: str) -> Path | None:

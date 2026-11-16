@@ -17,6 +17,7 @@ from starlette.testclient import TestClient
 from tests.test_deployment_trusted_extensions import org as org, install as install  # fixtures
 from tests.test_deployment_trusted_extensions import failing_package, FRAGMENT
 from tests.test_execution_domain import env as env, fake_docker, section  # fixture and container stand-in
+from tests.test_execution_domain import posix_container, posix_host
 
 RUNTIME_PLUGIN = '''from starlette.responses import StreamingResponse
 API = None
@@ -109,6 +110,7 @@ def test_runtime_failures_keep_categories_without_exposing_fixed_values(org, mon
         assert FRAGMENT not in caplog.text and "withheld" in caplog.text
 
 
+@posix_container  # the container's own shell text, run under the host's /bin/sh
 def test_minimal_container_without_setsid_never_starts_work_or_a_service(env):
     from ouroboros.workspace_executor import _docker_exec_wrapper, _docker_service_start_shell
 
@@ -126,6 +128,7 @@ def test_minimal_container_without_setsid_never_starts_work_or_a_service(env):
     assert receipt.read_text() == "completed"  # a positively empty launch, no invented PID or surviving group
 
 
+@posix_host
 def test_skill_and_mcp_unconfirmed_groups_reach_the_caller_with_custody_kept(env, monkeypatch):
     from ouroboros import execution_domain, mcp_client
     from ouroboros.tools import skill_exec
