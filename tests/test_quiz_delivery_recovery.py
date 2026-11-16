@@ -389,8 +389,8 @@ def test_a_closure_no_room_shows_retires_its_note_and_leaves_current_questions(r
 @pytest.mark.parametrize("author", ["running", "finished"])
 def test_an_owner_closure_retires_only_once_its_authors_letter_is_settled(runtime, monkeypatch, author):
     """The owner closed an older body's question whose card no room shows; the delivery attempt recorded the missing
-    address and wrote no letter. A living author is still owed it, so no door retires that note yet and the owner
-    keeps the forced retry; once the letter is written, the import retires it. A finished author's terminal status
+    address and wrote no letter. A living author is still owed it, so no door retires that note yet (nothing writes
+    that letter later either); once the letter is written, the import retires it. A finished author's terminal status
     never turns back, so no letter can reach it and the import retires the note at once."""
     from ouroboros import startup_migrations
     from ouroboros.owner_quiz import mark_quiz_history_written, record_quiz_delivery_failure
