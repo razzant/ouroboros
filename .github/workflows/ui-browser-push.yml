@@ -56,7 +56,7 @@ jobs:
     name: ${{ inputs.diagnostic && inputs.diagnostic != 'full' && format('PARTIAL DIAGNOSTIC UI - {0}', inputs.diagnostic) || 'ui-diagnostic' }}
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.diagnostic != 'full' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 115
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -66,14 +66,14 @@ jobs:
           interpreter: shipped  # the SQLite and journal mode fresh installs run, as the full lane
           install-project: 'false'
         id: setup_python
-      # Bounded downloads with one retry, as the full lane installs them (#2895).
+      # Bounded downloads with one retry, the reviewed Node first, as the full lane installs them (#2895).
       - name: Install UI smoke Chromium and WebKit
         id: install_browsers
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
-        timeout-minutes: 45
+        timeout-minutes: 70
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
-        run: python -I -S scripts/ci_browser_install.py chromium webkit
+        run: python -I -S scripts/ci_browser_install.py --pinned-node chromium webkit
       - name: Run PARTIAL DIAGNOSTIC host UI scenario
         id: ui_diagnostic
         if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
@@ -82,6 +82,7 @@ jobs:
           OUROBOROS_RUN_UI_SMOKE: "1"
           OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
         shell: bash
         run: |
           case "$DIAGNOSTIC" in

@@ -115,6 +115,7 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
     append, remember = () => {}, actionsOf }) {
     const census = new Map();
     let censusComplete = false;
+    let censusRead = false;
     let bindings = {};
     let bindingsKnown = false;  // the first `task_bindings` is the baseline, not news
     const projects = new Map();
@@ -328,6 +329,7 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
     function sync(data) {
         if (!data || typeof data !== 'object') return;
         if (Array.isArray(data.active_chat_activities)) {
+            censusRead = true;
             census.clear();
             for (const row of data.active_chat_activities) {
                 const id = key(row?.activity_id);
@@ -343,6 +345,14 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
             bindings = data.task_bindings;
             bindingsKnown = true;
         }
+        reconcile();
+        for (const id of fresh) if (!records.get(id)?.root?.isConnected) askAbout(id, key(bindings[id]?.project_id));
+        askContinued();
+    }
+
+    // Every mounted card against the census and bindings last read; a census also reads again the followed successors
+    // whose record read failed (`retry`).
+    function reconcile({ retry = true } = {}) {
         onDomWrite(() => {
             let changed = false;
             for (const record of records.values()) {
@@ -356,9 +366,28 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
             for (const successorId of [...follows.keys()]) changed = adopt(successorId) || changed;
             return reconcilePortalNotes(feed) || changed;
         });
-        for (const successorId of [...follows.keys()]) hydrate(successorId);
-        for (const id of fresh) if (!records.get(id)?.root?.isConnected) askAbout(id, key(bindings[id]?.project_id));
-        askContinued();
+        if (retry) for (const successorId of [...follows.keys()]) hydrate(successorId);
+    }
+
+    /**
+     * Cards a history replay mounted after the last `/api/state` was read meet that census now: a reload's state can
+     * arrive before its history draws the cards, and the next census is a poll away. It starts no reads of its own (no
+     * Continue asks, no retried successor read): a card it reconciles reads its record through the room's missing-work
+     * path, which stays quiet while away.
+     */
+    function refresh() {
+        if (!censusRead) return;
+        if (isMain) reconcile({ retry: false });
+    }
+
+    /**
+     * A disconnect: the census read before it proves nothing after it, so no card meets it (a replay, a first binding)
+     * until the next one.
+     */
+    function retire() {
+        censusRead = false;
+        censusComplete = false;
+        census.clear();
     }
 
     /**
@@ -468,5 +497,5 @@ export function createWorkPortals({ isMain, feed, records, card, onDomWrite, isC
         return added;
     }
 
-    return { activity, bind, bindRow, follow, present, relabel, row, settle, sync, syncConvert, turnIntoProject };
+    return { activity, bind, bindRow, follow, present, refresh, relabel, retire, row, settle, sync, syncConvert, turnIntoProject };
 }

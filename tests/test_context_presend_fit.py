@@ -310,21 +310,25 @@ def test_new_size_density_witness_reaches_real_admission(main_call, monkeypatch,
 @pytest.mark.parametrize("predicted", [True, False])
 def test_size_terminal_distinguishes_prediction_from_provider_failure(main_call, predicted):
     from ouroboros.outcomes import derive_loop_outcome
+    from tests.test_llm_claudexor import result
     from tests.test_provider_unknown_terminal_text import _ctx
 
     ctx, gateway, *_ = main_call
     if predicted:
         _large(ctx, irreducible=True)
-        assert loop._call_round_model(ctx)[0] is None and not gateway.creates
-        usage = ctx.accumulated_usage
-    else:
-        usage = {"_last_llm_error_kind": "context_overflow", "reason_code": "llm_api_error",
-                 REFUSED_INPUTS_KEY: {"fixture": 300_000}}
+    else:  # the provider refuses a sent request by size, stating no number (Claudexor passes no sentence on)
+        gateway.results = [result(outcome="failed", problem={"code": "provider_failed", "message": "Controlled refusal",
+            "context": {"httpStatus": 400, "vendorCode": "context_length_exceeded", "parameter": "input"}})] * 4
+        gateway.dispatch = ["response_received"] * 4
+    assert loop._call_round_model(ctx)[0] is None and bool(gateway.creates) is not predicted
+    usage = ctx.accumulated_usage  # the round's own refusal, measured by the same round (round 1, as ``_ctx``'s)
     text, usage, trace = loop._handle_provider_unavailable(_ctx(ctx.drive_root, usage), error_kind="context_overflow")
     expected = "context_overflow" if predicted else "llm_api_error"
     assert usage["reason_code"] == expected and usage["_last_llm_error_kind"] == "context_overflow"
     assert "Context-size recovery" in text and "context exceeded" not in text
     assert ("smallest refused request" in text) is (not predicted)
+    basis = "host prediction before sending, no provider response" if predicted else "from the bytes it sent"
+    assert f"tokens ({basis}) on {ctx.active_model}; assumed window " in text
     outcome = derive_loop_outcome(text, usage, trace)
     assert outcome["failure"]["kind"] == ("runtime" if predicted else "provider")
     assert outcome["failure"]["error_kind"] == "context_overflow"

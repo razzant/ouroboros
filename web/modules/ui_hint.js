@@ -7,13 +7,15 @@
  * `say({ word, text, fact, rule, action })` writes only the words that changed since it last said them (`fact`, an
  * optional `{ word, text }` line under the first, is what the control observed apart from its value), so a translation the
  * overlay put in their place stays; a row that watches its words for a refit leaves the hint's alone
- * (composer_owner_controls.js). `onAction()` runs the action.
+ * (composer_owner_controls.js). `onAction()` runs the action. Its consumer shows and hides it; `dismissOutside` lets a
+ * press outside its control hide it too (a capsule's floating list is outside its host and still its own, so a capsule
+ * keeps its hint), and `boundary` is the clipping box it stays inside.
  */
 let made = 0;
 const EDGE_PX = 8;
 const GAP_PX = 8;  // ui.css: the hint stands var(--space-2) from its control
 
-export function createHint(host, { doc = host.ownerDocument, onAction = () => {} } = {}) {
+export function createHint(host, { doc = host.ownerDocument, onAction = () => {}, boundary = null, dismissOutside = false } = {}) {
     const el = doc.createElement('div');
     el.className = 'ui-hint';
     el.id = `ui-hint-${++made}`;
@@ -35,6 +37,18 @@ export function createHint(host, { doc = host.ownerDocument, onAction = () => {}
         parts[part].hidden = !words;
     };
     const onClick = () => onAction();
+    const outside = (event) => { if (!host.contains(event.target)) hide(); };
+    // While it stands: any scroll (the document's or a scroller's, caught on its way down) can move its control
+    // toward an edge, so it is placed again; with `dismissOutside`, a press elsewhere hides it.
+    const listen = (on) => {
+        const how = on ? 'addEventListener' : 'removeEventListener';
+        doc[how]?.('scroll', later, { capture: true, passive: true });
+        if (dismissOutside) doc[how]?.('pointerdown', outside, true);
+    };
+    const hide = () => {
+        if (!el.hidden) listen(false);
+        el.hidden = true;
+    };
     parts.action.addEventListener('click', onClick);
     host.append(el);
 
@@ -46,8 +60,17 @@ export function createHint(host, { doc = host.ownerDocument, onAction = () => {}
         const width = Number(doc.documentElement?.clientWidth);
         if (!Number.isFinite(width) || width <= 0 || el.hidden) return;
         const view = win?.visualViewport;
-        const top = Number(view?.offsetTop) || 0;
-        const bottom = top + (Number(view?.height) || Number(doc.documentElement.clientHeight) || 0);
+        let top = Number(view?.offsetTop) || 0;
+        let bottom = top + (Number(view?.height) || Number(doc.documentElement.clientHeight) || 0);
+        let left = 0, right = width;
+        if (boundary) {  // A consumer inside a clipping box (a scroller, a collapse) supplies its visible content box.
+            const clip = boundary.getBoundingClientRect();
+            top = Math.max(top, clip.top + boundary.clientTop);
+            bottom = Math.min(bottom, clip.top + boundary.clientTop + boundary.clientHeight);
+            left = Math.max(left, clip.left + boundary.clientLeft);
+            right = Math.min(right, clip.left + boundary.clientLeft + boundary.clientWidth);
+            el.style.setProperty('--ui-hint-span', `${Math.max(0, Math.floor(right - left - 2 * EDGE_PX))}px`);  // no wider
+        }
         const anchor = host.getBoundingClientRect();
         const natural = Number(el.scrollHeight) + 2;  // its words' height, whatever room it was given; plus the border
         const above = anchor.top - GAP_PX - EDGE_PX - top;
@@ -61,8 +84,8 @@ export function createHint(host, { doc = host.ownerDocument, onAction = () => {}
         el.style.setProperty('--ui-hint-shift', '0px');
         const box = el.getBoundingClientRect();
         let dx = 0;
-        if (box.right > width - EDGE_PX) dx = width - EDGE_PX - box.right;
-        if (box.left + dx < EDGE_PX) dx = EDGE_PX - box.left;
+        if (box.right > right - EDGE_PX) dx = right - EDGE_PX - box.right;
+        if (box.left + dx < left + EDGE_PX) dx = left + EDGE_PX - box.left;
         const rtl = win?.getComputedStyle?.(el)?.direction === 'rtl';
         if (dx) el.style.setProperty('--ui-hint-shift', `${Math.round(rtl ? -dx : dx)}px`);
     }
@@ -76,6 +99,7 @@ export function createHint(host, { doc = host.ownerDocument, onAction = () => {}
     };
     const resized = typeof win?.ResizeObserver === 'function' ? new win.ResizeObserver(later) : null;
     resized?.observe(el);
+    if (boundary) resized?.observe(boundary);
     win?.addEventListener?.('resize', place);
     win?.visualViewport?.addEventListener?.('resize', place);
 
@@ -94,11 +118,13 @@ export function createHint(host, { doc = host.ownerDocument, onAction = () => {}
         show() {
             if (!el.hidden) return;
             el.hidden = false;
+            listen(true);
             place();
             later();
         },
-        hide() { el.hidden = true; },
+        hide,
         destroy() {
+            hide();
             parts.action.removeEventListener('click', onClick);
             resized?.disconnect();
             if (frame) win.cancelAnimationFrame(frame);

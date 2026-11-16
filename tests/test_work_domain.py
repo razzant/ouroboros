@@ -11,6 +11,7 @@ parent's Linux qualification. No Docker, daemon, network or engine is used.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import pathlib
 import subprocess
@@ -172,6 +173,34 @@ def test_work_domain_stdin_and_stdout_cross_byte_exact(env, monkeypatch):
                                      cwd=env.work, stdin=payload, timeout_sec=30)
     assert echoed.returncode == 0 and echoed.stdout == payload and echoed.backend_settled is True
     assert not docker.records()
+
+
+def test_an_unmanaged_run_hands_input_bytes_over_as_a_file_never_a_pipe_the_wait_writes(tmp_path, monkeypatch):
+    """Outside the work domain too, ``input`` bytes reach the command from an unlinked temporary file. A pipe the
+    wait wrote into hung the custody pass for four hours on 14.11.2026: macOS called git's full stdin writable, and
+    ``git hash-object --stdin-paths`` waited on its unread answers. The bytes still arrive exact (more than a pipe
+    holds), beside an explicit ``stdin=None`` too; a caller's own ``stdin`` goes as it is, ``input`` beside ``stdin``
+    is still the stdlib's refusal, and with no room for a temporary file the bytes take the stdlib's pipe as before."""
+    probe = ("import os, stat, sys\ndata = sys.stdin.buffer.read()\n"
+             "sys.stdout.buffer.write((b'file ' if stat.S_ISREG(os.fstat(0).st_mode) else b'pipe ') + data)\n")
+    command = [sys.executable, "-c", probe]
+    payload = bytes(range(256)) * 512 + b"\x00tail\xff"  # 128 KiB
+    done = work_domain.run(command, input=payload, capture_output=True, timeout=60)
+    assert (done.returncode, done.stdout) == (0, b"file " + payload)
+    beside_none = work_domain.run(command, input=bytearray(b"ba"), stdin=None, capture_output=True, timeout=60)
+    assert beside_none.stdout == b"file ba"
+    own = tmp_path / "own.bin"
+    own.write_bytes(b"own")
+    with own.open("rb") as handle:
+        assert work_domain.run(command, stdin=handle, capture_output=True, timeout=60).stdout == b"file own"
+    with pytest.raises(ValueError):
+        work_domain.run(command, input=b"x", stdin=subprocess.DEVNULL, capture_output=True)
+
+    def no_room(*_args, **_kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(work_domain.tempfile, "TemporaryFile", no_room)
+    assert work_domain.run(command, input=payload, capture_output=True, timeout=60).stdout == b"pipe " + payload
 
 
 @posix_host

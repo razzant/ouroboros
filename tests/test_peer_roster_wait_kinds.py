@@ -208,3 +208,69 @@ def test_a_restart_retained_warm_sleep_keeps_its_warm_mode_and_says_it_was_retai
     assert kept["kind"] == "sleep" and kept["mode"] == "warm" and kept["retained"] is True
     assert kept["state"] == "paused" and kept["tasks"] == ["child-1", "child-2"] and kept["since"] == _PAUSED_ISO
     assert "sleep (mode=warm, retained=true, state=paused, wake_at=" in _note(tmp_path)
+
+
+def test_a_queued_root_names_the_other_rooms_work_that_keeps_its_folder(tmp_path):
+    """Owner 15.11.2026, one queue per recorded folder: the chooser's ``_folder_wait`` reaches the roster the mind
+    reads, naming the holder and its room; a running root and a queued one without it say nothing of a folder."""
+    from ouroboros.peer_roster import independent_roots, roster_fingerprint
+
+    wait = {"task_id": "holder", "project_id": "room-a", "folder": "/work/shared"}
+    write_queue_document(tmp_path / "state" / "queue_snapshot.json", {
+        "ts": utc_now_iso(),
+        "running": [{"id": "holder", "attempt": 1, "task": {"id": "holder", "title": "Weekly review", "_attempt": 1,
+                                                            "project_id": "room-a"}}],
+        "pending": [{"id": "waiting", "attempt": 1, "task": {"id": "waiting", "title": "Reading notes", "_attempt": 1,
+                                                             "project_id": "room-b", "_folder_wait": wait}},
+                    {"id": "free", "attempt": 1, "task": {"id": "free", "title": "Other", "_attempt": 1}}],
+    })
+    rows = {row["task_id"]: row for row in independent_roots(tmp_path)["roots"]}
+    assert rows["waiting"]["folder_wait"] == wait and "folder_wait" not in rows["free"] | rows["holder"]
+    note = _note(tmp_path)
+    assert '  folder_wait={"folder": "/work/shared", "project_id": "room-a", "task_id": "holder"}' in note
+    roster = independent_roots(tmp_path)
+    freed = {**roster, "roots": [{**row, "folder_wait": {}} for row in roster["roots"]]}
+    assert roster_fingerprint(roster) != roster_fingerprint(freed), "a change of holder is a roster change"
+
+
+def test_a_held_or_paused_queued_root_is_not_said_to_wait_for_a_folder(tmp_path):
+    """Opus 15.11.2026: the chooser notes ``_folder_wait`` only on a pass that reaches the row's lane, after its hold
+    and pause gates (``worker_assignment._candidate_ineligible``), and the snapshot keeps that note. A row paused,
+    asleep or held since then waits for that, not for a holder that may long have finished: the roster names its
+    hold and no folder. The same row, eligible again, names its folder wait as the chooser last noted it."""
+    from ouroboros.peer_roster import independent_roots
+
+    wait = {"task_id": "holder", "project_id": "room-a", "folder": "/work/shared"}
+    write_task_result(tmp_path, "paused", "scheduled", reason_code="budget_paused", budget_pause={
+        "pause_id": "p-paused", "state": "paused", "task_attempt": 1, "paused_at": _PAUSED_AT,
+        "reason": "owner", "rail": "owner_pause"}, owner_pause={
+        "state": "paused", "fence_id": "f-paused", "requested_by": "owner", "requested_at": _PAUSED_ISO})
+    write_task_result(tmp_path, "asleep", "scheduled", reason_code="budget_paused", budget_pause={
+        "pause_id": "p-asleep", "state": "paused", "task_attempt": 1, "paused_at": _PAUSED_AT,
+        "reason": "sleep", "rail": "model_sleep", "sleep": _sleep("cold")})
+    held = {"reason": "project_routing_fence_lookup_failed", "detail": "The task result is unreadable."}
+    markers = {"eligible": {}, "paused": {"_budget_pause": {"exact_continuation": True}},
+               "asleep": {"_budget_pause": {"exact_continuation": True}},
+               "held": {"_project_admission_restore_hold": held}, "owner-held": {"_owner_hold": {"reason": "owner"}}}
+
+    def publish(marked):
+        write_queue_document(tmp_path / "state" / "queue_snapshot.json", {
+            "ts": utc_now_iso(),
+            "running": [{"id": "holder", "attempt": 1, "task": {"id": "holder", "title": "Weekly review", "_attempt": 1,
+                                                                "project_id": "room-a"}}],
+            "pending": [{"id": task_id, "attempt": 1, "task": {"id": task_id, "title": task_id, "_attempt": 1,
+                                                               "project_id": "room-b", "_folder_wait": wait, **extra}}
+                        for task_id, extra in marked.items()],
+        })
+        return {row["task_id"]: row for row in independent_roots(tmp_path)["roots"]}
+
+    rows = publish(markers)
+    assert rows["eligible"]["folder_wait"] == wait
+    for task_id in ("paused", "asleep", "held", "owner-held"):
+        assert "folder_wait" not in rows[task_id], task_id
+    assert rows["paused"]["waiting"][0]["kind"] == "owner_pause" and rows["asleep"]["waiting"][0]["kind"] == "sleep"
+    assert rows["held"]["project_admission_hold"]["reason"] == held["reason"]
+    assert rows["owner-held"]["refusal"] == {"reason": "_owner_hold"}
+    assert _note(tmp_path).count("folder_wait=") == 1
+    # The hold lifted, the same row is eligible again: its noted folder wait is said once more.
+    assert publish({"eligible": {}, "held": {}})["held"]["folder_wait"] == wait

@@ -1,7 +1,8 @@
 """Native process targets retained by the public platform layer.
 
 Capture pins an authorized process for later requests. A tracked POSIX child
-also retains its waitable status so its group number cannot be recycled.
+also retains its waitable status so its group number cannot be recycled. A
+retiring Windows Job's members stay held until each process has signalled.
 Signal operations stay in platform_layer; these witnesses own their lifetime.
 """
 
@@ -89,3 +90,45 @@ def retained_child_group(proc, *, release: bool = False, kill: bool = False) -> 
             return False
     finally:
         proc._ouroboros_group_lock.release()
+
+
+def job_members_running(job_handle, held: dict) -> bool | None:
+    """Windows: whether a member of the Job has not exited yet; None when the Job or a listed member is unreadable,
+    even beside a held member still running: another member's state never answers for one this read could not hold.
+
+    Each process the Job lists stays open in ``held`` (pid -> handle, closed by ``release_job_members``) once
+    ``IsProcessInJob`` proves its PID still names a member, and runs until its process object signals: termination is
+    asynchronous and only that signal proves its end (TerminateProcess's contract), never an exit code or the Job's
+    list. So the caller reads once before terminating the Job (``QuitEngineStop``): every member held then is
+    awaited, and one it could not hold stays unconfirmed however the others end."""
+    from ouroboros import platform_layer as platform
+
+    ctypes, kernel = platform.ctypes, platform._kernel32
+    listed = platform._JOBOBJECT_BASIC_PROCESS_ID_LIST()
+    if not kernel.QueryInformationJobObject(job_handle, platform._JOBOBJECTINFOCLASS_PROCESS_ID_LIST,
+                                            ctypes.byref(listed), ctypes.sizeof(listed), None):
+        return None
+    unknown = False
+    for pid in map(int, listed.ProcessIdList[:listed.NumberOfProcessIdsInList]):
+        if pid in held:
+            continue
+        if not (handle := kernel.OpenProcess(0x00101000, False, pid)):  # SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFO
+            unknown |= ctypes.get_last_error() != 87  # 87: the PID is already gone, nothing left to await
+            continue
+        member = ctypes.wintypes.BOOL()
+        if (read := kernel.IsProcessInJob(handle, job_handle, ctypes.byref(member))) and member.value:
+            held[pid] = handle
+        else:  # unreadable, or the PID now names a process outside the Job: the member it named is gone
+            unknown |= not read
+            kernel.CloseHandle(handle)
+    waits = {kernel.WaitForSingleObject(handle, 0) for handle in held.values()}  # 0: signalled; 0x102: timeout
+    return None if unknown else True if 0x102 in waits else None if waits - {0} else False
+
+
+def release_job_members(held: dict) -> None:
+    """Close every handle ``job_members_running`` keeps in ``held`` (nothing held: no native call)."""
+    if held:
+        from ouroboros import platform_layer as platform
+
+        while held:
+            platform._kernel32.CloseHandle(held.popitem()[1])

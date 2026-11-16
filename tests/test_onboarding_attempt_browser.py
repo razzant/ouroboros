@@ -133,8 +133,9 @@ def test_check_status_confirms_only_this_attempt_on_an_already_ready_install(dir
                     page.locator("#check-save-btn").click()
                     if reach == "pro":
                         expect(page.locator(".step-title")).to_have_text("Setup saved — restart to apply it")
-                        expect(page.locator(".panel-card code")).to_have_text("pro")
-                        expect(page.locator(".panel-card code")).to_be_visible()
+                        # The restart screen names the chosen access level by its label (PR #3207).
+                        expect(page.locator(".panel-card h3")).to_have_text("Pro access applies from the next start")
+                        expect(page.locator(".panel-card h3")).to_be_visible()
                         page.screenshot(path=str(evidence / f"682-{engine}-{theme}-{width}-restart.png"))
                     else:
                         page.wait_for_url(url + "/", timeout=30_000)

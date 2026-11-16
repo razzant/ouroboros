@@ -82,7 +82,9 @@ def _registry(tmp_path, monkeypatch, *, declared=True):
 
     if declared:
         monkeypatch.setattr(_tool_effects, "effect_of", lambda *a, **kw: _tool_effects.ToolEffect("message", declared=True))
-    monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {"places": [{"place_label": "Team room"}]})
+    # Real place facts always carry an identity, even when the place has no conversation or account.
+    monkeypatch.setattr(place_guard, "call_place_facts", lambda *a, **kw: {
+        "places": [{"place_id": "team", "place_label": "Team room"}]})
     sent: list = []
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
     registry.register(ToolEntry("fixture_send", {

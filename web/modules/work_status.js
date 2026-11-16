@@ -39,7 +39,7 @@ const QUESTIONS = new Set(['question', 'open_question']);
 /** The state one chat instance shows before its first body: an idle room and no works. */
 export function emptyWorkState() {
     return { room: IDLE_ROOM, works: [], episodes: new Map(), members: new Set(), attempts: new Map(), complete: false,
-        main: null, leads: new Map(), questions: new Map() };
+        main: null, tiers: null, leads: new Map(), processings: new Map(), questions: new Map() };
 }
 
 // One question's key across the turn, the census rows and the work list: its task and its quiz.
@@ -86,6 +86,9 @@ export function reconcileWorkState(prior, data, chatId, connected = true) {
     const attempts = new Map(rows.map((row) => [String(row.activity_id), row.task_attempt ?? null]));
     const leads = new Map(rows.filter((row) => row.lead && typeof row.lead === 'object')
         .map((row) => [String(row.activity_id), row.lead]));
+    const processings = new Map(rows.filter((row) => row.processing && typeof row.processing === 'object')
+        .map((row) => [String(row.activity_id), row.processing]));
+    const tiers = data.processing_tiers && typeof data.processing_tiers === 'object' ? data.processing_tiers : before.tiers || null;
     const main = data.main_route && typeof data.main_route === 'object' ? data.main_route : before.main || null;
     const carried = new Map(list(data.current_questions).filter((row) => row?.task_id).map((row) => [questionKey(row), row]));
     const questions = new Map();
@@ -94,7 +97,7 @@ export function reconcileWorkState(prior, data, chatId, connected = true) {
         const said = carried.get(questionKey(item)) || before.questions?.get(questionKey(item));
         if (said) questions.set(questionKey(item), said);
     }
-    return { room, works: [...listed, ...kept], episodes, members, attempts, complete, main, leads, questions };
+    return { room, works: [...listed, ...kept], episodes, members, attempts, complete, main, tiers, leads, processings, questions };
 }
 
 /** A work's or a room's one short word, from its activity, transition and exact call (the cards' chip words). */
@@ -323,9 +326,9 @@ export function roomStatusView(state, {
     case 'waiting': return view('online', activityWord(room), asked(room) ? 'wait' : 'held', mark, turn);
     case 'paused': return view('online', activityWord(room), 'held', mark, turn);
     case 'unknown': return view('online', activityWord(room), 'unknown', mark, turn);  // a listed turn still waits
-    // A room at rest keeps the owner's turn: a question of an ended work still waits there.
+    // A room at rest keeps the owner's turn: a question of an ended work still waits there, while the host starts too.
     default: return ready ? view('online', 'Online', 'online', mark, turn)
-        : { ...view('starting', 'Starting…', 'starting', 'none'), ...startingStatus(boot) };
+        : { ...view('starting', 'Starting…', 'starting', 'none', turn), ...startingStatus(boot) };
     }
 }
 
@@ -419,7 +422,8 @@ export function applyCardWorkViews(records, state) {
         // an incomplete body did not list again: only a complete body proves it gone.
         if (lead) {
             paintCardModel(record, { lead, target: work && work.confirmed !== false ? workControls(work).model : '',
-                main: state.main, queued: work?.activity === 'queued', since: clock(lead.since) });
+                main: state.main, queued: work?.activity === 'queued', since: clock(lead.since),
+                processing: work?.processing || state?.processings?.get(id) || null, tiers: state.tiers || null });
         } else if (record.cardModel && !portal && !state?.complete) paintCardModel(record, { ...record.cardModel.view, target: '' });
         else paintCardModel(record, null);
         const view = cardWorkView(work);

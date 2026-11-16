@@ -71,13 +71,45 @@ def test_bundled_payload_resolves_through_bundle_dir_env(tmp_path, monkeypatch):
     assert platform_layer.resolve_bundled_ripgrep() == str(expected)
 
 
-def test_bundled_node_uses_the_same_bases(tmp_path, monkeypatch):
+@pytest.mark.parametrize("runs_as_the_pin", [True, False])
+def test_bundled_node_uses_the_same_bases(tmp_path, monkeypatch, runs_as_the_pin):
+    """The shipped Node is found at the env bundle base, as ripgrep is. The reviewed resolver then takes it only when
+    it runs as the pin's version (``node_runtime.reviewed_host_node``): a shipped copy at the same base reporting an
+    older version is never returned. The probe is the only seam: no file here runs, no prepared Node is consulted."""
+    from types import SimpleNamespace
+
+    from ouroboros import claudexor_runtime, node_runtime
+
+    pin_version = claudexor_runtime.get_runtime_manager().pin.node_version  # the real reviewed pin
     bundle = tmp_path / "bundle"
     candidate = platform_layer.embedded_node_candidates(bundle)[0]
     candidate.parent.mkdir(parents=True, exist_ok=True)
     candidate.write_text("#!/bin/sh\n", encoding="utf-8")
+    candidate.chmod(0o755)
+    shipped = pin_version if runs_as_the_pin else "24.16.0"
+    probed = []
+
+    def probe(path, timeout_sec=10):
+        probed.append(str(path))
+        return (shipped, "") if str(path) == str(candidate) else ("", "missing")
+
+    monkeypatch.setattr(node_runtime, "_NODE_HEALTH_MEMO", {})
+    monkeypatch.setattr(node_runtime, "_probe_node_version_outcome", probe)
     monkeypatch.setenv(platform_layer.BUNDLE_DIR_ENV, str(bundle))
-    assert platform_layer.resolve_bundled_node() == str(candidate)
+    if runs_as_the_pin:
+        assert platform_layer.resolve_bundled_node() == str(candidate)
+        assert probed == [str(candidate)]  # selected by its own probe, before any prepared lookup
+        return
+    not_prepared = claudexor_runtime.ClaudexorRuntimeError("runtime_node_unavailable", "not prepared")
+
+    def reviewed_node(allow_install=False, prepared=False):
+        assert not allow_install  # a lookup never installs
+        raise not_prepared
+
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: SimpleNamespace(
+        pin=SimpleNamespace(node_version=pin_version), pin_error="", reviewed_node=reviewed_node))
+    assert platform_layer.resolve_bundled_node() is None  # the older shipped copy at the same base is not the pin's
+    assert probed[0] == str(candidate)
 
 
 def test_bundle_dir_env_is_exported_to_the_server_and_cli():
@@ -262,9 +294,13 @@ def test_a_restart_with_a_failed_dependency_install_pauses_and_discloses(
 # --------------------------------------------------------------------------
 
 def test_every_standalone_download_verifies_a_checksum(subtests):
-    for script in sorted(p.name for p in (REPO_ROOT / "scripts").glob("download_*_standalone.*")):
+    scripts = REPO_ROOT / "scripts"
+    for script in sorted(p.name for p in scripts.glob("download_*_standalone.*")):
         with subtests.test(script=script):
-            text = (REPO_ROOT / "scripts" / script).read_text(encoding="utf-8").lower()
+            text = (scripts / script).read_text(encoding="utf-8").lower()
+            helper = script.rsplit(".", 1)[0] + ".py"  # a thin wrapper uses the shared verifier it calls
+            if script != helper and helper in text and (scripts / helper).is_file():
+                text = (scripts / helper).read_text(encoding="utf-8").lower()
             assert "sha256" in text, f"{script} downloads a runtime without verifying it"
             assert any(token in text for token in ("mismatch", "verified")), (
                 f"{script} computes a hash but never refuses on mismatch"
@@ -862,7 +898,7 @@ def test_cancelling_a_subagent_rescues_its_partial_result(monkeypatch, tmp_path)
     )
     worker = types.SimpleNamespace(wid=0, proc=proc, busy_task_id="live-salvage", reaping=False)
     monkeypatch.setattr(workers, "WORKERS", {0: worker}, raising=False)
-    monkeypatch.setattr(workers, "respawn_worker", lambda wid: None, raising=False)
+    monkeypatch.setattr(workers, "respawn_worker", lambda wid, **_kwargs: None, raising=False)
     monkeypatch.setattr(
         "ouroboros.platform_layer.kill_pid_tree",
         lambda *a, **k: state.__setitem__("alive", False),
@@ -969,7 +1005,7 @@ def test_cancelling_a_subagent_preserves_the_full_output_on_the_canonical_drive(
     )
     worker = types.SimpleNamespace(wid=0, proc=proc, busy_task_id=task_id, reaping=False)
     monkeypatch.setattr(workers, "WORKERS", {0: worker}, raising=False)
-    monkeypatch.setattr(workers, "respawn_worker", lambda wid: None, raising=False)
+    monkeypatch.setattr(workers, "respawn_worker", lambda wid, **_kwargs: None, raising=False)
     monkeypatch.setattr(
         "ouroboros.platform_layer.kill_pid_tree",
         lambda *a, **k: state.__setitem__("alive", False),

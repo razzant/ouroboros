@@ -1,4 +1,4 @@
-/** Dependency-free JSDoc mirror of `ouroboros.gateway.contracts`; the interface-language envelopes (`UiI18n*`) sit in ./ui_i18n_types.js, the model-route previews in ./model_route_types.js, the Dashboard storage envelopes (`Storage*`) in ./storage_types.js, the Dashboard Evolution history (`Evolution*`) in ./evolution_types.js, the MCP import preview in ./mcp_import_types.js, the replaceable-client envelopes (`ServedUiState`, setup bootstrap, `/api/contract`, chat history rows, journey request bodies) in ./client_contract_types.js, the product-management envelopes (skills, marketplaces, accounts, local model, MCP, update status) in ./management_contract_types.js, the owner-decision ingress in ./decision_types.js, the managed-update preflight, apply and frame envelopes in ./update_types.js, the Dashboard › Logs compact and Raw envelopes in ./logs_types.js. */
+/** Dependency-free JSDoc mirror of `ouroboros.gateway.contracts`; the interface-language envelopes (`UiI18n*`) sit in ./ui_i18n_types.js, the model-route previews in ./model_route_types.js, the Dashboard storage envelopes (`Storage*`) in ./storage_types.js, the Dashboard Evolution history (`Evolution*`) in ./evolution_types.js, the MCP import preview in ./mcp_import_types.js, a skill's Connect tools in ./skill_mcp_types.js, the replaceable-client envelopes (`ServedUiState`, setup bootstrap, `/api/contract`, chat history rows, journey request bodies) in ./client_contract_types.js, the product-management envelopes (skills, marketplaces, accounts, local model, MCP, update status) in ./management_contract_types.js, the owner-decision ingress in ./decision_types.js, the managed-update preflight, apply and frame envelopes in ./update_types.js, the Dashboard › Logs compact and Raw envelopes in ./logs_types.js. */
 /** @typedef {Object} CostPresentation
  * @property {'own'|'root_tree'} scope
  * @property {?number} tracked_amount
@@ -42,6 +42,7 @@
  * @property {boolean} context_mode_auto_low  // frozen compatibility field; always false
  * @property {EffortRange} effort_range  // the owner's effort range (POST /api/owner/effort-range), the tolerant read
  * @property {ChatModelRoute} main_route  // Main itself, written by POST /api/owner/chat-model without project_id
+ * @property {import('./work_types.js').ProcessingTiers} processing_tiers  // Main's own tier and the default one (POST /api/owner/chat-processing)
  * @property {string} safety_mode
  * @property {boolean} skills_repo_configured
  * @property {boolean} github_token_configured
@@ -184,6 +185,7 @@
  * @property {Object} model_settings  // the model setting keys the draft would save
  * @property {AvailableSubagentsSetting} available_subagents
  * @property {string[]} known_spend_gaps  // what the draft's limits cannot count, as GET /api/settings names it after a save
+ * @property {Array<{name: string, condition: string}>} partly_counted_spend  // what they count only under a price condition
  * @property {string} source
  * @property {Object[]} diagnostics
  */
@@ -712,7 +714,7 @@
 
 /** @typedef {Object} UiPreferencesChangedOutbound A committed POST /api/ui/preferences change: read it again.
  * @property {"ui_preferences_changed"} type
- * @property {string[]} keys  // the changed groups, e.g. ["contributions"]
+ * @property {string[]} keys  // the changed groups: "contributions", "model_pins"
  */
 
 /** @typedef {Object} MessageAnnotationOutbound Bubble-free update for an existing owner message.
@@ -762,6 +764,7 @@
  * @property {boolean=} init_git
  * @property {string=} git_url
  * @property {boolean=} with_workspace
+ * @property {boolean=} no_folder  // records the choice to keep none; absent, the first promoted task provisions one
  */
 
 /** @typedef {Object} ProjectClosure
@@ -778,6 +781,7 @@
  * @property {boolean=} pinned  // absent on legacy rows means unpinned
  * @property {number=} chat_id
  * @property {string=} working_dir
+ * @property {{at: string, by: string}=} no_folder  // the recorded choice to keep no folder, until one is chosen
  * @property {string=} provenance   // attached | cloned | genesis | none (historical fact)
  * @property {string=} clone_url
  * @property {string=} trusted_at
@@ -797,6 +801,7 @@
  * @property {boolean=} created
  * @property {ProjectCognition} cognition
  * @property {ChatModelChoice=} model_choice  // the room's own model for new owner work; never copied from Main
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} processing_choice  // the room's own tier for new owner work; '' = Default
  */
 
 /** @typedef {Object} ProjectDeleteResponse
@@ -1516,6 +1521,7 @@
  * @property {Object.<string,number[][]>} read_ahead_revisions  // per chat id: revisions read in full in another room (host-owned)
  * @property {{mode:'default'|'hidden'|'custom',text:string}} welcome  // install-wide empty-Main UI copy, not chat history
  * @property {ChatModelRoute[]} model_recents  // server-written on each owner model act: newest first, at most four distinct routes; a POST may not carry it
+ * @property {ChatModelRoute[]} model_pins  // owner-pinned routes in pin order, at most 24; a POST changes them only by `{model_pins: {pin, unpin}}`
  * @property {boolean=} ok
  */
 /**

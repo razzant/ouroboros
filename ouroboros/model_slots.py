@@ -21,7 +21,10 @@ MODEL_ACCOUNTS_KEY = "OUROBOROS_MODEL_ACCOUNTS"
 MODEL_CONTEXT_WINDOWS_KEY = "OUROBOROS_MODEL_CONTEXT_WINDOWS"
 PROCESSING_PREFERENCE_KEY = "OUROBOROS_PROCESSING_PREFERENCE"
 MODEL_PROCESSING_PREFERENCES_KEY = "OUROBOROS_MODEL_PROCESSING_PREFERENCES"
-PROCESSING_PREFERENCES = ("standard", "fast", "economy")
+PROCESSING_PREFERENCES = ("standard", "fast", "economy")  # the Settings vocabulary
+# A room's, a work's, a helper's or one call's tier may also be Ultrafast. It is never a Settings value: an older
+# packaged reader refuses a whole settings document holding a value it does not know.
+CALL_TIERS = (*PROCESSING_PREFERENCES, "ultrafast")
 MODEL_ROLE_SETTINGS = {
     "main": "OUROBOROS_MODEL",
     "light": "OUROBOROS_MODEL_LIGHT",
@@ -43,6 +46,18 @@ def normalize_processing_preference(value: object) -> str:
     result = value.strip().lower()
     if result and result not in PROCESSING_PREFERENCES:
         raise ValueError("Processing preference must be standard, fast, economy, or empty to inherit")
+    return result
+
+
+def normalize_call_tier(value: object) -> str:
+    """A tier a room, a work, a helper's snapshot or one call carries: the Settings vocabulary or Ultrafast."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError("A processing tier must be a string")
+    result = value.strip().lower()
+    if result and result not in CALL_TIERS:
+        raise ValueError("A processing tier must be standard, fast, economy, ultrafast, or empty for Default")
     return result
 
 
@@ -95,6 +110,19 @@ def normalize_model_role_options(key: str, raw: object) -> tuple[dict, str]:
     return parsed, json.dumps(parsed, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
+def processing_tiers(settings: dict) -> dict:
+    """What the composer says about tiers: Main's own (``""``: none, it takes the default) and the default every
+    lead and every room without a tier of its own pays. An unreadable value reads as none, never as a tier."""
+    def tier(read) -> str:
+        try:
+            return normalize_processing_preference(read())
+        except ValueError:
+            return ""
+    roles = lambda: normalize_model_role_options(MODEL_PROCESSING_PREFERENCES_KEY,  # noqa: E731
+                                                 settings.get(MODEL_PROCESSING_PREFERENCES_KEY))[0].get("main")
+    return {"main": tier(roles), "default": tier(lambda: settings.get(PROCESSING_PREFERENCE_KEY))}
+
+
 def model_role_option(key: str, role: str, *, settings: dict | None = None) -> str | int:
     """Read one explicit role (``fallback:<index>`` for a chain entry).
 
@@ -136,10 +164,16 @@ def resolve_processing_preference(role: str = "", *, override: str | None = None
     exact overrides are applied at the transport boundary, outside this preference.
     """
     if override is not None:
-        return normalize_processing_preference(override)
+        return normalize_call_tier(override)
     role_value = model_role_option(MODEL_PROCESSING_PREFERENCES_KEY, role, settings=settings)
     global_value = (settings or {}).get(PROCESSING_PREFERENCE_KEY, "") if settings is not None else runtime_setting(PROCESSING_PREFERENCE_KEY, "")
     return normalize_processing_preference(role_value or global_value)
+
+
+def acting_model_role(ctx: object, *, model_role: str = "") -> str:
+    """The explicit call, cold-restored actor, then live fit; never a pending tool choice."""
+    return str(model_role or getattr(ctx, "_restored_context_model_role", "")
+               or getattr(getattr(ctx, "context_fit_plan", None), "model_role", "") or "")
 
 
 def task_model_binding(task: dict, *, context_fit_plan: object = None,
@@ -200,10 +234,15 @@ def route_binding(model: str, use_local: bool, role: str, *,
 
 def task_processing_preference(task: dict, *, model_role: str = "",
                               override: str | None = None) -> str:
-    """Capture the actor's intent; an unconfigured fallback keeps it (a lead uses the default, never Main's)."""
+    """Capture the actor's intent; an unconfigured fallback keeps it (a lead uses the default, never Main's).
+
+    A root's own tier (``metadata.processing``: its room's, or the owner's card act) answers for its own
+    calls on any route, a fallback row's included, so its card's promise holds. A nanny's frozen cognition
+    and a configured row keep theirs. Without one (none, or the decided Default) the default resolution
+    stands: an authored fallback tier, else Main's tier for work that follows Main."""
     if override is not None:
         return resolve_processing_preference(override=override)
-    from ouroboros.route_choice import LEAD_ROLE
+    from ouroboros.route_choice import LEAD_ROLE, task_processing
     from ouroboros.supervisor_route import supervisor_binding
 
     cognitive, supervisor_role = supervisor_binding(task)
@@ -214,17 +253,22 @@ def task_processing_preference(task: dict, *, model_role: str = "",
     actor_id = str(actor.get("selected_subagent_id") or "")
     role = model_role or task_model_binding(task)[0]
     if role.startswith("fallback:"):
-        authored = model_role_option(MODEL_PROCESSING_PREFERENCES_KEY, role)
-        if authored:
-            return resolve_processing_preference(override=str(authored))
-        role = supervisor_role or (f"subagent:{actor_id}" if actor_id and (actor.get("route") or {}).get("kind") == "api_model"
-                                  else LEAD_ROLE if task_model_binding(task)[0] == LEAD_ROLE else "main")
+        primary = supervisor_role or (f"subagent:{actor_id}" if actor_id and (actor.get("route") or {}).get("kind") == "api_model"
+                                      else LEAD_ROLE if task_model_binding(task)[0] == LEAD_ROLE else "main")
+        # The work's own tier is a choice for this work and outranks the row's tier, a Settings default.
+        explicit =(task_processing(metadata) if primary in (LEAD_ROLE, "main") else ""
+                    ) or model_role_option(MODEL_PROCESSING_PREFERENCES_KEY, role)
+        if explicit:
+            return resolve_processing_preference(override=str(explicit))
+        role = primary
     if supervisor_role and role == supervisor_role:
         return resolve_processing_preference(override=cognitive["processing_preference"])
     if actor_id and role == f"subagent:{actor_id}":
         # Missing in a historical snapshot means captured legacy behavior.
-        return resolve_processing_preference(override=actor.get("processing_preference") or "")
-    return resolve_processing_preference(role)
+        from ouroboros.subagent_runtime import run_processing
+
+        return resolve_processing_preference(override=run_processing(actor))
+    return task_processing(metadata) or resolve_processing_preference(role)
 
 
 def _persisted_role(role: str) -> tuple[str, str]:

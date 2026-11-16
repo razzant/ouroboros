@@ -20,6 +20,7 @@ from ouroboros.presence_bindings import PresenceEndpoint
 from ouroboros.presence_message_facts import HEADING, attachment_outcome, carries_content, event_reader
 from ouroboros.presence_runner import PresenceTurnEvent, _build_task, _live_task_rows, run_presence_turn
 from ouroboros.task_results import write_task_result
+from tests.conversation_carrier_support import lone_host_world as lone_host_world  # noqa: F401 -- fixture
 
 TOO_LARGE_NOTE = ("Not staged: larger than the Bot API's 20 MiB download limit. "
                   "The Telegram message reference is retained.")
@@ -75,6 +76,7 @@ def test_a_captionless_too_large_file_is_named_and_never_an_empty_event(focus):
     assert frame.count("report.zip") == 1  # said once
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_the_turn_door_gives_the_model_the_same_facts_and_keeps_the_words_empty(focus, monkeypatch):
     root, _place, _admission, event = focus
 

@@ -203,6 +203,34 @@ test('only an actual failed read fans out, and a throwing fan-out still releases
     assert.equal(unavailable.length, 2);
 });
 
+test('a watcher is told after each change of latest(): an applied body, a failed read, a retire; never a stale answer', async (t) => {
+    const logged = t.mock.method(console, 'error', () => {});
+    let painting = true;
+    const sequencer = createStateSnapshotSequencer(() => { if (painting) throw new Error('a consumer failed to paint'); });
+    const seen = [];
+    sequencer.watch(() => { throw new Error('one watcher fails'); });  // told first: its fault must not skip the next
+    const off = sequencer.watch(() => seen.push(sequencer.latest()));
+    const first = await sequencer.gate(false);
+    assert.throws(() => sequencer.apply(first, { supervisor_ready: true }), /failed to paint/);
+    assert.deepEqual(seen, [{ supervisor_ready: true }], 'told even when the apply callback threw, and past the failing watcher');
+    painting = false;
+    const stale = sequencer.begin();
+    sequencer.apply(await sequencer.gate(false), { supervisor_ready: false });
+    assert.equal(sequencer.apply(stale, { old: true }), false);
+    sequencer.fail(stale);
+    assert.deepEqual(seen.slice(1), [{ supervisor_ready: false }], 'a stale apply or fail changes nothing and tells nobody');
+    sequencer.fail(await sequencer.gate(false));
+    sequencer.retire();
+    assert.deepEqual(seen.slice(2), [null, null], 'a failed read and a retire clear latest(), and say so');
+    off();
+    sequencer.apply(await sequencer.gate(false), { supervisor_ready: true });
+    assert.equal(seen.length, 4, 'a removed watcher hears nothing more');
+    // The failing watcher said so each of the five times it was told; the quiet one never did.
+    assert.equal(logged.mock.callCount(), 5);
+    assert.ok(logged.mock.calls.every((call) => call.arguments[0] === 'A state snapshot watcher failed:'
+        && /one watcher fails/.test(call.arguments[1]?.message)), 'the console names the failing watcher\'s error');
+});
+
 // The bindings map is held with its revision; `?bindings_since` lets the server answer "unchanged".
 const bound = { t1: { project_id: 'alpha', chat_id: 5, project_name: 'Alpha' } };
 

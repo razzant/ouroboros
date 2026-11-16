@@ -44,11 +44,17 @@ _COMPANION_BASE_ENV_KEYS = {"PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"
                             "USER", "LOGNAME", "USERNAME"}
 
 
-def _companion_base_env() -> Dict[str, str]:
+def _companion_base_env(descriptor_env=None) -> Dict[str, str]:
+    from ouroboros.node_runtime import forward_playwright_node
     from ouroboros.process_scope import installation_scope_entries
 
-    return {**{key: value for key, value in os.environ.items() if key.upper() in _COMPANION_BASE_ENV_KEYS},
-            **installation_scope_entries()}
+    env = {**{key: value for key, value in os.environ.items() if key.upper() in _COMPANION_BASE_ENV_KEYS},
+           **installation_scope_entries()}
+    from ouroboros.workspace_executor import overlay_env
+
+    env = overlay_env(env, descriptor_env)
+    forward_playwright_node(env)  # refresh a saved automatic selection after the manifest's case-aware overlay
+    return env
 
 
 def _interpreter_command(command: List[str], *, windows: bool = IS_WINDOWS, executable: str = sys.executable,
@@ -202,7 +208,7 @@ class CompanionSupervisor:
             argv, launcher_env = _interpreter_command(list(descriptor.command))
             popen_kwargs: Dict[str, Any] = {
                 "cwd": str(descriptor.cwd),
-                "env": {**_companion_base_env(), **dict(descriptor.env), **lifeline_parent_env(), **launcher_env},
+                "env": {**_companion_base_env(descriptor.env), **lifeline_parent_env(), **launcher_env},
                 "stdin": subprocess.DEVNULL,
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.PIPE,
@@ -673,17 +679,13 @@ def companion_spawn_env(
     # Under a deployment policy, a manifest's env never stands in for a value it fixes, or for its file and pin.
     reserved = set(FORBIDDEN_SKILL_SETTINGS) | {"HOST_SERVICE_TOKEN", "HOST_SERVICE_URL", PARENT_PID_ENV,
                                                 *child_policy_env(), *fixed_settings()}
-    env = overlay_env(
-        _scrub_env(
-            list(env_allow), state_dir, skill,
-            granted_keys=list(granted_upper), settings=settings,
-        ),
-        {
-            str(key): str(value)
-            for key, value in (spec.get("env") or {}).items()
-            if str(key).upper() not in reserved
-        },
-    )
+    manifest_env = {str(key): str(value) for key, value in (spec.get("env") or {}).items()
+                    if str(key).upper() not in reserved}
+    env = overlay_env(_scrub_env(list(env_allow), state_dir, skill, granted_keys=list(granted_upper),
+                                 settings=settings), manifest_env)
+    from ouroboros.node_runtime import keep_explicit_driver_node
+
+    keep_explicit_driver_node(env, manifest_env)  # the manifest's driver Node is its own, even one equal to ours
     env["HOST_SERVICE_URL"] = f"http://{DEFAULT_HOST_SERVICE_HOST}:{host_service_port()}"
     env["HOST_SERVICE_TOKEN"] = token
     site_dirs = [] if skill_dir is None else [
@@ -693,10 +695,10 @@ def companion_spawn_env(
         inherited = env.get("PYTHONPATH")
         env["PYTHONPATH"] = os.pathsep.join([*site_dirs, inherited] if inherited else site_dirs)
     if str(spec.get("runtime") or "").strip() in {"node", "npm"} and not skill_manifest_owns_path(spec):
-        # T14 emergency PATH prepend, the other half of the argv rewrite in
-        # register_companion_process: descriptor env keys win over the
-        # supervisor's `_companion_base_env` merge, so the prepend reaches
-        # the child (and the PATH it would otherwise inherit) and survives
-        # supervisor restarts.
+        # T14 PATH prepend (the pin's Node first, else an emergency only), the
+        # other half of the argv rewrite in register_companion_process: an npm
+        # launcher's shebang finds the reviewed Node. Descriptor env keys win
+        # over the supervisor's `_companion_base_env` merge, so the prepend
+        # reaches the child and survives supervisor restarts.
         prepend_skill_node_emergency_path(env, fallback_path=os.environ.get("PATH", ""))
     return env

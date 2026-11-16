@@ -76,6 +76,7 @@ from ouroboros.loop_transport import (
     fallback_chain_allowed as _fallback_chain_allowed,  # noqa: F401 -- resolved by loop_model_call._recover_failed_round at call time
     finalize_now_transport_terminal as _finalize_now_transport_terminal,  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
     last_assistant_text as _last_assistant_text,
+    provider_failure_hint,
     provider_terminal_fallback_text as _provider_terminal_fallback_text,
     reconcile_transport_wait as _reconcile_transport_wait,  # noqa: F401 -- resolved by loop_model_call._recover_failed_round at call time
     task_deadline_epoch as _task_deadline_epoch,  # noqa: F401 -- the loop module keeps its historical import surface for the L-B leaves
@@ -309,15 +310,14 @@ def _provider_unavailable_result(
             source=no_call, provider_terminal=wall, host_words=not salvaged,
         )
         return with_terminal_notice(text, usage, llm_trace)
-    met = round_failure_words(ctx.accumulated_usage, ctx.round_idx)  # a provider content refusal is named as itself, never an outage
+    # The round's failure as observed: a content refusal by its kind, else the provider's own sentence with its
+    # speaker or the host's class; never an outage the host did not establish.
+    met = round_failure_words(ctx.accumulated_usage, ctx.round_idx) or provider_failure_hint(ctx.accumulated_usage)
     prompt = (
         "[DEADLINE] Primary model work reached the owner deadline. Produce the best final answer now from verified work and state what remains undone."
         if is_deadline_exhausted else
         f"[PROVIDER_UNAVAILABLE] No route returned a usable response.{met} The task is being INTERRUPTED, not "
-        "completed. Summarize the verified work so far and state plainly what remains undone." if met else
-        "[PROVIDER_UNAVAILABLE] The model provider failed to return a usable response. "
-        "The task is being INTERRUPTED by this outage, not completed. Summarize the "
-        "verified work so far and state plainly what remains undone."
+        "completed. Summarize the verified work so far and state plainly what remains undone."
     )
     text, usage, llm_trace = _forced_final_answer(
         ctx, prompt=prompt, fallback_text=fallback,
@@ -367,16 +367,16 @@ def _apply_runtime_overrides(
     active_effort: str,
 ) -> Tuple[str, bool, str]:
     """Apply one-shot per-round model/locality/effort overrides from tool ctx."""
+    from ouroboros.loop_routes import pending_runtime_route
+
+    route = pending_runtime_route(ctx, active_model, active_use_local, active_effort)
     if ctx.active_model_override:
-        active_model = ctx.active_model_override
         ctx.active_model_override = None
     if getattr(ctx, "active_use_local_override", None) is not None:
-        active_use_local = ctx.active_use_local_override
         ctx.active_use_local_override = None
     if ctx.active_effort_override:
-        active_effort = normalize_reasoning_effort(ctx.active_effort_override, default=active_effort)
         ctx.active_effort_override = None
-    return active_model, active_use_local, active_effort
+    return route
 
 
 def carried_inline_round_cap(task_metadata: Dict[str, Any]) -> Optional[int]:
@@ -452,7 +452,7 @@ def _reset_turn_state(ctx: Any) -> None:
     ctx._primary_route_observation, ctx._accepted_route_binding, ctx._primary_return_requested = None, None, None
     ctx._lead_last_sent = ctx._lead_episode = ctx._lead_return_from = None
     ctx._lead_cause, ctx._lead_role = "", None
-    ctx._owner_model_applied_id = ctx._owner_model_request_id = None
+    ctx._owner_model_applied_id = ctx._owner_model_request_id = ctx._owner_processing_applied_id = None
     ctx._owner_model_primary_changed = False
     ctx._primary_view = None  # a return resumes only the view this turn left (primary_route_observation.held_primary_view)
     ctx._accepted_model_route = ctx._left_review_wait = None  # a new turn waits on no left review

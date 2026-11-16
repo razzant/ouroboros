@@ -6,6 +6,7 @@ import pytest
 
 from supervisor import git_ops, git_ops_reset
 from ouroboros import startup_migrations as m
+from ouroboros.tools import shell_process  # noqa: F401 — load Popen subclasses before replacing Popen below
 
 
 def test_success_fingerprint_skips_only_unchanged_install(tmp_path, monkeypatch):
@@ -17,7 +18,8 @@ def test_success_fingerprint_skips_only_unchanged_install(tmp_path, monkeypatch)
     monkeypatch.setattr("ouroboros.platform_layer.pip_install_target_args", lambda _exe: ["--target", str(tmp_path / "env")])
     calls, code = [], [0]
     monkeypatch.setattr(git_ops_reset.subprocess, "Popen", lambda cmd, **kw: calls.append(cmd) or Mock(wait=lambda **kw: code[0]))
-    assert git_ops_reset.sync_runtime_dependencies("test")[0]
+    synced = git_ops_reset.sync_runtime_dependencies("test")
+    assert synced[0], synced
     assert git_ops_reset.sync_runtime_dependencies("test")[1].startswith("unchanged:")
     assert len(calls) == 1
     req.write_text("example==2\n", encoding="utf-8")

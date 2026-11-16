@@ -399,6 +399,7 @@ def test_a_pairwise_start_fit_is_the_production_start_fit_and_writes_nothing(tmp
     assert dataclasses.replace(core_a, memory_view_json='') == dataclasses.replace(core_b, memory_view_json='') == (
         dataclasses.replace(plan.core, memory_view_json=''))  # runtime, knowledge, marks text, assignment, books
     assert kw_a == kw_b and kw_a['tool_schemas'] == json.loads(plan.start_tool_schemas_json) == scale.tools()
+    assert (kw_a['provider'], kw_a['reasoning_effort']) == (plan.provider, plan.start_reasoning_effort)  # its shape
     assert mv.snapshot_from_json(core_b.memory_view_json).marks == captured.marks
     monkeypatch.undo()
     retained = retain_section(sections[shown['host_sections_addressed'][0]['section_id']], root=str(tmp_path),
@@ -463,6 +464,32 @@ def test_a_lower_mode_names_its_cause_from_the_plans_own_start_facts(tmp_path, m
         window_tokens=crowded.window_tokens, known_window=True, ratio=1.0, output_reserve=crowded.output_reserve_tokens,
         tool_schemas=scale.tools(), start_mode='low', refused_tokens=2_000, current_messages=crowded.messages_for('low'))
     assert narrowed.initial_mode == 'low' and mode_cause(narrowed, 'low') == 'memory'
+
+
+@pytest.mark.parametrize("old_effort,new_effort", [("high", "none"), ("none", "high")])
+def test_counterfactual_start_uses_the_rebound_provider_and_effort_together(tmp_path, monkeypatch,
+                                                                        old_effort, new_effort):
+    from ouroboros import capability_evidence as ce, context, loop, memory_view as mv
+    from ouroboros.tools.registry import ToolRegistry
+
+    plan = dataclasses.replace(scale.build(tmp_path, monkeypatch, window=1_000_000),
+                               provider="openrouter", start_reasoning_effort=old_effort)
+    tools = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    tools._ctx.task_id, tools._ctx.active_effort = "pair", old_effort
+    monkeypatch.setattr(context, "_context_fit_route", lambda *_a, **_kw: (
+        {"model": "openai::gpt-6-sol", "provider": "openai"},
+        ce.CapabilityEvidence(1_000_000, "confirmed", "metadata", "new-route")))
+    rebound, _ = loop._rebind_context_fit_plan(plan, tools, plan.messages_for("max"),
+        model="openai::gpt-6-sol", use_local=False, tool_schemas=scale.tools(), reasoning_effort=new_effort)
+    captured = mv.snapshot_from_json(rebound.core.memory_view_json)
+    actual = mf.counterfactual_starts(rebound, {"same memory": captured})
+    expected = mf.counterfactual_starts(dataclasses.replace(rebound, start_reasoning_effort=new_effort),
+                                       {"same memory": captured})
+    print("COUNTERFACTUAL_PAIR", old_effort, new_effort, rebound.provider, rebound.start_reasoning_effort,
+          actual["arms"]["same memory"]["max_room"], expected["arms"]["same memory"]["max_room"])
+    assert (rebound.provider, rebound.start_reasoning_effort) == ("openai", new_effort)
+    assert actual == expected
+    assert rebound.start == plan.start
 
 
 def test_a_pairwise_start_fit_reaches_the_starts_own_rescued_input(tmp_path, monkeypatch):

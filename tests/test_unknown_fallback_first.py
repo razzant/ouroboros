@@ -364,6 +364,44 @@ def test_an_adopted_fallback_that_fails_retains_the_primary_as_a_route(data_root
 # -- binding identity -----------------------------------------------------------------------------
 
 
+def test_each_candidate_reads_its_own_predecessors_refusal_before_its_send(data_root, tmp_path, monkeypatch):
+    """A refusal the host does not recognise goes to the route that continues, with the facts in that request
+    before it is measured and sent: who refused and when, each party's own sentence and codes, what the host did.
+    The second candidate reads the first candidate's failure, never the primary's again, and a failed candidate's
+    row does not stay in the transcript it shared (the first spare is of the primary's family, so it reads the
+    canonical transcript itself). The owner's row names who said the sentence."""
+    spare = "primary/spare"
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", f"{spare},fb/two")
+
+    def refused(body):
+        error = RuntimeError(f"Error code: 400 - {body!r}")
+        error.status_code, error.body = 400, body
+        return error
+
+    raw = ('data: {"error":{"code":"invalid_parameter_error","param":null,"message":"Range of input length should be '
+           '[1, 983616]","type":"invalid_request_error"},"id":"chatcmpl-x"}\n\n')
+    alibaba = {"code": 400, "message": "Provider returned error", "metadata": {"provider_name": "Alibaba", "raw": raw}}
+    llm, notes = _RouteLLM(data_root, **{
+        PRIMARY: [lambda: refused(alibaba)],
+        spare: [lambda: refused({"code": 400, "message": "Unsupported parameter: reasoning"})]}), []
+    text, _usage, _trace, _registry = _run(tmp_path, llm, notes=notes)
+
+    assert [model for model, _ in llm.sent] == [PRIMARY, spare, "fb/two"] and text == "answer from fb/two"
+    rows = [[str(row["content"]) for row in sent if "[ATTEMPT FACTS]" in str(row.get("content"))] for _model, sent in llm.sent]
+    assert rows[0] == [] and len(rows[1]) == len(rows[2]) == 1
+    assert rows[1][0].startswith(f"[ATTEMPT FACTS] The attempt before this request, on {PRIMARY}, ended without a usable answer at ")
+    assert (' with HTTP 400: the provider said "Provider returned error" (code 400); Alibaba said "Range of input length '
+            'should be [1, 983616]" (code invalid_parameter_error, invalid_request_error). The host filed it as a rejected '
+            f"request, established no size cause and changed nothing in the request for it. The host now asks {spare} with "
+            "this view as it stands. Facts, not an instruction.") in rows[1][0]
+    assert "chatcmpl" not in rows[1][0] and "Error code" not in rows[1][0]  # no id, no printed exception
+    assert f"on {spare}, ended without" in rows[2][0] and 'the provider said "Unsupported parameter: reasoning"' in rows[2][0]
+    assert "Alibaba" not in rows[2][0] and rows[2][0].endswith("The host now asks fb/two with this view as it stands. "
+                                                               "Facts, not an instruction.")
+    assert (f'⚡ Fallback: trying {spare} after a rejected request on {PRIMARY}. Alibaba said: "Range of input length '
+            'should be [1, 983616]"') in notes
+
+
 def test_route_candidates_compare_complete_bindings_not_model_strings(monkeypatch, tmp_path):
     main = "claudexor::codex=gpt-test"
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", main)

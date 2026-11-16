@@ -3,8 +3,10 @@
 Keys: ``voice`` (``stt``, ``tts``, ``tts_voice``), ``contributions``, ``widget_order``, ``widget_size``, ``widget_start_mode`` (values from
 ``extension_ui_validation.WIDGET_START_MODES``), ``nested_subagents_expanded``, the
 empty-Main ``welcome`` copy, the two side-section widths, the read cursors,
-``read_ahead_revisions`` and up to four recent model routes (``model_recents``).
-The latter two are server-written; a POST naming either or an unknown key answers 400.
+``read_ahead_revisions``, up to four recent model routes (``model_recents``) and the
+owner's pinned model routes (``model_pins``). ``read_ahead_revisions`` and ``model_recents`` are
+server-written: a POST naming either or an unknown key answers 400. ``model_pins`` changes only by
+``pin``/``unpin`` route lists, never as a whole list.
 ``shared_read`` (row addresses) is an input only: the host records it as read-ahead.
 """
 from __future__ import annotations
@@ -66,6 +68,10 @@ DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     "welcome": {"mode": "default", "text": ""},
     # Server-written owner choices, newest first; suggestions never authorize a model.
     "model_recents": [],
+    # Routes the owner pinned in the Model sheet, in the order pinned: a model through its source (a named
+    # connection is part of the route), never an account, tier or effort. A pin chooses nothing and no catalog
+    # filters it; a POST pins or unpins single routes (``model_pins.pin`` / ``.unpin``) under the lock.
+    "model_pins": [],
 }
 _KNOWN_KEYS = frozenset(DEFAULT_UI_PREFERENCES)
 _MAX_WIDGET_ORDER_ITEMS = 200
@@ -81,6 +87,7 @@ _MAX_PROJECT_ID_LENGTH = 64
 _MAX_WELCOME_CHARS = 500
 _MAX_SHARED_READS = 64  # addresses one POST may name; recorded facts are never capped
 _MAX_MODEL_RECENTS = 4
+_MAX_MODEL_PINS = 24
 _MAX_CONTRIBUTION_KEYS = 64  # the bound _normalize_preferences enforces on contributions lists
 
 
@@ -103,6 +110,35 @@ def _contribution_visibility_ops(body: dict[str, Any]) -> dict[str, list[str]]:
         ops[op] = list(dict.fromkeys(v.strip() for v in values))
     if ops and not group:
         body.pop("contributions")
+    return ops
+
+
+def _route_of(value: Any) -> dict[str, Any]:
+    """One model route ``{model, use_local}`` through the one route grammar; ``ValueError`` names the fault."""
+    from ouroboros.composer_cognition import normalize_model_choice
+
+    if not isinstance(value, dict):
+        raise ValueError("a model route is an object with model and use_local")
+    choice = normalize_model_choice({**value, "kind": "model"})
+    return {key: choice[key] for key in ("model", "use_local")}
+
+
+def _model_pin_ops(body: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Pop the atomic ``model_pins.pin`` / ``model_pins.unpin`` route lists from a POST body.
+
+    Each pins or unpins single routes under the preferences lock, so two windows never overwrite each
+    other's pins; the whole list is never posted (it would drop what another window pinned meanwhile)."""
+    if "model_pins" not in body:
+        return {}
+    group = body.pop("model_pins")
+    if not isinstance(group, dict) or not group or set(group) - {"pin", "unpin"}:
+        raise ValueError("model_pins changes by pin and unpin lists of routes, never as a whole list")
+    ops: dict[str, list[dict[str, Any]]] = {}
+    for op in ("pin", "unpin"):
+        values = group.get(op, [])
+        if not isinstance(values, list) or len(values) > _MAX_MODEL_PINS:
+            raise ValueError(f"model_pins.{op} must be a list of at most {_MAX_MODEL_PINS} routes")
+        ops[op] = [_route_of(value) for value in values]
     return ops
 
 
@@ -241,6 +277,19 @@ def _normalize_preferences(
             if len(routes) == _MAX_MODEL_RECENTS:
                 break
         prefs["model_recents"] = routes
+    if "model_pins" in raw:  # stored state only: a POST changes it by pin/unpin (``_model_pin_ops``)
+        pins = []
+        value = raw["model_pins"]
+        for item in value if isinstance(value, list) else []:
+            try:
+                route = _route_of(item)
+            except (TypeError, ValueError):
+                continue
+            if route not in pins:
+                pins.append(route)
+            if len(pins) == _MAX_MODEL_PINS:
+                break
+        prefs["model_pins"] = pins
     if "nested_subagents_expanded" in raw:
         value = raw.get("nested_subagents_expanded")
         if not isinstance(value, bool):
@@ -421,9 +470,10 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
         return json_error(f"shared_read must be a list of at most {_MAX_SHARED_READS} row addresses", 400)
     drive_root = request_drive_root(request)
     path = pathlib.Path(drive_root) / "state" / "ui_preferences.json"
-    contributions_changed = "contributions" in body
+    changed = [group for group in ("contributions", "model_pins") if group in body]
     try:
         visibility = _contribution_visibility_ops(body)
+        pins = _model_pin_ops(body)
         with _preferences_lock(path):
             prefs = _stored_preferences(path)
             incoming = _normalize_preferences(body, fill_defaults=False)
@@ -436,6 +486,14 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
                 if len(hidden) > _MAX_CONTRIBUTION_KEYS:
                     raise ValueError(f"contributions.hidden holds at most {_MAX_CONTRIBUTION_KEYS} keys")
                 prefs["contributions"] = {**prefs["contributions"], "hidden": hidden}
+            if pins:
+                kept = [route for route in prefs["model_pins"] if route not in pins["unpin"]]
+                for route in pins["pin"]:  # a route named twice in one write is pinned once
+                    if route not in kept:
+                        kept.append(route)
+                if len(kept) > _MAX_MODEL_PINS:
+                    raise ValueError(f"at most {_MAX_MODEL_PINS} models can be pinned; unpin one first")
+                prefs["model_pins"] = kept
             if "project_seen_revision" in incoming:
                 from ouroboros.projects_registry import get_project
 
@@ -486,12 +544,12 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
         return json_error(str(exc), 503)
     except StoreError as exc:
         return json_error(f"dialogue history unavailable: {exc}", 503)
-    if contributions_changed:
-        # Other windows re-read their contributions projection (one coalesced read each).
+    if changed:
+        # Other windows re-read the named groups (one coalesced read each): contributions, the pinned models.
         try:
             from ouroboros.gateway.ws import broadcast_ws_sync
 
-            broadcast_ws_sync({"type": "ui_preferences_changed", "keys": ["contributions"]})
+            broadcast_ws_sync({"type": "ui_preferences_changed", "keys": changed})
         except Exception:  # a missing socket loop must not fail a committed write
             pass
     return JSONResponse({"ok": True, **prefs})

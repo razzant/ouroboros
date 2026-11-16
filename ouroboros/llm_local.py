@@ -17,16 +17,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from ouroboros.deadline_utils import physical_dispatch_timeout
 from ouroboros.model_concurrency import limit_physical_send
 
-from ouroboros.context_budget import (  # the typed overflow lives with the overflow vocabulary
-    LocalContextTooLargeError,
-    context_overflow_message,
-)
+from ouroboros.context_budget import LocalContextTooLargeError  # the typed overflow lives with the overflow vocabulary
 from ouroboros.llm_attempt import (
     _attempt_request,
     _candidate_before_dispatch,
     _execute_candidate,
     _finalized_physical_candidate,
-    _is_structured_context_overflow_exception,
+    is_size_refusal,
 )
 from ouroboros.usage_accounting import UsageAccountingError
 from ouroboros.transport_custody import outcome_unknown_on_chain
@@ -190,8 +187,7 @@ class _LocalLaneMixin:
             raise
         except Exception as exc:
             err = str(exc)
-            if (_is_structured_context_overflow_exception(exc)
-                    or context_overflow_message(err)):
+            if is_size_refusal(exc, any_status=True):
                 raise LocalContextTooLargeError(err) from exc
             # Exception-owned capture proves this attempt; prior ContextVar may be unrelated.
             if outcome_unknown_on_chain(exc):

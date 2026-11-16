@@ -346,6 +346,21 @@ def inherited_access(ctx: Any, run_id: Any) -> Optional[str]:
     return access if access in SESSION_ACCESS_LOWERING else None
 
 
+def inherited_processing(ctx: Any, run_id: Any) -> Optional[str]:
+    """The tier a ``continue_from`` keeps: the continued run's captured one ('' when it asked for none);
+    None when it recorded none or custody is unreadable, so the selected row's own resolution stands."""
+    from ouroboros.delegate_custody_current import run
+
+    drive = custody.custody_root(ctx)
+    try:
+        entry = None if custody.custody_log_unreadable(drive) else run(drive, str(run_id or "").strip())
+    except Exception:
+        log.debug("Continued run's processing unavailable for %s", run_id, exc_info=True)
+        return None
+    captured = getattr(entry, "processing_preference", None)
+    return captured if isinstance(captured, str) else None
+
+
 def _adopted_snapshot(entry: Any, authority: Any) -> Tuple[Optional[AdoptedSnapshot], str, str]:
     """The predecessor's undisposed snapshot a WRITING continuation runs in, or a refusal."""
     from ouroboros.configured_subagents import SESSION_ACCESS_PROFILES

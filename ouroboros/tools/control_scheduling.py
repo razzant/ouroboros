@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ouroboros.artifacts import attachment_manifest_projection, resolve_attachment_manifest
-from ouroboros.config import get_max_subagent_depth, runtime_settings
+from ouroboros.config import get_max_subagent_depth
 from ouroboros.consciousness_authority import consciousness_origin_metadata
 from ouroboros.depth_evidence import parse_task_depth
 from ouroboros.dialogue_provenance import presence_binding_authority_metadata
@@ -36,7 +36,7 @@ from ouroboros.subagent_history import snapshot_handle
 from ouroboros.subagent_runtime import (
     SubagentSelectionError,
     _require_room_subagents,
-    effective_runtime_subagent_settings,
+    runtime_subagent_settings,
     select_subagent_snapshot,
 )
 from ouroboros.subagent_work_order import declared_words_fact
@@ -808,9 +808,11 @@ def _schedule_task(ctx: ToolContext, internal: Dict[str, Any] | None = None, /, 
         from ouroboros.supervisor_route import capture_cognitive_route
 
         _require_room_subagents()
-        settings = effective_runtime_subagent_settings(runtime_settings(settings_reader=_ctl().load_settings))
+        settings = runtime_subagent_settings(settings_reader=_ctl().load_settings)
+        from ouroboros.supervisor_route import work_tier
+
         configured_subagent, legacy_selection = select_subagent_snapshot(
-            settings,
+            settings, work_tier=work_tier(ctx, settings),
             subagent_id=str(params.get("subagent_id") or ""), access=params.get("access"),
             legacy_model_lane=params.get("model_lane"),
             legacy_executor=params.get("executor"),

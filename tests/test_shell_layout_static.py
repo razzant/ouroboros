@@ -112,6 +112,25 @@ def _block(css: str, head: str) -> str:
     return css[start:pos - 1]
 
 
+def test_folded_rings_leave_each_others_touch_reach():
+    css = _read("web/style.css")
+    rings = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] {')
+    assert "--composer-glyph-gap: max(var(--composer-row-gap), calc(var(--touch-target-min) - var(--composer-control-height)));" in rings
+    assert "column-gap: var(--composer-glyph-gap);" in rings
+    # The chips slot gives back that same wider gap, or a folded row with chips would wrap onto a second line.
+    chips = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips {')
+    assert "margin-inline-start: calc(-1 * var(--composer-glyph-gap));" in chips
+    lead = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips::before {')
+    assert "width: calc(var(--composer-glyph-gap) - 6px);" in lead
+
+
+def test_logs_use_the_space_below_clear_for_the_long_filter_word():
+    css = _read("web/style.css")
+    logs = _block(css, "@container dashboard (max-width: 27.75rem) {")
+    assert "grid-column: 4; grid-row: 1;" in _block(logs, ".logs-filters > .logs-inline-clear {")
+    assert "grid-column: 3 / -1;" in _block(logs, ".logs-filters > .filter-chip:nth-child(6) {")
+
+
 def test_a_section_gives_the_places_control_up_only_where_a_page_replaced_its_list():
     """In the stack layout a section's page is one row, Back and its name, where the places control stood. From 40rem
     a section holds its list beside the page and the first-level page has no Back: there the places control is the
@@ -126,17 +145,18 @@ def test_a_section_gives_the_places_control_up_only_where_a_page_replaced_its_li
     assert "@container sectionplace (min-width: 40rem) {" in _read("web/ui.css"), "the two panes start where the query above ends"
 
 
-def test_a_touch_window_names_a_sections_two_columns_on_a_row_under_its_band():
-    """From 40rem a touch window (the stack layout) holds a section's list beside its page: the band keeps the places
-    control and the place's name on one centre line, and the columns' names stand on a row under it, the Dashboard as
-    Settings. The stack layout's header is inset by --space-3, not by the desk's padding, so the lead counts that inset:
-    it starts at the list's own, Settings' search over its rows and the page's name over its cards."""
+def test_a_touch_window_names_a_sections_two_columns_in_its_one_header_row():
+    """DESIGN:3293,3345,3468: two panes from 40rem still have one header row. Places takes room from the rail's lead;
+    Search stays over the list and the page's name over its cards. The section name remains available to readers."""
     two = _block(_read("web/ui.css"), "@container sectionplace (min-width: 40rem) {")
     header = 'html[data-layout="stack"] .section-place > .app-page-header'
-    assert f'{header} {{ grid-template-areas: "leading title toolbar" "lead lead lead"; }}' in two
+    assert f'{header} {{ grid-template-areas: "leading lead lead"; }}' in two
     assert f"{header} > .app-page-title-block {{ display: contents; }}" in two
-    assert f"{header} .app-page-title-row {{ grid-area: title; }}" in two
+    title = _block(two, f"{header} .app-page-title-row {{")
+    assert "position: absolute;" in title and "clip-path: inset(50%);" in title
     assert f"{header} .app-page-lead {{ grid-area: lead; min-height: var(--touch-target-min); }}" in two
-    assert ('html[data-layout="stack"] .section-place[data-section-view="page"] .section-lead '
-            "{ margin-inline-start: calc(var(--section-rail-start) - var(--space-3)); }") in two
+    lead = _block(two, 'html[data-layout="stack"] .section-place[data-section-view="page"] .section-lead {')
+    assert "margin-inline-start: 0;" in lead
+    assert ("grid-template-columns: calc(var(--section-rail-w) - var(--section-rail-end) - var(--space-3) - 44px - var(--space-2)) minmax(0, 1fr);") in lead
+    assert '"leading title toolbar" "lead lead lead"' not in _read("web/settings.css")
     assert "padding: var(--chrome-inset) var(--space-3);" in _read("web/style.css"), "the stack header's inset the lead counts"

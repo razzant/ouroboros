@@ -47,11 +47,8 @@ from ouroboros.llm_attempt import (
     _physical_candidate,  # noqa: F401 -- historical public import surface
     _finalized_physical_candidate,  # noqa: F401
     _is_provider_policy_refusal,  # noqa: F401
-    _is_structured_context_overflow_body,  # noqa: F401
-    _is_structured_context_overflow_exception,  # noqa: F401
     _PayloadCachePolicyMixin,  # noqa: F401
     _route_normalizes_cache_breakpoints,  # noqa: F401
-    _structured_error_values,  # noqa: F401
     _VALID_CACHE_TTLS,  # noqa: F401
     cache_ttl_seconds,  # noqa: F401
     supports_message_cache_control,  # noqa: F401

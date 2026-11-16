@@ -33,7 +33,7 @@ def known_models() -> list[dict]:
     from ouroboros.provider_models import route_on_connection
     from ouroboros.route_choice import following_route
     from ouroboros.route_spec import ROUTE_KIND_API_MODEL
-    from ouroboros.settings_integrity import runtime_setting
+    from ouroboros.settings_integrity import SettingsDocumentUnknown, runtime_catalog_settings, runtime_setting
 
     routes = [following_route(role) for role in MODEL_ROLE_SETTINGS if role != "fallback"]
     routes.extend((model, runtime_setting("USE_LOCAL_FALLBACK", "").lower() in {"1", "true"})
@@ -43,11 +43,11 @@ def known_models() -> list[dict]:
         routes.append((local.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1], True))
     rows = {(model, local): {"model": model, "use_local": local, "source": "local configuration"}
             for model, local in routes if model}
-    raw = runtime_setting(SUBAGENTS_SETTING, "")
     try:
+        raw = runtime_catalog_settings().get(SUBAGENTS_SETTING)
         roster = parse_configured_subagents(raw) if raw else None
-    except ValueError:
-        roster = None  # A broken roster cannot hide other known routes or deny an exact id.
+    except (ValueError, SettingsDocumentUnknown):
+        roster = None  # A broken or unknown roster cannot hide other known routes or deny an exact id.
     for row in roster.items if roster else ():
         if row.route.kind == ROUTE_KIND_API_MODEL:
             try:

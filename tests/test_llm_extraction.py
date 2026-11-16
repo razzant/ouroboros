@@ -56,9 +56,8 @@ _MODULE_OWNERS = {
     llm_attempt: (
         "_CACHE_TTL_SECONDS _VALID_CACHE_TTLS _applied_payload_cache_ttl _attempt_request "
         "_candidate_before_dispatch _canonical_candidate_bytes _execute_candidate "
-        "_execute_candidate_async _is_structured_context_overflow_body "
-        "_is_structured_context_overflow_exception _physical_candidate "
-        "_route_normalizes_cache_breakpoints _structured_error_values cache_ttl_seconds "
+        "_execute_candidate_async _physical_candidate "
+        "_route_normalizes_cache_breakpoints cache_ttl_seconds "
         "supports_message_cache_control"
     ),
     llm_capability_policy: "_OPTIONAL_DROPPABLE_PARAMS _OPTIONAL_SAMPLING_PARAMS normalize_reasoning_effort",

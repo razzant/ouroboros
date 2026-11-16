@@ -53,6 +53,24 @@ def isolated_settings(tmp_path, monkeypatch):
     cfg.reset_runtime_mode_baseline_for_tests()
 
 
+@pytest.mark.parametrize("provenance", ["echo", "digest", "changed", "unmarked"])
+def test_retiring_a_catalog_mirror_requires_its_own_projection_proof(isolated_settings, provenance):
+    from ouroboros import config
+    from ouroboros.settings_integrity import PROJECTED_PROPOSALS_ENV, PROJECTED_SETTINGS_ENV, _value_digest
+    from tests.review_pool_rosters import packet_pool
+
+    key, old = "OUROBOROS_SUBAGENTS", packet_pool(["vendor/old"])
+    current = packet_pool(["vendor/operator"]) if provenance == "changed" else old
+    env = {key: current, PROJECTED_PROPOSALS_ENV: json.dumps({key: old} if provenance == "echo" else {}),
+           PROJECTED_SETTINGS_ENV: json.dumps({key: _value_digest(old)} if provenance in {"digest", "changed"} else {})}
+    # Equality with the CURRENT document is not provenance: an unmarked operator input must survive.
+    isolated_settings.write_text(json.dumps({key: current}))
+    config.apply_settings_to_env({key: packet_pool(["vendor/new"])}, environ=env)
+    assert env.get(key) == (None if provenance in {"echo", "digest"} else current)
+    assert key not in json.loads(env[PROJECTED_PROPOSALS_ENV])
+    assert key not in json.loads(env[PROJECTED_SETTINGS_ENV])
+
+
 def test_the_singular_fallback_alias_is_read_from_env_and_never_reaches_disk(
         isolated_settings, monkeypatch):
     """The env-only alias: a live benchmark contract on the read side, invisible on
@@ -233,3 +251,64 @@ def test_the_exemption_sets_are_exactly_the_declared_ones():
     # an exclusion is a decision written into the one list.
     assert set(cfg.settings_env_keys()) == (
         set(cfg.SETTINGS_DEFAULTS) - set(cfg.SETTINGS_KEYS_NOT_EXPORTED_TO_ENV))
+
+
+_ROW_TEXTS = {"ascii": "Reviews the change and names the risk. " * 13,
+              "cyrillic": "Проверяет изменение и называет риск. " * 13,
+              "astral": "🦊 сверяет 𝔘 каждую строку. " * 18}
+
+
+def _catalog(text, rows=50, *, enabled=True):
+    from ouroboros.configured_subagents import normalize_configured_subagents
+
+    return normalize_configured_subagents({"enabled": enabled, "items": [
+        {"subagent_id": f"row-{i:02d}", "recommended_use": f"{i} {text}", "review_eligible": i % 2 == 0,
+         "route": {"kind": "api_model", "target_id": f"openai/model-{i}"}} for i in range(rows)]})[1]
+
+
+@pytest.mark.parametrize("rows", [26, 50])
+@pytest.mark.parametrize("text", list(_ROW_TEXTS.values()), ids=list(_ROW_TEXTS))
+def test_the_catalog_rides_no_environment_and_its_document_keeps_it_whole(isolated_settings, rows, text):
+    """Rows of free text outgrow one environment entry (Linux execve: 32 pages per string; Windows: 32,767
+    characters per variable), so neither the catalog nor a proposal echo of it leaves the document."""
+    from ouroboros import config as cfg
+    from ouroboros.settings_integrity import projected_proposals
+
+    raw = _catalog(text, rows)
+    isolated_settings.write_text(json.dumps({"OUROBOROS_SUBAGENTS": raw}), encoding="utf-8")
+    environ: dict = {}
+    cfg.apply_settings_to_env(cfg.load_settings(), environ=environ)
+    assert "OUROBOROS_SUBAGENTS" not in environ and "OUROBOROS_SUBAGENTS" not in projected_proposals(environ)
+    assert max(len(f"{key}={value}".encode("utf-16-le")) // 2 for key, value in environ.items()) < 32767
+    assert cfg.load_settings()["OUROBOROS_SUBAGENTS"] == raw
+
+
+def test_an_earlier_projections_catalog_retires_and_an_operators_stays(isolated_settings, monkeypatch):
+    """Only equality with this tree's own echo proves a variable ours; anything else is an operator's input, which
+    stands in only for a document that sets no catalog: a saved one, an explicit empty list or a switched-off
+    catalog stay the owner's."""
+    from ouroboros import config as cfg
+    from ouroboros.settings_integrity import PROJECTED_PROPOSALS_ENV, projected_proposals
+
+    raw, operator = _catalog(_ROW_TEXTS["cyrillic"]), _catalog("Operator row.", 1)
+    echo = json.dumps({"OUROBOROS_SUBAGENTS": raw, "OUROBOROS_MODEL": "vendor/old-proposal"})
+    isolated_settings.write_text(json.dumps({"OUROBOROS_SUBAGENTS": raw}), encoding="utf-8")
+    settings = cfg.load_settings()
+    mirrored = {"OUROBOROS_SUBAGENTS": raw, PROJECTED_PROPOSALS_ENV: echo}
+    cfg.apply_settings_to_env(settings, environ=mirrored)
+    assert "OUROBOROS_SUBAGENTS" not in mirrored and "OUROBOROS_SUBAGENTS" not in projected_proposals(mirrored)
+    for kept in ({"OUROBOROS_SUBAGENTS": operator, PROJECTED_PROPOSALS_ENV: echo}, {"OUROBOROS_SUBAGENTS": raw}):
+        value = kept["OUROBOROS_SUBAGENTS"]
+        cfg.apply_settings_to_env(settings, environ=kept)
+        assert kept["OUROBOROS_SUBAGENTS"] == value and "OUROBOROS_SUBAGENTS" not in projected_proposals(kept)
+
+    monkeypatch.delenv(PROJECTED_PROPOSALS_ENV, raising=False)
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", operator)
+    isolated_settings.write_text("{}", encoding="utf-8")
+    assert cfg.load_settings()["OUROBOROS_SUBAGENTS"] == operator
+    monkeypatch.setenv(PROJECTED_PROPOSALS_ENV, json.dumps({"OUROBOROS_SUBAGENTS": operator}))
+    assert cfg.load_settings()["OUROBOROS_SUBAGENTS"] != operator  # our own mirror never stands in
+    monkeypatch.delenv(PROJECTED_PROPOSALS_ENV)
+    for saved in (raw, json.dumps({"enabled": True, "items": []}), _catalog("Off.", 2, enabled=False)):
+        isolated_settings.write_text(json.dumps({"OUROBOROS_SUBAGENTS": saved}), encoding="utf-8")
+        assert cfg.load_settings()["OUROBOROS_SUBAGENTS"] == saved

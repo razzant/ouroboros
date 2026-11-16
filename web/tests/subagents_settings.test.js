@@ -171,32 +171,48 @@ test('validation protects stable unique IDs, route shape, effort and the row lim
     assert.match(validateAvailableSubagentsSetting(setting([
         sessionRow({ route: { kind: ROUTE_KIND_AGENT_SESSION, target_id: 'codex=' } }),
     ])).join(' '), /harness=model/);
-    // The ceiling is the catalog's (MAX_CONFIGURED_SUBAGENTS, 26 since the review
-    // pool joined the catalog); the message quotes the module constant.
+    // The ceiling is the catalog's (MAX_CONFIGURED_SUBAGENTS, every saved row, switched
+    // off or not); the message quotes the module constant.
     const tooMany = Array.from({ length: MAX_AVAILABLE_SUBAGENTS + 1 }, (_, index) =>
         apiRow({ subagent_id: `actor_${index}` }));
     assert.match(validateAvailableSubagentsSetting(setting(tooMany)).join(' '),
         new RegExp(`at most ${MAX_AVAILABLE_SUBAGENTS}\\b`));
 });
 
-test('the catalog holds 26 rows: they load and save, and a 27th is refused on read and on save', () => {
-    assert.equal(MAX_AVAILABLE_SUBAGENTS, 26);
+test('the catalog holds 50 rows, switched off or not: 26 to 50 load whole, a 51st is refused on read and on save', () => {
+    assert.equal(MAX_AVAILABLE_SUBAGENTS, 50);
     const rows = (length) => Array.from({ length }, (_, index) => apiRow({
         subagent_id: `actor_${index}`, route: { kind: ROUTE_KIND_API_MODEL, target_id: `openai/model-${index}` },
+        ...(index % 3 === 2 ? { enabled: false } : {}),
     }));
-    const full = parseAvailableSubagentsSetting(setting(rows(26)));
-    assert.equal(full.error, '');
-    assert.equal(full.setting.items.length, 26);
-    assert.deepEqual(validateAvailableSubagentsSetting(full.setting, { uniqueEngines: true }), []);
-    assert.match(parseAvailableSubagentsSetting(setting(rows(27))).error, /more than 26 rows/);
-    assert.deepEqual(validateAvailableSubagentsSetting(setting(rows(27))), ['Available subagents supports at most 26 rows.']);
-    // A full catalog offers neither Add nor Duplicate a 27th row.
+    for (const length of [26, 27, 49, 50]) {
+        const loaded = parseAvailableSubagentsSetting(setting(rows(length)));
+        assert.equal(loaded.error, '');
+        assert.deepEqual(loaded.setting.items, rows(length), 'every row, in order, with its fields');
+        assert.deepEqual(validateAvailableSubagentsSetting(loaded.setting, { uniqueEngines: true }), []);
+    }
+    assert.match(parseAvailableSubagentsSetting(setting(rows(51))).error, /more than 50 rows/);
+    assert.deepEqual(validateAvailableSubagentsSetting(setting(rows(51))), ['Available subagents supports at most 50 rows.']);
+    // Setup: Add and Duplicate each reach the 50th row; a full list holds both (aria-disabled, so their hints stay
+    // reachable: agents_settings.test.js) and neither adds a 51st. No sentence joins the list's own lines.
     const dom = accessEditorDom();
     const editor = createAvailableSubagentsEditor({ doc: dom.doc, win: null });
-    editor.load(full.setting);
+    const held = () => [/data-subagent-add\s+aria-disabled="true"/.test(dom.html()),
+        dom.row(0).html.includes('aria-disabled="true">Duplicate'), /data-subagent-(add|duplicate)[^>]*\sdisabled[\s>=]/.test(dom.html())];
+    editor.load(setting(rows(49)));
+    assert.deepEqual(held(), [false, false, false]);
     dom.toolbar.add.emit('click', '');
-    dom.row(25).querySelector('[data-subagent-duplicate]').emit('click');
-    assert.equal(editor.setting.items.length, 26);
+    assert.equal(editor.setting.items.length, 50);
+    assert.match(dom.html(), /<span class="available-subagents-count">50\/50<\/span>/);
+    assert.deepEqual(held(), [true, true, false]);
+    assert.doesNotMatch(dom.html(), /holds at most/);
+    dom.toolbar.add.emit('click', '');
+    dom.row(49).querySelector('[data-subagent-duplicate]').emit('click');
+    assert.equal(editor.setting.items.length, 50);
+    editor.load(setting(rows(49)));
+    dom.row(0).querySelector('[data-subagent-duplicate]').emit('click');
+    assert.equal(editor.setting.items.length, 50);
+    assert.deepEqual(held(), [true, true, false]);
     editor.destroy();
 });
 
@@ -1311,6 +1327,11 @@ test('a reviewer says its model\'s published tariff until a review is measured, 
     assert.equal(modelTariffText(api, catalog), tariff);
     assert.equal(modelTariffText(apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'vendor/unpriced' } }), catalog), 'Price unknown');
     assert.equal(modelTariffText(apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'vendor/unlisted' } }), catalog), 'Price unknown');
+    // The role line's own words for an entry priced only under a condition: the same helper, never a figure.
+    const deepseek = apiRow({ route: { kind: ROUTE_KIND_API_MODEL, target_id: 'deepseek::deepseek-v4-pro' } });
+    assert.equal(modelTariffText(deepseek, { read_state: 'ok', items: [{ value: 'deepseek::deepseek-v4-pro',
+        price_condition: 'off_peak_usd' }] }), 'Estimated for text, off-peak · USD only');
+    assert.equal(reviewMoneyLine(deepseek, null, 'Estimated for text, off-peak · USD only'), 'Estimated for text, off-peak · USD only');
     // A row its own source listed keeps its tariff when another source of the read failed (a partial catalog, or a
     // failed read that kept the earlier rows); a model no read listed is unknown only once the catalog is read whole.
     for (const state of ['partial', 'transport']) {

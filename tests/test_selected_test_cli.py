@@ -68,7 +68,7 @@ def test_selected_cli_skips_unrelated_collection_and_records_both_lanes(tmp_path
     monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")  # nested slots: the selected passes run two real workers
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
     node = []
-    monkeypatch.setattr(cli, "_node_lane", lambda: node.append(True) or 0)
+    monkeypatch.setattr(cli, "_node_lane", lambda: node.append(True) or (0, ""))
     (repo / "leaf.py").write_text("value = 2\n", encoding="utf-8")
     evidence = tmp_path / "evidence"
     github_output = tmp_path / "github-output"
@@ -115,7 +115,7 @@ def test_selected_cli_runs_a_changed_test_modules_importers_and_only_selects_opt
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
     monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")  # nested slots: the selected passes run two real workers
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
-    monkeypatch.setattr(cli, "_node_lane", lambda: 0)
+    monkeypatch.setattr(cli, "_node_lane", lambda: (0, ""))
     (repo / "tests/test_hub.py").write_text(hub + "# changed\n", encoding="utf-8")
     evidence = tmp_path / "evidence"
     assert cli.main(["--selected", "--base", "HEAD", "--evidence-dir", str(evidence)]) == 0
@@ -163,7 +163,7 @@ def test_selected_cli_starts_pytest_with_a_scope_longer_than_one_windows_command
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
     monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")  # nested slots: the selected passes run two real workers
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
-    monkeypatch.setattr(cli, "_node_lane", lambda: 0)
+    monkeypatch.setattr(cli, "_node_lane", lambda: (0, ""))
     (repo / "leaf.py").write_text("value = 2\n", encoding="utf-8")
     # The control: spelled out inline, as its spec names it, this scope is past what Windows launches.
     inline = selection_passes(test_selection.select_tests(repo))[0].args
@@ -214,7 +214,7 @@ def test_selected_cli_runs_where_the_evidence_directory_and_a_module_spell_templ
     monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "2")
     monkeypatch.setenv("OURO_TEST_WORKER_BUDGET", "2")  # nested slots: the selected passes run two real workers
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)
-    monkeypatch.setattr(cli, "_node_lane", lambda: 0)
+    monkeypatch.setattr(cli, "_node_lane", lambda: (0, ""))
     (repo / named).write_text("def test_named(): assert True\n# changed\n", encoding="utf-8")
     evidence = tmp_path.joinpath(*TEMPLATE_FIELDS)  # an evidence directory that spells every field
     assert cli.main(["--selected", "--base", "HEAD", "--evidence-dir", str(evidence)]) == 0

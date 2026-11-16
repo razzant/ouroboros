@@ -386,6 +386,73 @@ def test_a_rebind_keeps_a_view_exactly_when_the_rounds_carried_input_fits_it(tmp
         assert rebound.projection(mode).calibration_ratio == sent.measurement.measurement_density == 1.0
 
 
+_FIXTURE_TOOLS = [{"type": "function", "function": {"name": f"fixture_{n}", "description": "Read a fixture.", "parameters": {
+    "type": "object", "properties": {"path": {"type": "string", "description": "A path."}}, "required": ["path"]}}}
+    for n in range(60)]  # direct OpenAI with reasoning sends them as its custom catalog: a longer request
+
+
+@pytest.mark.parametrize("switch,before,after,provider,rebinds,kept", [
+    ("model", "none", "high", "openai", True, False), ("model", "high", "none", "openai", True, True),
+    ("effort", "none", "high", "openai", True, False), ("effort", "high", "none", "openai", False, True),
+    ("effort", "low", "high", "openai", False, True), ("effort", "none", "high", "openrouter", False, True)],
+    ids=["model-opens-ladder", "model-drops-ladder", "effort-opens-ladder", "effort-drops-ladder", "effort-same-ladder",
+         "effort-no-ladder"])
+def test_a_route_handover_fits_the_view_in_the_effort_its_next_send_carries(tmp_path, monkeypatch, switch, before,
+                                                                           after, provider, rebinds, kept):
+    """A route handover fits the view in the effort its next send carries. Using the old effort cuts a fitting
+    high -> none view, while none -> high can leave an oversized request. Effort alone rebinds only when it opens
+    direct OpenAI's longer custom ladder (context_fit._request_shapes); other effort changes leave the route's
+    question, shown view and seams untouched. Each case ends with the round's own measurement inside the window."""
+    from ouroboros import capability_evidence as ce
+    from ouroboros import context, loop_routes, route_choice
+    from ouroboros import context_fit as cf
+    from ouroboros import memory_view as mv
+    from ouroboros.context_measurement import measure_main_fit
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.transcript_prefix import ORIGINS_ATTR
+    from tests import _memory_view_synthetic as syn
+
+    sol, astra = "openai::gpt-6-sol", "openai::gpt-6-astra"
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path / "evidence")
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    monkeypatch.setattr(route_choice, "round_route", lambda *_a, **_kw: None)  # no Settings follow
+    snap = syn.snapshot(room_facts=syn.room("1"), conversations=[], story=syn.pages(10, 2_000))
+    core = cf.ContextCore("Core", "BIBLE", "# Architecture\n\n" + "Whole source book. " * 2_000, "", "Identity", "Facts",
+                          json.dumps("Assignment. " + "Retained evidence. " * 14_000), False,
+                          memory_view_json=mv.snapshot_json(snap))
+
+    def stated(window):  # the route's stated metadata total
+        return ce.CapabilityEvidence(window, "confirmed", "metadata", f"f1-{window}")
+
+    plan = cf.build_context_fit_plan(None, core, {"id": "f1", "chat_id": 1}, preferred_mode="max",
+                                     tool_schemas=_FIXTURE_TOOLS, reasoning_effort=before,
+                                     route_resolver=lambda *_a, **_kw: ({"provider": provider, "model": sol}, stated(2_000_000)))
+    messages = plan.messages_for("max")
+    raw = {effort: cf.estimate_context_prompt_tokens(messages, _FIXTURE_TOOLS, provider="openai", reasoning_effort=effort)
+           for effort in ("none", "high")}
+    tight, questions = raw["none"] + 8_192 + (raw["high"] - raw["none"]) // 2, []  # admits only the canonical request
+    monkeypatch.setattr(context, "_context_fit_route", lambda task, **_kw: questions.append(task["model"]) or (
+        {"provider": provider, "model": task["model"]}, stated(tight)))
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx = registry._ctx
+    ctx.task_id, ctx.event_queue, ctx._accumulated_usage = "f1", None, {}
+    ctx.active_model, ctx.active_use_local, ctx.active_effort = sol, False, before
+    route, mode = (sol, False, before), plan.initial_mode
+    if switch == "effort":  # the previous round moved to this route in its own effort: its window, its view
+        ctx.active_model_override = astra
+        *route, plan, mode = loop_routes.bind_round_route(registry, messages, route, plan, mode, "max", _FIXTURE_TOOLS)
+    ctx.active_model_override, ctx.active_effort_override = astra if switch == "model" else None, after
+    shown, seams, questions[:] = copy.deepcopy(messages[0]), len(getattr(ctx, ORIGINS_ATTR, None) or []), []
+    model, _local, effort, rebound, mode = loop_routes.bind_round_route(registry, messages, tuple(route), plan, mode,
+                                                                        "max", _FIXTURE_TOOLS)
+    fit = measure_main_fit(rebound, messages, _FIXTURE_TOOLS, profile="owner_max", rendered_mode=mode, round_id="f1",
+                           reasoning_effort=effort).measurement
+    assert raw["high"] > raw["none"] and (model, effort, mode) == (astra, after, "max")
+    assert fit.capacity_deficit_tokens == 0  # the request this round sends fits its window
+    assert (questions == [astra]) is rebinds and (messages[0] == shown) is kept
+    assert bool((getattr(ctx, ORIGINS_ATTR, None) or [])[seams:]) is rebinds  # only a rebind names a view seam
+
+
 @pytest.mark.parametrize("holds_reply,after", [(False, "low"), (True, "nano")], ids=["unproved-total", "total-holds-reply"])
 def test_a_held_low_view_steps_down_to_nano_only_where_nano_makes_room(tmp_path, monkeypatch, holds_reply, after):
     """A Low view the work holds meets a window that cannot hold its transcript even with the shortest memory. On a
@@ -508,6 +575,14 @@ def test_a_cold_restore_keeps_the_tasks_own_start_not_the_restore_fit(tmp_path, 
         *_route, active, _round, rebound = resume_native_loop(registry, state, [], {}, {}, set())
         assert active == "low" == rebound.initial_mode and rebound.start == expected != fresh.start, name
         assert registry._ctx.context_fit_plan.start == expected and mode_cause(rebound, "low") == cause, name
+        from ouroboros.context_view_facts import memory_facts
+
+        line = memory_facts(rebound, active)
+        room = rebound.projection(active).memory_facts["max_room"]
+        assert room == fresh.projection(fresh.initial_mode).memory_facts["max_room"]
+        assert room != started.projection("max").memory_facts["max_room"]
+        assert f"Max room in this captured build: window {room['window']:,}" in line
+        assert "Max room at the start" not in line  # the known/unknown historical start above is still separate
         # The next checkpoint carries what the restore holds; a second cold restore keeps it, unknown included.
         again = json.loads(json.dumps(owner_wait.continuation_state(registry._ctx, [], {}, {}, 4, [], set())))
         assert again["context_start"] == list(expected), name

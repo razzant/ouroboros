@@ -880,7 +880,7 @@ def prepare_messages_for_send(
 
 # The round's error stamps a retry that never left the host gives back unchanged.
 _ROUND_ERROR_KEYS = ("_last_llm_error", "_last_llm_error_kind", "_last_llm_retry_same_request", "_last_llm_status_code",
-                     "_last_llm_provider_code", "_last_llm_provider_message", "_last_llm_provider_fields",
+                     "_last_llm_provider_code", "_last_llm_provider_message", "_last_llm_provider_fields", "_last_llm_provider_answer",
                      "_last_llm_provider_message_cut", "_last_llm_resource_refusal", "_last_llm_reset_at",
                      "_last_llm_attempt_custody", "_last_llm_failure", "execution_status", "reason_code")
 

@@ -39,7 +39,7 @@ def test_a_nanny_can_choose_two_rows_and_the_same_row_again(tmp_path, monkeypatc
 
     settings = _settings(_session_row(), {**_session_row(), "subagent_id": "other", "name": "Other",
                                         "route": {"kind": "agent_session", "target_id": "codex=other"}})
-    monkeypatch.setattr("ouroboros.config.runtime_settings", lambda: settings)
+    monkeypatch.setattr("ouroboros.settings_integrity.runtime_catalog_settings", lambda *, settings_reader=None: settings)
     snapshot = _snapshot(settings, "session-builder")
     ctx = SimpleNamespace(task_id="nanny", drive_root=tmp_path, budget_drive_root=tmp_path,
                           task_metadata={"review_mode": mode}, _configured_actor_bootstrap={

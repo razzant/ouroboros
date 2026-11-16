@@ -46,7 +46,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tupl
 
 from .telegram_api import _TELEGRAM_TEXT_LIMIT, _u16len
 from .telegram_i18n import Index
-from .telegram_state import _message_ref, _read_json_file, _state_file
+from .telegram_state import _data_dir, _message_ref, _read_json_file, _state_file
 
 _QUIZ_STATE_FILE = "quiz_state.json"
 _MAX_REMEMBERED = 50
@@ -274,6 +274,9 @@ def _forward_only(held: Any, record: Dict[str, Any]) -> Dict[str, Any]:
     after an edit that had to wait, or the question published again) keeps it and its facts."""
     if not isinstance(held, dict):
         return dict(record)
+    record = dict(record)
+    if held.get("message_id") == record.get("message_id") and held.get("creation_edits"):
+        record.setdefault("creation_edits", held["creation_edits"])
     was, state = str(held.get("state") or "open"), str(record.get("state") or "open")
     rank, held_rank = _LIFECYCLE_RANK.get(state, 0), _LIFECYCLE_RANK.get(was, 0)
     if rank > held_rank or (rank == held_rank and (was not in _FINAL_STATES or state == was)):
@@ -558,14 +561,39 @@ def _retain_fact(token: str, event: Dict[str, Any]) -> None:
         _RETAINED_FACTS.pop(stale, None)
 
 
-async def _apply_fact(api, token: str, event: Dict[str, Any], lang: str, client_factory) -> None:
-    client = client_factory()  # only this client's own card can be edited; another bot's waits for its bot
-    if quiz_for_token(api, client.bot_id, token) is None:
+def _any_card(api, token: str) -> bool:
+    data = _load(api)
+    return token in data["quizzes"] or any(key.endswith(f":{token}") for key in data["bots"])
+
+
+def card_follows(api, event: Dict[str, Any]) -> bool:
+    """Whether a ``chat.quiz_state`` fact has a remembered card to follow (its outbox filter). A fact for a card
+    not remembered yet is kept for that card's creation (``apply_retained_fact``, which reads the host's record
+    too), so it never waits in the outbox, for a bot token or for a day."""
+    task_id, quiz_id = str(event.get("task_id") or "").strip(), str(event.get("quiz_id") or "").strip()
+    token = mint_token(task_id, quiz_id) if task_id and quiz_id else ""
+    if not token or _any_card(api, token):
+        return bool(token)
+    _retain_fact(token, event)
+    return False
+
+
+async def _apply_fact(api, token: str, event: Dict[str, Any], lang: str, client_factory, *, creation=False) -> None:
+    # Only this client's own card can be edited; another bot's waits for its bot. No card at all needs no client
+    # (nor a bot token): its creation applies the fact, and reads the host's record too.
+    client = client_factory() if _any_card(api, token) else None
+    if client is None or quiz_for_token(api, client.bot_id, token) is None:
         _retain_fact(token, event)  # the card's send may still be in flight
         return
     target = lifecycle_target(api, client.bot_id, event, lang)
     if target is None:
         return
+    if creation:
+        record = quiz_for_token(api, client.bot_id, token)
+        edits = record.get("creation_edits") or []
+        if edits and edits[-1] == list(target):
+            return  # the journal already replayed this exact presentation
+        remember_quiz(api, client.bot_id, token, {**record, "creation_edits": [*edits, list(target)]})
     if not await client.edit_message_text_with_inline_keyboard(*target, parse_mode=""):
         api.log("warning", f"Telegram quiz card edit failed ({event.get('state')}).")  # never retried
 
@@ -590,24 +618,50 @@ def _settled_fact(record: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any
             **{key: record[key] for key in _SETTLED_FACTS if key in record}}
 
 
+def _host_fact(data_dir: Any, published: Mapping[str, Any]) -> Dict[str, Any]:
+    """The host's own record of the question (``owner_quiz``, written before any fact about it is published) as the
+    fact a card created now applies: an answer with its winner and delivery, a closure with its reason, a finished
+    task's expiry, or a wait that ended after the card was published waiting. ``{}`` when it is open or unreadable
+    (unknown, never taken for open)."""
+    from ouroboros.owner_quiz import question_delivery_projection, quiz_states
+
+    task_id, quiz_id = str(published.get("task_id") or ""), str(published.get("quiz_id") or "")
+    block = quiz_states(data_dir, task_id).get(quiz_id) if task_id and quiz_id else None
+    state = str((block or {}).get("state") or "")
+    fact: Dict[str, Any] = {"task_id": task_id, "quiz_id": quiz_id, "state": state}
+    if state == "answered":
+        fact.update(_winner(block))
+        if delivery := question_delivery_projection(block):
+            fact["question_delivery"] = delivery
+    elif state == "closed" and str(block.get("closed_reason") or "").strip():
+        fact["closed_reason"] = str(block["closed_reason"])
+    elif state == "open" and block.get("wait_ended_at") and published.get("wait_for_answer") is True:
+        fact["wait_for_answer"] = False
+    elif state not in _LIFECYCLE_RANK or state == "open":
+        return {}
+    return fact
+
+
 async def apply_retained_fact(api, token: str, lang: str, *, client_factory, published=None) -> None:
-    """Right after ``remember_quiz``, under the same lock: the settled state the card already
-    held (a card sent again keeps it, ``_forward_only``), the one the ``chat.quiz`` event itself
-    carries (a queued ask can land after its question was answered or closed), or the fact that
-    outran creation; the highest-ranked applies, each later one counting as the newer. So when the
-    outbox repeats this handler for a settling edit that had to wait, the same edit goes out, even
-    after a restart took what this load kept in memory."""
+    """After creation, replay its exact edits before reading newer facts. The bounded card record keeps those
+    presentations for this message id, not another owner-quiz truth. The outbox replays confirmed/unknown parts
+    without sending, and retries only known-unsent ones, even after a reload or another host answer. A newer
+    fact appends an edit, never changes a pending part's fingerprint. A newly sent card starts its own sequence.
+    Host state remains authoritative; unreadable leaves the facts known here."""
+    client = client_factory()
+    record = quiz_for_token(api, client.bot_id, token)
+    for target in (record or {}).get("creation_edits") or []:
+        await client.edit_message_text_with_inline_keyboard(*target, parse_mode="")
     outran = _RETAINED_FACTS.pop(token, None)
-    held = _settled_fact(quiz_for_token(api, client_factory().bot_id, token))
-    if held is not None:
-        _retain_fact(token, held)
-    if published and str(published.get("state") or "open") != "open":
-        _retain_fact(token, published)
-    if outran is not None:
-        _retain_fact(token, outran)
+    held = _settled_fact(record)
+    asked = published if published and str(published.get("state") or "open") != "open" else None
+    host = await asyncio.to_thread(_host_fact, _data_dir(api), published) if published else {}
+    for fact in (held, asked, outran, host):
+        if fact:
+            _retain_fact(token, fact)
     event = _RETAINED_FACTS.pop(token, None)
     if event is not None:
-        await _apply_fact(api, token, event, lang, client_factory)
+        await _apply_fact(api, token, event, lang, client_factory, creation=True)
 
 
 def _outcome(status: int, payload: Mapping[str, Any], attempted: Mapping[str, Any]) -> str:

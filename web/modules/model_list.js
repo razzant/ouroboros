@@ -1,15 +1,25 @@
-// The one list of models (docs/DESIGN.md "Composer owner controls"): a field and its suggestions. The composer's
-// Model capsule puts the field in its strip and floats the list above the row (composer_model.js); a work card's
-// model fact puts both in its popover (card_model.js). Without a query it shows Main (where the caller has a Main
-// row), the recent models, then the sources that can lead a work (one source: its models at once); typed words
-// search every source; any id can be used as typed. The catalog suggests and never admits (chat_model_routes.js).
+// The one list of models (docs/DESIGN.md "Composer owner controls"): a field and its suggestions, the body of the Model
+// sheet in a composer (composer_model.js) and on a work's card (card_model.js), model_sheet.js around both. Without a
+// query it shows Main (`mainRow`), the pinned models, the recent ones, then the sources that can lead a work (one
+// source: its models at once; more: folded under `All sources`); typed words search every source; any id can be used
+// as typed. The catalog suggests and never admits (chat_model_routes.js).
+//
+// The list is a grid the field drives (a combobox over it, focus stays in the field): a row's first cell picks its
+// model, its second is its Pin. Arrows Up and Down move among rows, then Right and Left between that row's cells
+// (until then they move the caret), Enter presses the active cell; a pointer presses either. The active row is its
+// model's, not a place: a repaint (another window's Pin, a state read) keeps it on that model or clears it when the
+// model left the list. Main's row is the one way to follow Main: a model row is always that route, even the model Main
+// runs on now. A Pin chooses nothing and leaves the list open.
 import { fmt, tr } from './i18n.js';
 import { sourceMark } from './model_source_mark.js';
+import { SHELL_ICONS } from './page_icons.js';
 import { escapeHtmlAttr as esc } from './ui_primitives.js';
-import { describeRoute, sameRoute, searchModels, typedRoute } from './chat_model_routes.js';
+import { describeRoute, routeKey, sameRoute, searchModels, typedRoute } from './chat_model_routes.js';
 
 // How many suggestions one list shows; the rest wait for another letter.
 const LIST_ROWS = 60;
+// How many sources `All sources` names before `+ N`.
+const NAMED_SOURCES = 2;
 export const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"'
     + ' stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>';
 
@@ -23,7 +33,7 @@ export function routeFacts(said) {
         .filter(Boolean).join(' · ');
 }
 
-/** The search field both homes of the list use: a combobox over the list `listId`. */
+/** The search field both homes of the list use: a combobox over the grid `listId`. */
 export function modelSearchField(doc, listId) {
     const label = doc.createElement('label');
     label.className = 'chat-model-search';
@@ -32,94 +42,138 @@ export function modelSearchField(doc, listId) {
     input.className = 'chat-model-query';
     for (const [key, value] of Object.entries({ type: 'text', role: 'combobox', autocomplete: 'off', autocorrect: 'off',
         autocapitalize: 'off', spellcheck: 'false', 'aria-autocomplete': 'list', 'aria-expanded': 'true',
-        'aria-controls': listId, 'aria-label': 'Search models' })) input.setAttribute(key, value);
+        'aria-haspopup': 'grid', 'aria-controls': listId, 'aria-label': 'Search models' })) input.setAttribute(key, value);
     input.dataset.i18nSkip = '';  // its placeholder may name a source: written through the catalog by the list
     label.append(input);
     return { label, input };
 }
 
 /**
- * The list painted into `el` and driven by `input`. `main()`, `current()` and `recents()` are the caller's routes
- * (Main's now, the chosen one, the recent ones to offer); `mainRow` puts Main's model first, tagged, and
- * `mainFacts()` says in its facts what a press on it means where that is not Main's own route facts; `rule` is the
- * line under the rows. `onRoute(route)` takes a pick, `onSettings()` the way to Settings › Accounts and keys where nothing but
- * Main can lead, `onLeave({focus})` an Escape with nothing typed (`focus`) or a Tab out; `onPaint()` follows every
- * repaint (the list may have changed size). Returns `{ paint, destroy }`.
+ * The list painted into `el` (the grid) and driven by `input`. `main()`, `current()` and `recents()` are the caller's
+ * routes (Main's now, the chosen one, the recent ones to offer); `follows()` says whether the scope follows Main now.
+ * `mainRow`: `follow` puts Main first as the way to follow it (its facts `mainFacts()`), `main` puts Main's own model
+ * first as the chosen one (the Main chat), false none. `tierOf(route, { main })` is the processing tier a pick would
+ * run on here: a catalog price is said only where that tier pays it. `onRoute(route)` takes a pick (null: follow
+ * Main), `onPin(route, pinned)` a Pin, `onSettings()` the way to Settings › Accounts and keys where nothing but Main can
+ * lead, `onLeave({focus})` an Escape with nothing typed; `onPaint()` follows every repaint. Returns
+ * `{ paint, destroy }`.
  */
-export function createModelList({ el, input, id, store, main, current, recents, mainRow = true, mainFacts = null,
-    rule = '', onRoute, onSettings = () => {}, onLeave = () => {}, onPaint = () => {} }) {
-    const search = { query: '', only: '', active: -1, rows: [], picks: new Map() };
-    const describe = (route) => describeRoute(store.index(), route);
+export function createModelList({ el, input, id, store, main, current, recents, follows = () => false, mainRow = 'follow',
+    mainFacts = null, tierOf = () => '', onRoute, onPin = () => {}, onSettings = () => {}, onLeave = () => {},
+    onPaint = () => {} }) {
+    // `key` is the active row's model (its data-row), `nav` whether the arrows made it active, `shown` the row and cell
+    // last scrolled into view.
+    const search = { query: '', only: '', sources: false, active: -1, key: '', cell: 0, nav: false, rows: [],
+        picks: new Map(), html: '', shown: '' };
+    const describe = (route, options = {}) => describeRoute(store.index(), route, { tier: tierOf(route, options) });
+    el.setAttribute('role', 'grid');
+    el.setAttribute('aria-label', 'Models');
+    el.id ||= `${id}-list`;
 
-    // A model whose catalog states a price says it where "paid by key" stood.
-    const rowMarkup = (said, { tag = '', selected = false, extra = '', facts = '' } = {}) => `<div class="chat-model-row" role="option"`
-        + ` data-row="${esc(said.key)}" aria-selected="${selected}">${sourceMark(said)}`
-        + `<span class="chat-model-row-id" data-i18n-skip>${esc(said.id)}</span>`
-        + (tag ? `<span class="chat-model-row-tag">${esc(tag)}</span>` : '')
-        + `<span class="chat-model-row-facts" data-i18n-skip>${esc(facts || [said.window, said.sourceLabel, said.price || payWords(said)].filter(Boolean).join(' · '))}</span>${extra}</div>`;
+    // One row: the mark, the model and its facts in the pick cell; its Pin in a cell of its own (none for Main's row,
+    // a source or a door). A model whose catalog states a price its context pays says it where "paid by key" stood.
+    const rowMarkup = (key, said, { tag = '', selected = false, extra = '', facts = '', pin = null, kind = '', name = '' } = {}) => {
+        const pinned = pin === true;
+        const pinCell = pin === null ? '' : `<span role="gridcell" class="chat-model-gridcell chat-model-pin-cell"><button type="button"`
+            + ` class="chat-model-pin ui-hit-area" tabindex="-1" data-pin="${esc(key)}" aria-pressed="${pinned}" data-i18n-authored`
+            + ` aria-label="${esc(fmt('Pin {model}', { model: said?.id || name }))}" title="${esc(pinned ? tr('model.unpin', 'Unpin') : tr('model.pin', 'Pin'))}">`
+            + `${SHELL_ICONS.pin}</button></span>`;
+        return `<div role="row" class="chat-model-row${kind ? ` chat-model-${kind}` : ''}" data-row="${esc(key)}"`
+            + ` aria-selected="${selected}"${pinned ? ' data-pinned="true"' : ''}><span role="gridcell" class="chat-model-gridcell chat-model-cell">`
+            + (said ? sourceMark(said) : SEARCH_ICON)
+            + `<span class="chat-model-row-id" data-i18n-skip>${esc(name || said.id)}</span>`
+            + (tag ? `<span class="chat-model-row-tag">${esc(tag)}</span>` : '')
+            + `<span class="chat-model-row-facts" data-i18n-skip>${esc(facts || (said ? [said.window, said.sourceLabel, said.price || payWords(said)].filter(Boolean).join(' · ') : ''))}</span>${extra}</span>${pinCell}</div>`;
+    };
 
     function paint() {
         const index = store.index();
         const status = store.status();
-        const [chosen, mainRoute] = [current(), main()];
+        const [chosen, mainRoute, following] = [current(), main(), follows()];
         const picks = new Map();  // a row's key → what a press on it does
         const parts = [];
+        const shown = new Set();
         const add = (route, options = {}) => {
             const said = describe(route);
-            picks.set(said.key, { route });
+            const key = said.key;
+            if (shown.has(key)) return;
+            shown.add(key);
+            picks.set(key, { route });
             const unavailable = said.available === false ? '<span class="chat-model-row-tag">Unavailable</span>' : '';
-            parts.push(rowMarkup(said, { selected: sameRoute(route, chosen), ...options, extra: unavailable }));
+            parts.push(rowMarkup(key, said, { selected: !following && sameRoute(route, chosen), ...options,
+                extra: unavailable, pin: store.isPinned(route) }));
         };
         const note = (words) => parts.push(`<p class="chat-model-note" role="presentation">${esc(words)}</p>`);
         const section = (words, literal = false) => parts.push(`<p class="chat-model-section" role="presentation"${literal ? ' data-i18n-skip' : ''}>${esc(words)}</p>`);
         const listRows = (found) => {
-            found.slice(0, LIST_ROWS).forEach((entry) => add(entry.route, { tag: sameRoute(entry.route, mainRoute) ? 'Main' : '' }));
+            found.slice(0, LIST_ROWS).forEach((entry) => add(entry.route));
             if (found.length > LIST_ROWS) section(fmt('{n} more · keep typing', { n: found.length - LIST_ROWS }));
         };
-        const others = index.rows.filter((entry) => !sameRoute(entry.route, mainRoute));
         if (!search.query && !search.only) {
-            if (mainRow && mainRoute) add(mainRoute, { tag: 'Main', facts: mainFacts?.() || '' });
-            const recent = recents();
-            if (recent.length) { section('Recent'); recent.forEach((route) => add(route)); }
+            if (mainRow && mainRoute) {
+                // Main's row: the way to follow Main (a room, a work), or Main itself (the Main chat).
+                const said = describe(mainRoute, { main: true });
+                picks.set('main', { main: true, route: mainRoute });
+                parts.push(rowMarkup('main', said, mainRow === 'follow'
+                    ? { name: tr('model.row.main', 'Main'), selected: following, kind: 'main',
+                        facts: mainFacts?.() || fmt('Follows Main · {model}', { model: said.short }) }
+                    : { tag: 'Main', selected: true, kind: 'main', pin: store.isPinned(mainRoute) }));
+                if (mainRow === 'main') shown.add(said.key);
+            }
+            // A section heads only rows it adds: a pin already shown above (Main's own model) adds none.
+            const pins = store.pins().filter((route) => !shown.has(routeKey(route)));
+            if (pins.length) { section(tr('model.section.pinned', 'Pinned')); pins.forEach((route) => add(route)); }
+            const recent = recents().filter((route) => !shown.has(routeKey(route)));
+            if (recent.length) { section(tr('model.section.recent', 'Recent')); recent.forEach((route) => add(route)); }
+            const others = index.rows.filter((entry) => !shown.has(entry.key));
             if (status.reading && !status.read) note('Reading models…');
-            else if (!others.length && !index.sources.some((entry) => entry.problems.length)) {
+            else if (!index.rows.length && !index.sources.some((entry) => entry.problems.length)) {
                 // Nothing but Main can lead: say so and offer the way to where a source is added.
                 note(status.failed ? 'The model catalog could not be read.' : 'Only Main\'s model can lead work here.');
                 picks.set('accounts', { settings: true });
-                parts.push(`<div class="chat-model-row chat-model-door" role="option" data-row="accounts" aria-selected="false">`
-                    + '<span class="chat-model-row-id">Add a subscription or a key in Settings › Accounts and keys</span></div>');
+                parts.push(`<div role="row" class="chat-model-row chat-model-door" data-row="accounts" aria-selected="false">`
+                    + '<span role="gridcell" class="chat-model-gridcell chat-model-cell"><span class="chat-model-row-id">Add a subscription or a key in Settings › Accounts and keys</span></span></div>');
             } else if (index.sources.length === 1) {
                 // One source: its models at once, no source step.
                 section(index.sources[0].label, true);
-                listRows(mainRow && mainRoute ? others : index.rows);
-            } else {
-                section('Sources');
-                for (const entry of index.sources) {
-                    picks.set(`source:${entry.id}`, { only: entry.id });
-                    const facts = [entry.count === 1 ? fmt('{n} model', { n: 1 }) : entry.count ? fmt('{n} models', { n: entry.count }) : '', payWords(entry),
-                        entry.problems.length ? tr('model.list_not_read', 'list not read') : ''].filter(Boolean).join(' · ');
-                    parts.push(`<div class="chat-model-row chat-model-source" role="option" data-row="${esc(`source:${entry.id}`)}" aria-selected="false">`
-                        + `${sourceMark(entry)}<span class="chat-model-row-id" data-i18n-skip>${esc(entry.label)}</span>`
-                        + `<span class="chat-model-row-facts" data-i18n-skip>${esc(facts)}</span></div>`);
+                listRows(others.map((row) => ({ route: row.route })));
+            } else if (index.sources.length > 1) {
+                // More sources fold under one row; opened, each is a step into its own models.
+                picks.set('sources', { sources: !search.sources });
+                const names = index.sources.map((entry) => entry.label);
+                const named = names.length > NAMED_SOURCES + 1
+                    ? fmt('{sources} + {n}', { sources: names.slice(0, NAMED_SOURCES).join(', '), n: names.length - NAMED_SOURCES }) : names.join(', ');
+                parts.push(`<div role="row" class="chat-model-row chat-model-sources" data-row="sources" aria-selected="false"`
+                    + ` aria-expanded="${search.sources}"><span role="gridcell" class="chat-model-gridcell chat-model-cell"><span class="chat-model-fold" aria-hidden="true">${SHELL_ICONS.chevron}</span>`
+                    + `<span class="chat-model-row-id">${esc(tr('model.all_sources', 'All sources'))}</span>`
+                    + `<span class="chat-model-row-facts" data-i18n-skip>${esc(named)}</span></span></div>`);
+                if (search.sources) {
+                    for (const entry of index.sources) {
+                        picks.set(`source:${entry.id}`, { only: entry.id });
+                        const facts = [entry.count === 1 ? fmt('{n} model', { n: 1 }) : entry.count ? fmt('{n} models', { n: entry.count }) : '', payWords(entry),
+                            entry.problems.length ? tr('model.list_not_read', 'list not read') : ''].filter(Boolean).join(' · ');
+                        parts.push(`<div role="row" class="chat-model-row chat-model-source" data-row="${esc(`source:${entry.id}`)}" aria-selected="false">`
+                            + `<span role="gridcell" class="chat-model-gridcell chat-model-cell">${sourceMark(entry)}<span class="chat-model-row-id" data-i18n-skip>${esc(entry.label)}</span>`
+                            + `<span class="chat-model-row-facts" data-i18n-skip>${esc(facts)}</span></span></div>`);
+                    }
                 }
             }
         } else {
             if (search.only && index.sources.length > 1) {
                 picks.set('source:', { only: '' });
-                parts.push(`<div class="chat-model-row chat-model-source" role="option" data-row="source:" aria-selected="false">`
-                    + `${SEARCH_ICON}<span class="chat-model-row-id">All sources</span>`
-                    + `<span class="chat-model-row-facts" data-i18n-skip>${esc(index.source(search.only)?.label || '')}</span></div>`);
+                parts.push(`<div role="row" class="chat-model-row chat-model-source" data-row="source:" aria-selected="false">`
+                    + `<span role="gridcell" class="chat-model-gridcell chat-model-cell">${SEARCH_ICON}<span class="chat-model-row-id">All sources</span>`
+                    + `<span class="chat-model-row-facts" data-i18n-skip>${esc(index.source(search.only)?.label || '')}</span></span></div>`);
             }
             const found = searchModels(index, search.query, search.only);
-            listRows(found);
+            listRows(found.map((row) => ({ route: row.route })));
             // Suggestions assist typing and are not an allowlist: what was typed can be used as it is.
             const typed = search.query ? typedRoute(index, search.query, search.only) : null;
             if (typed && !found.some((entry) => sameRoute(entry.route, typed))) {
                 const said = describe(typed);
                 picks.set(`typed:${said.key}`, { route: typed });
-                parts.push(`<div class="chat-model-row chat-model-typed" role="option" data-row="${esc(`typed:${said.key}`)}" aria-selected="false">`
-                    + `${sourceMark(said)}<span class="chat-model-row-id" data-i18n-skip>${esc(fmt('Use “{model}” as typed', { model: search.query }))}</span>`
-                    + `<span class="chat-model-row-facts" data-i18n-skip>${esc(said.sourceLabel)}</span></div>`);
+                parts.push(rowMarkup(`typed:${said.key}`, said, { kind: 'typed', name: fmt('Use “{model}” as typed', { model: search.query }),
+                    facts: said.sourceLabel }));
             } else if (search.query && !typed && !found.length) {
                 note('No model matches. Choose a source to use a model as typed.');
             }
@@ -127,64 +181,104 @@ export function createModelList({ el, input, id, store, main, current, recents, 
             if (status.failed) note('The model catalog could not be read; earlier suggestions are kept.');
             else if (gaps.length) note(fmt('Could not read every list: {sources}.', { sources: gaps.map((entry) => entry.label).join(', ') }));
         }
-        el.innerHTML = `<div class="chat-model-rows">${parts.join('')}</div>`
-            + (rule ? `<p class="chat-model-rule" role="presentation">${esc(rule)}</p>` : '');
-        search.rows = [...el.querySelectorAll('.chat-model-row')];
-        search.rows.forEach((made, at) => { made.id = `${id}-o${at}`; });
+        // A state read that changes nothing here writes nothing: the list keeps its scroll and its active row.
+        const html = `<div class="chat-model-rows" role="rowgroup">${parts.join('')}</div>`;
         search.picks = picks;
-        setActive(Math.min(search.active, search.rows.length - 1));
+        if (html !== search.html) {
+            const scrolled = el.querySelector('.chat-model-rows')?.scrollTop || 0;
+            search.html = html;
+            el.innerHTML = html;
+            const rows = el.querySelector('.chat-model-rows');
+            if (rows && scrolled) rows.scrollTop = scrolled;
+            search.rows = [...el.querySelectorAll('.chat-model-row')];
+            search.rows.forEach((made, at) => {
+                made.querySelectorAll('.chat-model-gridcell').forEach((cell, column) => { cell.id = `${id}-r${at}c${column}`; });
+            });
+        }
+        // A pinned row moves between sections and another window's pin inserts rows: the active row follows its model,
+        // never the place it left, and a model that left the list leaves nothing active.
+        setActive(search.key ? search.rows.findIndex((made) => made.dataset.row === search.key) : -1, search.cell);
         input.placeholder = search.only ? fmt('{source}: type a model', { source: index.source(search.only)?.label || '' })
             : tr('model.search.placeholder', 'Model or source');
         onPaint();
     }
-    function setActive(at) {
-        search.active = at;
-        search.rows.forEach((made, order) => { made.dataset.active = String(order === at); });
-        const active = search.rows[at];
+    const cellsOf = (row) => (row ? [...row.querySelectorAll('.chat-model-gridcell')] : []);
+    function setActive(at, cell = 0) {
+        const row = search.rows[at];
+        search.active = row ? at : -1;
+        search.key = row?.dataset.row || '';
+        if (!row) search.nav = false;
+        search.cell = Math.min(cell, Math.max(0, cellsOf(row).length - 1));
+        search.rows.forEach((made, order) => {
+            made.dataset.active = String(order === at);
+            if (order === at) made.dataset.activeCell = String(search.cell); else delete made.dataset.activeCell;
+        });
+        const active = cellsOf(row)[search.cell];
         if (active) input.setAttribute('aria-activedescendant', active.id);
         else input.removeAttribute('aria-activedescendant');
-        active?.scrollIntoView?.({ block: 'nearest' });
+        // Only a change of row or cell scrolls: a repaint never snaps a list the owner scrolled back to it.
+        const shown = row ? `${search.key}|${search.cell}` : '';
+        if (shown !== search.shown) { search.shown = shown; row?.scrollIntoView?.({ block: 'nearest' }); }
     }
-    function take(made) {
-        const act = search.picks.get(made?.dataset?.row);
+    function pin(row) {
+        const act = search.picks.get(row?.dataset?.row);
+        if (!act?.route) return;
+        onPin(act.route, !store.isPinned(act.route));
+    }
+    function take(row) {
+        const act = search.picks.get(row?.dataset?.row);
         if (!act) return;
         if (act.settings) { onSettings(); return; }
+        if (act.sources !== undefined) { search.sources = act.sources; paint(); return; }
         if (act.only !== undefined) {
-            Object.assign(search, { only: act.only, query: '', active: -1 });
+            Object.assign(search, { only: act.only, query: '', active: -1, key: '', cell: 0, nav: false });
             input.value = '';
-            input.focus({ preventScroll: true });
             paint();
             return;
         }
-        onRoute(act.route);
+        onRoute(act.main ? null : act.route);
     }
-    const keepFocus = (event) => event.preventDefault();  // a press on a suggestion leaves the caret in the field
+    // A press on the list leaves the caret where it was (a pointer's press on a row never takes the field's focus away).
+    const keepFocus = (event) => { if (event.target?.closest?.('.chat-model-row')) event.preventDefault(); };
     const onQuery = () => {
         search.query = input.value.trim();
-        search.active = search.query ? 0 : -1;
+        Object.assign(search, { active: -1, key: '', cell: 0, nav: false });
         paint();
+        // What was typed makes its first model active, never the way back to all sources; the arrows still move the
+        // caret until Up or Down chooses a row.
+        if (search.query) setActive(Math.max(0, search.rows.findIndex((made) => !made.matches('.chat-model-source, .chat-model-sources'))));
     };
-    const onClick = (event) => take(event.target?.closest?.('.chat-model-row'));
+    const onClick = (event) => {
+        const row = event.target?.closest?.('.chat-model-row');
+        if (!row) return;
+        if (event.target?.closest?.('.chat-model-pin')) { event.stopPropagation?.(); pin(row); return; }
+        take(row);
+    };
     const onKey = (event) => {
         if (event.isComposing) return;
         const count = search.rows.length;
+        const row = search.rows[search.active];
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-            if (count) setActive(event.key === 'ArrowDown' ? (search.active + 1) % count : search.active <= 0 ? count - 1 : search.active - 1);
+            if (count) {
+                setActive(event.key === 'ArrowDown' ? (search.active + 1) % count : search.active <= 0 ? count - 1 : search.active - 1, search.cell);
+                search.nav = true;
+            }
+        } else if ((event.key === 'ArrowRight' || event.key === 'ArrowLeft') && row && search.nav) {
+            // In a row the arrows chose, they move between its cells; otherwise they move the caret.
+            setActive(search.active, event.key === 'ArrowRight' ? search.cell + 1 : Math.max(0, search.cell - 1));
         } else if (event.key === 'Enter') {
-            // The active row, else the first model when something was typed or a source chosen.
-            const first = search.query || search.only ? search.rows.find((made) => !made.classList.contains('chat-model-source')) : null;
-            const target = search.rows[search.active] || first;
+            // The active cell, else the first model when something was typed or a source chosen.
+            if (row && search.cell === 1) { pin(row); event.preventDefault(); return; }
+            const first = search.query || search.only ? search.rows.find((made) => !made.matches('.chat-model-source, .chat-model-sources')) : null;
+            const target = row || first;
             if (target) take(target);
         } else if (event.key === 'Escape') {
             // Escape clears what was typed first; with nothing typed it leaves the list to its home.
             if (search.query || search.only) {
-                Object.assign(search, { query: '', only: '', active: -1 });
+                Object.assign(search, { query: '', only: '', active: -1, key: '', cell: 0, nav: false });
                 input.value = '';
                 paint();
             } else onLeave({ focus: true });
-        } else if (event.key === 'Tab') {
-            onLeave({ focus: false });
-            return;
         } else return;
         event.preventDefault();
         event.stopPropagation?.();

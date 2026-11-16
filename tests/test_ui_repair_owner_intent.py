@@ -47,7 +47,9 @@ def test_repair_button_records_owner_intent_and_runs_the_installed_skill(tmp_pat
         {"tool": "skill_review", "arguments": {"skill": name}},
         {"tool": "toggle_skill", "arguments": {"skill": name, "enabled": True}},
     ]
-    with ScriptedStubModel(script, final_answer="The repaired skill is running.") as stub:
+    # The repair writes plugin.py, so its plain answer meets the finish door's one notice (#3280): the stub selects
+    # the held answer as a model obeying the door does, or the turn is returned until its round limit.
+    with ScriptedStubModel(script, final_answer="The repaired skill is running.", select_retained=True) as stub:
         server = start_server(repair_clone, tmp_path / "runtime", keyless_settings(
             stub, OUROBOROS_MAX_WORKERS=1, OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS=True,
         ))

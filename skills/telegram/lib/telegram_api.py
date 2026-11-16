@@ -9,6 +9,7 @@ import os
 import pathlib
 import re
 import stat
+from contextlib import nullcontext
 from typing import Any, BinaryIO, Dict, Optional
 
 import httpx
@@ -37,6 +38,12 @@ _UNSENT_FAILURES = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout,
 # (lib/telegram_outbox.py, which sets OUTBOUND_JOURNAL around one mirrored event) each is one journaled part.
 JOURNALED_METHODS = frozenset({"sendMessage", "sendPhoto", "sendVideo", "sendDocument", "sendAudio", "editMessageText"})
 OUTBOUND_JOURNAL: contextvars.ContextVar = contextvars.ContextVar("telegram_outbound_journal", default=None)
+
+
+def replacing_request():
+    """Scope the handler's fallback to the refused request it replaces, including every new chunk."""
+    journal = OUTBOUND_JOURNAL.get()
+    return journal.replacement() if journal is not None and not journal.probing else nullcontext()
 
 
 def _u16len(value: str) -> int:
@@ -885,11 +892,12 @@ class TelegramClient:
             except TelegramRequestRejected as exc:
                 if parse_mode != "HTML" or not exc.plain_retry_safe:
                     raise
-                payload = await self.call(
-                    "sendMessage",
-                    data={"chat_id": str(chat_id), "text": _telegram_html_to_plain(formatted), **muted},
-                    timeout=20,
-                )
+                with replacing_request():
+                    payload = await self.call(
+                        "sendMessage",
+                        data={"chat_id": str(chat_id), "text": _telegram_html_to_plain(formatted), **muted},
+                        timeout=20,
+                    )
             try:
                 last_message_id = int((payload.get("result") or {}).get("message_id") or 0)
             except (TypeError, ValueError):

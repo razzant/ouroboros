@@ -6,12 +6,13 @@ import test from 'node:test';
 
 import { createClaudexorStatusStore } from '../modules/claudexor_status_store.js';
 import { getContributions } from '../modules/contributions.js';
+import { createHostStart } from '../modules/host_starting_status.js';
 import { renderPageHeader } from '../modules/page_header.js';
 import { initSettings } from '../modules/settings.js';
 import { readSettings, writeEntry } from '../modules/settings_controls.js';
 import { askOuroboros, beingState, homeAnswers, mountSettingsHome, needRows } from '../modules/settings_home.js';
 import { registerSettingsPage, settingsPageFor } from '../modules/settings_pages.js';
-import { createStateSnapshotSequencer } from '../modules/state_snapshots.js';
+import { createStateSnapshotSequencer, readStateSnapshot } from '../modules/state_snapshots.js';
 import { ANSWERS, STARTS, Stub, settle, world } from './helpers/settings_dom.js';
 
 const account = (harness, id, verification, enabled = true) => ({
@@ -168,9 +169,135 @@ test('This computer and Updates answer on every host: who can open it where the 
 });
 
 test('the card says who it is and its state, never that nothing waits', () => {
-    assert.deepEqual(beingState({ connected: true, state: { supervisor_ready: true } }), { text: 'Online', tone: 'ok' });
-    assert.deepEqual(beingState({ connected: false, state: { supervisor_ready: true } }), { text: 'Reconnecting…', tone: 'muted' });
-    assert.equal(beingState({ connected: true, state: { supervisor_ready: false, boot: { phase: 'failed', error: 'x' } } }).tone, 'danger');
+    assert.deepEqual(beingState({ connected: true, ready: true }), { text: 'Online', tone: 'ok' });
+    assert.deepEqual(beingState({ connected: false, ready: true }), { text: 'Reconnecting…', tone: 'muted' });
+    assert.deepEqual(beingState({ connected: true, ready: false, boot: { phase: 'failed', error: 'x' } }), { text: 'Start failed', tone: 'danger' });
+    // Only a body that said ready is Online: none read yet, or one forgotten at a disconnect, keeps Starting….
+    assert.deepEqual(beingState({ connected: true }), { text: 'Starting…', tone: 'muted' });
+    assert.deepEqual(beingState({ connected: true, ready: false, boot: null }), { text: 'Starting…', tone: 'muted' });
+    assert.deepEqual(beingState({ connected: true, ready: false, boot: {
+        phase: 'serving', dialogue_ready: true, steps: [{ name: 'startup:task_recovery', state: 'running' }],
+    } }), { text: 'Chat ready · restoring saved work', tone: 'muted' }, 'the card has room for the step the bar may drop');
+});
+
+test('a failed start is the card\'s first line: its cause beside it and Restart, never only a word', async (t) => {
+    const failed = { supervisor_ready: false, boot: { phase: 'failed', error: 'Supervisor init failed: queue RPC failed', steps: [] } };
+    assert.deepEqual(needRows({ state: failed }), [{ kind: 'start', id: 'start', owner: true, action: 'Restart', run: 'restart',
+        text: 'Ouroboros could not finish starting.', note: 'Supervisor init failed: queue RPC failed' }]);
+    for (const state of [{ supervisor_ready: true, boot: failed.boot }, { supervisor_ready: false, boot: { phase: 'serving', steps: [] } }, null]) {
+        assert.deepEqual(needRows({ state }), [], 'readiness outranks the phase, and a start that goes on is no need');
+    }
+    // The page's newest snapshot reaches the card while it shows (app.js applies each): the start's word follows it.
+    const { content } = world(t);
+    const starting = { supervisor_ready: false, boot: { phase: 'serving', dialogue_ready: true, steps: [{ name: 'extensions', state: 'running' }] } };
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws: { isConnected: () => true }, stateSnapshots: { latest: () => starting } } });
+    t.after(() => home.dispose());
+    await home.refresh();
+    await settle();
+    const stateEl = content.querySelector('[data-being-state]');
+    assert.equal(stateEl.textContent, 'Chat ready · loading extensions');
+    home.stateApplied(failed);
+    assert.equal(stateEl.textContent, 'Start failed');
+    const startRow = content.querySelector('[data-needs="start"]');
+    assert.equal(startRow.querySelector('.ui-row-meta').textContent, 'Supervisor init failed: queue RPC failed');
+    assert.equal(startRow.querySelector('[data-need-action]').textContent, 'Restart');
+    home.stateApplied({ supervisor_ready: true });
+    assert.equal(stateEl.textContent, 'Online');
+    assert.equal(content.querySelector('[data-needs="start"]'), null);
+});
+
+// The card's word against an outage (#3376 M2): a live socket proves only the transport, as for the room's bar
+// (docs/DESIGN.md "Foreground and state colour"), so Online needs a snapshot that states readiness.
+test('the card says Online only from a snapshot that states readiness; a close and a reconnect forget older snapshots', async (t) => {
+    // The card's word for one body, as its reducer (createHostStart, the header's) reads it.
+    const cardWord = (state) => {
+        const start = createHostStart();
+        start.read(state);
+        return beingState({ connected: true, ready: start.ready(), boot: start.status().bootPhase });
+    };
+    for (const state of [null, {}, { supervisor_error: 'Supervisor init failed: x' }]) {
+        assert.deepEqual(cardWord(state), { text: 'Starting…', tone: 'muted' }, JSON.stringify(state));
+    }
+    // A head start that failed and was replaced leaves its failed step in a ready boot: readiness outranks it.
+    const recovered = { supervisor_ready: true, boot: { phase: 'ready', dialogue_ready: true, tasks_ready: true,
+        steps: [{ name: 'startup:event_queue', state: 'failed', error: 'OSError: the first event-bus Queue() RPC is refused' }] } };
+    assert.deepEqual([cardWord(recovered), needRows({ state: recovered })], [{ text: 'Online', tone: 'ok' }, []]);
+    const { content } = world(t);
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    let connected = true;
+    let latest = { supervisor_ready: true };
+    const handlers = new Map();
+    const ws = { isConnected: () => connected, on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); } };
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws, stateSnapshots: { latest: () => latest } } });
+    t.after(() => home.dispose());
+    await home.refresh(['settings']);
+    const word = () => content.querySelector('[data-being-state]').textContent;
+    assert.equal(word(), 'Online');
+    connected = false;
+    latest = null;  // the page's sequencer retires its bodies at every socket change (app.js)
+    handlers.get('close')({});
+    assert.equal(word(), 'Reconnecting…');
+    // A valid HTTP poll can finish while the socket is down, answered by the server from before a restart.
+    latest = { supervisor_ready: true };
+    home.stateApplied(latest);
+    assert.equal(word(), 'Reconnecting…');
+    connected = true;
+    latest = null;  // open retires that intermediate reply in the page's sequencer
+    handlers.get('open')({ previouslyConnected: true });
+    assert.equal(word(), 'Starting…', 'the reconnect forgets that reply, as the header does: it may not be this server\'s');
+    home.stateApplied({ supervisor_ready: true });
+    assert.equal(word(), 'Online', 'a body read after the reconnect proves readiness again');
+    home.stateApplied({ supervisor_ready: false, boot: { phase: 'serving', dialogue_ready: true, steps: [{ name: 'extensions', state: 'running' }] } });
+    assert.equal(word(), 'Chat ready · loading extensions', 'a newer snapshot speaks at once, without a reload');
+    home.hide();  // off screen (settings.js): the newest snapshot is kept, nothing is painted
+    home.stateApplied({ supervisor_ready: false, boot: { phase: 'failed', error: 'Supervisor init failed: x', steps: [] } });
+    assert.equal(word(), 'Chat ready · loading extensions');
+    await home.refresh([]);
+    assert.equal(word(), 'Start failed', 'shown again, the card says the newest snapshot it was given');
+    home.stateApplied({ supervisor_ready: true });
+    assert.equal(word(), 'Online');
+});
+
+test('a state read from before an outage never repaints the card: the page\'s one sequencer orders the replies', async (t) => {
+    const { env, content } = world(t);
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    let connected = true;
+    let home = null;
+    const handlers = new Map();
+    const ws = { isConnected: () => connected, on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); } };
+    // As in app.js: every body the sequencer applies reaches the card; a socket change retires the older reads.
+    const snapshots = createStateSnapshotSequencer((data) => home?.stateApplied(data));
+    const answers = [];
+    const body = (data) => ({ ok: true, status: 200, json: async () => data });
+    env.routes.set('/api/state', () => new Promise((resolve) => { answers.push(resolve); }));
+    home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws, stateSnapshots: snapshots } });
+    t.after(() => home.dispose());
+    const shown = home.refresh(['settings', 'state']);  // the list comes on screen: its state read is in flight
+    await settle();
+    assert.equal(answers.length, 1);
+    connected = false;
+    snapshots.retire();
+    handlers.get('close')({});
+    connected = true;
+    snapshots.retire();
+    handlers.get('open')({ previouslyConnected: true });
+    const reread = snapshots.gate(true).then((request) => request && readStateSnapshot(snapshots, request));  // app.js's read after an open
+    await settle();
+    assert.equal(answers.length, 2);
+    const word = () => content.querySelector('[data-being-state]').textContent;
+    assert.equal(word(), 'Starting…', 'reconnected, nothing read yet');
+    answers[1](body({ supervisor_ready: false, boot: { phase: 'serving', dialogue_ready: true,
+        steps: [{ name: 'startup:worker_spawn', state: 'running' }] } }));
+    await reread;
+    assert.equal(word(), 'Chat ready · starting executors');
+    answers[0](body({ supervisor_ready: true }));  // the older generation answers last
+    await shown;
+    await settle();
+    assert.equal(word(), 'Chat ready · starting executors', 'an older generation never paints over a newer one');
 });
 
 test('showing the home reads only what is passive: no catalogue, no review pool, no wake, no refresh, no status poll', async (t) => {
@@ -202,6 +329,126 @@ test('showing the home reads only what is passive: no catalogue, no review pool,
         ['glm-5.3', 'Empty', '1 installed', 'Not measured', 'No MCP servers', '']);
     await settle();
     assert.deepEqual(statusReads, [], 'still no read of the status and no wake');
+});
+
+test('the card\'s first word follows the socket: an open or a close repaints it and reads nothing', async (t) => {
+    // The home can finish its reads before the socket's first open; since it reads only when it comes on screen, that
+    // open alone must move the card off Reconnecting.
+    const { env, content } = world(t);
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    let connected = false;
+    const handlers = new Map();
+    const ws = { isConnected: () => connected, on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); } };
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws, stateSnapshots: { latest: () => ({ supervisor_ready: true }) } } });
+    t.after(() => home.dispose());
+    await home.refresh();
+    await settle();
+    const word = () => content.querySelector('[data-settings-card]').querySelector('[data-being-state]').textContent;
+    assert.equal(word(), 'Reconnecting…', 'painted while the socket was down');
+    const reads = env.calls.length;
+    connected = true;
+    handlers.get('open')?.({});
+    assert.equal(word(), 'Online', 'the first open repaints the card');
+    connected = false;
+    handlers.get('close')?.({});
+    assert.equal(word(), 'Reconnecting…', 'a close repaints it back');
+    connected = true;
+    handlers.get('open')?.({ previouslyConnected: true });  // before app.js's retire: the newest body is still the old one
+    assert.equal(word(), 'Starting…', 'a reconnect repaints it without reading back the body from before it, ready as it is');
+    await settle();
+    assert.equal(env.calls.length, reads, 'none of them reads anything');
+    home.dispose();
+    assert.equal(handlers.has('open') || handlers.has('close'), false, 'dispose lets the socket go');
+});
+
+test('the card keeps the header\'s readiness rule over the page\'s sequencer: a reconnect never paints a retired Online', async (t) => {
+    // The home is mounted at start and reads only when it comes on screen. app.js retires the page's sequencer on the
+    // socket's close and open before the home's own handlers run (it registers first); the card and the list's own
+    // Ouroboros row follow every body the sequencer applies (`watch`), keep what the last one said over a failed read,
+    // and forget it at the close and again at a reconnect, never at the first open, as the header's createHostStart
+    // does (chat.js): a poll applied while the socket was down may be the answer of the server from before a restart.
+    const { env, content } = world(t);
+    const store = createClaudexorStatusStore({ fetchImpl: async () => ({ ok: false, status: 503, json: async () => ({}) }) });
+    t.after(() => store.dispose());
+    const snapshots = createStateSnapshotSequencer(() => {});
+    let connected = false;
+    const handlers = new Map();
+    const ws = { isConnected: () => connected, on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); } };
+    let opened = false;  // ws.js: an open after an earlier one is a reconnect (`previouslyConnected`)
+    const emit = (type) => {  // app.js's handler, then the home's
+        snapshots.retire();
+        handlers.get(type)?.(type === 'open' ? { previouslyConnected: opened } : {});
+        if (type === 'open') opened = true;
+    };
+    const apply = async (body) => snapshots.apply(await snapshots.gate(false), body);
+    const home = mountSettingsHome(content, { open() {}, store, ctx: { readSettings, ws, stateSnapshots: snapshots } });
+    t.after(() => home.dispose());
+    const words = () => [content.querySelector('[data-settings-card]').querySelector('[data-being-state]').textContent,
+        content.querySelector('[data-overview-answer]').textContent];
+    const said = (word) => [word, word];
+    assert.deepEqual(words(), said('Reconnecting…'), 'painted while the socket was down');
+    connected = true;
+    emit('open');
+    assert.deepEqual(words(), said('Starting…'), 'open, no state read yet: not Online');
+    await apply({ supervisor_ready: true });
+    assert.deepEqual(words(), said('Online'), 'a body the page read repaints the card: the home read nothing for it');
+    snapshots.fail(await snapshots.gate(false));
+    assert.deepEqual(words(), said('Online'), 'a failed read states nothing: the card keeps the last word, as the header does');
+    await apply({ version: '7.10.2' });
+    assert.deepEqual(words(), said('Online'), 'neither does a body without supervisor_ready');
+    await apply({ supervisor_ready: true });
+    await home.refresh([]);  // the home comes on screen while ready: its own copy now holds that Online body
+    connected = false;
+    emit('close');
+    assert.deepEqual(words(), said('Reconnecting…'));
+    connected = true;
+    emit('open');
+    assert.deepEqual(words(), said('Starting…'), 'the reconnect forgot the old Online: a restart is no longer Online here');
+    const held = await snapshots.gate(false);
+    assert.deepEqual(words(), said('Starting…'), 'still Starting… while the fresh read is in flight');
+    snapshots.apply(held, { supervisor_ready: false, boot: { phase: 'failed', error: 'init failed' } });
+    assert.deepEqual(words(), ['Start failed', 'Start failed · One thing needs you'],
+        'the restart failed: the card says so, and its own row (#3376) is the one thing that needs the owner');
+    await apply({ supervisor_ready: true });
+    assert.deepEqual(words(), said('Online'));
+    connected = false;
+    emit('close');
+    await apply({ supervisor_ready: true });  // a state poll the server from before a restart answered while the socket was down
+    assert.deepEqual(words(), said('Reconnecting…'));
+    connected = true;
+    emit('open');
+    assert.deepEqual(words(), said('Starting…'), 'the reconnect forgets that poll, as the header does: the server that answers now may be new');
+    snapshots.fail(await snapshots.gate(false));
+    assert.deepEqual(words(), said('Starting…'), 'a failed read after the reconnect proves nothing');
+    await apply({ version: '7.10.2' });
+    assert.deepEqual(words(), said('Starting…'), 'nor does a body that states no readiness');
+    await apply({ supervisor_ready: true });
+    assert.deepEqual(words(), said('Online'), 'a body read after the reconnect proves readiness again');
+    // A failed start a poll read while the socket was down is forgotten with it: its Restart leaves with the word, and
+    // returns only with a body read after the reconnect that says the start failed.
+    connected = false;
+    emit('close');
+    await apply({ supervisor_ready: false, boot: { phase: 'failed', error: 'the old start failed' } });
+    connected = true;
+    emit('open');
+    assert.deepEqual(words(), said('Starting…'));
+    assert.equal(content.querySelector('[data-needs="start"]'), null, 'the failure read in the outage is no need of the server now');
+    await apply({ supervisor_ready: false, boot: { phase: 'failed', error: 'init failed again' } });
+    assert.deepEqual(words(), ['Start failed', 'Start failed · One thing needs you']);
+    await apply({ supervisor_ready: true });
+    connected = false;
+    handlers.get('close')?.({});  // the home's close handler first this time, then app.js's retire
+    snapshots.retire();
+    connected = true;
+    emit('open');
+    assert.deepEqual(words(), said('Starting…'), 'in either order, the close does not read back the body before it');
+    await apply({ supervisor_ready: true });
+    assert.deepEqual(words(), said('Online'));
+    assert.equal(env.calls.length, 0, 'the home read nothing');
+    home.dispose();
+    await apply({ supervisor_ready: false, boot: { phase: 'failed', error: 'later' } });
+    assert.deepEqual(words(), said('Online'), 'dispose lets the sequencer go: a later body no longer repaints the card');
 });
 
 test('a page reads when it is shown, not when Settings is', async (t) => {

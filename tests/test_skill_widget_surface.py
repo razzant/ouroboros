@@ -64,7 +64,8 @@ def _make_skill(tmp_path: pathlib.Path, monkeypatch, manifest: str, plugin: str)
 _TRIVIAL_PLUGIN = "def register(api):\n    pass\n"
 
 
-def test_explicit_esm_preflight_parses_native_grammar_and_checks_declared_resources(tmp_path, monkeypatch):
+def test_explicit_esm_preflight_parses_native_grammar_and_checks_declared_resources(tmp_path, monkeypatch,
+                                                                                 pinned_path_node):
     from ouroboros.tools import skill_preflight as sp
 
     ctx = _make_ctx(tmp_path)
@@ -174,7 +175,7 @@ def test_noncanonical_module_entry_fails_preflight_and_runtime_validation(
     [("export const a = 1;\n", True), ("const a = 1;\n", False)],
 )
 def test_skill_preflight_parses_module_entry_as_classic_script(
-    tmp_path, monkeypatch, source, expect_block
+    tmp_path, monkeypatch, source, expect_block, pinned_path_node
 ):
     """The declared entry is checked in the grammar the frame actually runs it in."""
     ctx = _make_ctx(tmp_path)

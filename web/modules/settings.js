@@ -370,8 +370,8 @@ export function initSettings(ctx = {}) {
         if (beside() || overview || !level) homeEl.scrollTop = places.get(homeEl) || 0;
         besideBefore = beside();
         home.mark(levels.map((each) => each.path).reverse());  // the open page's own row, else the nearest under it
-        // The home narrowed into the rail at once: the pressed row is brought into the rail's view.
-        if ((opened && beside()) || overview) revealInRail();
+        // A chosen row is revealed; a quiet layout change (including a section shown again) keeps the rail's passage.
+        if ((opened && beside()) || (overview && !quiet)) revealInRail();
         syncLayers();
         if (!quiet) {
             if (row && level) revealRow(level, row);
@@ -514,5 +514,5 @@ export function initSettings(ctx = {}) {
 
     // Loopback-only debug hook, like app.js's __ouroWs: Settings has no URL, so browser tests open a path through it.
     window.__ouroSettings = { open: openFromOutside };
-    return { page, open: openFromOutside, pressedAgain };
+    return { page, open: openFromOutside, pressedAgain, stateApplied: (data) => home.stateApplied(data) };
 }

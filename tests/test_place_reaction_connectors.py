@@ -61,15 +61,19 @@ def until(predicate, what, seconds=60):
 
 @pytest.fixture
 def chain(tmp_path, monkeypatch):
+    from ouroboros.presence_carrier import set_presence_runner
+    from tests.conversation_carrier_support import host_lane, join_host_lane_carriers
     from tests.test_host_service_api import _seed_token
     from tests.test_presence_continuation_bootstrap import install_bootstrap_harness
 
     monkeypatch.setattr("ouroboros.pricing._fetch_live_rows", lambda *_a, **_kw: {})  # a settling reviewer's price stays off the wire
-    clients = []
+    host_lane(monkeypatch, tmp_path / "data")  # a Host serving alone: no supervisor queue of its own
+    clients, holds = [], []
 
     def start(provider, *, review_mode="off", tools=None):
         spec, data = CHAINS[provider], tmp_path / "data"
         h = install_bootstrap_harness(monkeypatch, data, review_mode=review_mode)
+        holds.append(h.release)
         h.addressed = ""
         _seed_token(data, skill=spec.skill, token=TOKEN, permissions=["presence"], manifest_permissions=["presence"])
         place = places.connect_place(data, connector=spec.skill, provider=provider, account_id=spec.account,
@@ -90,8 +94,17 @@ def chain(tmp_path, monkeypatch):
                                author=lambda: h.agents[-1].tools._ctx)
 
     yield start
-    for client in clients:
-        client.__exit__(None, None, None)
+    try:  # the worlds' turns end and their carriers settle before the Hosts, tables and roots are given back
+        for release in holds:
+            release.set()
+        for client in clients:
+            turns = client.app.state.host_service_context.presence_turns
+            until(lambda: not turns.live(), "the world's Host turns to end")
+        join_host_lane_carriers()
+    finally:
+        for client in clients:
+            client.__exit__(None, None, None)
+        set_presence_runner(tmp_path / "data", None)
 
 
 def post(world, source):

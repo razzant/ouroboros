@@ -134,8 +134,8 @@ QUEUE_SEQ_COUNTER_REF: Dict[str, int] = {"value": 0}
 ACCEPTANCE_FENCES: Dict[str, Dict[str, Any]] = {}
 ADMISSION_RESERVATIONS: Dict[str, str] = {}
 # This generation's returning stop (planned or owner Restart) that copied PENDING for its
-# returns, under Q (``name_queue_returns``). The off-loop schedule duty reads it under Q
-# before its final enqueue: an admission after that copy would boot held for Resume.
+# returns, under Q (``name_queue_returns``). The off-loop schedule duty reads it under Q before its final
+# enqueue: an admission after that copy would boot held (a planned stop's late step names only what came before it).
 # Those doors always exit; the next generation's ``init_queue_refs`` starts open.
 RETURNS_NAMED: Dict[str, str] = {}
 
@@ -450,6 +450,7 @@ def enqueue_task(
 
                 bindings_snapshot = _load_bindings(DRIVE_ROOT, strict=True)["bindings"]
                 binding = pending_placement(DRIVE_ROOT, t, bindings_snapshot=bindings_snapshot)
+                t.pop("_placement_folder", None)  # a saved lane projection is dropped: the chooser decides it again
                 if binding:
                     if not refresh_pending_placement(DRIVE_ROOT, t, binding=binding):
                         raise ProjectAdmissionError(lookup, "The moved work could not be readmitted.")

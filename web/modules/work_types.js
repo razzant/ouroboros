@@ -31,20 +31,47 @@
  * @property {import('./client_contract_types.js').ChatModelRoute=} pending  // the route the next step uses, when it differs
  */
 /**
+ * Main's own tier ('' = none: Main takes the default) and the default every lead pays (`/api/state`).
+ * @typedef {Object} ProcessingTiers
+ * @property {""|"standard"|"fast"|"economy"} main
+ * @property {""|"standard"|"fast"|"economy"} default
+ */
+/**
+ * One call's processing as its receipt states it: what was asked, sent and seen.
+ * @typedef {Object} ProcessingReceipt
+ * @property {?string} requested
+ * @property {?string} submitted
+ * @property {?string=} submittedNative  // the provider's own word for what was sent
+ * @property {string} observed  // standard | fast | economy | unknown
+ * @property {Array<string>=} observedNative  // the provider's own words (an older Codex: `ultrafast` folded into fast)
+ * @property {?string} reason  // processing_not_submitted | submitted_mode_differs | provider_mode_changed
+ */
+/**
+ * A root's own tier (its room's at admission, or the owner's card act; '' = the default resolution) and the
+ * newest call's receipt this host saw: a choice is never shown as what ran.
+ * @typedef {Object} WorkProcessing
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"} choice
+ * @property {"room"|"owner"=} source
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} resolved  // server resolver, including the acting fallback row
+ * @property {ProcessingReceipt=} last
+ */
+/**
  * One act on a work's model (POST /api/tasks/{task_id}/model): `set` gives it a model, `follow` returns it to Main;
- * `return`, `wait` and `keep` leave a fallback.
+ * `return`, `wait` and `keep` leave a fallback; `processing` sets its own tier from its next call ('' = Default).
  * @typedef {Object} TaskModelRequest
  * @property {string} request_id  // a retry of the same act carries the same id
- * @property {"set"|"follow"|"return"|"wait"|"keep"} action
+ * @property {"set"|"follow"|"return"|"wait"|"keep"|"processing"} action
  * @property {string=} model  // `set` only
  * @property {boolean=} use_local  // `set` only
+ * @property {""|"standard"|"fast"|"economy"|"ultrafast"=} processing  // `processing` only
  */
 /**
  * @typedef {Object} TaskModelResponse
  * @property {true} ok
  * @property {string} task_id
  * @property {"next_step"|"at_start"} applied  // a running work switches at its next step, a queued one starts on it
- * @property {WorkLead} lead
+ * @property {WorkLead=} lead  // every model act
+ * @property {WorkProcessing=} processing  // a tier act
  */
 /**
  * @typedef {Object} WorkReason
@@ -144,6 +171,7 @@
  * @property {Array<Object>=} gaps
  * @property {string=} client_message_id
  * @property {WorkLead=} lead  // the model it runs on and whose choice that is
+ * @property {WorkProcessing=} processing  // its own tier and the newest call's receipt
  */
 /**
  * @typedef {Object} RoomStatus

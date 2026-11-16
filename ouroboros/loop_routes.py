@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from ouroboros.llm import LLMClient
+from ouroboros.llm import LLMClient, normalize_reasoning_effort
 from ouroboros.tools.registry import ToolRegistry
 
 
@@ -19,6 +19,14 @@ def _loop():
     from ouroboros import loop
 
     return loop
+
+
+def pending_runtime_route(ctx: Any, model: str, use_local: bool, effort: str) -> tuple:
+    """Read the next ordinary call's one-shot choices without consuming them."""
+    local = getattr(ctx, "active_use_local_override", None)
+    return (getattr(ctx, "active_model_override", None) or model,
+            use_local if local is None else local,
+            normalize_reasoning_effort(getattr(ctx, "active_effort_override", None), default=effort))
 
 
 def bind_round_route(tools: ToolRegistry, messages: List[Dict[str, Any]], route: tuple,
@@ -41,6 +49,7 @@ def bind_round_route(tools: ToolRegistry, messages: List[Dict[str, Any]], route:
     ctx.active_context_mode = mode
     if not pending_tool_budget:
         ctx.context_fit_plan = plan
+        ctx._restored_context_model_role = None  # ordinary handover ends the saved actor
         publish_lead(ctx)
     return model, local, effort, plan, mode
 
@@ -65,9 +74,12 @@ def _apply_round_route_overrides(ctx: Any, tools: ToolRegistry, messages: List[D
     ``route`` is ``(model, use_local, effort)``. A symbolic primary return also names
     the primary's role, so the rebound fit plan, account and processing binding are the
     primary's own (Auto stays Auto: no observed account becomes a pin); effort intent is
-    untouched. Returns ``(model, use_local, effort, plan, mode)``.
+    untouched. The rebind fits the view in the effort this round sends, a switch's new one
+    with its new model; an effort alone rebinds only where it can lengthen the request.
+    Returns ``(model, use_local, effort, plan, mode)``.
     """
     from ouroboros import route_choice
+    from ouroboros.context_fit import effort_lengthens_request
     from ouroboros.loop_model_call import _record_authoring_handover
 
     selected = getattr(tools._ctx, "_authored_memory_plan", None)
@@ -87,10 +99,12 @@ def _apply_round_route_overrides(ctx: Any, tools: ToolRegistry, messages: List[D
     if role and getattr(ctx, "primary_route", None) and not getattr(ctx, "_owner_model_primary_changed", False):
         from ouroboros.primary_route_observation import record_primary_return_request
         record_primary_return_request(ctx, model, use_local, role)
-    if (model, use_local) != previous or role:
+    if ((model, use_local) != previous or role  # a view that still fits is never rewritten for an effort alone
+            or effort_lengthens_request(str(getattr(context_fit_plan, "provider", "") or ""),
+                getattr(context_fit_plan, "start_reasoning_effort", route[2]), effort)):
         context_fit_plan, active_context_mode = _loop()._rebind_context_fit_plan(
             context_fit_plan, tools, messages, model=model, use_local=use_local, preferred_mode=preferred_mode,
-            start_mode=active_context_mode, tool_schemas=tool_schemas,
+            start_mode=active_context_mode, tool_schemas=tool_schemas, reasoning_effort=effort,
             **({"model_role": role, "model_route": {}} if role else {}))
     if model != previous[0]:
         # Cross-FAMILY switch: discard provider-private reasoning

@@ -475,7 +475,7 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any], *, seen: Any = (), review_entr
     """Why the sleep is ready now (``""`` = not yet). Owner input is never filtered."""
     from ouroboros.deadline_utils import parse_deadline_ts, utc_now
     from ouroboros.owner_mailbox import (KIND_CARD_INPUT, KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED,
-                                         KIND_TASK_MESSAGE, place_arrival_wake)
+                                         KIND_TASK_MESSAGE, place_arrival_wake, tier_only)
     from ouroboros.owner_wait import _wait_entries
     first_error = None
     if wake_fact is not None:
@@ -501,6 +501,8 @@ def wake_reason(ctx: Any, chosen: Dict[str, Any], *, seen: Any = (), review_entr
         kind = str(entry.get("kind") or KIND_OWNER_TEXT)
         if kind in {KIND_OWNER_TEXT, KIND_QUIZ_ANSWER, KIND_QUIZ_CLOSED, KIND_CARD_INPUT}:
             return "owner_text"
+        if tier_only(entry):
+            continue  # the next round's drain applies it to the next call; it ends no sleep
         if kind != KIND_TASK_MESSAGE:
             return f"control:{kind}"  # finalize_now, hurry, owner_pause, ... always wake
         source = str(entry.get("source_task_id") or "")
@@ -731,20 +733,26 @@ def request_sleep(ctx: Any, chosen: Dict[str, Any], mode: str) -> Dict[str, Any]
         project_id = str(getattr(ctx, "project_id", "") or (getattr(ctx, "task_metadata", None) or {}).get("project_id") or "")
         from ouroboros.owner_pause import _member_coordinates
         tree_id = _member_coordinates(ctx)[1]
-        if isinstance(chosen.get("task_wait"), dict):  # who answers needs the lane: a queued retry too
-            from ouroboros.native_task_wait import lane_rows
+        from ouroboros.native_task_wait import lane_rows, tree_folder_waits
 
+        if isinstance(chosen.get("task_wait"), dict):  # who answers needs the lane: a queued retry too
             selected_rows = lane_rows(ctx, chosen.get("tasks") or ()) if project_id else {}
         else:
             selected_rows = {selected: load_task_result(_canonical_root(ctx), selected, strict=True) or {}
                              for selected in set(chosen.get("tasks", []) + chosen.get("senders", []))}
-        for selected, row in selected_rows.items():
-            if (project_id and row.get("project_id") == project_id
-                    and str(row.get("root_task_id") or selected) != tree_id
-                    and row.get("status") in {"requested", "scheduled"}):
-                raise ValueError("this sleep retains the project lane needed by the selected queued root, so it cannot "
-                                 "start while you wait for it here: wait on another source or end this turn; a cold "
-                                 "sleep releases the lane unless your bound external runs or live members keep it")
+        queued = {selected: str(row.get("task_id") or selected) for selected, row in selected_rows.items()
+                  if project_id and row.get("status") in {"requested", "scheduled"}
+                  and str(row.get("root_task_id") or selected) != tree_id}
+        # The tree also holds its root's folder lane (``project_lease.lane_folder``), whatever room waits for it:
+        # a root's own recorded folder, a helper's root's as the queue lists it.
+        own = (str(getattr(ctx, "workspace_root", "") or "") if getattr(ctx, "workspace_mode", "") == "external"
+               else "") if tree_id == str(ctx.task_id) else None
+        folder, waits = tree_folder_waits(ctx, tree_id, own, queued.values()) if queued else ("", {})
+        if any(selected_rows[selected].get("project_id") == project_id or folder and waits.get(answer) == folder
+               for selected, answer in queued.items()):
+            raise ValueError("this sleep retains the project lane (or its folder's) needed by the selected queued root, "
+                             "so it cannot start while you wait for it here: wait on another source or end this turn; a "
+                             "cold sleep releases the lane unless your bound external runs or live members keep it")
     gaps: List[Dict[str, str]] = []
     if mode == MODE_COLD:
         blockers = cold_blockers(ctx, chosen=chosen, allow_transfer=True, gaps=gaps)

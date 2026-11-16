@@ -155,13 +155,28 @@ def bound_dispatch_candidate(
     By default the dispatcher takes the binding once; a pre-dispatch observation
     uses ``consume=False`` without spending it or resolving an absent binding. Both require the same context and name. The
     physical dispatcher still observes liveness itself, so a revocation that
-    lands after the timeout was chosen refuses before the handler runs.
+    lands after the timeout was chosen refuses before the handler runs. The descriptor the dispatcher takes stays
+    in the call's slot for the facts written after it (``dispatched_descriptor``).
     """
     slot = _CALL_RESOLUTION.get()
     bound = (slot.pop("bound", None) if consume else slot.get("bound")) if slot is not None else None
     if bound is not None and bound[0] is ctx and bound[1] == name:
-        return bound[2]
-    return _extension_dispatch_candidate(ctx, name) if consume else (None, False)
+        resolution = bound[2]
+    elif consume:
+        resolution = _extension_dispatch_candidate(ctx, name)
+    else:
+        return None, False
+    if consume and slot is not None:
+        slot["dispatched"] = (ctx, name, resolution[0])
+    return resolution
+
+
+def dispatched_descriptor(ctx: Any, name: str) -> Optional[Dict[str, Any]]:
+    """The extension descriptor this call was dispatched with, read after it ran; None outside a call's scope or
+    for another context or name. Its bound declaration, not a later publication, describes the act."""
+    slot = _CALL_RESOLUTION.get()
+    found = slot.get("dispatched") if slot is not None else None
+    return found[2] if found is not None and found[0] is ctx and found[1] == name else None
 
 
 def _dispatch_mcp_tool_result(

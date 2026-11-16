@@ -81,8 +81,8 @@ def _count_forms(snapshot, level):
                 lines = mv._page_label(entry) if step == "F5" else mv._note_pointer(entry)
                 add("retold" if lead else "emergency", label + (" leads" if lead else " openings"), len(lines.splitlines()), 1)
     for key, records in legacy.pointer_rooms(snapshot.story).items():
-        if key in gone.get("F3", ()):
-            add("emergency", "old story ranges", 1, len(records))
+        if key in gone.get("F3", ()):  # the helper's retelling and a room's transfers are each one line
+            add("emergency", "old story ranges", len(legacy.room_pointer(records).split("\n")), len(records))
     lost = _remote_counts(snapshot, gone, add)
     snapshot.__dict__.setdefault("_telling_emergency", {})[level.addressed] = bool(
         lost or counts["emergency"].keys() - {"conversation count"})

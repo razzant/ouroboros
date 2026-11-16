@@ -151,6 +151,14 @@ def test_task_status_stays_factual_in_main_and_project_chat(
         )
 
     def assert_card_geometry(page, scope_selector, task_ids):
+        # A finished subagent folds into its finished, collapsed root's Details (owner 09.11 A, DESIGN line
+        # "under a finished, collapsed root a finished subagent folds away"): open the root to measure it.
+        for task_id in task_ids:
+            card = page.locator(f'{scope_selector} .chat-live-card[data-task-id="{task_id}"]')
+            if card.evaluate("node => node.getClientRects().length") == 0:
+                root = card.locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' chat-live-card ')][1]")
+                root.locator(":scope > [data-live-summary-button] [data-live-disclosure]").click()
+                card.wait_for(state="visible")
         geometry = page.evaluate(
             """({scopeSelector, taskIds}) => {
                 const scope = document.querySelector(scopeSelector);
