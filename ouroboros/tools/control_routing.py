@@ -659,9 +659,7 @@ def _manage_project_folder(ctx: ToolContext, project_id: str, action: str = "vie
     root, repo = canonical_data_root(ctx), serving_repo_dir_for(ctx)
     try:
         if not changing:
-            view = project_folder.folder_view(root, project_id, repo_dir=repo)
-            outcome = ({"status": "refused", "reason": "unknown_project", "detail": "No active Project has this id."}
-                       if view is None else {"status": "view", "view": view})
+            outcome = project_folder.view_outcome(root, project_id, repo_dir=repo)
         else:
             from ouroboros.tools.project_journal import _project_scope, _scope_authority
 

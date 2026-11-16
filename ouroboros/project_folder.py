@@ -5,7 +5,9 @@ in, ``no_folder`` the recorded choice to keep none (``project_sources.apply_fold
 reads one room's choice together with what one look at that address found; ``change_folder`` changes
 it through the registry's writer, compare-and-set on the view's ``expected``, and appends the receipt
 (actor, old, new) to ``logs/events.jsonl``. The Project menu's "Working folder…"
-(``gateway/projects.py``) and the mind's ``manage_project_folder`` call these two and nothing else.
+(``gateway/projects.py``) calls these two. The mind's ``manage_project_folder`` reads through
+``view_outcome`` (the view, or the ``unknown_project`` refusal ``change_folder`` also gives) and
+changes through ``change_folder``.
 
 The door is narrow on purpose. It shows any folder and changes one only where the room has no usable
 default: a folder that is missing or unusable, no choice made yet, or the recorded No folder. A
@@ -174,6 +176,14 @@ def effects(view: dict, action: str, folder: str = "") -> list[str]:
 
 def _refused(reason: str, detail: str, view: Optional[dict]) -> dict:
     return {"status": "refused", "reason": reason, "detail": detail, "view": view}
+
+
+def view_outcome(drive_root: Any, project_id: Any, *, repo_dir: Any) -> dict:
+    """The view of an active Project, else the ``unknown_project`` refusal that ``change_folder`` gives."""
+    view = folder_view(drive_root, project_id, repo_dir=repo_dir)
+    if view is None:
+        return _refused("unknown_project", "No active Project has this id.", None)
+    return {"status": "view", "view": view}
 
 
 def change_folder(drive_root: Any, project_id: Any, *, action: str, expected: str, actor: str, repo_dir: Any,
