@@ -26,6 +26,7 @@ from ouroboros import loop_output_exhaustion as output_recovery
 from ouroboros.context_anchor import (main_input_anchor, measured_units, record_input_anchor, refused_request_density,
                                       reservation_refusal)
 from ouroboros.context_budget import WHOLE_CATEGORY
+from ouroboros.context_view_facts import SIZE_REFUSAL_KEY, remember_size_refusal
 from ouroboros.llm import LLMClient
 from ouroboros.loop_llm_call import REBOUND_PHYSICAL_CONTEXT_KEY, REFUSED_CANDIDATE_KEY, TIMEOUT_REPEAT_KEY, TRANSPORT_DEATHS_KEY
 from ouroboros.loop_round_limits import _coarsen_memory_view, _run_emergency_address_pass
@@ -141,12 +142,12 @@ def _adopt_fallback_route(
 
 def _route_fit_key(key: str) -> bool:
     """Route-fit state a failed candidate's walk must not leave behind. The conversation's per-model
-    facts (anchors, accepted floors, refused sizes) and this round's own size refusal are not route
-    state: a candidate's refusal still earns the round its renewal (review r2, 18.10)."""
+    facts (anchors, accepted floors, refused sizes) and this round's own size refusal (its round, its whole facts)
+    are not route state: a candidate's refusal keeps the round's renewal (review r2, 18.10) and its own facts."""
     from ouroboros.context_anchor import ACCEPTED_INPUTS_KEY, INPUT_ANCHOR_KEY, REFUSED_INPUTS_KEY
 
     return key.startswith("_context_") and key not in {
-        INPUT_ANCHOR_KEY, ACCEPTED_INPUTS_KEY, REFUSED_INPUTS_KEY, CONTEXT_REFUSAL_ROUND_KEY}
+        INPUT_ANCHOR_KEY, ACCEPTED_INPUTS_KEY, REFUSED_INPUTS_KEY, CONTEXT_REFUSAL_ROUND_KEY, SIZE_REFUSAL_KEY}
 
 
 def _snapshot_context_fit_usage(usage: Dict[str, Any]) -> Dict[str, Any]:
@@ -937,7 +938,8 @@ def _dispatch_round_model(
     ctx.accumulated_usage.pop(REBOUND_PHYSICAL_CONTEXT_KEY, None)  # consumed by the call's later attempts, if any
     capture = _loop().last_physical_attempt_capture()  # the answer's own receipt, as ``send_clock`` reads it
     if result[0] is not None:  # an accepted request is this conversation's next size anchor: the bytes it answered
-        ctx.accumulated_usage.pop(CONTEXT_REFUSAL_ROUND_KEY, None)  # an answer ends the round's refusal (review r2)
+        for key in (CONTEXT_REFUSAL_ROUND_KEY, SIZE_REFUSAL_KEY):  # an answer ends the round's refusal (review r2)
+            ctx.accumulated_usage.pop(key, None)
         sent = admitted.get(capture.candidate_raw_sha256) if getattr(capture, "state", "") in {"settled", "dispatched"} else None
         record_input_anchor(ctx.accumulated_usage, ctx.context_fit_plan, round_idx=ctx.round_idx,
                             rewrite_epoch=rewrite_epoch(ctx.tools._ctx), estimate_tokens=sent)
@@ -1369,6 +1371,7 @@ def _call_round_model_once(ctx: _RoundModelCallContext) -> Tuple[Any, float, str
     # and would otherwise replace the failed Main candidate in the ContextVar.
     # A refusal before dispatch left no capture: compare with the refused candidate, never an earlier round's.
     failed_capture = _refused_candidate(refused) if refused else _loop().last_physical_attempt_capture()
+    remember_size_refusal(ctx, failed_capture, measured=disposition is not None)  # whole, before any early return
     if disposition is None:
         return msg, cost, ctx.active_context_mode
     if isinstance(ctx.accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict):
@@ -1448,7 +1451,8 @@ def _refusal_target(ctx: _RoundModelCallContext, fit: Any, refused: Any = None, 
         slack = refused.predicted_slack_tokens
         return max(0, -predicted_free) + slack, slack
     stated, size, slack, reply, sent = _refusal_window(ctx, fit, refused)
-    record_refused_input(ctx.accumulated_usage, ctx.context_fit_plan, size, measured=measurement.anchor_input_tokens is not None)  # the provider's count when stated
+    record_refused_input(ctx.accumulated_usage, ctx.context_fit_plan, size,  # the provider's count when stated
+                         measured=measurement.anchor_input_tokens is not None, candidate=refused)  # names a local count
     shed = max(0, sent - measurement.estimated_input_tokens) if rebound else 0  # a view rebound since already dropped it
     if stated:
         return max(0, size + reply - stated - shed) + slack, slack
@@ -1507,11 +1511,13 @@ def _recover_context_overflow(ctx: _RoundModelCallContext, failed_capture: Any, 
             ctx.accumulated_usage["_last_llm_error_kind"] = "context_overflow"  # ``sized``: its total, in the same words
         if retry_msg is not None or str(ctx.accumulated_usage.get("_last_llm_error_kind") or "") != "context_overflow":
             return retry_msg, cost, ctx.active_context_mode  # answered, or another kind: ordinary recovery
+        # Refused again: the next pass must shrink below THIS candidate, sized by THIS refusal.
+        refused = ctx.accumulated_usage.get(REFUSED_CANDIDATE_KEY)
+        failed_capture = _refused_candidate(refused) if refused else _loop().last_physical_attempt_capture()
+        remember_size_refusal(ctx, failed_capture, measured=True)  # the round's latest, before any early return
         if isinstance(ctx.accumulated_usage.get(TRANSPORT_DEATHS_KEY), dict):
             return _skipped("round_holds_unresolved_attempt")
-        # Refused again: the next pass must shrink below THIS candidate, sized by THIS refusal.
-        refused = ctx.accumulated_usage.pop(REFUSED_CANDIDATE_KEY, None)
-        failed_capture = _refused_candidate(refused) if refused else _loop().last_physical_attempt_capture()
+        ctx.accumulated_usage.pop(REFUSED_CANDIDATE_KEY, None)  # consumed past that return, as it always was
         if not _failed_capture_is_comparable(failed_capture):
             return _skipped("failed_candidate_not_comparable")
         fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True) or fit

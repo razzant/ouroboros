@@ -134,6 +134,33 @@ test('context note uses the server projection, never catalogue arithmetic', () =
     assert.match(modelContextNote(null), /not known/);
 });
 
+test('a window a refusal set says how its number was known, and claims no basis the projection does not name', () => {
+    // A size refusal's input limit in window_projection's shape; the numbers are made up, no provider was asked.
+    const window = { tokens: 883899, kind: 'input', source: 'refusal', observed_at: '2026-11-15T12:00:00+00:00',
+        reserve: 65536, usable: 883899, admitted: 883899, contradiction: null, retired_ack: {} };
+    const note = (basis) => modelContextNote({ window: { ...window, basis } });
+    const said = (words) => `Window 884k tokens (${words}) · 884k usable for input`;
+    assert.equal(note('provider_stated'), said('stated by the provider in a refusal'));
+    // A local instance counted the request Ouroboros refused before sending: no server stated or withheld a number.
+    assert.equal(note('exact_local_count'), said('derived from an exact local count before sending'));
+    // Derived by Ouroboros from a numberless refusal: an anchored estimate or a confirmed declared total.
+    assert.equal(note('anchored_estimate'), said('derived from a refusal that stated no number'));
+    assert.equal(note('unrecorded'), said('from an earlier refusal, basis not recorded'));
+    // A server from before bases were kept sends none; an empty, unknown or inherited name is never guessed at.
+    assert.equal(modelContextNote({ window }), said('from a refusal, basis unknown'));
+    for (const basis of ['', null, 'sent_estimate', 'toString', '__proto__']) assert.equal(note(basis), said('from a refusal, basis unknown'));
+    for (const basis of ['provider_stated', 'exact_local_count', 'anchored_estimate', 'unrecorded', undefined]) {
+        assert.doesNotMatch(note(basis), /2026|65,536|reserve|\(refusal\)|_/);  // stamps and codes stay in the record
+    }
+    // A basis is a refusal's alone: every other source keeps its words, whatever a projection carries beside it.
+    for (const [source, words] of [['provider_metadata', 'from the server'], ['user_setting', 'set in Settings'],
+        ['owner_ack', 'your confirmation'], ['local_health', 'the local serving window'], ['accepted', 'accepted']]) {
+        for (const basis of [undefined, '', 'provider_stated']) {
+            assert.equal(modelContextNote({ window: { ...window, source, basis } }), said(words), `${source} ${basis}`);
+        }
+    }
+});
+
 test('the same role sheets are loaded by both actual UI hosts', () => {
     for (const file of ['index.html', 'onboarding_template.html']) {
         const html = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');

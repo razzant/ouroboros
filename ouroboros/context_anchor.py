@@ -151,16 +151,21 @@ def main_input_anchor(usage: Optional[Mapping[str, Any]], plan: Any, *,
     return anchor, (int(floor) if floor else None)
 
 
-def record_refused_input(usage: Dict[str, Any], plan: Any, estimate_tokens: int, *, measured: bool = False) -> None:
+def record_refused_input(usage: Dict[str, Any], plan: Any, estimate_tokens: int, *, measured: bool = False,
+                         candidate: Any = None) -> None:
     """Remember the smallest input estimate ``plan``'s model refused by size in this task.
 
     ``measured`` (the estimate is anchored on an accepted request) also bounds the refusing account's
-    window when the provider stated no limit; a cold estimate stays task-local."""
+    window when the provider stated no limit; a cold estimate stays task-local. ``candidate``, the refused
+    request, says how that size was known: a local instance's exact count (its ``input_tokens`` with its
+    ``context_window_tokens``) is stored as such, any other as an anchored estimate (``WindowLimit.basis``)."""
     if plan is None or int(estimate_tokens or 0) <= 0:
         return
     from ouroboros.context_window import record_refusal
 
-    record_refusal(usage, plan, refused_input=int(estimate_tokens) if measured else 0)
+    exact = getattr(candidate, "context_window_tokens", None) and getattr(candidate, "input_tokens", None)
+    record_refusal(usage, plan, refused_input=int(estimate_tokens) if measured else 0,
+                   basis="exact_local_count" if exact else "anchored_estimate")
     refused = usage.setdefault(REFUSED_INPUTS_KEY, {})
     key = _anchor_model_key(plan)
     refused[key] = min(int(refused.get(key) or estimate_tokens), int(estimate_tokens))

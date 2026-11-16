@@ -45,7 +45,7 @@ def test_a_roomy_window_holds_max_and_names_the_measured_parts(monkeypatch):
     assert fact["unfolded"] and fact["unfolded"] <= fact["story"]  # 40 pages, none in a part or account yet
     assert dict(fact["parts"])["books"] > dict(fact["parts"])["knowledge, scratchpad and runtime facts"] and "tool schemas" not in dict(fact["parts"])
     line = memory_facts(plan, "max")  # every start, Max held too: the measure part by part, no advice
-    assert line.startswith("Max room at the start: window 2,000,000; books, core, knowledge, scratchpad, runtime facts, "
+    assert line.startswith("Max room in this captured build: window 2,000,000; books, core, knowledge, scratchpad, runtime facts, "
                            "connections, assignment, reply reserve and work room")
     assert f"(books {dict(fact['parts'])['books']:,}, " in line and f"tool schemas {fact['schemas']:,}; " in line
     assert f"story {fact['story']:,} (40 pages no part or account holds yet, {fact['unfolded']:,} tokens, most in " in line
@@ -73,6 +73,19 @@ def test_memory_or_schemas_that_take_the_books_room_are_measured_without_advice(
     selected = mf.select_view(plan, "low", [])
     assert selected.low_projection.memory_facts["max_room"] == fact
     assert "The host's measure of this start" in selected.low_projection.system_content_json
+
+
+def test_reprojected_restore_names_its_captured_build_not_an_unknown_original_start(monkeypatch):
+    built = _start(_core(), 2_000_000, monkeypatch)
+    restored = cf.restored_start(built, None)
+    moved = restored.reproject_for_route(window_tokens=128_600, known_window=True, ratio=1.0,
+        output_reserve=built.output_reserve_tokens, tool_schemas=[], start_mode=restored.initial_mode, admitted=True)
+    assert moved.start == cf.UNKNOWN_START
+    assert _fact(moved) == _fact(built)  # the retained room belongs to the capture, not the new route
+    assert moved.window_tokens == 128_600
+    text = memory_facts(moved, moved.initial_mode)
+    assert "Max room in this captured build: window 2,000,000" in text
+    assert "Max room at the start" not in text
 
 
 def test_a_route_whose_window_cannot_hold_the_books_floor_is_a_disclosed_fact(monkeypatch):

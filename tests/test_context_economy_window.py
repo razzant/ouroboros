@@ -575,6 +575,14 @@ def test_a_cold_restore_keeps_the_tasks_own_start_not_the_restore_fit(tmp_path, 
         *_route, active, _round, rebound = resume_native_loop(registry, state, [], {}, {}, set())
         assert active == "low" == rebound.initial_mode and rebound.start == expected != fresh.start, name
         assert registry._ctx.context_fit_plan.start == expected and mode_cause(rebound, "low") == cause, name
+        from ouroboros.context_view_facts import memory_facts
+
+        line = memory_facts(rebound, active)
+        room = rebound.projection(active).memory_facts["max_room"]
+        assert room == fresh.projection(fresh.initial_mode).memory_facts["max_room"]
+        assert room != started.projection("max").memory_facts["max_room"]
+        assert f"Max room in this captured build: window {room['window']:,}" in line
+        assert "Max room at the start" not in line  # the known/unknown historical start above is still separate
         # The next checkpoint carries what the restore holds; a second cold restore keeps it, unknown included.
         again = json.loads(json.dumps(owner_wait.continuation_state(registry._ctx, [], {}, {}, 4, [], set())))
         assert again["context_start"] == list(expected), name

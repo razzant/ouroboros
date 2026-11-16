@@ -224,6 +224,7 @@ def test_empty_replies_and_a_predicted_smaller_send_record_no_refusal(tmp_path, 
                                                                        predicted):
     from ouroboros import capability_evidence as ce, context_fit as cf
     from ouroboros.context_anchor import REFUSED_INPUTS_KEY
+    from ouroboros.context_view_facts import SIZE_REFUSAL_KEY
     from ouroboros.context_window import record_observation
     from ouroboros.loop_llm_call import REFUSED_CANDIDATE_KEY
 
@@ -252,6 +253,10 @@ def test_empty_replies_and_a_predicted_smaller_send_record_no_refusal(tmp_path, 
         if predicted:
             assert ctx.accumulated_usage[REFUSED_CANDIDATE_KEY]["predicted_free_tokens"] < 0
         assert REFUSED_INPUTS_KEY not in ctx.accumulated_usage  # neither is a provider-refused input
+        # The prediction is the round's latest size refusal, named as the host's; an empty reply is none.
+        slot = ctx.accumulated_usage.get(SIZE_REFUSAL_KEY) or {}
+        assert (slot.get("basis"), slot.get("round")) == (("known_window_prediction", ctx.round_idx) if predicted
+                                                          else (None, None))
         raise Inspected
 
     monkeypatch.setattr(recovery, "_send_smaller", inspect)
