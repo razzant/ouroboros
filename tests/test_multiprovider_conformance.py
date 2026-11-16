@@ -43,6 +43,7 @@ from tests._delegated_transport_shared import (  # noqa: F401  (autouse fixture 
     _started_request,
 )
 from tests._cases import chosen_rows
+from tests._tariff_guard import _no_unscripted_tariff_reads  # noqa: F401  (autouse: DeepSeek sends here)
 
 
 # ===========================================================================

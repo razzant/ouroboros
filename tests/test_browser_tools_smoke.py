@@ -145,10 +145,8 @@ def test_browser_tools_launch_real_chromium(tmp_path, static_page_url, monkeypat
                 pytest.skip(str(exc))
             raise
         if text.startswith("⚠️ BROWSER_INFRA_ERROR"):
-            if "Executable doesn't exist" in text or "playwright install" in text.lower():
-                if expect_chromium:
-                    pytest.fail(text)
-                pytest.skip(text)
+            if expect_chromium:  # a required engine's missing executable or driver Node is red, never a skip
+                pytest.fail(text)
             pytest.skip(text)
         if text.startswith("⚠️ BROWSER_CHROMIUM_"):
             if expect_chromium:

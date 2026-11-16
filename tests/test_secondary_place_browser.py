@@ -134,6 +134,9 @@ def test_settings_keeps_its_page_a_typed_value_and_its_place_across_other_pages(
             # The home: scrolled down its list, left, shown again at the same place.
             home = page.locator("#page-settings [data-settings-home]")
             expect(home.locator('[data-settings-open="models"]')).to_be_visible()
+            # DESIGN "A section with pages": the rail's Ouroboros row opens its card in the page pane.
+            home.locator("[data-settings-overview-row]").click()
+            expect(page.locator("#page-settings [data-settings-card]")).to_be_visible()
             home.evaluate("box => { box.scrollTop = Math.min(320, box.scrollHeight - box.clientHeight); }")
             page.wait_for_timeout(200)
             place = home.evaluate("box => box.scrollTop")
@@ -375,6 +378,8 @@ def test_safety_counter_defers_its_tail_until_permissions_is_shown(direct_server
             page, logs, errors = _page(browser, direct_server_with_data["url"])
             _nav(page, "settings")
             settings_page(page, "").locator('[data-settings-open="models"]').wait_for(state="visible")
+            settings_page(page, "").locator("[data-settings-overview-row]").click()
+            page.locator("#page-settings [data-settings-card]").wait_for(state="visible")
             page.wait_for_timeout(400)
             tails = lambda: [url for url in logs if '/events?limit=2000' in url]
             assert tails() == [], 'the home reads no whole event tail'

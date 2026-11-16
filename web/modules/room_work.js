@@ -17,7 +17,7 @@
 import { fetchTaskDetail, fetchTaskDetailStrict } from './api_client.js';
 import { bindContentButton, confirmAndSendRestart } from './chat_activity.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { createStartFailure, startFailureCause } from './host_starting_status.js';
+import { createStartFailure, startFailureCause, startingStatus } from './host_starting_status.js';
 import { compareHistoryPosition } from './chat_history_replay.js';
 import { createHistoryReveal } from './chat_history_reveal.js';
 import { fmt, tr } from './i18n.js';
@@ -36,6 +36,7 @@ import { motionMs, reducedMotion } from './motion.js';
 import { roomCoversMain } from './layout.js';
 import { closingLine } from './settled_card.js';
 import { bindScrollFade } from './scroll_fade.js';
+import { closeModelSheet } from './model_sheet.js';
 
 // The closed list rises back as it fades (room_work.css rw-unfold, reversed).
 const SHADE_FOLDS = [{ opacity: 1, transform: 'none' }, { opacity: 0, transform: 'translateY(-6px)' }];
@@ -46,7 +47,8 @@ const clean = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
 const listOf = (value) => (Array.isArray(value) ? value : []);
 const clip = (text, max) => (text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text);
 let sequence = 0;
-// A status sentence's own dot speaks only at rest (Online beside its green dot) and for a failed start (its red dot).
+// A status sentence's own dot speaks only at rest (Online beside its green dot) and for a failed start (its red dot),
+// each only where the owner's move does not stand: the owner's move comes first (DESIGN "One mark per place").
 const AT_REST = Object.freeze({ shape: 'dot', hue: 'ok' }), START_FAILED = Object.freeze({ shape: 'dot', hue: 'failed' });
 
 /** The latest represented root card: the newest unfinished one, else the newest of all. */
@@ -106,7 +108,7 @@ export function createRoomWork({
     works = () => null, liveCardRecords: records = new Map(),
     pendingSubmissions: pending = new Map(), pendingSuggestedNames: names = new Map(),
     cancelRunFromCard = null, refreshHeaderControlState = async () => {},
-    captureVisibleTimelineAnchor = () => null, restoreVisibleTimelineAnchor = () => false, hostReady = () => true,
+    captureVisibleTimelineAnchor = () => null, restoreVisibleTimelineAnchor = () => false, hostReady = () => true, hostBoot = () => null,
     historyPager = null, showLatest = null,
 } = {}) {
     if (!page || !statusBadge || !messagesDiv) return null;
@@ -794,9 +796,11 @@ export function createRoomWork({
     function paintTrigger() {
         const text = [clean(statusBadge.textContent), clean(statusBadge.dataset.step)].filter(Boolean).join(' · ');
         // A Project's list always has its head, the room's whole name, so its title opens it even with no work; a failed
-        // start always has its line and Restart, and a socket the server answers around always has its sentence.
+        // start always has its line and Restart, a start its sentence of what runs, and a socket the server answers
+        // around its sentence.
         const failed = startFailureCause({ badge: statusBadge, ready: hostReady(), latest: stateSnapshots?.latest?.() }) !== null;
-        const listed = Boolean(head) || failed || serverAnswers() || rows.length > 0 || extras.children.length > 0;
+        const starting = connected() && !hostReady();
+        const listed = Boolean(head) || failed || starting || serverAnswers() || rows.length > 0 || extras.children.length > 0;
         // Word, tone, mark and what waits for the owner come together from the chat's producer
         // (work_status.roomStatusView via setStatus); the control paints them and never ranks row tones or reads a
         // class name for a second opinion. Before the producer's first answer the room is not online yet: an unknown
@@ -813,7 +817,7 @@ export function createRoomWork({
         // its own ink: Working with a question elsewhere stays Working. A pause by the owner or by Ouroboros is not the
         // owner's move. The room at rest says Online beside its green dot.
         const owner = statusBadge.dataset.owner === '1';
-        const reshaped = paintStatusMark(mark, tone === 'failed' ? START_FAILED
+        const reshaped = paintStatusMark(mark, tone === 'failed' && !owner ? START_FAILED
             : tone === 'online' && !owner ? AT_REST : markView({ mark: statusBadge.dataset.mark, owner }));
         // The owner's move said in words too, where the word does not already say it.
         const said = amberNote(statusBadge.dataset.amber || '');
@@ -832,7 +836,7 @@ export function createRoomWork({
         const message = !connected() ? (serverAnswers()
             ? tr('room_work.note.server_answers', 'The server answers, but live updates cannot connect. Retrying automatically. If you use a proxy, check WebSocket forwarding and the server log.')
             : tr('room_work.note.reconnecting', 'Reconnecting — showing the last known state.'))
-            : cause !== null ? '' : !hostReady() ? tr('room_work.note.starting', 'Ouroboros is starting…')
+            : cause !== null ? '' : !hostReady() ? (startingStatus(hostBoot()).detail || tr('room_work.note.starting', 'Ouroboros is starting…'))
                 : Array.isArray(latest?.works) && latest.works_complete === false
                     ? tr('room_work.note.partial', 'Not all current work could be confirmed; this list may be incomplete.')
                     // A Project's list that opened on its name alone says so in Activity's words.
@@ -1155,13 +1159,15 @@ export function createRoomWork({
         update: schedule,
         extras,
         close: () => close({ restoreFocus: false }),
-        // The room leaves the screen: the list closes and the saved passage no longer applies.
+        // The room leaves the screen: the list closes, a Model sheet its composer or a card opened closes, and the saved
+        // passage no longer applies.
         leave() {
             navigationIntent += 1;
             // Main stays mounted behind a Project. Cancel the shared reading claim too, so an
             // outstanding canonical question read cannot scroll or focus that obscured room.
             reading.cancel();
             close({ restoreFocus: false });
+            closeModelSheet({ within: page });
             showBack(null);
         },
         isOpen: () => open,

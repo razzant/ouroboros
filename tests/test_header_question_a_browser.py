@@ -610,7 +610,7 @@ def test_files_location_keeps_every_folder_reachable_in_the_bar(engine_ui, width
 
 @pytest.mark.parametrize('theme', ['light', 'dark'])
 def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme):
-    """A docked 720px window preserves the residual 320px room floor during and after a drag."""
+    """A docked 720px window keeps Files' 320px floor during and after a drag; use its real resize handle."""
     page = _open(engine_ui, 720, 801)
     engine = engine_ui['engine']
     try:
@@ -621,13 +621,14 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
             .map(id => document.getElementById(id)); document.getElementById('files-new-file').focus(); }""")
         handle = page.locator('#primary-sidebar > .resize-handle').bounding_box()
         start_x = handle['x'] + handle['width'] / 2
-        # The residual sidebar clamp keeps 320px for the room. Both attempted wider drags stop there.
+        # Owner 14.11; DESIGN "Resizing": drag from the shown box, within the sidebar and room's bounds
+        # (8f5ea4856). Probe just above the room's floor during the drag, then overshoot the sidebar's cap.
         start_width = page.locator('#primary-sidebar').bounding_box()['width']
         page.mouse.move(start_x, handle['y'] + handle['height'] / 2)
         page.mouse.down()
         # Check during the drag as well as after release, without a window resize event.
-        page.mouse.move(start_x + 545 - start_width, handle['y'] + handle['height'] / 2, steps=12)
-        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 320")
+        page.mouse.move(start_x + 385 - start_width, handle['y'] + handle['height'] / 2, steps=12)
+        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 335")
         page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
         setup_browser.capture(page, f'files-sidebar-drag-{engine}-{theme}')
         assert page.locator('#files-breadcrumb').evaluate("el => el.closest('.app-page-lead') !== null")

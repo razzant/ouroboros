@@ -7,6 +7,7 @@ card was not shown, and stores nothing.
 
 from __future__ import annotations
 
+import base64
 import json
 import queue
 
@@ -170,6 +171,100 @@ def test_an_app_is_copied_content_addressed_from_the_workspace_or_inline(tmp_pat
     assert from_file["kind"] == "app" and from_file["app"] == inline["app"]
     assert from_file["app"]["size"] == len(page.encode()) and read_app_bytes(tmp_path, from_file["app"]["sha256"]) == page.encode()
     assert len(list((tmp_path / "state" / "cards" / "apps").iterdir())) == 1
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+PNG_URI = "data:image/png;base64," + base64.b64encode(PNG).decode("ascii")
+
+
+def test_an_image_file_is_copied_into_the_card_as_what_the_card_draws(tmp_path):
+    ctx = _ctx(tmp_path)
+    (tmp_path / "work" / "shots").mkdir()
+    (tmp_path / "work" / "shots" / "dock.png").write_bytes(PNG)
+    tree = [{"type": "image", "file": "shots/dock.png", "path": "ignored", "alt": "The dock"},
+            {"type": "tabs", "tabs": [{"label": "More", "components": [
+                {"type": "gallery", "items": [{"file": str(tmp_path / "work" / "shots" / "dock.png")}, {"src": PNG_URI}]}]}]},
+            {"type": "image", "path": "shot.uri"}, {"type": "audio", "src": "data:audio/wav;base64,AAAA"}]
+    card = load_card(tmp_path, json.loads(_show_card(
+        ctx, title="Mockup", fallback_text="The dock mockup", components=tree, data={"shot": {"uri": PNG_URI}}))["card_id"])
+    assert card["components"][0] == {"type": "image", "alt": "The dock", "src": PNG_URI}
+    assert card["components"][1]["tabs"][0]["components"][0]["items"] == [{"src": PNG_URI}, {"src": PNG_URI}]
+    assert card["components"][2] == {"type": "image", "path": "shot.uri"}
+    assert tree[0]["file"] == "shots/dock.png", "the caller's tree is left as given"
+
+
+def test_an_image_file_does_not_count_against_the_body_bound_and_has_its_own(tmp_path):
+    from ouroboros.tools import cards
+
+    ctx = _ctx(tmp_path)
+    big = b"\x89PNG\r\n\x1a\n" + b"\x00" * (cards._MAX_BODY_BYTES + 1)
+    (tmp_path / "work" / "big.png").write_bytes(big)
+    shown = json.loads(_show_card(ctx, title="T", fallback_text="p", components=[{"type": "image", "file": "big.png"}]))
+    assert len(load_card(tmp_path, shown["card_id"])["components"][0]["src"]) > cards._MAX_BODY_BYTES
+    (tmp_path / "work" / "half.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * (cards._MAX_CARD_IMAGE_BYTES // 2))
+    two = _show_card(ctx, title="T", fallback_text="p", components=[{"type": "image", "file": "half.png"}, {"type": "image", "file": "half.png"}])
+    assert "components[1].file is" in two and "at most 2097152 bytes together" in two and "send_photo" in two
+    wordy = _show_card(ctx, title="T", fallback_text="p", components=[
+        {"type": "image", "file": "big.png"}, {"type": "markdown", "text": "x" * (cards._MAX_BODY_BYTES + 1)}])
+    assert "the components body exceeds 262144 bytes as JSON" in wordy, "a file image does not lift the bound on the rest"
+    assert len(_cards(tmp_path)) == 1
+
+
+@pytest.mark.parametrize(("component", "data"), [
+    ({"type": "image", "path": "missing", "src": PNG_URI}, {}),                    # a path that reads nothing falls back to src
+    ({"type": "image", "path": "shots.0"}, {"shots": [PNG_URI]}),
+    ({"type": "image", "path": "shot"}, {"shot": [" " + PNG_URI + "\ufeff"]}),     # the renderer's own text and trim
+    ({"type": "image", "src": "DATA:IMAGE/PNG;BASE64," + PNG_URI.split(",", 1)[1]}, None),
+    ({"type": "image", "path": "shot", "condition_key": "has_shot"}, {}),          # shown only on a condition
+    ({"type": "image", "target": "preview", "path": "shot", "src": PNG_URI}, {"shot": "x"}),  # reads another state
+    ({"type": "group", "target": "preview", "components": [{"type": "image", "path": "shot", "src": PNG_URI}]}, {"shot": "x"}),
+    ({"type": "gallery", "path": "shots"}, {"shots": [{"src": PNG_URI}, {"type": "markdown", "text": "x"}]}),  # items read from data
+    ({"type": "gallery", "items_key": "shots", "condition_key": "has"}, {"shots": ["a.png"]}),
+    ({"type": "group", "condition_key": "has", "components": [{"type": "gallery", "path": "shots"}, {"type": "image", "path": "shot"}]},
+     {"has": False, "shots": [{"src": "missing.png"}]}),                           # a hidden section hides its media
+    ({"type": "tabs", "condition_key": "has", "tabs": [{"label": "A", "components": [{"type": "video", "src": "clip.mp4"}]}]}, {}),
+    ({"type": "gallery", "path": "shots"}, {"shots": [{"src": [PNG_URI]}]}),
+    ({"type": "markdown", "text": "x", "components": [{"type": "image", "src": "never-drawn.png"}]}, None),  # not a container
+])
+def test_media_the_renderer_draws_or_may_lawfully_hide_is_shown(tmp_path, component, data):
+    shown = json.loads(_show_card(_ctx(tmp_path), title="T", fallback_text="plain", components=[component],
+                                  **({"data": data} if data is not None else {})))
+    assert load_card(tmp_path, shown["card_id"])["components"] == [component]
+
+
+@pytest.mark.parametrize(("component", "data", "fragment"), [
+    ({"type": "image", "path": "evidence/unified/chromium-overview.png"}, None,
+     "components[0]: this image has no source a card can draw; path 'evidence/unified/chromium-overview.png' reads a "
+     "value of data, not a file. Give it file: the path of a PNG"),
+    ({"type": "image", "src": "https://example.com/a.png"}, None, "components[0]: this image has no source a card can draw. Give it file:"),
+    ({"type": "image", "path": "shot"}, {"shot": "shots/dock.png"}, "components[0]: this image has no source"),
+    ({"type": "video", "src": "clip.mp4"}, None, "components[0]: this video has no source a card can draw. Give it src: an inline data: URI"),
+    ({"type": "group", "components": [{"type": "gallery", "path": "shots"}]}, {"shots": [{"src": "missing.png"}]},
+     "components[0].components[0]: item 0 of data 'shots' has no source"),
+    ({"type": "group", "components": [{"type": "gallery", "items": [{"src": "a.png"}]}]}, None,
+     "components[0].components[0].items[0]: this image has no source"),
+    ({"type": "image", "path": "shots.00", "src": "x"}, {"shots": [PNG_URI]}, "components[0]: this image has no source"),
+    ({"type": "image", "path": "shot", "src": PNG_URI}, {"shot": "x.png"}, "components[0]: this image has no source"),
+    ({"type": "image", "src": PNG_URI.replace("base64", "ba\u017fe64")}, None, "components[0]: this image has no source"),
+    ({"type": "tabs", "tabs": [{"label": "Summary", "components": [{"type": "image", "src": PNG_URI}]},
+                               {"label": "Preview", "components": [{"type": "image", "src": "missing.png"}]}]}, None,
+     "components[0].tabs[1].components[0]: this image has no source"),             # a tab the owner can open
+    ({"type": "gallery", "path": "shots"}, {"shots": [{"src": PNG_URI}, {"file": "notes.png"}]},
+     "components[0]: item 1 of data 'shots' has no source a card can draw. Give each item src:"),
+    ({"type": "gallery", "items_key": "shots"}, {"shots": [PNG_URI]}, "components[0]: item 0 of data 'shots' has no source"),
+    ({"type": "image", "file": PNG_URI}, None, "components[0].file takes a file path; an inline data: URI goes in components[0].src"),
+    ({"type": "image", "path": " ", "src": PNG_URI}, {" ": "not-media"}, "components[0]: this image has no source"),
+    ({"type": "image", "file": "missing.png"}, None, "components[0].file not found: missing.png (looked for "),
+    ({"type": "image", "file": "notes.png"}, None, "components[0].file is not a PNG, JPEG, GIF or WebP image: notes.png"),
+    ({"type": "image", "file": ""}, None, "components[0].file must be the path of an image file"),
+    ({"type": "audio", "file": "notes.png"}, None, "components[0].file: only an image is read from a file; give audio as src"),
+])
+def test_media_a_card_could_not_draw_is_refused_with_the_way_to_give_it(tmp_path, component, data, fragment):
+    ctx = _ctx(tmp_path)
+    (tmp_path / "work" / "notes.png").write_text("not an image", encoding="utf-8")
+    text = _show_card(ctx, title="T", fallback_text="plain", components=[component], **({"data": data} if data is not None else {}))
+    assert text.startswith("⚠️ SHOW_CARD_ARG_ERROR") and fragment in text and "The card was not shown." in text
+    assert _cards(tmp_path) == [] and _events(ctx) == []
 
 
 def test_an_oversized_or_binary_app_is_refused(tmp_path):

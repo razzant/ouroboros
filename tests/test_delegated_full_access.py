@@ -313,12 +313,13 @@ def test_owner_http_save_projects_full_choice_into_task_start_snapshot(monkeypat
         start = apply_task_start_settings()
         selected, _ = select_subagent_snapshot(start.settings, subagent_id='phone-coder')
         assert selected['access'] == 'full'
-        assert json.loads(start.environ[SUBAGENTS_SETTING])['items'][0]['access'] == 'full'
+        assert json.loads(start.settings[SUBAGENTS_SETTING])['items'][0]['access'] == 'full'
+        assert SUBAGENTS_SETTING not in start.environ
         config['items'][0]['access'] = 'workspace_write'
         response = client.post('/api/settings', json={SUBAGENTS_SETTING: config, 'allow_empty_review_pool': True})
         assert response.status_code == 200
         assert selected['access'] == 'full'
-        assert json.loads(start.environ[SUBAGENTS_SETTING])['items'][0]['access'] == 'full'
+        assert json.loads(start.settings[SUBAGENTS_SETTING])['items'][0]['access'] == 'full'
 
 
 @pytest.mark.parametrize("historical", [False, True])

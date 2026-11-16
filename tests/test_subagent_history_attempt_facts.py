@@ -370,7 +370,7 @@ def test_no_first_call_sample_without_the_rows_own_paid_first_answer(root, monke
 
 def test_first_call_samples_are_bounded_per_row_and_follow_its_price_class(tmp_path, monkeypatch):
     """The projection keeps a row's newest 20 samples of its recorded price class, so its size has a bound
-    (26 rows x 20 samples). A late observation of an older run neither erases nor displaces them. A row moved
+    (MAX_CONFIGURED_SUBAGENTS rows x 20 samples). A late observation of an older run neither erases nor displaces them. A row moved
     to another model or processing tier starts over: the other tier's price per token is not this one's.
     A row that leaves the projection takes its samples."""
     from ouroboros.configured_subagents import MAX_CONFIGURED_SUBAGENTS

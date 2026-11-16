@@ -698,6 +698,7 @@ async def api_onboarding_model_catalog(request: Request) -> JSONResponse:
     never the whole-draft validator: Main is picked from this list, so it answers while Main is blank."""
     from ouroboros.config import load_settings
     from ouroboros.gateway.models import draft_catalog
+    from ouroboros.provider_models import CONNECTIONS_KEY
     from ouroboros.settings_setup_contract import draft_access
 
     try:
@@ -711,7 +712,7 @@ async def api_onboarding_model_catalog(request: Request) -> JSONResponse:
     if error:
         return unsaved_error(error, 400, code="invalid_onboarding_settings")
     local = {key: body[key] for key in ("LOCAL_MODEL_SOURCE", "LOCAL_MODEL_FILENAME", "LOCAL_MODEL_CONTEXT_LENGTH") if key in body}
-    return JSONResponse(await draft_catalog(saved, {**saved, **keys, "OUROBOROS_CONNECTIONS": connections, **local}, typed))
+    return JSONResponse(await draft_catalog(saved, {**saved, **keys, CONNECTIONS_KEY: connections, **local}, typed))
 
 
 async def api_onboarding_subagents_preview(request: Request) -> JSONResponse:
@@ -758,15 +759,16 @@ async def api_onboarding_subagents_preview(request: Request) -> JSONResponse:
         available = normalize_configured_subagents(catalog)[0]
     except ValueError as exc:
         return unsaved_error(str(exc), 400, code="invalid_onboarding_settings")
-    from ouroboros.pricing import known_spend_gaps
+    from ouroboros.pricing import spend_coverage
 
     shown = configured_subagents_dict(available)
+    gaps, partial = spend_coverage(current, shown)
     return JSONResponse({
         "ok": True,
         "model_settings": dict(preset.model_settings),
         "available_subagents": shown,
         # What the limits of this draft cannot count, as Dashboard › Costs names it after the save.
-        "known_spend_gaps": known_spend_gaps(current, shown),
+        "known_spend_gaps": gaps, "partly_counted_spend": partial,
         "source": preset.source,
         "diagnostics": list(preset.diagnostics),
     })

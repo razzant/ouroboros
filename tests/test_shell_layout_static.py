@@ -133,6 +133,33 @@ def _block(css: str, head: str) -> str:
     return "\n".join(bodies)
 
 
+def test_folded_rings_leave_each_others_touch_reach():
+    css = _read("web/style.css")
+    rings = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] {')
+    assert "--composer-glyph-gap: max(var(--composer-row-gap), calc(var(--touch-target-min) - var(--composer-control-height)));" in rings
+    assert "column-gap: var(--composer-glyph-gap);" in rings
+    # The chips slot gives back that same wider gap, or a folded row with chips would wrap onto a second line.
+    chips = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips {')
+    assert "margin-inline-start: calc(-1 * var(--composer-glyph-gap));" in chips
+    lead = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips::before {')
+    assert "width: calc(var(--composer-glyph-gap) - 6px);" in lead
+
+
+def test_logs_long_filter_word_never_crowds_its_neighbours_or_clear():
+    """The longest filter (Consciousness, wider in some system faces) widens no neighbour and never pushes Clear: the
+    filters are one sideways rail that scrolls beside a Clear that never shrinks, and on a page alone the rail takes
+    its own full row under Clear. (This guard once read the two-row chip grid the band's rail replaced.)"""
+    css = _read("web/style.css")
+    assert "flex: none;" in _block(css, ".logs-clear-list {")
+    assert "flex: 1;" in _block(css, ".logs-kinds {")
+    strip = _block(css, ".app-tab-strip {")
+    assert "flex-wrap: nowrap;" in strip and "overflow-x: auto;" in strip and "min-width: 0;" in strip
+    assert 'class="logs-kinds app-tab-strip"' in _read("web/modules/logs.js")
+    alone = _block(css, SECTION_PAGE_ALONE)
+    assert 'html[data-layout="stack"] #page-dashboard .logs-kinds { grid-area: 2 / 1 / auto / -1;' in alone
+    assert 'html[data-layout="stack"] #page-dashboard .logs-clear-list { grid-area: 1 / 3; }' in alone
+
+
 def test_a_section_gives_the_places_control_up_only_where_a_page_replaced_its_list():
     """A level's Back replaces the picture only when its page replaced the list. A jump independently owes a
     return in either layout; its writer marks the header, so its single capsule also replaces the picture."""
@@ -147,17 +174,21 @@ def test_a_section_gives_the_places_control_up_only_where_a_page_replaced_its_li
     assert "@container sectionplace (min-width: 40rem) {" in _read("web/ui.css"), "the two panes start where the query above ends"
 
 
-def test_a_touch_sections_controls_can_follow_its_row_but_an_empty_lead_draws_nothing():
-    """At the touch/two-pane overlap, a rail can follow the row. Empty captions cannot keep a second row alive;
-    Settings puts Search in its list, with its one named Back and level in the header when owed."""
+def test_a_touch_window_keeps_a_sections_two_columns_in_one_header_row_and_an_empty_lead_draws_nothing():
+    """DESIGN:3293,3345,3468: two panes from 40rem still have one header row. Places takes room from the rail's lead;
+    the section name remains available to readers. Empty captions cannot keep a second row alive; Settings puts
+    Search in its list, with its one named Back and level in the header when owed."""
     two = _block(_read("web/ui.css"), "@container sectionplace (min-width: 40rem) {")
     header = 'html[data-layout="stack"] .section-place > .app-page-header'
-    assert f'{header} {{ grid-template-areas: "leading title toolbar" "lead lead lead"; }}' in two
+    assert f'{header} {{ grid-template-areas: "leading lead lead"; }}' in two
     assert f"{header} > .app-page-title-block {{ display: contents; }}" in two
-    assert f"{header} .app-page-title-row {{ grid-area: title; }}" in two
+    title = _block(two, f"{header} .app-page-title-row {{")
+    assert "position: absolute;" in title and "clip-path: inset(50%);" in title
     assert f"{header} .app-page-lead {{ grid-area: lead; min-height: var(--touch-target-min); }}" in two
-    assert ('html[data-layout="stack"] .section-place[data-section-view="page"] .section-lead '
-            "{ margin-inline-start: calc(var(--section-rail-start) - var(--space-3)); }") in two
+    lead = _block(two, 'html[data-layout="stack"] .section-place[data-section-view="page"] .section-lead {')
+    assert "margin-inline-start: 0;" in lead
+    assert ("grid-template-columns: calc(var(--section-rail-w) - var(--section-rail-end) - var(--space-3) - 44px - var(--space-2)) minmax(0, 1fr);") in lead
+    assert '"leading title toolbar" "lead lead lead"' not in _read("web/settings.css")
     assert "padding: var(--chrome-inset) var(--space-3);" in _read("web/style.css"), "the stack header's inset the lead counts"
     css = _read('web/style.css')
     for selector in ['html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {',

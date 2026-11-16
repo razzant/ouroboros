@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 import pytest
 
 from tests.settings_browser_helpers import HOME, open_settings
+from tests.test_segmented_layout_browser import _MEASURE as STRIP_MEASURE
 from tests.test_subscription_setup_browser import subscription_ui as subscription_ui
 
 pytestmark = [pytest.mark.ui_browser]
@@ -399,9 +400,15 @@ def test_no_tab_scrolls_sideways_at_the_floor_and_a_three_way_choice_keeps_one_l
         assert _sideways(page) == [], tab
     page.locator('#page-dashboard [data-shell-back]').click()
     page.click('[data-dashboard-tab="consciousness"]')
-    tops = page.locator('#page-dashboard [data-setting-row="OUROBOROS_CONSCIOUSNESS_AUTONOMY"] [data-setting-value]').evaluate_all(
-        "(buttons) => buttons.map((button) => Math.round(button.getBoundingClientRect().top))")
-    assert len(tops) == 3 and len(set(tops)) == 1, f"Advises, Acts and Evolves stand on one line at 320 px: {tops}"
+    # DESIGN:432–437: one line when its words fit; otherwise the strip wraps inside its row, never sideways.
+    strip = page.evaluate(STRIP_MEASURE, ['OUROBOROS_CONSCIOUSNESS_AUTONOMY',
+        '#page-dashboard [data-setting-row="OUROBOROS_CONSCIOUSNESS_AUTONOMY"] .ui-segment-group'])
+    assert [button['label'] for button in strip['buttons']] == ['Advises', 'Acts', 'Evolves']
+    if strip['needed'] <= strip['row']['right'] - strip['row']['left'] + 0.5:
+        assert len({round(button['top']) for button in strip['buttons']}) == 1, strip
+    assert all(button['lines'] == 1 and button['left'] >= strip['left']
+               and button['right'] <= strip['right'] + 0.5 for button in strip['buttons']), strip
+    assert not strip['spills'] and strip['left'] >= strip['row']['left'] - 0.5 and strip['right'] <= strip['row']['right'] + 0.5, strip
     # A number and a door keep their place at the row's end; a range goes under its words. "At the row's end" is
     # beside the words: right of the name and no lower than the last line under it. (The control is centred against
     # the name and its line of meaning, so beside three such lines a 34 px number starts a pixel under the name's own

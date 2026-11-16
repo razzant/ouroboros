@@ -3,13 +3,16 @@
 One subscribed event (``chat.outbound``, a photo, video, document, link list, quiz card or quiz lifecycle fact) is
 one operation, run by its unchanged handler. Every request that handler makes to create or edit a message
 (``telegram_api.JOURNALED_METHODS``) is the operation's next part, numbered in the order the handler asks for it.
-Nothing is sent before it is saved under ``<state>/outbox/``: the event exactly as published (its reply, source and
-label facts included), the operation's place in the queue, and each part as ``sending`` before its request, with
-its outcome after. One operation runs at a time. An event that would have to wait (behind a running or waiting
-operation) is saved before it waits: ``chat.outbound`` first runs its handler as a decision that sends nothing
-(``_Probe``), so an event its filters drop at publish time is never saved or sent; other topics are saved as they
-come. Saved operations run in arrival order while the supervised ``outbox`` task runs; if that task has ended, a
-new event runs at once, ahead of what waits (it is still saved first).
+Nothing is sent before its event, queue position and part's ``sending`` state are saved under ``<state>/outbox/``.
+One operation runs at a time. An event its handler's first filters send nowhere (``routed``: a target chat or a
+quiz card; what it carries, ``copies.carries``) is dropped before anything is saved, counted or refused. A waiting
+event's filters then run without sending (``_Probe``), an outbound's before it is saved, other content's after (saved
+before its handler can wait, e.g. on a quiz's card lock), and the queue's head never runs while its own decision
+does: what they hold back as published was never accepted. A free outbound saves at its first request or pre-call
+failure.
+Count and byte reservations include writers until custody or cleanup finishes, even when publication is cancelled.
+Saved operations run in arrival order while the supervised ``outbox`` task runs; if it has ended, a new
+event runs ahead of what waits, still saved first.
 
 A part whose request provably never left (``TelegramTransportError.unsent``: a refused connection or tunnel, a
 connect or pool timeout) or that Telegram's flood control refused (429, waiting its ``retry_after``) waits
@@ -20,7 +23,8 @@ from the saved one stops the operation instead. An answer that may follow delive
 connection closed after the request, a 5xx, an unreadable body) makes its part ``unknown``: never sent again, and
 the handler goes on as for a message whose id it does not know; an edit counts as made, so no plain-text edit or
 fresh message follows it. A part still ``sending`` when the process stopped is ``unknown`` at the next start.
-Telegram's other refusals are ``refused``; the handler's own fallback (plain text, a document) is its next part.
+Telegram's other refusals are ``refused``. An explicit handler fallback links its parts to the refused
+request it replaces; the aggregate excludes that refusal, preserving every replacement or unrelated failure.
 
 The journal fails closed: a part is never sent unless its ``sending`` state is on disk. An event that cannot be
 saved is not sent (counted for the Connection form, which says the journal is failing); a saved operation whose
@@ -29,11 +33,25 @@ next state cannot be written waits for its retry instead of sending.
 States: an operation is ``pending`` (saved, waiting for its turn or a token), ``sending``, ``retry_wait``, or
 finished. A finished one is ``confirmed`` (every part it asked for was delivered; its files are removed),
 ``unknown``, ``refused``, ``failed`` (stopped: expired after ``MAX_AGE_SEC``, changed before its retry, the token
-changed after a delivered part, the queue full, its handler failing) or ``superseded`` (on its retry the handler
-no longer asked for the part that waited, e.g. progress mirroring was turned off). A saved event whose handler
-asks nothing of Telegram when it runs is removed without a trace. The newest ``MAX_FINISHED`` finished ones that
-were not confirmed keep metadata only, never words or bytes, for the Connection form. An event published while
-the skill is not loaded never reaches it (the host's event bus keeps nothing).
+changed after a delivered part, the queue full, its handler failing) or ``superseded`` (accepted, its handler later
+asked no more of Telegram: a mirror setting changed while it waited). Telemetry, or an event whose handler asks
+nothing as it is published, is removed without a trace.
+
+What was not confirmed is told, and its content is not lost. ``MAX_AGE_SEC`` bounds safe retries, never keeping. A
+finished operation that was not confirmed keeps its metadata (subject, room, parts, outcome) for the Connection
+form, the newest ``MAX_FINISHED`` of them; that bound takes a record only once its end is decided (``finished_at``),
+and an end a stop interrupted is decided at the next start. Its saved event is kept too (``held``) when it is
+content that no verified home holds (lib/telegram_copies.py), or a file the outbox failed to remove: through expiry,
+reloads and that bound, never sent again, until the owner deletes exactly the copies the form showed (``clear``:
+bytes first, so a removal that fails leaves the copy kept). Typed telemetry is never kept; a home is read again
+before the event's copy goes. A document whose captured file verifies is saved without its inline duplicate (if
+that file goes, its message and reference stay); photos and videos keep their bytes until that end. Kept copies
+have no bound of their own, since one would drop an only copy or refuse new messages: the form shows the bytes they
+take, and only waiting events count toward ``MAX_ACTIVE`` and ``MAX_ACTIVE_BYTES``. They can fill the disk, and an
+event a full disk cannot save is not sent (fails closed). A refusal of content keeps its metadata as far as the
+disk takes it. An event file without its record, or a record that cannot be read (a record id is only ``_ID``),
+stays as found and is shown by its exact name and a handle, never sent.
+An event published while the skill is not loaded never reaches it (the host's event bus keeps nothing).
 """
 from __future__ import annotations
 
@@ -42,11 +60,14 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import time
 import uuid
 import weakref
+from contextlib import contextmanager
 from typing import Any, Awaitable, Callable, Dict, Optional
 
+from . import telegram_copies as copies
 from .telegram_api import (
     OUTBOUND_JOURNAL,
     TELEGRAM_RETRY_INITIAL_SEC,
@@ -56,6 +77,7 @@ from .telegram_api import (
     TelegramTransportError,
     next_telegram_retry_delay,
 )
+from .telegram_state import _data_dir
 from .telegram_token import binding_for
 
 SCHEMA = 1
@@ -63,6 +85,8 @@ MAX_AGE_SEC = 24 * 3600  # still waiting after a day: stopped, never delivered t
 MAX_ACTIVE = 500
 MAX_ACTIVE_BYTES = 256 * 1024 * 1024  # UTF-8 bytes of the saved events of waiting operations, media included
 MAX_FINISHED = 100
+SHOWN = 10  # outcomes and kept copies the Connection form lists, newest first
+_ID = re.compile(r"\d{12}-[0-9a-f]{8}")  # the only record id this journal writes: a path and a form line, never more
 TOKEN_WAIT_SEC = 5.0
 _NOT_MODIFIED = "Telegram API editMessageText: message is not modified."
 _ACTIVE = frozenset({"pending", "sending", "retry_wait"})
@@ -92,14 +116,13 @@ class _Probe:
 
     probing = True
 
-    def failed(self, _exc: BaseException) -> None:
-        pass
+    failure = None
+
+    def failed(self, exc: BaseException) -> None:
+        self.failure = exc
 
     async def call(self, _client, _method: str, **_request) -> Dict[str, Any]:
         raise _WouldSend()
-
-
-_PROBE = _Probe()
 
 
 def _fingerprint(method: str, data: Optional[dict], files: Optional[dict]) -> str:
@@ -139,7 +162,9 @@ def _cause(exc: BaseException) -> str:
 
 
 def _final_state(parts: list) -> str:
-    states = {part.get("state") for part in parts}
+    replaced = {part["replaces"] for part in parts if "replaces" in part}
+    states = {part.get("state") for part in parts
+              if part.get("state") != "refused" or part.get("n") not in replaced}
     for state in ("unknown", "refused", "failed", "superseded"):
         if state in states:
             return state
@@ -156,10 +181,12 @@ class _Operation:
 
     probing = False
 
-    def __init__(self, outbox: "Outbox", topic: str, event: dict, record: Optional[dict] = None, seq: int = 0):
-        self.outbox, self.topic, self.event, self.record = outbox, topic, event, record
+    def __init__(self, outbox: "Outbox", topic: str, event: dict, record: Optional[dict] = None, seq: int = 0,
+                 deciding: bool = False):  # deciding: the event's run as published, which is its decision
+        self.outbox, self.topic, self.event, self.record, self.deciding = outbox, topic, event, record, deciding
         self.seq = int((record or {}).get("seq") or seq)
         self.ordinal = 0
+        self.replacing = None
         self.paused = False
         self.stopped = False
         self.failure: Optional[BaseException] = None
@@ -168,14 +195,29 @@ class _Operation:
         """The handler ended in ``exc`` (its ``_report_failure``): unreached waiting parts are not superseded."""
         self.failure = exc
 
+    @contextmanager
+    def replacement(self):
+        """The handler explicitly replaces its last refused request, possibly with several parts."""
+        previous = self.replacing
+        parts = (self.record or {}).get("parts", [])
+        index = self.ordinal - 1
+        if 0 <= index < len(parts) and parts[index]["state"] == "refused":
+            self.replacing = index
+        try:
+            yield
+        finally:
+            self.replacing = previous
+
     async def call(self, client, method: str, *, data=None, files=None, timeout: int = 30) -> Dict[str, Any]:
         index, self.ordinal = self.ordinal, self.ordinal + 1
         fingerprint = _fingerprint(method, data, files)
         record = self.record
         part = record["parts"][index] if record is not None and index < len(record["parts"]) else None
         if part is not None:
-            if part.get("fingerprint") != fingerprint:
+            if part.get("fingerprint") != fingerprint or ("replaces" in part and part["replaces"] != self.replacing):
                 await self.outbox._stop(self, "changed")
+            if self.replacing is not None:
+                part["replaces"] = self.replacing  # older journals learn the explicit link on replay
             if record.get("bot") and client.bot_id != record["bot"] and _delivered(record):
                 await self._token_changed(part)
             if part["state"] not in _ACTIVE:
@@ -187,6 +229,8 @@ class _Operation:
             elif record.get("bot") and client.bot_id != record["bot"] and _delivered(record):
                 await self._token_changed(None)
             part = {"n": index, "method": method, "fingerprint": fingerprint, "state": "pending", "attempts": 0}
+            if self.replacing is not None:
+                part["replaces"] = self.replacing
             record["parts"].append(part)
         return await self._send(client, part, method, data, files, timeout)
 
@@ -308,12 +352,16 @@ class Outbox:
         self._bodies: Dict[str, Callable[[dict], Awaitable[None]]] = {}
         self._ops: Dict[str, dict] = {}
         self._written: set = set()  # ids whose record is on disk: their custody survives a failed later write
+        self._capacity: Dict[str, int] = {}  # bytes held until custody succeeds or cleanup finishes
         self._reserved: set = set()  # places of events being decided or saved, which nothing later may pass
+        self._lost: list = []  # refused content whose record the disk did not take: shown for this load only
+        self._strays: list = []  # files found at load without a readable record: shown and kept, never sent
         self._loaded = False
         self._seq = 0
         self._loop: Optional[asyncio.AbstractEventLoop] = None  # the loop the lock and wake belong to
         self._lock: Optional[asyncio.Lock] = None
         self._wake: Optional[asyncio.Event] = None
+        self._clearing: tuple = (None, None)  # the loop and lock ``clear`` runs under, never the queue's
         self._waiting_cause = ""
         self._sender_down = False  # the supervised sender ended: nothing would run what waits until a new load
         self._fault = ""  # the last journal write failure, until a write succeeds
@@ -323,15 +371,16 @@ class Outbox:
 
     # --- the subscribed handlers and the supervised sender ---
 
-    def subscriber(self, topic: str, body: Callable[[dict], Awaitable[None]], *,
-                   decide: bool = False) -> Callable[[dict], Awaitable[None]]:
-        """The handler to subscribe for ``topic``. With ``decide`` an event that must wait first runs ``body`` as
-        a decision (its filters at publish time); otherwise every such event is saved as it comes."""
+    def subscriber(self, topic: str, body: Callable[[dict], Awaitable[None]], *, decide: bool = False,
+                   routed: Optional[Callable[[dict], bool]] = None) -> Callable[[dict], Awaitable[None]]:
+        """The handler to subscribe for ``topic``; ``routed`` (its first filter, sending nothing) drops an event
+        before anything is saved. An event that must wait runs ``body`` as a decision (its filters as published):
+        with ``decide`` before it is saved, otherwise after (its handler may wait), content only."""
         self._bodies[topic] = body
 
         async def handle(event: Dict[str, Any]) -> None:
             try:
-                await self._receive(topic, body, dict(event or {}), decide)
+                await self._receive(topic, body, dict(event or {}), decide, routed)
             except Exception as exc:  # the journal itself failed: say so once, never as an unseen task error
                 self._log("error", f"Telegram {topic} delivery failed ({type(exc).__name__}).")
         return handle
@@ -356,8 +405,49 @@ class Outbox:
             self._wake.set()
 
     def summary(self) -> Dict[str, Any]:
-        """What the Connection form shows: counts and timing, never words or bytes (any thread)."""
+        """What the Connection form shows: counts, timing and the subjects of outcomes and kept copies, never
+        words or bytes (any thread)."""
         return dict(self._summary)
+
+    async def clear(self, names) -> Dict[str, int]:
+        """Delete exactly the kept copies and stray files ``names`` (as the form showed them); any other, a copy
+        kept since then included, stays. A deleted copy's outcome stays, naming the deletion, until the finished
+        bound takes it. Runs on the outbox's loop, one press at a time under its own lock (a send that hangs holds
+        none back): a press that overlaps waits, then counts what the earlier one deleted as no longer kept."""
+        loop = asyncio.get_running_loop()
+        if self._clearing[0] is not loop:  # like the queue's lock, one per running loop
+            self._clearing = (loop, asyncio.Lock())
+        result = {"deleted": 0, "missing": 0, "failed": 0}
+        async with self._clearing[1]:
+            for name in dict.fromkeys(str(name) for name in names):
+                record = self._ops.get(name)
+                stray = next((item for item in self._strays if item["id"] == name), None)
+                held = record is not None and bool(record.get("held"))
+                if not held and stray is None:
+                    result["missing"] += 1
+                    continue
+                try:  # the bytes first: a removal that fails leaves the copy kept, listed and counted
+                    await asyncio.to_thread(_unlink, self._payload_path(record) if held else self.root / stray["name"])
+                except OSError as exc:
+                    result["failed"] += 1
+                    self._log("warning", f"Telegram outbox could not delete a kept copy ({type(exc).__name__}).")
+                    continue
+                result["deleted"] += 1
+                if not held:
+                    self._strays.remove(stray)
+                    for lost in self._lost:
+                        if stray["name"] == self._payload_path(lost).name:
+                            lost.update(held=False, deleted_at=self.clock())
+                    continue
+                deleted = {"held": False, "deleted_at": self.clock()}
+                try:  # written while it is still held here, so no eviction meets it half done
+                    await self._write({**record, **deleted})
+                except OSError as exc:  # its bytes are gone all the same: the next load reads the copy as deleted
+                    self._fault = type(exc).__name__
+                record.update(deleted)
+            await self._evict()
+            self._refresh()
+        return result
 
     # --- receiving an event ---
 
@@ -371,26 +461,40 @@ class Outbox:
         self._bind()
         return self._lock
 
-    async def _receive(self, topic: str, body, event: dict, decide: bool) -> None:
+    async def _receive(self, topic: str, body, event: dict, decide: bool, routed) -> None:
+        try:  # sent nowhere by its handler's first filters: nothing is saved, counted or refused
+            if not copies.carries(topic, event) or (routed is not None and not routed(event)):
+                return
+        except Exception:
+            pass  # a filter that fails leaves its handler to say why
         try:
             self._load()
-        except OSError as exc:  # no journal to hold it: not sent
-            await self._refuse(self._new_record(topic, event, self._next_seq(), "pending"), f"journal {type(exc).__name__}")
+        except OSError as exc:  # no journal to hold it: not sent, if it would be
+            if not decide or await self._decide(body, event):
+                await self._refuse(self._new_record(topic, event, self._next_seq(), "pending"),
+                                   f"journal {type(exc).__name__}")
             return
         lock = self._fifo()
         if not lock.locked() and not self._active() and not self._reserved:
             async with lock:  # free: acquired without waiting, so the event runs now and saves before sending
-                op = _Operation(self, topic, event, seq=self._next_seq())
-                await self._run(op)
+                seq = self._next_seq()
+                # Non-filtered events may wait inside their handler (notably a quiz's card lock).
+                record = await self._custody(topic, event, seq) if not decide else None
+                if not decide and record is None:
+                    return
+                await self._run(_Operation(self, topic, event, record, seq=seq, deciding=True))
             self.wake()
             return
-        # It must wait: saved first, in its place. A decision run says whether the event sends at all.
+        # It must wait, in its place; a decision run says whether it sends at all (module docstring).
         seq = self._next_seq()
         self._reserved.add(seq)
         try:
             if decide and not await self._decide(body, event):
                 return
             record = await self._custody(topic, event, seq)
+            if record and not decide and record["copy"] != copies.REPLACEABLE and not await self._decide(body, event):
+                await self._discard(record)
+                return
         finally:
             self._reserved.discard(seq)
             self.wake()
@@ -401,33 +505,55 @@ class Outbox:
 
     async def _decide(self, body, event: dict) -> bool:
         """Run ``body`` as a decision: True when it would send. Its filters see the state of publication."""
-        context = OUTBOUND_JOURNAL.set(_PROBE)
+        probe = _Probe()
+        context = OUTBOUND_JOURNAL.set(probe)
         try:
             await body(event)
         except _WouldSend:
             return True
         finally:
             OUTBOUND_JOURNAL.reset(context)
-        return False
+        return probe.failure is not None
 
     async def _custody(self, topic: str, event: dict, seq: int) -> Optional[dict]:
         """Save an event that must wait, before it waits; None when the journal cannot hold it (not sent)."""
         record = self._new_record(topic, event, seq, "pending")
-        payload = await self._payload(record, event)
+        kind, home, saved = await asyncio.to_thread(copies.classify, _data_dir(self.api), topic, event)
+        record.update(copy=kind, **({"home": home} if home else {}))
+        payload = await self._payload(record, saved)
         if payload is None:
             return None
+
+        async def save():
+            try:
+                await asyncio.to_thread(self._write_payload, record, payload)
+                await self._write(record)
+            except OSError as exc:
+                await self._refuse(record, f"journal {type(exc).__name__}")
+                return None
+            else:
+                self._ops[record["id"]] = record
+                self._written.add(record["id"])
+                self._fault = ""
+                self._refresh()
+                self.wake()  # custody survives a cancelled publisher even without a reload
+                return record
+            finally:
+                self._capacity.pop(record["id"], None)
+
+        # Cancelling to_thread does not stop its write. Keep its reservation and finish custody
+        # (or cleanup) before propagating cancellation; no late file can escape the accounting.
+        writer = asyncio.create_task(save())
         try:
-            await asyncio.to_thread(self._write_payload, record, payload)
-            await asyncio.to_thread(_write_private, self._record_path(record),
-                                    json.dumps(record, ensure_ascii=False).encode("utf-8"))
-        except OSError as exc:
-            await self._refuse(record, f"journal {type(exc).__name__}")
-            return None
-        self._ops[record["id"]] = record
-        self._written.add(record["id"])
-        self._fault = ""
-        self._refresh()
-        return record
+            return await asyncio.shield(writer)
+        except asyncio.CancelledError:
+            while not writer.done():
+                try:
+                    await asyncio.shield(writer)
+                except asyncio.CancelledError:
+                    pass
+            writer.result()
+            raise
 
     # --- running one operation ---
 
@@ -487,6 +613,8 @@ class Outbox:
         self.wake()
 
     async def _settle(self, op: _Operation) -> None:
+        if op.record is None and op.failure is not None:
+            op.record = await self._custody(op.topic, op.event, op.seq)
         record = op.record
         if record is None or op.paused or record.get("id") not in self._ops:
             return
@@ -495,15 +623,15 @@ class Outbox:
                 record.update(state="pending", next_at=self.clock() + TOKEN_WAIT_SEC)
                 await self._save(op)
                 return
-            if not record["parts"] and op.failure is None:  # its handler asks nothing of Telegram now
-                await self._discard(record)
+            if not record["parts"] and op.failure is None and (op.deciding or record.get("copy") == copies.REPLACEABLE):
+                await self._discard(record)  # held back as published, or telemetry: nothing was accepted to keep
                 return
-            unreached = "failed" if op.failure is not None else "superseded"
+            unreached = "failed" if op.failure is not None else "superseded"  # accepted content stays as content
             for part in record["parts"]:
                 if part.get("state") in _ACTIVE:
                     part.update(state=unreached, **({"reason": _cause(op.failure)} if op.failure else {}))
-            record["state"] = _final_state(record["parts"]) if record["parts"] else "failed"
-            if not record["parts"]:
+            record["state"] = _final_state(record["parts"]) if record["parts"] else unreached
+            if not record["parts"] and op.failure is not None:
                 record["reason"] = _cause(op.failure)
         await self._finish(record)
 
@@ -512,38 +640,33 @@ class Outbox:
     def _new_record(self, topic: str, event: dict, seq: int, state: str) -> dict:
         return {"schema": SCHEMA, "id": f"{seq:012d}-{uuid.uuid4().hex[:8]}", "seq": seq, "topic": topic,
                 "created_at": self.clock(), "state": state, "parts": [], "bot": "", "chat_id": 0, "next_at": 0.0,
-                "retry_delay": TELEGRAM_RETRY_INITIAL_SEC, "reason": "", "source": _source(event)}
+                "retry_delay": TELEGRAM_RETRY_INITIAL_SEC, "reason": "", "source": _source(event),
+                "subject": copies.subject_of(topic, event)}
 
     async def _payload(self, record: dict, event: dict) -> Optional[bytes]:
-        """The event as UTF-8 JSON, if the queue can take it; refused (and not sent) otherwise."""
+        """The event as UTF-8 JSON, if the waiting bounds take it (kept copies never count there); refused (and not
+        sent) otherwise."""
         try:
             payload = (await asyncio.to_thread(json.dumps, event, ensure_ascii=False)).encode("utf-8")
         except (TypeError, ValueError) as exc:
             await self._refuse(record, f"event {type(exc).__name__}")
             return None
         active = [item for item in self._ops.values() if item.get("state") in _ACTIVE]
-        if len(active) >= MAX_ACTIVE or sum(int(item.get("payload_bytes") or 0) for item in active) \
-                + len(payload) > MAX_ACTIVE_BYTES:
+        if len(active) + len(self._capacity) >= MAX_ACTIVE or sum(int(item.get("payload_bytes") or 0) for item in active) \
+                + sum(self._capacity.values()) + len(payload) > MAX_ACTIVE_BYTES:
             await self._refuse(record, "full")
             return None
         record["payload_bytes"] = len(payload)
+        self._capacity[record["id"]] = len(payload)  # no await between checking and reserving
         return payload
 
     async def _admit(self, op: _Operation) -> None:
-        """Save ``op``'s event before its first request; the first record write follows in ``_send``."""
-        record = self._new_record(op.topic, op.event, op.seq, "sending")
-        payload = await self._payload(record, op.event)
-        if payload is None:
+        """Save ``op``'s event and pending record before its first request."""
+        record = await self._custody(op.topic, op.event, op.seq)
+        if record is None:
             op.stopped = True
             raise OutboxStopped()
-        try:
-            await asyncio.to_thread(self._write_payload, record, payload)
-        except OSError as exc:
-            await self._refuse(record, f"journal {type(exc).__name__}")
-            op.stopped = True
-            raise OutboxStopped() from None
         op.record = record
-        self._ops[record["id"]] = record
         older = [item for item in self._ops.values()
                  if item.get("state") in _ACTIVE and int(item.get("seq") or 0) < op.seq]
         if older and not self._sender_down:  # an earlier message waits: this one keeps its place behind it
@@ -567,16 +690,32 @@ class Outbox:
         raise OutboxStopped()
 
     async def _refuse(self, record: dict, reason: str) -> None:
-        """Fail closed: an event the journal cannot hold is not sent; the Connection form counts it."""
+        """Fail closed: an event the journal cannot hold is not sent; the Connection form counts it, and names
+        refused content by its metadata, durable as far as the disk takes it (its words and bytes are not kept,
+        unless its saved event could not be removed: that file is then a kept copy, shown and counted)."""
         self._not_sent += 1
         if reason.startswith("journal"):
             self._fault = reason.split(" ", 1)[1] if " " in reason else reason
+        stays = False
         for path in (self._payload_path(record), self._record_path(record)):
             try:
                 await asyncio.to_thread(_unlink, path)
             except OSError:
-                pass
+                stays = stays or path == self._payload_path(record)
         self._log("error", f"Telegram {record.get('topic')} was not sent: the outbox could not hold it ({reason}).")
+        if record.get("copy") != copies.REPLACEABLE or stays:
+            record.update(state="failed", reason=reason, finished_at=self.clock(),
+                          **({"held": True} if stays else {"payload_bytes": 0}))
+            try:
+                await self._write(record)
+            except (OSError, TypeError, ValueError):
+                self._lost = [*self._lost[-(MAX_FINISHED - 1):], record]  # this load only: no success is claimed
+                if stays:  # its file without a record, listed as the next load finds it
+                    self._strays.append(_stray(self._payload_path(record), "orphan"))
+            else:
+                self._ops[record["id"]] = record
+                self._written.add(record["id"])
+                await self._evict()
         self._refresh()
 
     async def _defer(self, op: _Operation, delay: Optional[float], cause: str) -> None:
@@ -612,8 +751,7 @@ class Outbox:
         record = op.record
         record["updated_at"] = self.clock()
         try:
-            content = json.dumps(record, ensure_ascii=False).encode("utf-8")
-            await asyncio.to_thread(_write_private, self._record_path(record), content)
+            await self._write(record)
         except (OSError, TypeError, ValueError) as exc:
             if self._fault != type(exc).__name__:
                 self._log("error", f"Telegram outbox could not save {op.topic} ({type(exc).__name__}); "
@@ -626,23 +764,30 @@ class Outbox:
         self._refresh()
         return True
 
+    async def _write(self, record: dict) -> None:
+        await asyncio.to_thread(_write_private, self._record_path(record), json.dumps(record, ensure_ascii=False).encode())
+
     async def _finish(self, record: dict) -> None:
         state = record.get("state")
-        record["finished_at"] = self.clock()
         try:
             if state == "confirmed":
                 self._ops.pop(record["id"], None)
                 self._delivered += 1
                 await asyncio.to_thread(self._remove, record)
-            else:
-                await asyncio.to_thread(_unlink, self._payload_path(record))
-                await asyncio.to_thread(_write_private, self._record_path(record),
-                                        json.dumps(record, ensure_ascii=False).encode("utf-8"))
-                finished = sorted((item for item in self._ops.values() if item.get("state") not in _ACTIVE),
-                                  key=lambda item: int(item.get("seq") or 0))
-                for stale in finished[:-MAX_FINISHED]:
-                    self._ops.pop(stale["id"], None)
-                    await asyncio.to_thread(self._remove, stale)
+            else:  # no eviction takes it until its end is decided (``finished_at``), across these awaits
+                if await self._keeps(record):
+                    record["held"] = True
+                    self._log("warning", f"Telegram {record.get('topic')} delivery not confirmed ({state}); its saved "
+                                         "copy is kept, never sent again, until deleted under Kept copies in the "
+                                         "skill's settings.")
+                else:
+                    try:
+                        await asyncio.to_thread(_unlink, self._payload_path(record))
+                    except OSError:  # a file the outbox could not remove stays a kept copy, shown and counted
+                        record["held"] = True
+                record["finished_at"] = self.clock()
+                await self._write(record)
+                await self._evict()
         except (OSError, TypeError, ValueError) as exc:
             # Safe to leave: a part is sent only after its sending state was saved, so a stale record can only
             # replay what was answered or name an interrupted part unknown, never send a delivered part again.
@@ -654,13 +799,47 @@ class Outbox:
             self._waiting_cause = ""
         self._refresh()
 
+    async def _keeps(self, record: dict) -> bool:
+        """Whether a finished operation that was not confirmed keeps its saved event: content that no verified home
+        holds now (or the message and reference of a file that was its own home). The home is read again here (one
+        found at admission may be gone; an older record has no class), and replaces the admission's."""
+        if record.get("copy") == copies.REPLACEABLE:
+            return False
+        try:
+            event = json.loads(await asyncio.to_thread(self._payload_path(record).read_bytes))
+        except FileNotFoundError:
+            return False  # nothing is left to keep
+        except (OSError, ValueError):
+            return True  # unreadable: it stays as found
+        if not isinstance(event, dict):
+            return True
+        kind, home, _saved = await asyncio.to_thread(copies.classify, _data_dir(self.api),
+                                                     str(record.get("topic") or ""), event)
+        record.pop("home", None)
+        record.update(copy=kind, **({"home": home} if home else {}))
+        return kind in (copies.ONLY, copies.REFERENCE)
+
+    async def _evict(self) -> None:
+        """Only the newest ``MAX_FINISHED`` finished records that keep no copy stay; a kept copy stays until deleted,
+        and a record whose end is still being decided (no ``finished_at``) is never taken. A removal that fails is
+        the form's fault line; its record comes back at the next load and goes then."""
+        finished = sorted((item for item in self._ops.values() if item.get("finished_at") and not item.get("held")
+                           and item.get("state") not in _ACTIVE), key=lambda item: int(item.get("seq") or 0))
+        try:
+            for stale in finished[:-MAX_FINISHED]:
+                self._ops.pop(stale["id"], None)
+                await asyncio.to_thread(self._remove, stale)
+        except OSError as exc:
+            self._fault = type(exc).__name__
+
     async def _discard(self, record: dict) -> None:
-        """A saved event its handler no longer sends anything for: removed, counted nowhere."""
+        """A saved event nothing was accepted to keep of (held back as published, or telemetry): removed, counted
+        nowhere."""
         self._ops.pop(record["id"], None)
         try:
             await asyncio.to_thread(self._remove, record)
         except OSError as exc:
-            self._fault = type(exc).__name__  # a stale record of it replays to the same nothing
+            self._fault = type(exc).__name__  # a stale record of it runs at the next load like any saved event
         self._refresh()
 
     def _load(self) -> None:
@@ -689,28 +868,42 @@ class Outbox:
                 self._log("warning", f"Telegram {record.get('topic')}: a part was in flight at the last stop; "
                                      "its delivery is unknown and it is not sent again.")
                 try:
-                    await asyncio.to_thread(_write_private, self._record_path(record),
-                                            json.dumps(record, ensure_ascii=False).encode("utf-8"))
+                    await self._write(record)
                 except OSError:
                     pass  # the record on disk still says sending: the next load decides the same
+        for record in [item for item in self._ops.values() if item.get("state") not in _ACTIVE
+                       and not item.get("finished_at")]:  # the process ended between its stop and its end
+            await self._finish(record)
         self._refresh()
 
     def _read_all(self) -> list:
+        """The records, oldest first. An event file without a readable record and a record this schema cannot read
+        stay as found, listed as strays: a missing record proves neither that nothing was sent nor that it was."""
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         for leftover in self.root.glob(".*.tmp"):  # a write a stop interrupted: its record was never replaced
             leftover.unlink(missing_ok=True)
-        records = []
+        records, unread = [], []
         for path in sorted(self.root.glob("*.json")):
             if path.name.endswith(".event.json"):
                 continue
             try:
                 record = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
-                self._log("warning", f"Telegram outbox record {path.name} is unreadable; it is left as it is.")
-                continue
+                record = None
             if isinstance(record, dict) and record.get("schema") == SCHEMA and isinstance(record.get("parts"), list) \
-                    and path.name == f"{record.get('id')}.json":
+                    and _ID.fullmatch(str(record.get("id"))) and path.name == f"{record['id']}.json":
                 records.append(record)
+            else:
+                self._log("warning", f"Telegram outbox record {path.name} is unreadable; it is left as it is.")
+                unread.append(path)
+        events = sorted(self.root.glob("*.event.json"))
+        present = {path.name for path in events}
+        for record in records:  # a kept copy whose bytes are gone (its deletion's record write failed): deleted
+            if record.get("held") and f"{record['id']}.event.json" not in present:
+                record.update(held=False, deleted_at=record.get("deleted_at") or self.clock())
+        known = {f"{record['id']}.event.json" for record in records}
+        orphans = [path for path in events if path.name not in known]
+        self._strays = [_stray(path, "unreadable" if path in unread else "orphan") for path in unread + orphans]
         return sorted(records, key=lambda item: int(item.get("seq") or 0))
 
     def _write_payload(self, record: dict, payload: bytes) -> None:
@@ -741,8 +934,8 @@ class Outbox:
         active = sorted((item for item in self._ops.values() if item.get("state") in _ACTIVE),
                         key=lambda item: int(item.get("seq") or 0))
         if not active or active[0].get("state") == "sending" \
-                or (self._reserved and min(self._reserved) < int(active[0].get("seq") or 0)):
-            return None, None  # nothing waits, a run holds it, or an earlier event is still being saved
+                or (self._reserved and min(self._reserved) <= int(active[0].get("seq") or 0)):
+            return None, None  # nothing waits, a run holds it, or it or an earlier event is being saved or decided
         head = active[0]
         wait = float(head.get("next_at") or 0) - self.clock()
         if wait > 0 and self.clock() - float(head.get("created_at") or 0) <= MAX_AGE_SEC:
@@ -751,15 +944,16 @@ class Outbox:
 
     async def _sleep(self, wait: Optional[float]) -> None:
         self._bind()
-        try:
-            await asyncio.wait_for(self._wake.wait(), timeout=wait)
-        except asyncio.TimeoutError:
-            pass
+        woken = asyncio.ensure_future(self._wake.wait())
+        try:  # not wait_for: Python 3.10's swallows a stop that lands with a wake, and the sender lived on
+            await asyncio.wait({woken}, timeout=wait)
+        finally:
+            woken.cancel()
         self._wake.clear()
 
     def _refresh(self) -> None:
         active = [item for item in self._ops.values() if item.get("state") in _ACTIVE]
-        finished = [item for item in self._ops.values() if item.get("state") not in _ACTIVE]
+        finished = [item for item in self._ops.values() if item.get("state") not in _ACTIVE] + self._lost
         now = self.clock()
         head = min(active, key=lambda item: int(item.get("seq") or 0)) if active else None
         summary: Dict[str, Any] = {"loaded": self._loaded, "waiting": len(active), "delivered": self._delivered,
@@ -770,10 +964,40 @@ class Outbox:
                            cause=str(head.get("reason") or ""))
         for state in ("unknown", "refused", "failed", "superseded"):
             summary[state] = sum(1 for item in finished if item.get("state") == state)
+        newest = sorted(finished, key=lambda item: int(item.get("seq") or 0), reverse=True)  # by arrival, not clock
+        kept = [item for item in newest if item.get("held") and item["id"] in self._ops]  # a lost one's file: a stray
+        sizes = [item.get("size") for item in self._strays]  # what kept copies take: their events and stray files
+        summary.update(outcomes=[_outcome(item) for item in newest[:SHOWN]], outcomes_total=len(newest),
+                       kept=[_outcome(item) for item in kept[:SHOWN]] + [dict(item) for item in self._strays],
+                       kept_total=len(kept) + len(self._strays), kept_unknown=sizes.count(None),
+                       kept_bytes=sum(int(item.get("payload_bytes") or 0) for item in kept)
+                       + sum(size for size in sizes if size is not None))
         self._summary = summary
 
     def _log(self, level: str, message: str) -> None:
         self.api.log(level, message)
+
+
+def _outcome(record: dict) -> Dict[str, Any]:
+    """An outcome as the Connection form names it: its subject and facts, never its words or bytes."""
+    replaced = {part["replaces"] for part in record.get("parts") or () if "replaces" in part}
+    parts = [part for part in record.get("parts") or () if part.get("state") != "refused" or part.get("n") not in replaced]
+    subject = record.get("subject") if isinstance(record.get("subject"), dict) else {"kind": str(record.get("topic") or "")}
+    return {"id": str(record.get("id") or ""), "at": float(record.get("created_at") or 0), "state": record.get("state"),
+            "reason": str(record.get("reason") or ""), "subject": dict(subject), "parts": len(parts),
+            "arrived": sum(1 for part in parts if part.get("state") == "confirmed"), "held": bool(record.get("held")),
+            "home": bool(record.get("home")), "copy": str(record.get("copy") or ""), "deleted": "deleted_at" in record}
+
+
+def _stray(path: pathlib.Path, kind: str) -> Dict[str, Any]:
+    """A file found without a readable record: its exact name, and a handle no name can spell (a form line and the
+    copy recipe use it; a name may hold a line break). A size that cannot be read stays unknown, never zero."""
+    handle = "stray-" + hashlib.sha256(path.name.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+    try:
+        stat = path.stat()
+    except OSError:
+        return {"id": handle, "name": path.name, "stray": kind, "at": 0.0, "size": None}
+    return {"id": handle, "name": path.name, "stray": kind, "at": stat.st_mtime, "size": stat.st_size}
 
 
 def _source(event: dict) -> Dict[str, str]:

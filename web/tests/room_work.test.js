@@ -517,6 +517,7 @@ test('the one mark after the word is the room\'s shape, in the owner\'s hue whil
         // owner's move together, as chat.js writes them.
         const paint = (view) => {
             badge.textContent = view.text;
+            badge.title = view.title || '';  // a failed start's cause (chat.js setStatus), the list's Details
             Object.assign(badge.dataset, { tone: view.tone, mark: view.mark, owner: view.owner ? '1' : '', amber: view.amber,
                 step: view.step || '' });
             work.update();
@@ -551,6 +552,20 @@ test('the one mark after the word is the room\'s shape, in the owner\'s hue whil
             ['online', 'dot', 'owner', 'An unanswered question is here']);
         assert.deepEqual(paint(roomStatusView(inRoom('working', question), { connected: false })), ['offline', 'ring', 'ink', '']);
         assert.deepEqual(paint(roomStatusView(emptyWorkState(), { ready: false })), ['starting', 'hidden', 'ink', '']);
+        // A failed start says its word and cause beside its red dot, its list heading with the failure and Restart. A
+        // question still waiting there keeps the owner's dot instead (DESIGN "One mark per place": the owner's move
+        // comes first, then an outcome), said in words too, and the failure's word, cause and Restart stay.
+        const failedStart = { ready: false, boot: { phase: 'failed', dialogue_ready: true, steps: [],
+            error: 'Supervisor init failed: boot dependency refused' } };
+        const failure = header.querySelector('.rw-failure');
+        assert.deepEqual(paint(roomStatusView(emptyWorkState(), failedStart)), ['failed', 'dot', 'failed', '']);
+        assert.deepEqual(paint(roomStatusView(inRoom('idle', unanswered), failedStart)),
+            ['failed', 'dot', 'owner', 'An unanswered question is here']);
+        assert.deepEqual([badge.textContent, badge.dataset.step, trigger.disabled],
+            ['Start failed', failedStart.boot.error, false]);
+        assert.deepEqual([failure.hidden, failure.querySelector('.rw-failure-lead').textContent,
+            failure.querySelector('.btn').textContent, failure.querySelector('.ui-result-details').textContent],
+            [false, 'Ouroboros could not finish starting.', 'Restart', failedStart.boot.error]);
         assert.deepEqual(paint(roomStatusView(emptyWorkState(), { sending: true })), ['live', 'moving', 'ink', '']);
         assert.deepEqual(paint(roomStatusView(inRoom('working'), { stopping: 'finalize' })), ['live', 'moving', 'ink', '']);
         // One mark node throughout, repainted in place.
@@ -775,6 +790,49 @@ test('Main with no work opens its list for that sentence, and closes it when the
         connected = true;
         work.update();
         assert.deepEqual([work.isOpen(), trigger.disabled], [false, true], 'the open socket ends the sentence and its list');
+    } finally { work?.destroy(); restoreDom(prior); }
+});
+
+test('a starting host opens even an empty Main\'s list, which says in words what runs; readiness ends it', () => {
+    const { prior, mount } = installDom(async () => ({ ok: true, json: async () => ({}) }));
+    let work;
+    try {
+        const node = (tag, cls, parent) => {
+            const el = document.createElement(tag); el.className = cls; parent.appendChild(el); return el;
+        };
+        const page = node('div', 'page', mount);
+        const header = node('div', 'chat-page-header', page);
+        const titleRow = node('div', 'app-page-title-row', node('div', 'app-page-title-block', header));
+        const badge = node('span', 'status-badge starting', node('div', 'app-page-actions ui-chrome-group', header));
+        let ready = false, connected = true;
+        let latest = { supervisor_ready: false, boot: { phase: 'serving', dialogue_ready: true, steps: [
+            { name: 'extensions', state: 'running' }, { name: 'startup:event_queue', state: 'running' }] } };
+        work = createRoomWork({ page, statusBadge: badge, messagesDiv: node('div', 'chat-messages', page),
+            ws: { isConnected: () => connected }, hostReady: () => ready, hostBoot: () => latest.boot || null,
+            reading: { cancel() {}, scroll() {} }, works: () => workState(), liveCardRecords: new Map(),
+            pendingSubmissions: new Map() });
+        const trigger = titleRow.children.find((el) => el.classList.contains('rw-trigger'));
+        work.update();
+        assert.equal(trigger.disabled, false, 'the start is something to say, without a pointer over the title');
+        trigger.click();
+        assert.equal(work.isOpen(), true);
+        const note = header.querySelector('.rw-note');
+        assert.deepEqual([note.textContent, note.hidden], ['Messages are saved and answered once the start finishes. '
+            + 'Now: loading extensions, preparing task transport.', false]);
+        latest = { ...latest, boot: { ...latest.boot, steps: [{ name: 'startup:worker_spawn', state: 'running' }] } };
+        work.update();
+        assert.equal(note.textContent, 'Messages are saved and answered once the start finishes. Now: starting executors.',
+            'the open list follows the start');
+        connected = false;
+        work.update();
+        assert.deepEqual([work.isOpen(), trigger.disabled], [false, true], 'a plain reconnect in an empty Main lists nothing, as before');
+        connected = true;
+        work.update();
+        assert.equal(trigger.disabled, false, 'the socket back, the start is said again');
+        ready = true;
+        latest = { supervisor_ready: true };
+        work.update();
+        assert.deepEqual([work.isOpen(), trigger.disabled], [false, true], 'readiness ends the sentence and its list');
     } finally { work?.destroy(); restoreDom(prior); }
 });
 

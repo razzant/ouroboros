@@ -255,6 +255,25 @@ def test_a_contended_lock_aborts_before_the_precondition_and_the_write(isolated_
     assert not isolated_settings.exists(), "a contended write still touched settings.json"
 
 
+def test_an_incidental_write_keeps_every_unnamed_saved_value_exactly_as_written(isolated_settings):
+    """Connect tools, the tool-timeout setter and other incidental writers name only their keys: a value the read
+    merely re-types (a saved ``false`` for a key whose default is the text ``"true"``) is written back as saved."""
+    from ouroboros.gateway.owner_settings import _owner_update_settings, fields_on_saved_document
+
+    saved = {"OUROBOROS_STARTER_SKILLS_TURN_ON": False, "OUROBOROS_STARTER_SKILLS": "[]", "MCP_ENABLED": False,
+             "MCP_TOOL_TIMEOUT_SEC": "75", "OWNER_UNKNOWN_KEY": {"kept": [1, "two"]}}
+    isolated_settings.write_text(json.dumps(saved), encoding="utf-8")
+    receipt = _owner_update_settings(fields_on_saved_document({"MCP_ENABLED": True}))
+    written = json.loads(isolated_settings.read_text(encoding="utf-8"))
+    assert written == {**saved, "MCP_ENABLED": True}
+    assert written["OUROBOROS_STARTER_SKILLS_TURN_ON"] is False and written["MCP_TOOL_TIMEOUT_SEC"] == "75"
+    assert set(receipt) == {"MCP_ENABLED"}  # no read-seeded default (consciousness coverage) is authored either
+    isolated_settings.write_text(json.dumps({"OUROBOROS_SAFETY_MODE": "light"}), encoding="utf-8")
+    _owner_update_settings(fields_on_saved_document({"MCP_ENABLED": True}))
+    kept = json.loads(isolated_settings.read_text(encoding="utf-8"))
+    assert kept["OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"] == "light"  # a value derived from a saved key still lands
+
+
 def test_the_commit_boundary_is_only_marked_by_a_real_write(isolated_settings):
     from ouroboros.gateway.owner_settings import (
         CommitBoundary,
@@ -710,8 +729,8 @@ def test_the_live_handler_judges_the_receipt_by_the_document_on_disk_not_the_pro
                                                                                                refused):
     """VD3-06, the real path: the server reads the document, the boot receipts it, then
     ``config.apply_settings_to_env`` projects the LIVE settings keys into the process environment
-    and ``GET /api/review-pool`` is served from that projection (``runtime_environ``). A lane value
-    a refused migration retained lives in the document, not in the projection — so judged against
+    and ``GET /api/review-pool`` is served from the settings the pool runs from (``runtime_catalog_settings``).
+    A lane value a refused migration retained lives in the document, not in the projection — so judged against
     the projection the current ``error`` receipt read as ``history`` and the Settings note hid it.
     The handler judges the receipt against the document on disk, the same view the direct payload
     of the loaded document gives; the retained lanes never enter the runtime configuration."""
@@ -759,6 +778,27 @@ def test_review_pool_payload_states_which_pool_rows_have_no_credentials(monkeypa
     unreadable = {**_POOL_CATALOG, "items": [{**_POOL_CATALOG["items"][0], "delivery": "x"}, *_POOL_CATALOG["items"][1:]]}
     broken = settings_mod.review_pool_payload({"OUROBOROS_SUBAGENTS": json.dumps(unreadable)})
     assert broken["config_error"] and broken["pool_without_credentials"] == []
+
+
+def test_review_pool_endpoint_reads_the_saved_catalog_and_says_unknown_for_an_unreadable_one(tmp_path, monkeypatch):
+    """The server's projection carries no catalog, so ``GET /api/review-pool`` reads the saved document; one it
+    cannot read is a typed ``config_error`` with no pool, never the defaults' factory rows or the Main seat."""
+    from ouroboros import config as cfg
+
+    settings_mod = _pool_world(monkeypatch)
+    path = tmp_path / "settings.json"
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", path)
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
+    path.write_text(json.dumps({"OUROBOROS_SUBAGENTS": json.dumps(_POOL_CATALOG)}), encoding="utf-8")
+    cfg.apply_settings_to_env(cfg.load_settings())
+    assert "OUROBOROS_SUBAGENTS" not in os.environ
+
+    body = settings_mod.review_pool_payload()
+    assert [row["subagent_id"] for row in body["pool"]] == ["api-critic", "session-critic", "bare-critic"]
+    assert body["config_error"] == "" and body["catalog"]["rows"] == 5
+    path.write_text("{broken", encoding="utf-8")
+    unknown = settings_mod.review_pool_payload()
+    assert unknown["pool"] == [] and unknown["config_error"].startswith("OUROBOROS_SUBAGENTS is unknown: ")
 
 
 def test_generic_settings_save_projects_model_role_objects_as_json(
@@ -1503,6 +1543,40 @@ def test_roster_row_switches_keep_checker_and_review_pool_guards(row_client, cas
             refused = client.post("/api/settings", json={key: {**changed, "items": items}})
             assert refused.status_code == 400 and "same engine" in refused.json()["error"], refused.text
             assert refused.json()["saved"] is False and path.read_bytes() == before
+
+
+@pytest.mark.parametrize("count", [26, 27, 49, 50, 51])
+def test_a_roster_up_to_the_ceiling_saves_and_reads_back_whole_and_one_row_more_writes_nothing(row_client, count):
+    """Up to 50 rows (every third switched off, the last a 64-character id with multilingual guidance) save
+    through the owner's CAS and read back as written; a 51st refuses the whole value and the stored bytes stay.
+    The last row alone changes the roster's token: a write holding the earlier token is refused (409) with the
+    tail intact, and a save of another key keeps every row."""
+    from ouroboros.configured_subagents import normalize_configured_subagents
+    client, path, _ = row_client
+    key = "OUROBOROS_SUBAGENTS"
+    rows = [{"subagent_id": f"row-{i}", "recommended_use": f"Row {i}.", "route": {"kind": "api_model", "target_id": f"openai/m-{i}"},
+             **({"review_eligible": True} if i == 0 else {}), **({"enabled": False} if i % 3 == 2 else {})} for i in range(count)]
+    rows[-1].update(subagent_id="z" * 64, recommended_use="Последняя строка — 長い説明.")
+    roster, token = {"enabled": True, "items": rows}, client.get("/api/settings").json()["_meta"]["tokens"][key]
+    before = path.read_bytes()
+    saved = client.post("/api/settings", json={key: roster, "if_unchanged": {key: token}})
+    if count > 50:
+        assert saved.status_code == 400 and saved.json()["saved"] is False, saved.text
+        assert "has 51 rows; maximum is 50" in saved.json()["error"] and path.read_bytes() == before
+        return
+    assert saved.status_code == 200, saved.text
+    stored = json.loads(path.read_text(encoding="utf-8"))[key]
+    assert stored == normalize_configured_subagents(roster)[1] and json.loads(stored)["items"] == rows
+    read = client.get("/api/settings").json()
+    assert read[key] == stored and read["_meta"]["tokens"][key] == saved.json()["changes"][key]["token"]
+    tail = {**roster, "items": [*rows[:-1], {**rows[-1], "recommended_use": "Changed at the tail."}]}
+    moved = client.post("/api/settings", json={key: tail, "if_unchanged": {key: read["_meta"]["tokens"][key]}})
+    assert moved.status_code == 200 and moved.json()["changes"][key]["token"] != read["_meta"]["tokens"][key]
+    before = path.read_bytes()
+    stale = client.post("/api/settings", json={key: roster, "if_unchanged": {key: read["_meta"]["tokens"][key]}})
+    assert stale.status_code == 409 and stale.json()["saved"] is False and path.read_bytes() == before
+    assert client.post("/api/settings", json={"TOTAL_BUDGET": 321}).status_code == 200
+    assert json.loads(json.loads(path.read_text(encoding="utf-8"))[key])["items"] == tail["items"]
 
 
 @pytest.mark.parametrize("endpoint,handler,body,key", [

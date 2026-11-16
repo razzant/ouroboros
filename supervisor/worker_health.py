@@ -257,7 +257,6 @@ def recover_confirmed_dead_worker(job: dict) -> None:
     from supervisor.task_reaper import (
         _finish_self_finalized_task, _respawn_after_reap, TerminalFileRecoveryPending,
     )
-    from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK
 
     with _queue_lock:
         if not _dead_job_is_current(job):
@@ -308,14 +307,11 @@ def recover_confirmed_dead_worker(job: dict) -> None:
         else:
             _recover_crashed_task_without_terminal(job, queue)
     if not job.get("skip_respawn"):
-        # Hold only the lifecycle serializer around the identity check + existing
-        # respawn. Its process launch deliberately runs outside queue lock.
-        with _WORKER_LIFECYCLE_LOCK:
-            with _queue_lock:
-                owned = (_pool().WORKERS.get(job["worker_id"]) is w
-                         and str(_pool().DRIVE_ROOT) == job["drive_root"])
-            if owned:
-                _respawn_after_reap(queue, _pool(), job["worker_id"], expected_worker=w)
+        with _queue_lock:
+            owned = (_pool().WORKERS.get(job["worker_id"]) is w
+                     and str(_pool().DRIVE_ROOT) == job["drive_root"])
+        if owned:
+            _respawn_after_reap(queue, _pool(), job["worker_id"], expected_worker=w)
 
 
 def owe_worker_exit(worker: Any, root: Any = None) -> None:
@@ -871,7 +867,6 @@ def _recover_terminal_files(job: dict) -> None:
     from ouroboros.headless import prepare_terminal_task_files, terminal_task_files_ready
     from ouroboros.task_results import load_task_result
     from supervisor import queue as q
-    from supervisor.worker_pool_lifecycle import _WORKER_LIFECYCLE_LOCK
 
     ctx, task_id, meta, state = (job[key] for key in ("ctx", "task_id", "meta", "state"))
     worker_id = meta.get("worker_id")
@@ -912,11 +907,7 @@ def _recover_terminal_files(job: dict) -> None:
         if terminal and worker is not None and not worker.proc.is_alive():
             # Only the captured dead process can be replaced; a newer pool is
             # never touched by completion of an old file job.
-            with _WORKER_LIFECYCLE_LOCK:
-                with q._queue_lock:
-                    owned = ctx.WORKERS.get(worker_id) is worker
-                if owned:
-                    _reaper()._respawn_after_reap(q, _pool(), int(worker_id))
+            _reaper()._respawn_after_reap(q, _pool(), int(worker_id), expected_worker=worker)
     except Exception:
         log.warning("Terminal file recovery failed for %s", task_id, exc_info=True)
     finally:

@@ -119,6 +119,28 @@ def turn_stop_reader(ctx: Any) -> Optional[Callable[[], Optional[bool]]]:
     return lambda: in_process_stop_now(ctx)
 
 
+def turn_control_reader(ctx: Any) -> Optional[Callable[[], Optional[bool]]]:
+    """``turn_stop_reader`` widened, for a host wait that runs no command (the gate's wait for memory), to every
+    control the turn's model wait reads (``TaskModelWait.control_reason``): a finalize control (Wrap up, a carrier's
+    cooperative stop at teardown or Update), the task's deadlines. True on a control; None when Stop is unknown or
+    the controls are unreadable (it stops nothing); else False. Reads only, by the waiter's private seen copy:
+    delivery stays the loop's. Ordinary pooled work keeps the worker kill: no reader."""
+    stop = turn_stop_reader(ctx)
+    if stop is None:
+        return None
+    waiter = ctx.model_wait_context
+
+    def read() -> Optional[bool]:
+        stopped = stop()
+        if stopped:
+            return True
+        try:
+            return True if waiter.control_reason() else stopped
+        except Exception:
+            return None
+    return read
+
+
 def communicate_or_stop(proc: subprocess.Popen, timeout: Optional[float], stop: Optional[Callable[[], Any]] = None,
                         end: Optional[Callable[[], Any]] = None) -> tuple:
     """The one command wait. Without ``stop`` it is ``proc.communicate(timeout)``, as before. With a reader
@@ -569,6 +591,9 @@ def _shell_env_for_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> dict:
     if isolated is not None:
         return isolated
     env = runtime_environ()
+    from ouroboros.node_runtime import forward_playwright_node
+
+    forward_playwright_node(env)
     try:
         system_repo = pathlib.Path(getattr(ctx, "repo_dir")).resolve(strict=False)
         wd = pathlib.Path(work_dir).resolve(strict=False)

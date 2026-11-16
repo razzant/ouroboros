@@ -315,7 +315,9 @@ def fetch_openrouter_endpoint_pricing(model: str, *, timeout_sec: float = 5.0) -
             suffix = tag.rsplit("/", 1)[-1] if "/" in tag else ""
             tier = "priority" if suffix in {"fast", "priority"} else "flex" if suffix == "flex" else "default"
             source = {"provider": "openrouter", "model": model, "endpoint_tag": tag,
-                      "service_tier": tier, "url": url, "status": endpoint.get("status")}
+                      "service_tier": tier, "url": url, "status": endpoint.get("status"),
+                      # The endpoint's declared token limits, kept beside its tariff (``pricing.declared_token_limits``).
+                      **{key: endpoint[key] for key in ("context_length", "max_prompt_tokens") if endpoint.get(key) is not None}}
             rows[tag] = _endpoint_pricing_schedule(endpoint.get("pricing"), source)
         return rows
     except (requests.RequestException, TypeError, ValueError, AttributeError) as error:

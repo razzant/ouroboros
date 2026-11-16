@@ -283,6 +283,9 @@ def _child_env(
     env = _scrub_env(env_allowlist, skill_state_dir(drive_root, skill_name), skill_name, granted_keys=granted_keys)
     from ouroboros.config import resolve_app_root
     from ouroboros.launch_roots import BASIS_ENV
+    from ouroboros.node_runtime import forward_playwright_node
+
+    forward_playwright_node(env)  # this child runs here even beside a work domain (a trusted extension), as companions do
 
     env["OUROBOROS_APP_ROOT"] = str(resolve_app_root())  # the host's, never inferred from the drive's parent
     env["OUROBOROS_SETTINGS_PATH"] = str(pathlib.Path(drive_root) / "settings.json")

@@ -376,12 +376,13 @@ def test_context_overflow_with_no_episode_keeps_the_overflow_salvage(tmp_path, m
     assert usage["execution_status"] == "infra_failed"
     assert usage["reason_code"] == "llm_api_error"
     assert trace["forced_finalization"]["source"] == "context_overflow_local_salvage"
-    assert result == loop_transport.provider_terminal_fallback_text(
-        usage, is_context_overflow=True, is_transport_wait=False, waited_sec=0.0, is_deadline_exhausted=False,
+    assert result == loop_transport.provider_terminal_fallback_text(  # the loop's only round, its own refusal named
+        usage, round_idx=1, is_context_overflow=True, is_transport_wait=False, waited_sec=0.0, is_deadline_exhausted=False,
     )
     assert "Context-size recovery" in result and "exact transcript" in result
-    # Nothing substantive could leave the view, so no renewal was sent and the refusal names the frame.
+    # Nothing substantive could leave the view, so no renewal was sent and the refusal names the frame, as counted.
     assert "a renewed view could not make it fit (largest parts: " in result
+    assert " by raw estimate of the current view)" in result
 
 
 def test_round_record_outranks_a_wait_cause_that_holds_an_overflow_kind(tmp_path):

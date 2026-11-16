@@ -173,6 +173,50 @@ def test_snapshot_is_immutable_across_queue_persistence(monkeypatch, tmp_path):
     assert restored["parent_cognitive_route"]["model"] == "openai/parent"
 
 
+def test_rows_past_the_former_26_are_offered_whole_selected_exactly_and_never_retargeted(tmp_path):
+    """A 50-row catalog: every switched-on row is offered with its guidance whole; the 27th and the 50th are
+    selected by handle and by stored id alike, a switched-off one is refused as switched off; the snapshot
+    keeps its row through queue persistence and a later save that moves or removes that row."""
+    from ouroboros.configured_subagents import parse_configured_subagents, roster_handles
+    from ouroboros.subagent_runtime import (
+        SubagentSelectionError,
+        model_visible_subagent_catalog,
+        select_subagent_snapshot,
+    )
+    from supervisor import queue as task_queue
+
+    rows = [_api_row(f"row-{i}", model=f"openai/m-{i}") for i in range(50)]
+    rows[-1].update(subagent_id="z" * 64, recommended_use="Последняя строка: " + "длинное описание · " * 40)
+    for row in rows[3::7]:
+        row["enabled"] = False
+    settings = _settings(*rows)
+    handles = roster_handles(parse_configured_subagents(settings["OUROBOROS_SUBAGENTS"]), settings)
+    offered = model_visible_subagent_catalog(settings)["rows"]
+    assert [row["subagent_id"] for row in offered] == [handles[row["subagent_id"]] for row in rows if row.get("enabled", True)]
+    assert offered[-1]["recommended_use"] == rows[-1]["recommended_use"] and len(offered) == 50 - len(rows[3::7])
+    for row in (rows[26], rows[49]):
+        by_handle, _ = select_subagent_snapshot(settings, subagent_id=handles[row["subagent_id"]])
+        by_id, _ = select_subagent_snapshot(settings, subagent_id=row["subagent_id"])
+        assert by_handle["selected_subagent_id"] == by_id["selected_subagent_id"] == row["subagent_id"]
+        assert by_handle["route"]["target_id"] == row["route"]["target_id"]
+    with pytest.raises(SubagentSelectionError) as off:
+        select_subagent_snapshot(settings, subagent_id=rows[45]["subagent_id"])
+    assert off.value.code == "subagent_disabled"
+    snapshot = _snapshot(settings, rows[49]["subagent_id"])
+    pending = [{"id": "child50", "type": "task", "chat_id": 1, "text": "work", "delegation_role": "subagent",
+                "configured_subagent": snapshot, "_attempt": 1}]
+    task_queue.init(tmp_path)
+    task_queue.init_queue_refs(pending, {}, {"value": 0})
+    assert task_queue.persist_queue_snapshot(reason="test") is True
+    pending.clear()
+    assert task_queue.restore_pending_from_snapshot() == 1 and pending[0]["configured_subagent"] == snapshot
+    moved = _settings(*rows[:-1], {**rows[-1], "route": {"kind": "api_model", "target_id": "openai/elsewhere"}})
+    assert _snapshot(moved, rows[49]["subagent_id"])["route"]["target_id"] == "openai/elsewhere"
+    assert pending[0]["configured_subagent"]["route"]["target_id"] == "openai/m-49", "a taken snapshot is never retargeted"
+    with pytest.raises(SubagentSelectionError):
+        select_subagent_snapshot(_settings(*rows[:-1]), subagent_id=rows[49]["subagent_id"])
+
+
 def test_api_actor_dispatch_is_exact_recursive_route_without_slot_substitution(monkeypatch):
     from ouroboros.subagents import resolve_subagent_dispatch
     import ouroboros.provider_models as provider_models
@@ -1042,6 +1086,34 @@ def test_undisposed_capture_allows_an_independent_actor_selection(monkeypatch, t
         runtime._EXACT_START_SELECTION.reset(token)
     assert refusal is None and actor["selected_subagent_id"] == "session-builder"
     assert not custody.replay(tmp_path)["run-old"].patch_disposed
+
+
+@pytest.mark.parametrize("own,work_tier,expected", [
+    ("", "fast", "fast"),  # a session row without a tier of its own runs on the work's (owner 13.11)
+    ("standard", "fast", "standard"),  # a row with one keeps it
+    ("", "", ""),  # nothing to inherit: the row's resolution (none here)
+])
+def test_the_prepared_session_actor_asks_the_tier_its_start_selected(tmp_path, own, work_tier, expected):
+    """``prepare_delegate_start_actor`` is the one hop from the start's selection to the run's request."""
+    import ouroboros.subagent_runtime as runtime
+    from ouroboros.subagent_history import execution_identity
+    from ouroboros.tools.registry import ToolContext
+
+    row = _session_row()
+    if own:
+        row["processing_preference"] = own
+    snapshot = runtime.select_subagent_snapshot(_settings(row), subagent_id="session-builder", work_tier=work_tier)[0]
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="child1")
+    token = runtime._EXACT_START_SELECTION.set({"snapshot": snapshot})
+    try:
+        actor, refusal = runtime.prepare_delegate_start_actor(ctx, tmp_path, recovering=False, invocation_id="",
+            work_order_fingerprint="new", authority_fingerprint="authority")
+    finally:
+        runtime._EXACT_START_SELECTION.reset(token)
+    assert refusal is None and actor["processing_preference"] == expected
+    assert execution_identity(snapshot) == execution_identity(_snapshot(_settings(row), "session-builder"))
+    # The run's custody and history file it under the row's own tier, as effort is under the row's pin.
+    assert actor["row_processing"] == execution_identity(snapshot)["processing_preference"] == own
 
 
 def test_replacement_refuses_unreadable_custody_before_fail_soft_scan(

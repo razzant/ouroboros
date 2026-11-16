@@ -171,7 +171,7 @@ test('the Project close control and scrim both use the shared Back, including a 
 // before the complete list is read too, from the state's count of listable rooms. Only a state that counts none (an
 // older server) leaves the number unsaid. A find with no match offers its two different ways back each with its own
 // glyph: Clear search the field's ×, Show all projects the chevron Show more opens the list with.
-function listOf(t, { listableCount = 3, reserved = [] } = {}) {
+function listOf(t, { listableCount = 3, reserved = [], readList = null } = {}) {
     const { document } = setup(t);
     // What the list's painting asks of a node beyond the shared stub, for this test's life.
     const added = {
@@ -197,7 +197,7 @@ function listOf(t, { listableCount = 3, reserved = [] } = {}) {
         last_message_at: `2026-11-1${at}T00:00:00Z` }));
     const nav = createProjectsNav({ header, list, feed: () => feed, feedOrder: () => 0, nextOrder: () => 1,
         reserved: () => reserved, listableCount: () => listableCount, activeId: () => null, isUnread: () => false,
-        readList: async () => ({ projects: feed }), onListRead() {}, onShown() {}, open() {}, openMenu() {}, pin() {},
+        readList: readList || (async () => ({ projects: feed })), onListRead() {}, onShown() {}, open() {}, openMenu() {}, pin() {},
         isPinPending: () => false });
     t.after(() => nav.destroy());
     const commands = () => list.children.filter((node) => node.className.includes('nav-projects-more'))
@@ -244,6 +244,23 @@ test('a row leaving the feed hands lost keyboard focus to Find, while kept rows 
     feed.length = 0;
     nav.paint();
     assert.equal(document.activeElement, elsewhere, 'a read never steals the keyboard from another control');
+});
+
+test('a key\'s Show more whose read failed hands the keyboard to Try again; a press leaves it to Find', async (t) => {
+    for (const key of [true, false]) {
+        const { nav, header, list, document } = listOf(t, { listableCount: 60, readList: async () => { throw new Error('offline'); } });
+        document.body.append(header, list);
+        nav.paint();
+        const more = list.children.find((node) => node.className.includes('nav-projects-more'));
+        Object.defineProperty(more, 'isConnected', { get: () => document.body.contains(more) });
+        more.focus();
+        await more.fire('click', { detail: key ? 0 : 1 });
+        for (let turn = 0; turn < 6; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+        const retry = list.children.find((node) => node.textContent.trim() === 'Try again');
+        assert.ok(retry && !more.isConnected, 'the read failed: Try again stands where Show more was');
+        assert.equal(document.activeElement, key ? retry : header.querySelector('input'),
+            key ? 'the key that asked keeps going on Try again' : 'a press that loses its control goes to Find');
+    }
 });
 
 test('Show more names how many it adds before the list is read, as after', (t) => {

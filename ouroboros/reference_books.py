@@ -11,7 +11,9 @@ stamps, and selected views carry physical refs separately.
 from __future__ import annotations
 
 import posixpath
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Iterable
 from urllib.parse import unquote, urlsplit
@@ -144,6 +146,21 @@ def _member_paths(entrypoint: MarkdownSource, book_id: str) -> tuple[str, ...] |
     return tuple(paths)
 
 
+@lru_cache(maxsize=64)
+def _book_source(raw: bytes, source_path: str) -> MarkdownSource:
+    """Bounded parser reuse by exact bytes AND physical path, never mtime or TTL.
+
+    Only this book loader uses the memo; mutable YAML metadata is detached below before
+    a source escapes. Every load still reads current bytes and current membership.
+    """
+    return parse_markdown_source(raw, source_path)
+
+
+def _read_book_source(reader: Callable[[str], bytes], path: str) -> MarkdownSource:
+    source = _book_source(reader(path), path)
+    return replace(source, frontmatter=deepcopy(source.frontmatter)) if source.frontmatter is not None else source
+
+
 def load_reference_book(
     repo_root: Path,
     book_id: str,
@@ -154,9 +171,9 @@ def load_reference_book(
         raise ValueError(f"unknown reference book: {book_id}")
     reader = read_bytes if read_bytes is not None else lambda path: (Path(repo_root) / path).read_bytes()
     entry_path = BOOK_ENTRYPOINTS[book_id]
-    entrypoint = parse_markdown_source(reader(entry_path), entry_path)
+    entrypoint = _read_book_source(reader, entry_path)
     members = _member_paths(entrypoint, book_id)
-    chapters = tuple(parse_markdown_source(reader(path), path) for path in members or ())
+    chapters = tuple(_read_book_source(reader, path) for path in members or ())
     book = ReferenceBook(book_id, entrypoint, chapters, members is None)
     problems = validate_reference_book(book)
     if problems:

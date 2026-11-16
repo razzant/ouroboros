@@ -498,15 +498,15 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
         if (focused) (host.contains(focused) ? focused : host.querySelector('[data-costs-account="accounts"]'))?.focus({ preventScroll: true });
     }
 
-    // What the limits cannot count, one line under them (pricing.known_spend_gaps). The words are composed
+    // What the limits cannot count, one line under them (pricing.spend_coverage). The words are composed
     // (spendGapsWords), so the overlay leaves them alone and a language change says them again.
-    let spendGaps = [];
+    let spendGaps = [], partlyCounted = [];
     function paintGaps() {
         const line = page.querySelector('#costs-gaps');
         if (!line) return;
-        line.textContent = spendGapsWords(spendGaps);
-        line.hidden = !spendGaps.length;
-        if (spendGaps.length) line.dataset.i18nFmt = 'spend gaps'; else delete line.dataset.i18nFmt;
+        line.textContent = spendGapsWords(spendGaps, partlyCounted);
+        line.hidden = !line.textContent;
+        if (line.textContent) line.dataset.i18nFmt = 'spend gaps'; else delete line.dataset.i18nFmt;
     }
 
     async function loadLimits() {
@@ -517,6 +517,7 @@ export function initCosts({ state, mount, openDashboardTab = null, openSettings 
             const noteEl = page.querySelector('#costs-budget-help');
             if (noteEl && note) noteEl.textContent = note;
             spendGaps = Array.isArray(settings?._meta?.known_spend_gaps) ? settings._meta.known_spend_gaps.map(String) : [];
+            partlyCounted = Array.isArray(settings?._meta?.partly_counted_spend) ? settings._meta.partly_counted_spend : [];
             paintGaps();
         } catch { /* the rows keep the last values they read */ }
         limits.paint();

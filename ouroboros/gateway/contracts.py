@@ -28,7 +28,8 @@ from ouroboros.gateway.claudexor_contracts import (  # noqa: F401 -- public re-e
     ClaudexorReadState, ClaudexorStatusReads, ClaudexorPassiveReadError, ClaudexorQuotaResponse,
     ClaudexorStatusResponse,
 )
-from ouroboros.gateway.work_contracts import WorkLeadFields, WorkStateFields
+from ouroboros.gateway.work_contracts import ProcessingTiers, WorkLeadFields, WorkStateFields
+from ouroboros.gateway.project_folder_contracts import FsDirsEntry, FsDirsResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.history_contracts import ChatHistoryResponse, PresenceContact  # noqa: F401 -- public re-exports
 from ouroboros.gateway.health_contracts import BootDocument, BootJob, BootStep, HealthResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.attachment_contracts import (  # noqa: F401 -- public re-exports
@@ -542,7 +543,7 @@ class ProjectsChangedOutbound(TypedDict):
 
 class UiPreferencesChangedOutbound(TypedDict):
     """Outbound notice that ``POST /api/ui/preferences`` committed a change of the named groups
-    (``contributions``); every window reads the named state again."""
+    (``contributions``, ``model_pins``); every window reads the named state again."""
 
     type: Literal["ui_preferences_changed"]
     keys: List[str]
@@ -591,6 +592,7 @@ class ProjectCreateRequest(TypedDict, total=False):
     init_git: bool
     git_url: str
     with_workspace: bool
+    no_folder: bool  # records the choice to keep none; absent, a file-less room's first promoted task provisions one
 
 
 class ProjectClosure(TypedDict):
@@ -611,9 +613,11 @@ class ProjectEntry(TypedDict, total=False):
     name: str
     chat_id: int
     working_dir: str
+    no_folder: Dict[str, str]  # {at, by}: the recorded choice to keep no folder, until one is chosen
     pinned: bool  # absent on legacy rows means unpinned; no routing/activity effect
     cognition: ProjectCognition
     model_choice: ChatModelChoice  # the room's own model for new owner work; never copied from Main
+    processing_choice: Literal["", "standard", "fast", "economy", "ultrafast"]  # the room's own tier for new owner work; '' = Default
     provenance: str
     clone_url: str
     trusted_at: str
@@ -640,25 +644,6 @@ class ProjectDeleteResponse(TypedDict):
     ok: bool
     project_id: str
     folder_untouched: bool
-
-
-class FsDirsEntry(TypedDict):
-    name: str
-    path: str
-    is_git: bool
-
-
-class FsDirsResponse(TypedDict):
-    """GET /api/fs/dirs — owner-facing directory browser for the New Project attach
-    picker (server-side; works in web/Docker). Directories only, confined to the
-    home tree, never file contents. ``truncated`` is True when the directory holds
-    more children than the 500-entry cap (no silent truncation)."""
-
-    path: str
-    parent: str
-    home: str
-    dirs: List[FsDirsEntry]
-    truncated: bool
 
 
 class TaskNamedOutbound(TypedDict):
@@ -813,6 +798,7 @@ class StateResponse(WorkStateFields):
     context_mode_auto_low: bool  # frozen compatibility field, always False (persistent auto-Low is retired)
     effort_range: EffortRange  # the owner's effort range (POST /api/owner/effort-range), the tolerant read
     main_route: ChatModelRoute  # Main itself, written by POST /api/owner/chat-model without project_id
+    processing_tiers: ProcessingTiers  # Main's own tier and the default one; POST /api/owner/chat-processing
     safety_mode: str
     skills_repo_configured: bool
     github_token_configured: bool
@@ -890,7 +876,8 @@ class SettingsMeta(SettingsNetworkMeta, SettingsTiming, total=False):
     restart_state: SettingsRestartState
     connections: list[Dict[str, Any]]  # every API connection as the picker shows it (provider_connections.connections_meta)
     main_connection_choice: list[str]  # the connections an unauthored Main waits to be chosen among (server_runtime)
-    known_spend_gaps: list[str]  # what spends money the limits cannot count: no known price (pricing.known_spend_gaps)
+    known_spend_gaps: list[str]  # what spends money the limits cannot count: no known price (pricing.spend_coverage)
+    partly_counted_spend: list[Dict[str, str]]  # {name, condition}: counted only under a price condition (the same)
 
 
 class SettingsSaveResponse(SettingsReceipt, total=False):
@@ -1417,6 +1404,7 @@ class OnboardingSubagentsPreviewResponse(TypedDict):
     model_settings: Dict[str, Any]  # the model setting keys the draft would save
     available_subagents: Dict[str, Any]
     known_spend_gaps: List[str]  # what the draft's limits cannot count, as GET /api/settings names it after a save
+    partly_counted_spend: List[Dict[str, str]]  # what they count only under a price condition, the same way
     source: str
     diagnostics: list[Dict[str, Any]]
 

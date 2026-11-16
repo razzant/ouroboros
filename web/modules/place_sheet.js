@@ -11,7 +11,7 @@ import { tr, fmt } from './i18n.js';
 import { fetchJson } from './api_client.js';
 import { catalogPrograms } from './model_program.js';
 import { bindModelChoosers, modelChooserHtml, updateModelChooser } from './model_chooser.js';
-import { priceWords } from './route_editor_primitives.js';
+import { modelPriceWords } from './route_editor_primitives.js';
 import { modelCatalog } from './model_catalog_store.js';
 import { disconnectPlace, failureText, normalizePlace, normalizePlaceStatus, PLACES_CHANGED_EVENT, readPlaceConnector, readPlaceRooms, readPlaces, updatePlace } from './consciousness_api.js';
 import { mountPlaceHistory, placeRoomsHtml } from './place_history.js';
@@ -370,7 +370,7 @@ export function showSheet(dialog, { returnFocus, onClose, onBack }) {
 export function modelSuggestions(data, { tierPriced = true } = {}) {
     if (!Array.isArray(data?.items) || data.read_state === 'failed') throw new Error('The model catalog could not be read.');
     return data.items.filter((item) => !item?.use_local)
-        .map((item) => (item?.price && !tierPriced ? { ...item, meta: priceWords(item.price) } : item));
+        .map((item) => { const meta = tierPriced ? '' : modelPriceWords(item); return meta ? { ...item, meta } : item; });
 }
 
 /** The one write a press on the sheet asks for, as the contract's change; null when it needs no write. */

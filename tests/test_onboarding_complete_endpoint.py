@@ -526,7 +526,7 @@ def test_api_only_preview_is_read_only_and_never_reads_claudexor(onboarding):
 
 
 def test_the_preview_names_what_the_limits_of_its_draft_cannot_count(onboarding):
-    """The limits step says before the save what Dashboard › Costs says after it (`pricing.known_spend_gaps`, over
+    """The limits step says before the save what Dashboard › Costs says after it (`pricing.spend_coverage`, over
     the draft and the roster the preview shows): the roles whose route has no known price, and none where each has."""
     def gaps(**draft):
         response = onboarding.client.post("/api/onboarding/subagents/preview", json={**WIZARD_PAYLOAD, **draft})

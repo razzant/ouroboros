@@ -35,8 +35,13 @@ fetch('https://example.com/').then(() => { document.body.dataset.network = 'reac
     () => { document.body.dataset.network = 'blocked'; });
 </script></body></html>"""
 
+# A one-pixel PNG given the way ``show_card`` stores an image it read from a file: inline in the component's own ``src``.
+PIXEL = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/"
+         "iZk9HQAAAABJRU5ErkJggg==")
+
 COMPONENTS = [
     {"type": "markdown", "text": "Two plans fit what you described."},
+    {"type": "image", "src": PIXEL, "alt": "Both plans side by side"},
     {"type": "table", "path": "plans", "columns": [{"label": "Plan", "path": "name"}, {"label": "Price", "path": "price"}]},
     {"type": "action", "id": "pick", "label": "Choose Pro", "submit": {"id": "pick_pro", "once": True}},
 ]
@@ -129,6 +134,10 @@ def test_living_cards_render_press_submit_and_keep(direct_server_with_data, engi
                     _open_chat(page, url, width=width, height=900, theme=theme)
                     _wait_cards(page, ids)
                     _assert_layout(page.evaluate(FACTS), where, ids)
+                    drawn = page.locator(f'.chat-card[data-card-id="{ids["components"]}"] .widget-media img')
+                    drawn.evaluate("img => img.decode()")
+                    assert drawn.evaluate("img => [img.naturalWidth, img.alt]") == [1, "Both plans side by side"], \
+                        (where, "the card's own inline image is drawn, not named as missing")
                     frame = page.locator(f'.chat-card[data-card-id="{ids["app"]}"] iframe.chat-card-frame')
                     assert frame.get_attribute("sandbox") == "allow-scripts", where
                     inner = page.frame_locator(f'.chat-card[data-card-id="{ids["app"]}"] iframe.chat-card-frame')

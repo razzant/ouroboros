@@ -176,16 +176,47 @@ def _login_disclosure_native(operations: List[Dict[str, Any]]) -> bool:
     return False
 
 
+def _catalog_login_capable_harness_ids(catalog: Dict[str, Any]) -> "set | None":
+    """Harnesses whose current catalog row offers a sign-in on this host.
+
+    The engine fills ``setupLogin`` on every row in the same sweep as the row:
+    an object when the adapter declares a managed subscription login and its
+    vendor login command resolves here, null otherwise. That is the "an
+    account you LOG INTO" discriminator, already in the catalog the status read
+    holds, so this read need not wait for ``/v2/harnesses`` (a doctor sweep of
+    every harness, seconds on a busy host). The raw-api/openrouter adapters
+    authenticate with an API key only and are null: projecting them into the
+    accounts panel gave them "Log in" buttons no flow can honor.
+
+    The catalog is evidence only when every row is in a current wire state, as
+    ``_harness_setup_login`` reads it for sign-in: null or a known mode. An
+    empty row list, a legacy row that omits the key, a malformed value, an
+    unknown mode or a duplicate id answers ``None``, and the caller derives the
+    set from the manifests as before (an engine with a new mode takes that
+    slower path until ``_SETUP_LOGIN_TRANSPORTS`` learns it, as sign-in must).
+    A set, even empty, is authoritative. Pure for unit tests."""
+    rows = catalog.get("harnesses") if isinstance(catalog, dict) else None
+    if not isinstance(rows, list) or not rows:
+        return None
+    capable: set = set()
+    for row in rows:
+        harness = str(row.get("id") or "") if isinstance(row, dict) else ""
+        state = _harness_setup_login(catalog, harness)[0] if harness else _SETUP_LOGIN_MALFORMED
+        if state == _SETUP_LOGIN_OBJECT:
+            capable.add(harness)
+        elif state != _SETUP_LOGIN_NULL:
+            return None
+    return capable
+
+
 def _login_capable_harness_ids(rows: List[Dict[str, Any]]) -> "set | None":
     """Harnesses whose manifest declares a ``native_session`` auth source.
 
-    That is the engine's own discriminator for "an account you LOG INTO"
-    (codex, claude, cursor). The raw-api/openrouter adapters authenticate with
-    an API key only — projecting them into the accounts panel gave them
-    "Log in" buttons no flow can honor, and leaked them into the reviewer
-    slots' subscriptions group. Read from ``/v2/harnesses`` because the
-    agent-capability catalog is a derived projection that drops the
-    manifest's auth block.
+    The manifest answer for a catalog that is not current evidence
+    (``_catalog_login_capable_harness_ids`` answered ``None``: a legacy engine,
+    an unread catalog, a malformed row): ``native_session`` in a readable
+    manifest, read from ``/v2/harnesses``. A row whose vendor program is not
+    installed carries no manifest.
 
     Returns ``None`` when the response carried ZERO readable manifests overall
     — the answer succeeded but says nothing about auth, so callers must fail
@@ -209,10 +240,11 @@ def _login_capable_harness_ids(rows: List[Dict[str, Any]]) -> "set | None":
 
 
 def _account_row_visible(harness_id: str, capable) -> bool:
-    """Account-surface predicate: manifest-declared login capability. Deliberately
-    NOT "keep all unknown-manifest rows": that would resurrect raw-api
-    (manifest-null on the live engine), which is the exact leak this filter
-    closes. ``capable is None`` (no readable manifest at all) fails open."""
+    """Account-surface predicate: login capability (the catalog's ``setupLogin``,
+    or the manifests on an engine whose catalog is not current evidence).
+    Deliberately NOT "keep all unknown rows": that would resurrect raw-api,
+    which is the exact leak this filter closes. ``capable is None`` (no readable
+    evidence at all) fails open."""
     return capable is None or harness_id in capable
 
 
@@ -340,7 +372,7 @@ def _with_facet_memory(payload: Dict[str, Any], include_models: bool = False,
         if read_sequence is None:
             _STATUS_READ_SEQUENCE += 1
             read_sequence = _STATUS_READ_SEQUENCE
-        # Manifest eligibility and roster membership are independent reads. A
+        # Login eligibility and roster membership are independent reads. A
         # refused roster may retain old rows, never overwrite newer eligibility.
         policy_key = (home, "login_policy", False)
         policy = _FACET_MEMORY.get(policy_key)
@@ -497,19 +529,20 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
                     return {"evidence": read_capability_marks(gateway)}
                 except Exception:
                     return {"failed_at": utc_now_iso()}
-            # The catalog, manifest, profile and quota reads are INDEPENDENT GETs
-            # over one thread-safe httpx client, and each costs SECONDS daemon-side
-            # (it probes the real coding-agent CLIs on every read: binary, version,
-            # login state). Serialized, the panel waited for their SUM — ~23s on a
-            # warm daemon with nothing on screen; fanned out it waits for the
-            # slowest. Failure semantics are per-facet: each result is classified
-            # on its own (see `_facet_outcome`), a refusal surfaces as that facet's
-            # own typed error below WITHOUT downgrading the siblings that
-            # landed, and a manifest refusal still fails OPEN.
-            with ThreadPoolExecutor(max_workers=6) as pool:
+            # The catalog, profile and quota reads are INDEPENDENT GETs over one
+            # thread-safe httpx client, and each can cost SECONDS daemon-side.
+            # Serialized, the panel waited for their SUM — ~23s on a warm daemon
+            # with nothing on screen; fanned out it waits for the slowest. The
+            # manifest read (`/v2/harnesses`, a doctor sweep of every harness) is
+            # not in the fan-out: the catalog's `setupLogin` answers login
+            # eligibility, and the manifests are asked below only when the catalog
+            # is not current evidence. Failure semantics are per-facet: each
+            # result is classified on its own (see `_facet_outcome`), a refusal
+            # surfaces as that facet's own typed error below WITHOUT downgrading
+            # the siblings that landed, and a manifest refusal still fails OPEN.
+            with ThreadPoolExecutor(max_workers=5) as pool:
                 operations_call = pool.submit(lambda: gateway.operations())
                 catalog_call = pool.submit(gateway.agent_capabilities)
-                manifests_call = pool.submit(gateway.harnesses)
                 profiles_call = pool.submit(gateway.credential_profiles)
                 quota_call = pool.submit(_quota_state)
                 marks_call = pool.submit(_capability_marks)
@@ -547,16 +580,20 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
             payload["unified_accounts"] = profiles_outcome[0] == READ_OK
             catalog = catalog_outcome[1] if catalog_outcome[0] == READ_OK else {}
             payload["_facet_observed"] = {"catalog": catalog.get("generatedAt")}
-            # Account surfaces show only harnesses with a login concept. On a
-            # transient manifest-read failure — or a successful read with zero
-            # readable manifests (the helper answers None) — fail OPEN
-            # (no filter): a blip must not blank the panel. The manifest read is
-            # deliberately NOT a facet: it is a filter input, and its failure is
-            # already absorbed rather than reported.
-            try:
-                capable = _login_capable_harness_ids(manifests_call.result())
-            except ClaudexorUnavailable:
-                capable = None
+            # Account surfaces show only harnesses with a login concept: the
+            # catalog's own `setupLogin` when the catalog is current evidence,
+            # otherwise (a legacy engine, an unread catalog, a malformed row) the
+            # manifests, read once now. On a transient manifest-read failure — or
+            # a successful read with zero readable manifests (the helper answers
+            # None) — fail OPEN (no filter): a blip must not blank the panel. The
+            # manifest read is deliberately NOT a facet: it is a filter input, and
+            # its failure is already absorbed rather than reported.
+            capable = _catalog_login_capable_harness_ids(catalog)
+            if capable is None:
+                try:
+                    capable = _login_capable_harness_ids(gateway.harnesses())
+                except ClaudexorUnavailable:
+                    capable = None
             # The operations catalog gates other capabilities (per-account model
             # catalogs below, resources, marks); an unreadable one withholds only
             # them, absorbed like the manifest read, never a reported facet.
@@ -582,29 +619,12 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
                         str(v) for v in row.get("accessProfilesSupported") or []
                     ],
                 }
-                if include_models and projected["id"]:
-                    try:
-                        from ouroboros.gateway.models import account_catalog_models, account_catalog_supported
-
-                        if account_catalog_supported(operations, "/v2/harnesses/:id/models"):
-                            envelope = gateway.harness_model_catalog(projected["id"], view="accounts")
-                            projected["model_catalog"] = envelope
-                            projected["models"] = [
-                                {**model, "credential_profile_id": account.get("credentialProfileId"),
-                                 "availability": account.get("availability"), "problem": account.get("problem"),
-                                 "provenance": source.get("provenance"), "observed_at": source.get("observedAt"),
-                                 "catalog_source": source.get("source")}
-                                for account, source, model in account_catalog_models(envelope)
-                            ]
-                        else:
-                            projected["models"] = gateway.harness_models(projected["id"])
-                    except ClaudexorUnavailable as exc:
-                        projected["models"] = []
-                        projected["models_error"] = exc.code
                 rows.append(projected)
+            if include_models:
+                _attach_model_catalogs(gateway, rows, operations)
             payload["harnesses"] = rows
             profiles = profiles_outcome[1] if profiles_outcome[0] == READ_OK else {}
-            # Full Accounts owns this manifest-derived presentation policy. The
+            # Full Accounts owns this login-eligibility presentation policy. The
             # passive roster remains raw; its browser merge carries this evidence
             # forward instead of deriving login support from catalog membership.
             if profiles_outcome[0] == READ_OK or capable is not None:
@@ -648,6 +668,51 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
         # at its `not_read` default, each carrying the error that kept it unasked.
         payload["_facet_errors"] = {facet: exc.code for facet in payload["reads"]}
     return payload
+
+
+def _attach_model_catalogs(gateway: Any, rows: List[Dict[str, Any]], operations: List[Any]) -> None:
+    """Attach each visible harness's model list, asking for all of them at once.
+
+    They are independent GETs over the gateway's one thread-safe client, like the
+    fan-out in ``_read_status_payload``. A busy daemon answers every request late,
+    so asked one after another the read paid that wait once per harness; asked
+    together it pays it once. The pool is joined before any result is used, so
+    every read ends while the client is open, and the rows are filled in catalog
+    order. A refused read stays that row's ``models_error``; any other failure
+    leaves the status read."""
+    from ouroboros.gateway.models import account_catalog_models, account_catalog_supported
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    targets = [row for row in rows if row["id"]]
+    if not targets:
+        return
+    per_account = account_catalog_supported(operations, "/v2/harnesses/:id/models")
+
+    def read(harness_id: str) -> Any:
+        if per_account:
+            return gateway.harness_model_catalog(harness_id, view="accounts")
+        return gateway.harness_models(harness_id)
+
+    with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+        calls = [(row, pool.submit(read, row["id"])) for row in targets]
+    for row, call in calls:
+        try:
+            result = call.result()
+        except ClaudexorUnavailable as exc:
+            row["models"] = []
+            row["models_error"] = exc.code
+            continue
+        if not per_account:
+            row["models"] = result
+            continue
+        row["model_catalog"] = result
+        row["models"] = [
+            {**model, "credential_profile_id": account.get("credentialProfileId"),
+             "availability": account.get("availability"), "problem": account.get("problem"),
+             "provenance": source.get("provenance"), "observed_at": source.get("observedAt"),
+             "catalog_source": source.get("source")}
+            for account, source, model in account_catalog_models(result)
+        ]
 
 
 def _facet_outcome(

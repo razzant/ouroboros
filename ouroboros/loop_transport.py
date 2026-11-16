@@ -60,7 +60,7 @@ from ouroboros.config import (
     get_task_idle_timeout_sec,
 )
 from ouroboros.deadline_utils import parse_deadline_ts
-from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY, _TRANSIENT_BACKOFF_CAP_SEC, _exception_body
+from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY, _TRANSIENT_BACKOFF_CAP_SEC
 from ouroboros.llm_claudexor import daemon_not_delivered
 from ouroboros.llm_probe import upstream_transport_reachable
 from ouroboros.model_concurrency import capacity_refusal
@@ -879,7 +879,8 @@ def provider_terminal_fallback_text(accumulated_usage: Dict[str, Any], *, round_
     each by its own kind (``round_failure_words``): such a refusal is never called an outage, an outage keeps its words."""
     from ouroboros.primary_route_observation import round_failure_words
 
-    return _provider_terminal_text(accumulated_usage, **facts) + round_failure_words(accumulated_usage, round_idx)
+    return (_provider_terminal_text(accumulated_usage, round_idx=round_idx, **facts)
+            + round_failure_words(accumulated_usage, round_idx))
 
 
 def _provider_terminal_text(
@@ -890,7 +891,7 @@ def _provider_terminal_text(
     waited_sec: float,
     interactive: bool = False,
     is_deadline_exhausted: bool,
-    control_reason: str = "", wait_cause: str = "",
+    control_reason: str = "", wait_cause: str = "", round_idx: Any = None,
 ) -> str:
     """Owner-facing terminal text when provider death left nothing to salvage.
 
@@ -903,8 +904,10 @@ def _provider_terminal_text(
     fact (0.0 when the binding window was already spent before the first wait
     iteration, so that terminal never claims a wait). The waited-out wording
     deliberately avoids the supervisor's lifecycle term INTERRUPTED
-    (STATUS_INTERRUPTED means pre-requeue, not terminal).
+    (STATUS_INTERRUPTED means pre-requeue, not terminal). ``round_idx``: the ending
+    round, whose own latest size refusal its size facts name (``context_view_facts``).
     """
+    from ouroboros.context_view_facts import refusal_frame_facts, request_window_fact
     from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
     from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
 
@@ -926,17 +929,12 @@ def _provider_terminal_text(
                 f"after {waited_sec / 60.0:.1f} min. No new summary request was sent. "
                 "Completed work and the original attempt-cost records are preserved.")
     if is_context_overflow:
-        from ouroboros.context_anchor import REFUSED_INPUTS_KEY
-
-        refused = min((int(v) for v in (accumulated_usage.get(REFUSED_INPUTS_KEY) or {}).values() if v), default=0)
-        parts = ", ".join(f"{label} ~{int(tokens):,}" for label, tokens in accumulated_usage.get("_context_refusal_frame") or [])
-        facts = "; ".join(fact for fact in (f"smallest refused request ~{refused:,} tokens" if refused else "",
-                                             f"largest parts: {parts}" if parts else "") if fact)
+        facts = refusal_frame_facts(accumulated_usage, round_idx)
         return (
             "⚠️ Context-size recovery ended without a fitting request; no further provider call was made. "
             "The recovery passes, the configured fallback and a renewed view could not make it fit"
             f"{f' ({facts})' if facts else ''}. The exact transcript and any files written so far are preserved."
-            + _failure_window_fact(accumulated_usage, overflow=True)
+            + request_window_fact(accumulated_usage, overflow=True, round_idx=round_idx) + _provider_quote(accumulated_usage)
         )
     if is_transport_wait:
         if unknown:
@@ -946,6 +944,7 @@ def _provider_terminal_text(
                 f"{_unknown_wait_note(True, waited_sec, interactive)}"
                 " Inspect the preserved facts before starting another run."
                 f"{_unknown_terminal_recovery_hint(accumulated_usage)}{UNKNOWN_ATTEMPT_COST_NOTE}"
+                + request_window_fact(accumulated_usage, round_idx=round_idx, earlier_only=True)
             )
         # A released attempt proves only that the request never reached the provider: a broken
         # connect, an incomplete upload or an engine refusal before dispatch, never a provider reply.
@@ -967,12 +966,13 @@ def _provider_terminal_text(
         else:
             text = ("⚠️ The request did not reach the provider, and " + ("no wait window was left" if interactive else
                     "the owner deadline left no time to wait") + f"; {subject} ended as an outage, not completed.")
-        return text + kept + (f" Last reported code: {code}." if code else "")
+        return (text + kept + (f" Last reported code: {code}." if code else "")
+                + request_window_fact(accumulated_usage, round_idx=round_idx, earlier_only=True))
     if is_deadline_exhausted:
         text = "⚠️ The owner deadline ended primary model work; any files written so far are preserved."
         if unknown:
             text += _unknown_terminal_recovery_hint(accumulated_usage) + UNKNOWN_ATTEMPT_COST_NOTE
-        return text
+        return text + request_window_fact(accumulated_usage, round_idx=round_idx, earlier_only=True)
     released = accumulated_usage.get("_last_llm_attempt_custody") == "released" and not unknown
     return (
         ("⚠️ The model request did not start generation." if released else "⚠️ The model provider returned no usable response.")
@@ -981,27 +981,8 @@ def _provider_terminal_text(
         f"{_unknown_terminal_recovery_hint(accumulated_usage) if unknown else provider_recovery_hint(accumulated_usage)}"
         f"{UNKNOWN_ATTEMPT_COST_NOTE if unknown else ''} "
         "Any files written so far are preserved in the workspace."
-        + _failure_window_fact(accumulated_usage)
+        + request_window_fact(accumulated_usage, round_idx=round_idx)
     )
-
-
-def _failure_window_fact(usage, *, overflow=False):
-    if not overflow and usage.get("_last_llm_error_kind") not in {"bad_request", "request_too_large", "context_overflow"}:
-        return ""
-    from ouroboros.capability_evidence import _parse_ctx_requested
-    from ouroboros.context_view_facts import required_book_fact, window_projection
-    from ouroboros.context_window import WindowRecord
-
-    input_tokens, _reply, total = _parse_ctx_requested(usage.get("_last_llm_provider_message", ""))
-    if input_tokens or total:
-        request = f"request {'input' if input_tokens else 'total'} {input_tokens or total:,} tokens (provider stated)"
-    else:
-        estimate = int(usage.get("_context_prompt_estimate") or 0)
-        request = f"request input estimated {estimate:,} tokens" if estimate else "request size unknown"
-    window = usage.get("_context_window") or window_projection(WindowRecord("", reserve=int(
-        usage.get("_context_response_reserve_tokens") or 0)))
-    return f"\n{request}; assumed {window['text']}." + (required_book_fact(usage) if overflow else "")
-
 
 
 # Host vocabulary: terminal rows without provider words, and fallback's previous route.
@@ -1033,27 +1014,28 @@ _DIAGNOSTIC_POINTER = "The task's Logs keep the host's record of this failure."
 _OWNER_QUOTE_LIMIT = 600
 
 
-def owner_provider_message(failure: Any) -> str:
-    """Whole provider sentence from a structured body/stream error or body-error dict.
+def owner_provider_answer(failure: Any, classification: Any = None) -> Dict[str, Any]:
+    """The provider's answer as the owner line and the continuing mind read it (``ProviderAnswer.facts``): the
+    sentence that carried the classifier's recognition, else the innermost party's own on the current path (an
+    upstream's words, not its gateway's wrapper), with its speaker.
 
-    No sentence returns "". Exception repr belongs to ``llm_api_error`` and
-    ``_last_llm_error`` diagnostics, not owner text. Claudexor's composed display
-    (stage/cause/engine/capability facts) and private body are excluded; only its
+    An HTTP 200 body error brings the record its transport seam read from the whole object (``answer``). Exception
+    repr belongs to ``llm_api_error`` and ``_last_llm_error`` diagnostics, not owner text. Claudexor's composed
+    display (stage/cause/engine/capability facts) and private body are excluded; only its
     ``owner_provider_fields`` speak. ``_provider_quote`` bounds the owner's quote.
     """
-    from ouroboros.llm_claudexor import ClaudexorModelError
-    from ouroboros.utils import sanitize_tool_result_for_log
+    from ouroboros._usage_response import provider_answer
 
-    if isinstance(failure, ClaudexorModelError):
-        return ""
-    if isinstance(failure, dict):
-        authored = (failure.get("message"),)
-    else:
-        body = _exception_body(failure)
-        nested = body.get("error") if isinstance(body.get("error"), dict) else {}
-        authored = (nested.get("message"), body.get("message"), getattr(failure, "provider_message", None))
-    text = next((value for value in authored if isinstance(value, str) and value.strip()), "")
-    return sanitize_tool_result_for_log(" ".join(text.split())) if text else ""
+    if isinstance(failure, dict) and isinstance(failure.get("answer"), dict):
+        return failure["answer"]
+    return provider_answer(failure).facts(
+        getattr(classification, "said", ("", "")), basis=getattr(classification, "basis", ""),
+        untyped=getattr(classification, "untyped", False))
+
+
+def owner_provider_message(failure: Any) -> str:
+    """The quoted provider sentence of a failure, or "" (``owner_provider_answer``)."""
+    return owner_provider_answer(failure).get("sentence", "")
 
 
 def owner_provider_fields(failure: Any) -> Dict[str, str]:
@@ -1070,14 +1052,16 @@ def owner_provider_fields(failure: Any) -> Dict[str, str]:
             if isinstance(value := context.get(key), str) and value.strip()}
 
 
-def stamp_owner_provider_message(accumulated_usage: Dict[str, Any], failure: Any) -> None:
-    """Replace/clear this call's provider sentence, fields and producer-cut marker.
+def stamp_owner_provider_message(accumulated_usage: Dict[str, Any], failure: Any, classification: Any = None) -> None:
+    """Replace/clear this call's provider answer: its quoted sentence, the record that sentence came from
+    (speaker, recognition basis, each party's words), typed fields and producer-cut marker.
 
-    ``loop_llm_call`` stamps each failure so older words cannot speak for it;
-    body-error messages may already be bounded (``_last_llm_provider_message_cut``).
+    ``loop_llm_call`` stamps each failure so older words cannot speak for it. Every later reader (the owner line,
+    the window record, the sizing of a pass, the continuing request's facts) reads this one stamp.
     """
-    cut = isinstance(failure, dict) and failure.get("message_truncated") is True
-    for key, value in (("_last_llm_provider_message", owner_provider_message(failure)),
+    answer = owner_provider_answer(failure, classification)
+    cut = isinstance(failure, dict) and failure.get("message_truncated") is True and "answer" not in failure
+    for key, value in (("_last_llm_provider_message", answer.get("sentence")), ("_last_llm_provider_answer", answer),
                        ("_last_llm_provider_message_cut", cut),
                        ("_last_llm_provider_fields", owner_provider_fields(failure))):
         accumulated_usage.pop(key, None)
@@ -1091,16 +1075,18 @@ def _failure_words(kind: str) -> str:
 
 
 def _provider_quote(accumulated_usage: Dict[str, Any]) -> str:
-    """The provider's own sentence, a long one shortened in words beside the Logs pointer, or ""."""
+    """The stamped sentence with its speaker (the upstream a gateway named, else "The provider"), a long one
+    shortened in words beside the Logs pointer, or ""."""
     from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
 
     message = " ".join(sanitize_tool_result_for_log(
         str(accumulated_usage.get("_last_llm_provider_message") or "")).split()).strip()
     cut = accumulated_usage.get("_last_llm_provider_message_cut") is True
+    speaker = (accumulated_usage.get("_last_llm_provider_answer") or {}).get("speaker") or "The provider"
     if message and not cut and truncate_review_artifact(message, limit=_OWNER_QUOTE_LIMIT) == message:
-        return f" The provider said: \"{message}\""
+        return f" {speaker} said: \"{message}\""
     if message:  # its producer or the SSOT cut it (the SSOT's anti-waste floor lets a small overflow through whole)
-        return f" The provider said: \"{message[:_OWNER_QUOTE_LIMIT].rstrip()}…\" (shortened). {_DIAGNOSTIC_POINTER}"
+        return f" {speaker} said: \"{message[:_OWNER_QUOTE_LIMIT].rstrip()}…\" (shortened). {_DIAGNOSTIC_POINTER}"
     return ""
 
 

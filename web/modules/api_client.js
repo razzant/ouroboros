@@ -650,7 +650,11 @@ export const apiClient = {
     ownerSubagentsMode: (choice) => jsonPost('/api/owner/subagents-mode', choice),
     /** The room's model for new owner work. @param {import('./client_contract_types.js').OwnerChatModelRequest} choice
      * @returns {Promise<import('./client_contract_types.js').OwnerChatModelResponse>} */
-    ownerChatModel: (choice) => jsonPost('/api/owner/chat-model', choice),
+    ownerChatModel: (choice) => jsonPost('/api/owner/chat-model', choice, { headers: APP_SETTINGS_ORIGIN }),
+    /** The room's processing tier for new owner work ('' = Default); Main's own without project_id.
+     * @param {import('./client_contract_types.js').OwnerChatProcessingRequest} choice
+     * @returns {Promise<import('./client_contract_types.js').OwnerChatProcessingResponse>} */
+    ownerChatProcessing: (choice) => jsonPost('/api/owner/chat-processing', choice, { headers: APP_SETTINGS_ORIGIN }),
     /** @returns {Promise<import('./api_types.js').OwnerSafetyModeResponse>} */
     ownerSafetyMode: (mode) => jsonPost('/api/owner/safety-mode', { mode }),
     /** A log's newest rows; `view` 'compact' bounds each row and keeps its `ts` and `type` (ouroboros/gateway/logs.py). */
@@ -680,6 +684,15 @@ export const apiClient = {
         payload_root: payloadRoot,
         ...(expectedContentHash ? { expected_content_hash: expectedContentHash } : {}),
     }, { headers: { Prefer: 'respond-async' } }),
+    /** @returns {Promise<import('./skill_mcp_types.js').SkillMcpConnectPreviewResponse>} */
+    skillMcpConnectPreview: (skill) => fetchJson(`/api/skills/${encodeURIComponent(skill)}/mcp-connect`, { cache: 'no-store' }),
+    /**
+     * @param {string} skill
+     * @param {import('./skill_mcp_types.js').SkillMcpConnectRequest} body
+     * @returns {Promise<import('./skill_mcp_types.js').SkillMcpConnectResponse|import('./skill_mcp_types.js').SkillMcpConnectPending>}
+     */
+    skillMcpConnect: (skill, body) => jsonPost(`/api/skills/${encodeURIComponent(skill)}/mcp-connect`, body,
+        { headers: { Prefer: 'respond-async' } }),
     skillGrants: (skill, items, expectedContentHash = '', enableAfterGrant = false) => jsonPost(`/api/skills/${encodeURIComponent(skill)}/grants`, {
         items, ...(expectedContentHash ? { expected_content_hash: expectedContentHash } : {}),
         ...(enableAfterGrant ? { enable_after_grant: true } : {}),
@@ -697,6 +710,12 @@ export const apiClient = {
         typeof update === 'string' ? { name: update } : update),
     /** @returns {Promise<import('./api_types.js').ProjectDeleteResponse>} */
     projectDelete: (projectId) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/delete`, {}),
+    /** One Project's working folder as one look finds it (the only read that inspects a folder).
+     *  @returns {Promise<import('./project_folder_types.js').ProjectFolderResponse>} */
+    projectFolder: (projectId) => fetchJson(`/api/projects/${encodeURIComponent(projectId)}/folder`, { cache: 'no-store' }),
+    /** @param {import('./project_folder_types.js').ProjectFolderRequest} change
+     *  @returns {Promise<import('./project_folder_types.js').ProjectFolderResponse>} */
+    projectFolderChange: (projectId, change) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/folder`, change),
     /** @returns {Promise<import('./api_types.js').FsDirsResponse>} */
     fsDirs: (path = '') => fetchJson(`/api/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ''}`, { cache: 'no-store' }),
     /**

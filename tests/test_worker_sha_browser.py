@@ -67,7 +67,8 @@ def test_descendant_is_informational_and_problem_stays_warning(width, tmp_path):
                 assert problem.locator('.log-failure').is_hidden()
                 assert page.locator('.log-entry').filter(has_text='comparison unavailable').locator('.log-failure').is_hidden()
                 descendant.locator(':scope > summary').click()
-                assert 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' in descendant.locator('.log-raw').inner_text()
+                # The record reads a Blob asynchronously (logs_raw.js); the click opens it before its bytes arrive.
+                playwright.expect(descendant.locator('.log-raw')).to_contain_text('b' * 40)
                 assert 'Worker SHA mismatch' not in page.locator('#page-logs').inner_text()
                 assert not errors, errors
                 output = diagnostic_directory(tmp_path, "worker-sha", publish=True) / f'worker-sha-{width}.png'

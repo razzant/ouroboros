@@ -184,8 +184,31 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
         log.info("Playwright not found, installing...")
         from ouroboros.platform_layer import pip_install_target_args
 
-        _install_beside_calls("playwright-package", "the Playwright package", lambda _progress: subprocess.check_call(
+        _install_beside_calls("playwright-package", "the Playwright package", lambda _progress: _diagnostic_install(
             [sys.executable, "-m", "pip", "install", *pip_install_target_args(sys.executable), "playwright"]))
+
+    # Before every SDK start and installer subprocess, either engine: the driver runs on the pinned Node,
+    # never silently on the SDK's own copy (an older signed bundle or a pip-installed SDK carries one). A local
+    # one is selected at once; preparing it (~50 MB download) runs beside the calls, as a browser's does.
+    from ouroboros.claudexor_runtime import ClaudexorRuntimeError, get_runtime_manager
+    from ouroboros.node_runtime import select_playwright_node
+
+    try:
+        try:
+            select_playwright_node()
+        except ClaudexorRuntimeError:
+            if not allow_install:
+                raise
+            node_version = getattr(get_runtime_manager().pin, "node_version", "")
+            _install_beside_calls("pinned-node", f"the pinned Node {node_version} for Playwright's driver",
+                                  lambda _progress: _prepare_driver_node(select_playwright_node))
+    except ClaudexorRuntimeError as exc:
+        if exc.code == "runtime_install_in_progress":  # another process prepares it (a boot after an Update)
+            raise chromium_runtime.ChromiumRefusal(chromium_runtime.PREPARING, (
+                "the pinned Node for Playwright's driver is still being installed (waiting for another Ouroboros "
+                "process that is installing it); this call opened no browser. A later call uses it.")) from None
+        raise RuntimeError(f"Browser tools need the reviewed Node for Playwright's driver: {exc}. "
+                           "Set PLAYWRIGHT_NODEJS_PATH to choose a Node explicitly.") from exc
 
     if engine == "chromium":
         return _pinned_chromium(allow_install=allow_install)
@@ -232,7 +255,8 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
 
     try:
         from playwright.sync_api import sync_playwright
-        with sync_playwright() as pw:
+        from ouroboros.browser_output import driver_diagnostics
+        with driver_diagnostics(), sync_playwright() as pw:
             executable_path = pathlib.Path(str(getattr(pw, engine).executable_path))
         if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0":
             try:
@@ -255,7 +279,7 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
         def install(_progress: Dict[str, Any]) -> None:  # Playwright's own installer locks its browsers root
             log.info("Installing Playwright %s dependencies and binary...", engine)
             _repair_host_dependencies(engine, install_python)
-            subprocess.check_call([install_python, "-m", "playwright", "install", engine])
+            _diagnostic_install([install_python, "-m", "playwright", "install", engine])
 
         _install_beside_calls(install_key, f"Playwright {engine}", install)
 
@@ -287,10 +311,18 @@ def _playwright_python() -> str:
     )
 
 
+def _diagnostic_install(command: list[str]) -> None:
+    """Installer progress is diagnostics, unlike the browser driver's protocol."""
+    from ouroboros.process_logging import relayed_child_output
+
+    with relayed_child_output() as output:
+        subprocess.check_call(command, **({"stdout": output, "stderr": output} if output is not None else {}))
+
+
 def _repair_host_dependencies(engine: str, install_python: str = "") -> None:
     """Best effort: Playwright installs the engine's host libraries where it can."""
     try:
-        subprocess.check_call([install_python or _playwright_python(), "-m", "playwright", "install-deps", engine])
+        _diagnostic_install([install_python or _playwright_python(), "-m", "playwright", "install-deps", engine])
     except Exception as exc:
         log.warning("Playwright system dependency repair failed; continuing with browser download: %s", exc)
 
@@ -300,6 +332,20 @@ def _repair_host_dependencies(engine: str, install_python: str = "") -> None:
 # its own download. A call waits only what is left of its own window and then says where it stands.
 _installs: Dict[str, Tuple[concurrent.futures.Future, Dict[str, Any]]] = {}
 _installs_lock = threading.Lock()
+
+
+def _prepare_driver_node(select) -> str:
+    """Prepare and select the pin's Node for the driver; then the extensions that waited for it are asked again, as
+    after the boot's preparation (``server_boot.requeue_waiting_extensions``; a failure there only logs)."""
+    node = select(allow_install=True)
+    try:
+        from ouroboros.config import DATA_DIR
+        from ouroboros.server_boot import requeue_waiting_extensions
+
+        requeue_waiting_extensions(DATA_DIR)
+    except Exception:
+        log.warning("Extensions waiting for the pinned Node were not asked again", exc_info=True)
+    return node
 
 
 def _install_beside_calls(key: str, what: str, install: Callable[[Dict[str, Any]], Any], hint: str = "") -> Any:
@@ -632,11 +678,15 @@ async def _open_session(ctx: ToolContext, bs: Any, owner: Any, engine: str, requ
 
 
 async def _start_driver(bs: Any) -> None:
-    """Own the transport before starting it; a close during the handshake takes the same driver."""
-    driver = browser_session.PlaywrightDriver()
-    with _retired_generations_lock:
-        setattr(bs, "_pw_driver", driver)
-    playwright = await driver.start()
+    """Own the transport before starting it; a close during the handshake takes the same driver. The driver's
+    stderr joins the process buffer for this task's spawn alone (``driver_diagnostics``); stdout stays protocol."""
+    from ouroboros.browser_output import driver_diagnostics
+
+    with driver_diagnostics(task=True):
+        driver = browser_session.PlaywrightDriver()
+        with _retired_generations_lock:
+            setattr(bs, "_pw_driver", driver)
+        playwright = await driver.start()
     with _retired_generations_lock:
         if getattr(bs, "_pw_driver", None) is driver:
             bs.pw_instance = playwright

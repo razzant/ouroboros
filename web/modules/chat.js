@@ -386,7 +386,7 @@ export function createChatInstance({
     // Local user submissions awaiting server confirmation (clientMessageId
     // -> { clientMessageId, timestamp }).
     const pendingSubmissions = new Map();
-    const hostStart = createHostStart(); // В9 readiness and boot phases; a disconnect forgets both
+    const hostStart = createHostStart(); // В9 readiness and boot phases; a disconnect and a reconnect forget both
     // Bounded conclusions retain known outcomes for later cards; reusable slots clear on settlement.
     const concludedDirectActivities = new Map();
     const CONCLUDED_ACTIVITY_LEDGER_MAX = 200;
@@ -3419,14 +3419,18 @@ export function createChatInstance({
 
     onWs('open', (msg) => {
         const openedVisit = visit, readOnOpen = recentRequest;
-        mainWaiting?.setConnected(true);
-        refreshHeaderControlState();
-        syncChatStatus();
         // The socket's previouslyConnected covers newly mounted Projects too;
         // per-instance state is only the fallback for legacy open events.
         const isReconnect = typeof msg?.previouslyConnected === 'boolean'
             ? msg.previouslyConnected
             : wsHasConnectedOnce;
+        // A real reconnect forgets the start as the close did: a body polled while the socket was down may be the
+        // server's from before a restart. A room's return (`resumed`) is none: `leave` forgot an outage it left in,
+        // `stay` one it slept through.
+        if (isReconnect && !msg?.resumed) hostStart.forget();
+        mainWaiting?.setConnected(true);
+        refreshHeaderControlState();
+        syncChatStatus();
         // A changed-code reload owes one notice. Main exists from startup: if away at first open, it hears only
         // resume's synthetic reconnect but still owes that notice. A Project mounted later owes none.
         if (isReconnect && !wsHasConnectedOnce && !isMain) pendingRestartNotice = '';
@@ -3489,7 +3493,7 @@ export function createChatInstance({
     roomWork = createRoomWork({ page, asPanel, ws, statusBadge, messagesDiv, reading, stateSnapshots, revealQuestion,
         works: () => workState, liveCardRecords, pendingSubmissions, pendingSuggestedNames,
         cancelRunFromCard, refreshHeaderControlState, captureVisibleTimelineAnchor, restoreVisibleTimelineAnchor,
-        historyPager, showLatest, hostReady: hostStart.ready });
+        historyPager, showLatest, hostReady: hostStart.ready, hostBoot: () => hostStart.status().bootPhase });
     // Main's bar: Restart, Panic, the budget and the consciousness chip; a Project's bar is app.js's.
     header = asPanel ? null : createRoomHeader({ bar: pageHeader, ws, shade: roomWork, openDashboardTab,
         refreshState: refreshHeaderControlState });
@@ -3527,6 +3531,9 @@ export function createChatInstance({
         leave: () => {
             if (leaving) return;
             catchUp.cancel();  // its return reads, and says so, anew
+            // Left in an outage (down after the page's socket opened), it will not hear the reconnect that forgets a
+            // readiness polled meanwhile. Before the first open there is none: that open keeps the boot read.
+            if (ws.isConnected?.() === false && ws.previouslyConnected?.()) hostStart.forget();
             roomWork?.leave(); keepPlace(); leaving = true; visit += 1;
             readReceipt.cancel(); historyReadAbort?.abort(); historyPager.suspend(); historyResyncScheduler.cancel();
             rowSleep.destroy(); chatResizeObserver?.disconnect(); reviewHydrator.suspend(); replies.search.close();

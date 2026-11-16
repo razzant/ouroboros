@@ -532,11 +532,14 @@ def test_the_local_runtime_install_refuses_before_pip(policy, monkeypatch, manag
 
 @pytest.mark.parametrize("managed", [True, False])
 @pytest.mark.parametrize("installed", [True, False])
-def test_browser_tools_install_no_package_into_a_managed_interpreter(policy, monkeypatch, managed, installed):
+@pytest.mark.parametrize("node", ["prepared", "cold"])
+def test_browser_tools_install_no_package_into_a_managed_interpreter(policy, monkeypatch, managed, installed, node):
     """The Playwright package would land in the serving interpreter; browser binaries and an installed package
-    stay as they are."""
+    stay as they are. The pinned driver Node is a file of the data root's own store, like the browser: preparing
+    it installs no package, under either policy, and is counted apart whatever this host has prepared."""
     import builtins
 
+    from ouroboros import claudexor_runtime, node_runtime
     from ouroboros.tools import browser
 
     policy(managed)
@@ -547,17 +550,25 @@ def test_browser_tools_install_no_package_into_a_managed_interpreter(policy, mon
             raise ImportError("not installed")
         return real_import(name, *args, **kwargs)
 
+    def select_playwright_node(env=None, *, allow_install=False):
+        if node == "cold":
+            raise claudexor_runtime.ClaudexorRuntimeError("runtime_node_unavailable", "Node is not prepared yet")
+        return "/fixture/node"
+
     monkeypatch.setattr(builtins, "__import__", importer)
     monkeypatch.setattr(browser.sys, "frozen", False, raising=False)
-    pip = _calls(monkeypatch, "ouroboros.tools.browser._install_beside_calls")
+    monkeypatch.setattr(node_runtime, "select_playwright_node", select_playwright_node)
+    installs = _calls(monkeypatch, "ouroboros.tools.browser._install_beside_calls")
     launched = _calls(monkeypatch, "ouroboros.tools.browser._pinned_chromium", "/fixture/chromium")
     if managed and not installed:
         with pytest.raises(RuntimeError, match="administrator"):
             browser._ensure_playwright_installed(engine="chromium")
-        assert pip == [] and launched == []
+        assert installs == [] and launched == []
         return
     assert browser._ensure_playwright_installed(engine="chromium") == "/fixture/chromium"
-    assert len(pip) == (0 if installed else 1) and len(launched) == 1
+    assert [args[0] for args, _ in installs] == (
+        ([] if installed else ["playwright-package"]) + ([] if node == "prepared" else ["pinned-node"]))
+    assert len(launched) == 1
 
 
 # --- the update channel --------------------------------------------------------------------------------

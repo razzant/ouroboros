@@ -21,6 +21,7 @@ import types
 import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
+from tests._tariff_guard import _no_unscripted_tariff_reads  # noqa: F401  (autouse: DeepSeek sends here)
 from tests.test_restart_retention import _pool_events, _restart_door
 
 
@@ -114,8 +115,9 @@ def _first_round(tmp_path, monkeypatch, task, *, wire=False):
     monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "low")
     monkeypatch.setattr(LLMClient, "_SUPPORTED_PARAMS_FETCHED", True, raising=False)
     monkeypatch.setattr(agent_module.OuroborosAgent, "_log_worker_boot_once", lambda self: None)
+    fitted = []  # the effort the start fit sized the request with (``context_fit._request_shapes``)
     monkeypatch.setattr("ouroboros.agent.build_llm_messages",
-                        lambda **_kw: ([{"role": "user", "content": "go"}], {}))
+                        lambda **kw: fitted.append(kw["reasoning_effort"]) or ([{"role": "user", "content": "go"}], {}))
     captured = []
     real_execute = llm_attempt._execute_candidate
 
@@ -144,6 +146,7 @@ def _first_round(tmp_path, monkeypatch, task, *, wire=False):
     _wait_for_post_task(started)
     assert captured, "the real first round never reached the physical executor"
     first = captured[0]
+    assert fitted == [str((first.effort or {}).get("requested") or "")], "the start fit sizes the effort round 1 sends"
     if not wire:
         return [str((first.effort or {}).get("requested") or "")]
     usage_events = []

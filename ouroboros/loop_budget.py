@@ -142,6 +142,7 @@ def _check_budget_limits(
     # producer allowance stops when known spend reaches it, never one call early.
     authority = task_pacing.COST_STOP_EXPLICIT if tool_ctx is None else task_pacing.cost_stop_authority(tool_ctx)
     explicit = authority == task_pacing.COST_STOP_EXPLICIT
+    continuation_view = None  # populated only when pricing temporarily replaces the pending ordinary fit
     if explicit and prompt_estimate > 0 and (
             global_remaining is not None or (cost_ceiling.root_cap_usd is not None and deciding is not None)):
         finish_reason = task_pacing.wrapup_last_fit_text(deciding, cost_ceiling, global_remaining)
@@ -160,10 +161,21 @@ def _check_budget_limits(
             # Pre-screen only: every proxy stop, and every image prompt the proxy
             # understates, is priced exactly on a COPY of the transcript (no
             # service finalization) before anything destructive happens.
+            from ouroboros.loop_forced_finalization import _bind_forced_route
+
             probe_messages = [dict(message) for message in ctx.messages]
             _loop()._append_or_merge_user_message(probe_messages, forced_prompt)
             wrapup_fits, two_fit = _exact_reservations(ctx, probe_messages, balances, prompt_estimate,
                                                        last_fit_relaxed, server_web)
+            pending_view = (getattr(tool_ctx, "context_fit_plan", None), getattr(tool_ctx, "active_context_mode", None))
+            if (wrapup_fits is False or two_fit is False) and _bind_forced_route(ctx):
+                continuation_view = pending_view
+                # A cold tail's plan for the next ordinary round's route left that price unmeasured (a rendered
+                # Nano's whole reply): the stop is priced again on the acting route's own fit; the switch stays.
+                probe_messages = [dict(message) for message in ctx.messages]
+                _loop()._append_or_merge_user_message(probe_messages, forced_prompt)
+                wrapup_fits, two_fit = _exact_reservations(ctx, probe_messages, balances, prompt_estimate,
+                                                           last_fit_relaxed, server_web)
         if wrapup_fits is False or two_fit is False:
             # The exact probe confirmed a stop: finalize services and prepare the
             # candidate that will be dispatched (forced augmentations included).
@@ -187,7 +199,8 @@ def _check_budget_limits(
                 accumulated_usage["cost_stop_rail"] = "wrapup_reservation_last_fit"
                 budget_pause.request_pause(
                     ctx, rail=budget_pause.RAIL_WRAPUP_LAST_FIT, scope=pause_scope,
-                    reason_text=task_pacing.wrapup_unaffordable_text(deciding, cost_ceiling, global_remaining))
+                    reason_text=task_pacing.wrapup_unaffordable_text(deciding, cost_ceiling, global_remaining),
+                    context_view=continuation_view)
                 return _loop()._forced_fallback_result(
                     ctx, trace, task_pacing.wrapup_unaffordable_text(deciding, cost_ceiling, global_remaining),
                     "budget_exhausted", source="budget_wrapup_unaffordable",
@@ -198,7 +211,7 @@ def _check_budget_limits(
                 accumulated_usage["cost_stop_spend_basis"] = spend_basis
                 accumulated_usage["cost_stop_rail"] = "wrapup_reservation_last_fit"
                 budget_pause.request_pause(ctx, rail=budget_pause.RAIL_WRAPUP_LAST_FIT,
-                                           scope=pause_scope, reason_text=finish_reason)
+                                           scope=pause_scope, reason_text=finish_reason, context_view=continuation_view)
                 return _loop()._forced_final_answer(
                     ctx, prompt=priced_prompt, _prompt_prepared=True,
                     fallback_text=finish_reason, reason_code="budget_exhausted",
@@ -235,7 +248,7 @@ def _check_budget_limits(
         )
         accumulated_usage["cost_stop_spend_basis"] = spend_basis
         budget_pause.request_pause(ctx, rail=budget_pause.RAIL_GRACEFUL_CEILING,
-                                   scope=pause_scope, reason_text=finish_reason)
+                                   scope=pause_scope, reason_text=finish_reason, context_view=continuation_view)
         if not explicit:
             # Only an explicit profile authored room for a final answer. The fence checks the
             # wider tree cap and wallet, never a producer allowance (or an inherited number

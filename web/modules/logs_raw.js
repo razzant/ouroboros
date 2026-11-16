@@ -74,8 +74,23 @@ export function createLogRaw({ visible }) {
     }
     const shown = view => visible() && !view.fold.closest?.('[hidden]');
     const current = (view, turn) => opened.has(view) && view.turn === turn && shown(view);
+    // Another page takes focus after Logs leaves; WebKit clears its selection even though Raw's text stays.
+    function keepSelection(view) {
+        const selection = view.pre.ownerDocument?.getSelection?.();
+        view.ranges = selection?.rangeCount && !selection.isCollapsed && view.pre.contains(selection.anchorNode)
+            && view.pre.contains(selection.focusNode)
+            ? Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index).cloneRange()) : null;
+    }
+    function restoreSelection(view) {
+        const selection = view.pre.ownerDocument?.getSelection?.(), ranges = view.ranges;
+        view.ranges = null;
+        if (!selection || !ranges?.length || !ranges.every(range => view.pre.contains(range.startContainer) && view.pre.contains(range.endContainer))) return;
+        selection.removeAllRanges();
+        ranges.forEach(range => selection.addRange(range));
+    }
     function status(view, text) { view.status.textContent = text; }
     function showPage(view, data) {
+        view.ranges = null;
         view.next = data.next_offset;
         view.shown = data.offset;
         view.pre.textContent = wholeText(data);
@@ -140,7 +155,7 @@ export function createLogRaw({ visible }) {
                 view.worker?.terminate(); view.worker = null;
                 if (!view.url) view.url = URL.createObjectURL(view.blob);
                 view.download.href = view.url;
-                if (again) { view.download.hidden = false; view.loading = false; return; }
+                if (again) { view.download.hidden = false; view.loading = false; restoreSelection(view); return; }
                 // Withhold an unfinished UTF-8 code point, just as the gateway does. No character-count cursor.
                 const bytes = new Uint8Array(await view.blob.slice(offset, offset + PAGE_BYTES + 1).arrayBuffer());
                 let end = Math.min(PAGE_BYTES, bytes.length);
@@ -187,6 +202,7 @@ export function createLogRaw({ visible }) {
         } finally { if (view.downloadAbort === abort) view.downloadAbort = null; }
     }
     return {
+        rememberSelection() { for (const view of opened) if (shown(view)) keepSelection(view); },
         bind(fold, source) { bindings.set(fold, source); },
         changed(root) {
             for (const view of opened) {

@@ -291,25 +291,29 @@ def _send_smaller(ctx: Any, cost: Any) -> tuple:
     usage, record = ctx.accumulated_usage, ctx.accumulated_usage[KEY]
     failed = SimpleNamespace(**record["comparison"], physical_context=None)
     fit = _loop()._measure_round_main_fit(ctx, automatic_pass_used=True)
+    shrunk = True  # False: the changed view was not strictly smaller, so nothing was sent or refused
     try:
         msg, retry_cost = _invoke(ctx, lambda: _loop()._dispatch_round_model(
             ctx, fit, attempt_cap=1, candidate_predicate=_strict_context_shrink_predicate(failed, same_round=False),
             max_tokens=int(failed.max_completion_tokens or 0) or None), "smaller_request")
     except PhysicalAttemptPreconditionFailed:
-        msg, retry_cost = None, None
+        msg, retry_cost, shrunk = None, None, False
         record.update(stage="fallback", reclaim="candidate_not_smaller")
     if msg is None and str(usage.get("_last_llm_error_kind") or "") == "context_overflow":
+        from ouroboros.context_view_facts import remember_size_refusal
         from ouroboros.loop_llm_call import REFUSED_CANDIDATE_KEY
         from ouroboros.loop_model_call import _refused_candidate, _refusal_window
 
         # The same reading as the context-size path: a pre-send prediction leaves its candidate, never a capture.
         candidate = usage.get(REFUSED_CANDIDATE_KEY)
         refused = _refused_candidate(candidate) if candidate else _loop().last_physical_attempt_capture()
+        if shrunk:  # this round's latest size refusal, whole; an unsent candidate leaves the earlier one
+            remember_size_refusal(ctx, refused, measured=fit is not None)
         if refused is not None and getattr(refused, "predicted_free_tokens", None) is None:
             # The smaller send's own provider refusal is window evidence like any other; empty replies are not.
             from ouroboros.context_anchor import record_refused_input
             record_refused_input(usage, ctx.context_fit_plan, _refusal_window(ctx, fit, refused)[1],
-                                 measured=fit.measurement.anchor_input_tokens is not None)
+                                 measured=fit.measurement.anchor_input_tokens is not None, candidate=refused)
     if msg is not None:
         _answered(ctx, msg)
     _save(ctx)

@@ -637,6 +637,55 @@ def _closing_page(ctx: ToolContext, root: Any, project: Dict[str, Any], note: st
     return f" The closing note is its room's page {result.record['id']}, sealing {covers['count']} open rows."
 
 
+def _manage_project_folder(ctx: ToolContext, project_id: str, action: str = "view", path: str = "",
+                           expected: str = "", reason: str = "") -> str:
+    """The mind's hand on a Project's working folder: the view and the one change the owner's menu calls
+    (``project_folder``), on the canonical data root. A change is recorded with this work as its actor."""
+    from ouroboros import project_folder
+    from ouroboros.body_candidate import serving_repo_dir_for
+    from ouroboros.project_facts import explicit_project_id_ok
+
+    meta = getattr(ctx, "task_metadata", {}) or {}
+    lineage = (getattr(ctx, "task_contract", {}) or {}).get("lineage") or {}
+    task_id = str(getattr(ctx, "task_id", "") or "")
+    changing = action in (project_folder.CLEAR, project_folder.CHOOSE)
+    if changing and str(meta.get("delegation_role") or lineage.get("delegation_role") or "") == "subagent":
+        return "⚠️ TOOL_ERROR (manage_project_folder): subagents inherit the parent's project scope; they may view."
+    if not explicit_project_id_ok(project_id) or not (changing or action == "view"):
+        return "⚠️ TOOL_ARG_ERROR (manage_project_folder): supply a filesystem-clean project_id and action view, clear or choose."
+    if changing and not (task_id and isinstance(reason, str) and reason.strip() and isinstance(expected, str) and expected):
+        return ("⚠️ TOOL_ARG_ERROR (manage_project_folder): a change needs the view's expected and a reason; "
+                "read the folder first with action='view'.")
+    root, repo = canonical_data_root(ctx), serving_repo_dir_for(ctx)
+    try:
+        if not changing:
+            outcome = project_folder.view_outcome(root, project_id, repo_dir=repo)
+        else:
+            from ouroboros.tools.project_journal import _project_scope, _scope_authority
+
+            # A place's work changes only its own room's folder, as it writes only that room's journal; it may view any.
+            refusal = _project_scope(ctx, project_id, write=True)[1] if _scope_authority(ctx)[0] == "presence" else ""
+            if refusal:
+                return f"{refusal} (manage_project_folder)"
+            outcome = project_folder.change_folder(root, project_id, action=action, expected=expected, repo_dir=repo,
+                                                   actor=f"ouroboros:{task_id}", path=str(path or ""), note=reason.strip())
+    except Exception as exc:
+        return f"⚠️ PROJECTS_ERROR: {type(exc).__name__}: {exc}"
+    view = outcome.get("view") or {}
+    if outcome["status"] == "changed":
+        folder = view.get("folder") or outcome["receipt"]["new"]["working_dir"]  # the receipt's, when no view was read
+        outcome["effects"] = project_folder.effects(view, action, folder)
+        outcome["note"] = ("Recorded as project_folder_changed with you as the actor. The host tells nobody: "
+                           "say what you changed and why where your human reads.") + (
+            " The change stands, but the folder could not be read after it (view_error): do not repeat it; read it "
+            "again with action='view'." if outcome.get("view_error") else "")
+    elif view:
+        outcome["effects"] = {offered: project_folder.effects(view, offered, str(path or "")) for offered in view["actions"]}
+        outcome["note"] = ("Nothing changed. A change sends view.expected back with a reason." if view["actions"]
+                           else "Nothing changed. This folder is in place; it is not moved from here.")
+    return json.dumps({"ok": outcome["status"] in ("changed", "view"), **outcome}, ensure_ascii=False, default=str)
+
+
 def _cause_words(code: str) -> str:
     """``": <words>"`` for a refusal code the host cause table explains, else "".
 

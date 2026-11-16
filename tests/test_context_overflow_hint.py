@@ -10,7 +10,6 @@ from ouroboros.llm import LocalContextTooLargeError
 from ouroboros.loop_transport import provider_recovery_hint as _provider_recovery_hint
 from ouroboros.loop_llm_call import (
     _LlmErrorContext,
-    _is_context_overflow_error,
     _record_llm_call_error,
     call_llm_with_retry,
     classify_llm_exception,
@@ -23,14 +22,16 @@ class _TypedOverflow(RuntimeError):
 
 
 def test_untyped_context_scan_excludes_rate_and_output_size_errors():
-    assert _is_context_overflow_error(LocalContextTooLargeError("too big"), "")
-    assert _is_context_overflow_error(Exception(), "prompt is too long for context window")
-    assert not _is_context_overflow_error(Exception(), "429 rate limit exceeded")
-    assert not _is_context_overflow_error(Exception(), "Rate limit: too many tokens per minute")
+    def overflow(exc, text=""):  # an answer without a body speaks through its printed form
+        return classify_llm_exception(exc, text).kind == "context_overflow"
+
+    assert overflow(LocalContextTooLargeError("too big"))
+    assert overflow(Exception(), "prompt is too long for context window")
+    assert not overflow(Exception(), "429 rate limit exceeded")
+    assert not overflow(Exception(), "Rate limit: too many tokens per minute")
     # Output-size precedence is applied by the SHARED helper, so the untyped
     # scan itself rejects output-limit wording that mentions the context window.
-    assert not _is_context_overflow_error(
-        Exception(), "max_tokens 65536 exceeds maximum context length 32768")
+    assert not overflow(Exception(), "max_tokens 65536 exceeds maximum context length 32768")
 
     for text in (
         "max_tokens 65536 exceeds maximum context length 32768",
@@ -159,14 +160,21 @@ class _StructuredLocalOverflow(RuntimeError):
     body = {"error": {"code": "context_window_exceeded", "type": "invalid_request_error"}}
 
 
+class _LocalServerError(RuntimeError):
+    status_code = 500
+
+
 @pytest.mark.parametrize("overflow_exc", [
     _StructuredLocalOverflow("provider rejected request"),
     RuntimeError("Error code: 400 - prompt is too long: 250000 tokens > 200000 maximum"),
+    _LocalServerError("Error code: 500 - prompt is too long: 250000 tokens > 200000 maximum"),
 ])
 def test_local_transport_stops_unchanged_retry_on_any_overflow_shape(monkeypatch, overflow_exc):
     """The local path raises LocalContextTooLargeError on the FIRST attempt for
     every structured overflow code and message marker — an identical over-window
-    payload is never resent (the old path matched one literal code only)."""
+    payload is never resent (the old path matched one literal code only). Its own
+    server's status does not gate the reading: a local 5xx with the words is no outage
+    to wait out, while a remote answer's status sets its family."""
     from ouroboros import llm as llm_mod
     from ouroboros import llm_local as llm_local_mod
 

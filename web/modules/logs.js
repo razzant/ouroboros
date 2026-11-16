@@ -53,7 +53,7 @@ function omittedNote(evt) {
     return `Left out of this view: ${left}. The record below reads the whole row.`;
 }
 
-export function initLogs({ ws, state, mount, setControls }) {
+export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) {
     const MAX_LOGS = 500;
     const MAX_TASK_EVENTS = 30;
     // Entries placed per frame while a shown panel catches up with what changed while it was hidden.
@@ -118,6 +118,7 @@ export function initLogs({ ws, state, mount, setControls }) {
     }
 
     const raw = createLogRaw({ visible: isLogsVisible });
+    setBeforePageLeave?.(() => { if (isLogsVisible()) raw.rememberSelection(); });
 
     // A live entry never yanks the view away from history the reader scrolled
     // up to: following sticks only while the reader is at the bottom of the tab

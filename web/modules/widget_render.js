@@ -22,7 +22,14 @@ function safeMediaSrc(ctx, spec, state, effectiveTarget = '') {
         }
         return ctx.routePath(route, params);
     }
-    const value = getPath(state[effectiveTarget || spec.target || 'result'], spec.path || '', spec.src || '');
+    // A `path` reads the target's state, with the component's own `src` where it reads nothing. Without a path the
+    // state itself is the source when it is one (as before); otherwise the component's own `src` is.
+    const root = state[effectiveTarget || spec.target || 'result'];
+    const read = acceptedMediaSrc(ctx, getPath(root, spec.path || '', spec.src || ''));
+    return read || spec.path ? read : acceptedMediaSrc(ctx, spec.src);
+}
+
+function acceptedMediaSrc(ctx, value) {
     const text = String(value || '').trim();
     if (/^data:(image\/(?:png|jpeg|jpg|gif|webp)|audio\/(?:mpeg|wav|ogg)|video\/(?:mp4|webm|ogg));base64,[A-Za-z0-9+/=]+$/i.test(text)) {
         return text;
@@ -261,7 +268,9 @@ function renderComponentBody(ctx, component, view, treePath, inheritedTarget = '
         const src = safeMediaSrc(ctx, component, state, target);
         const label = escapeHtml(component.label || component.alt || type);
         if (!src) return `<div class="muted">${label}: no safe media source.</div>`;
-        if (type === 'image') return `<figure class="widget-media"><img src="${escapeHtml(src)}" alt="${escapeHtml(component.alt || label)}"><figcaption>${label}</figcaption></figure>`;
+        // The caption is the author's label or alt text; an image that has neither stands without one.
+        const caption = component.label || component.alt ? `<figcaption>${label}</figcaption>` : '';
+        if (type === 'image') return `<figure class="widget-media"><img src="${escapeHtml(src)}" alt="${escapeHtml(component.alt || label)}">${caption}</figure>`;
         if (type === 'audio') return `<div class="widget-media"><div>${label}</div><audio controls src="${escapeHtml(src)}"></audio></div>`;
         if (type === 'video') return `<div class="widget-media"><div>${label}</div><video controls src="${escapeHtml(src)}"></video></div>`;
         const filename = escapeHtml(component.filename || filenameFromWidgetUrl(src, label || 'download'));

@@ -3179,7 +3179,7 @@ def test_absolute_deadline_does_not_retry_expired_task(tmp_path, monkeypatch):
     monkeypatch.setattr(queue_module, "get_task_idle_timeout_sec", lambda: 1)
     worker = SimpleNamespace(busy_task_id="deadline1", proc=FakeProc(), reaping=False)
     monkeypatch.setattr(workers_module, "WORKERS", {9: worker})
-    monkeypatch.setattr(workers_module, "respawn_worker", lambda worker_id: None)
+    monkeypatch.setattr(workers_module, "respawn_worker", lambda worker_id, **_kw: None)
 
     queue_module.RUNNING["deadline1"] = {
         "task": {

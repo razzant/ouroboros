@@ -14,11 +14,11 @@ const logUrl = (name) => `/api/logs/${name}?view=compact&limit=150`;
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 const STREAMS = ['events', 'tools', 'progress', 'supervisor'];
 
-function mountLogs(t, { page = 'dashboard', history = {} } = {}) {
+function mountLogs(t, { page = 'dashboard', history = {}, beforeLeave } = {}) {
     const fixture = setup(t);
     for (const name of STREAMS) fixture.routes.set(logUrl(name), response({ entries: history[name] || [] }));
     const state = { activePage: page, dashboardActiveSubtab: 'logs' };
-    const controls = initLogs({ mount: fixture.mount, ws: fixture.ws, state });
+    const controls = initLogs({ mount: fixture.mount, ws: fixture.ws, state, setBeforePageLeave: beforeLeave });
     const list = fixture.mount.querySelector('#log-entries');
     return {
         ...fixture, state, list, controls,
@@ -284,8 +284,9 @@ test('backfilled rows older than an open Timeline\'s rows take their places in t
     assert.equal(rows[2], third, 'the row already shown keeps its node');
 });
 
-test('a received event\'s open record shown again keeps its page, its scroll and its text node; only its download is rebuilt', async (t) => {
-    const logs = mountLogs(t);
+test('a received event\'s open record shown again keeps its page, scroll, text node and selection after another page takes focus, but never adopts another selection; only its download is rebuilt', async (t) => {
+    const leaving = [];
+    const logs = mountLogs(t, { beforeLeave: handler => leaving.push(handler) });
     await settle();
     logs.emit({ type: 'deps_sync_ok', reason: 'boot', ts: at(1), detail: 'x'.repeat(200) });
     const entry = logs.list.children[0];
@@ -299,8 +300,19 @@ test('a received event\'s open record shown again keeps its page, its scroll and
     let writes = 0;
     const own = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(pre), 'textContent');
     Object.defineProperty(pre, 'textContent', { get() { return own.get.call(this); }, set(value) { writes += 1; own.set.call(this, value); } });
+    const range = root => ({ startContainer: root, startOffset: 0, endContainer: root, endOffset: 1,
+        cloneRange() { return { ...this }; } });
+    const selected = range(pre);
+    let ranges = [selected];
+    logs.document.getSelection = () => ({
+        get rangeCount() { return ranges.length; }, get isCollapsed() { return !ranges.length; },
+        get anchorNode() { return ranges[0]?.startContainer; }, get focusNode() { return ranges[0]?.endContainer; },
+        getRangeAt: index => ranges[index], removeAllRanges: () => { ranges = []; }, addRange: value => ranges.push(value),
+    });
+    leaving.forEach(handler => handler({ from: 'dashboard', to: 'settings' }));
     logs.state.activePage = 'settings';
     logs.window.dispatchEvent({ type: 'ouro:page-shown', detail: { page: 'settings' } });
+    ranges = [];  // WebKit clears document selection when the destination page takes focus.
     logs.show();
     await settle();
     await settle();
@@ -310,6 +322,16 @@ test('a received event\'s open record shown again keeps its page, its scroll and
     const download = entry.querySelector('.log-raw-download');
     assert.equal(download.hidden, false, 'the full download is offered again');
     assert.match(String(download.href || download.getAttribute('href') || ''), /^blob:/);
+    assert.deepEqual(ranges, [selected], 'the same selection comes back after focus elsewhere cleared it');
+    const elsewhere = range(logs.mount);
+    ranges = [elsewhere];
+    leaving.forEach(handler => handler({ from: 'dashboard', to: 'settings' }));
+    logs.state.activePage = 'settings';
+    logs.window.dispatchEvent({ type: 'ouro:page-shown', detail: { page: 'settings' } });
+    logs.show();
+    await settle();
+    await settle();
+    assert.deepEqual(ranges, [elsewhere], 'a later selection outside Raw neither belongs to it nor revives the old one');
     // An explicit page move starts at that page's top: tests/test_logs_raw_browser.py (a worker-sized event, real engines).
 });
 

@@ -405,6 +405,45 @@ test('a row chosen under the rail\'s bottom fade comes just clear of it; a row c
     assert.equal(home.scrollTop, 485, 'a row in the clear stays where it is');
 });
 
+test('returning to the overview keeps the rail passage; explicitly choosing its row still reveals it', async (t) => {
+    const { env, content, state, showPage } = world(t);
+    globalThis.requestAnimationFrame = fn => setImmediate(fn);
+    const observers = [];
+    const previous = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class { constructor(fn) { observers.push(this); this.fn = fn; this.seen = []; } observe(box) { this.seen.push(box); } disconnect() {} };
+    t.after(() => { globalThis.ResizeObserver = previous; });
+    const controls = initSettings({ state, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    const wide = { on: true };
+    layout(t, controls, content, wide);
+    await controls.open('');
+    await settle();
+    const home = content.querySelector('[data-settings-home]');
+    const shell = content.querySelector('.settings-shell');
+    const row = home.querySelector('[data-settings-overview-row]');
+    Object.assign(home, { scrollHeight: 1200, clientHeight: 600, scrollTop: 0 });
+    home.getBoundingClientRect = () => ({ top: 0, bottom: 600, width: 240 });
+    row.getBoundingClientRect = () => ({ top: 40 - home.scrollTop, bottom: 86 - home.scrollTop });
+    await home.fire('click', { target: row });
+    await settle();
+    assert.equal(state.settingsPath, '');
+    home.scrollTop = 320;
+    await shell.fire('scroll', { target: home });
+    const resize = observers.find(observer => observer.seen.includes(shell));
+    assert.ok(resize);
+    // A hidden section loses its box, then gains its two panes on return: these are quiet layout changes.
+    for (const name of ['dashboard', 'settings']) {
+        state.activePage = name;
+        wide.on = name === 'settings';
+        env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: name } }));
+        resize.fn([]);
+        await settle();
+    }
+    assert.equal(home.scrollTop, 320, 'showing the section again is not another choice of its overview row');
+    await home.fire('click', { target: row });
+    await settle();
+    assert.ok(home.scrollTop < 320 && row.getBoundingClientRect().top >= 0, 'an explicit choice still brings the row into view');
+});
+
 test('Settings pressed again in the sidebar: two panes keep a first-level page and return from a deeper one; one column shows the list', async (t) => {
     const { env, content, state, showPage, layers } = world(t);
     const drawn = { first: 0, deeper: 0 };

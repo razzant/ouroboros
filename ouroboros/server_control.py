@@ -155,7 +155,9 @@ def restart_current_process(
     re-pins from ``load_settings()``; an agent- or supervisor-initiated restart
     keeps inheriting it exactly as before.
     """
-    env = os.environ.copy()
+    from ouroboros.node_runtime import without_selected_driver_node
+
+    env = without_selected_driver_node(os.environ.copy())  # the successor selects Playwright's driver Node itself
     desired_host = str(host)
     try:
         from ouroboros.config import load_settings
@@ -305,8 +307,18 @@ def exit_after_shutdown(exit_code: int) -> None:
     interrupted capture stays owed to the next generation. An accepted Panic
     parks the caller until its own flag/control writes and exit finish; Panic
     never waits for this caller. Ordinary imported main()/ASGI shutdown returns.
+    Before the exit the output relay hands its queue to a reading launcher, bounded inside the
+    ordinary stop's own deadline (``finish_output_relay``); Panic and the backstops never do.
     """
-    if _restart_stop_requested:
+    if not _restart_stop_requested:
+        try:
+            from ouroboros.owned_shutdown import stop_deadline
+            from ouroboros.process_logging import finish_output_relay
+
+            finish_output_relay(stop_deadline())
+        except Exception:
+            pass  # the handover never stands between this exit and the process's end
+    if _restart_stop_requested:  # Panic, also one accepted during the handover, owns the exit
         import threading
 
         threading.Event().wait()

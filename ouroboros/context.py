@@ -1121,6 +1121,7 @@ def build_context_fit_plan(
     tool_schemas: Optional[List[Dict[str, Any]]] = None,
     route_resolver: Optional[Any] = None,
     tool_registry: Any = None,
+    reasoning_effort: str = "",
 ) -> ContextFitPlan:
     """Compatibility wrapper over the cohesive context-fit implementation."""
     core = _capture_context_core(env, memory, task, review_context_builder, ctx, tool_registry)
@@ -1131,6 +1132,7 @@ def build_context_fit_plan(
         preferred_mode=str(preferred_mode or get_context_mode() or "max"),
         route_resolver=route_resolver or _context_fit_route,
         tool_schemas=tool_schemas,
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -1167,12 +1169,13 @@ def build_llm_messages(
     review_context_builder: Optional[Any] = None,
     ctx: Any = None,
     *, tool_schemas: Optional[List[Dict[str, Any]]] = None, route_resolver: Optional[Any] = None,
-    tool_registry: Any = None,
+    tool_registry: Any = None, reasoning_effort: str = "",
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """The first request of a task: the plan's projection for its starting mode, and the cap info.
 
     No model is called on this path: my memory is rendered, never prepared by a paid pass;
-    a window too small for it addresses lines and pages instead.
+    a window too small for it addresses lines and pages instead. ``reasoning_effort`` is the first send's,
+    which shapes the request on a direct OpenAI reasoning route (``context_fit._request_shapes``).
     """
     # Keep the legacy public shape while publishing the immutable plan on the
     # existing ToolContext for the ordinary loop.  Commit/scope reviewers do not
@@ -1187,6 +1190,7 @@ def build_llm_messages(
         tool_schemas=tool_schemas,
         route_resolver=route_resolver,
         tool_registry=tool_registry,
+        reasoning_effort=reasoning_effort,
     )
     if ctx is not None:
         ctx.context_fit_plan = plan

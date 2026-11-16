@@ -525,3 +525,48 @@ def test_every_role_editor_keeps_vendor_program_inside_open_chooser(subscription
         expect(footer).to_be_hidden()
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     assert not world['posts']
+
+
+# A window a size refusal set, in context_view_facts.window_projection's shape: made up here, no provider was asked.
+REFUSED_WINDOW = {"tokens": 883_899, "kind": "input", "reserve": 65_536, "source": "refusal",
+                  "observed_at": "2026-11-15T12:00:00+00:00", "contradiction": None, "retired_ack": {},
+                  "usable": 883_899, "admitted": 883_899}
+
+
+@pytest.mark.parametrize("width,height", SIZES)
+def test_a_window_a_refusal_set_says_how_its_number_was_known(subscription_ui, width, height):
+    """A role's More: the window a size refusal set says whether the provider stated its number, a local instance
+    counted it exactly before sending, Ouroboros derived it from a refusal that stated none, or an earlier refusal kept
+    no basis; a projection naming none (a server from before bases were kept) claims none. Each opening of the fold
+    reads the route again, the page fits in both themes and nothing is written."""
+    from playwright.sync_api import expect
+
+    shown = {}
+    subscription_ui["backend"]["response_preview"] = lambda query: {
+        "route": {"provider": "claudexor", "model": query["model"][0], "base_url": "", "use_local": False, "options": None},
+        "response_limit": {"max_output_tokens": 0, "status": "unknown", "source": "none", "observed_at": "",
+                           "stale": False, "route_fp": "fixture"},
+        "window": {**REFUSED_WINDOW, **shown}, "window_route": {}, "window_ack": False}
+    page, server = _page(subscription_ui, width, height)
+    open_settings(page, "models/role/main")
+    editor = _settled(page, "models/role/main")
+    fold, note = editor.locator(".model-role-details"), editor.locator("[data-model-context-note]")
+    for basis, words in [(None, "from a refusal, basis unknown"),
+                         ("unrecorded", "from an earlier refusal, basis not recorded"),
+                         ("provider_stated", "stated by the provider in a refusal"),
+                         ("anchored_estimate", "derived from a refusal that stated no number"),
+                         ("exact_local_count", "derived from an exact local count before sending")]:
+        shown.clear()
+        shown.update({"basis": basis} if basis else {})
+        if fold.evaluate("node => node.open"):
+            fold.locator(":scope > summary").click()
+        fold.locator(":scope > summary").click()  # opening it reads the route's window again
+        expect(note).to_have_text(f"Window 884k tokens ({words}) · 884k usable for input")
+        note.scroll_into_view_if_needed()
+        assert editor.evaluate(FITS) == {"page": 0, "doc": 0, "out": []}, (basis, width)
+        setup_browser.capture(page, f"refusal-basis-{basis or 'none'}-{width}x{height}-dark")
+    page.evaluate("theme => window.ouroTheme.set(theme)", "light")  # the longest words, in the other theme
+    assert editor.evaluate(FITS) == {"page": 0, "doc": 0, "out": []}, ("light", width)
+    setup_browser.capture(page, f"refusal-basis-{basis}-{width}x{height}-light")
+    assert not server.posts
+    page.close()

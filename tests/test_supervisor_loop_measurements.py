@@ -501,9 +501,10 @@ def test_a_stamp_names_the_interval_its_cpu_covers():
 def test_the_watchdog_watches_startup_and_every_generation_exit_stops_it():
     """Source pin: the watchdog starts BEFORE the init block, so a hung recovery,
     worktree prune or worker spawn is a journaled "startup" stall with its stack
-    instead of a silent wedge behind ``_supervisor_ready``; and BOTH generation
-    exits — the init-failure return and the loop exit — set the per-generation
-    stop token, so no watchdog outlives the liveness list it reads."""
+    instead of a silent wedge behind ``_supervisor_ready``; and all THREE generation
+    exits — a Stop before init (its behaviour: test_boot_readiness), the init-failure
+    return and the loop exit — set the per-generation stop token, so no watchdog
+    outlives the liveness list it reads."""
     import server
 
     source = inspect.getsource(server._run_supervisor)
@@ -511,7 +512,10 @@ def test_the_watchdog_watches_startup_and_every_generation_exit_stops_it():
     assert start < source.index("migrate_from_journal("), "the watchdog must start before init"
     assert source.index("\n    try:\n", source.index("prior_worker_pids:")) < start, "watchdog setup must use the init failure rail"
     assert source.index('loop_phase_facts(_loop_liveness, "startup", new_tick=True)') < start
-    assert source.count("_watchdog_stop.set()") == 2, "init-failure exit and loop exit"
+    assert source.count("_watchdog_stop.set()") == 3, "Stop-before-init exit, init-failure exit and loop exit"
+    stopped = source.index("server_boot.wait_event_queue(")
+    assert start < stopped, "a Stop before init comes after the watchdog started"
+    assert source.index("_watchdog_stop.set()", stopped) < source.index("\n            return\n", stopped)
     failure = source.index('_supervisor_error = f"Supervisor init failed: {exc}"')
     assert source.index("_watchdog_stop.set()", failure) < source.index("\n        return\n", failure)
 

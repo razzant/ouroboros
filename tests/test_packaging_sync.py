@@ -304,8 +304,10 @@ def test_server_workers_init_reads_manifest_branches_not_hardcoded_strings():
 
     assert "workers_init(" in server_py
     assert 'branch_dev="ouroboros", branch_stable="ouroboros-stable"' not in server_py
-    assert 'branch_dev=_workers_branch_dev' in server_py
-    assert 'branch_stable=_workers_branch_stable' in server_py
+    # The pair `_run_supervisor` reads from the manifest is the pair it feeds the pool.
+    supervisor = server_py.split("def _run_supervisor(", 1)[1].split("\ndef ", 1)[0]
+    assert "branch_dev, branch_stable = _runtime_branch_defaults()" in supervisor
+    assert "branch_dev=branch_dev, branch_stable=branch_stable" in supervisor
 
 
 def test_architecture_module_tree_lists_all_live_extension_http_endpoints():

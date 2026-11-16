@@ -108,7 +108,9 @@ def test_connection_discovery_survives_general_refresh_without_replacing_other_s
 
     ui, page = subscription_ui, subscription_ui['page']
     initial = ui['bootstrap']['initialState']
+    # These are saved owner choices, not the wizard's replaceable first-run proposals (#2969).
     initial.update(openaiKey='fixture', compatibleBaseUrl='http://127.0.0.1:1/v1',
+                   automaticModels=[],
                    mainModel='openai::same-model', lightModel='openai-compatible@alpha::same-model',
                    safetyModel='claudexor::service=gpt-test', modelAccounts={'safety': 'personal'},
                    connections=[{'kind': 'openai-compatible', 'name': name, 'label': name.title(),
@@ -159,7 +161,8 @@ def test_connection_discovery_survives_general_refresh_without_replacing_other_s
     assert choices(main) == ['same-model'], 'a connection list must not replace unrelated API suggestions'
     assert choices(light) == ['same-model']
     expect(main.locator('[data-model-role-source] option[value="subscription:service"]')).to_have_text('Codex (model)')
-    expect(main.locator('[data-model-role-status]')).to_have_text('')
+    # DESIGN "Onboarding density": an API role without a published price says so.
+    expect(main.locator('[data-model-role-status]')).to_have_text('Price unknown')
     kept()
     evidence = diagnostic_directory(tmp_path / 'frames', 'mixed-catalog', publish=True)
     report = []
@@ -185,7 +188,7 @@ def test_connection_discovery_survives_general_refresh_without_replacing_other_s
         if note:
             expect(main.locator('[data-model-role-status]')).to_contain_text(note)
         else:
-            expect(main.locator('[data-model-role-status]')).to_have_text('')
+            expect(main.locator('[data-model-role-status]')).to_have_text('Price unknown')
         if label == 'empty':
             expect(main.locator('[data-model-role-source] option[value="subscription:service"]')).to_have_count(0)
             expect(main.locator('[data-model-role-source]')).to_contain_text('No model sources listed')

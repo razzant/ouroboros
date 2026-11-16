@@ -3,6 +3,20 @@
  *  catalog, updates and core control. `UpdateLetter` sits in ./api_types.js. */
 
 /**
+ * One declared server's passive state in an installed skill's `mcp_servers` list.
+ * @typedef {Object} SkillMcpServerFact
+ * @property {string} id
+ * @property {string} title
+ * @property {boolean} conflict
+ * @property {boolean} bound  // the saved row belongs to this skill, even when off
+ * @property {boolean} configured  // bound and both the row and MCP are on
+ * @property {number} tool_count
+ * @property {boolean} listed
+ * @property {string} error  // skill refusal or failed listing
+ * @property {string} notes  // diagnostics from a successful listing
+ */
+
+/**
  * One `GET /api/extensions` `skills` row; a name collision gives one row per occupant (`identity_collision`).
  * @typedef {Object} InstalledSkill
  * @property {string} name
@@ -42,6 +56,7 @@
  * @property {{current: Object, history: Object[], history_omitted: (number|undefined)}|Object=} skill_review  // a history row of a Skills-page review may carry `continuable_seats`
  * @property {?{fields: {id: string, key: string, state: ('configured'|'missing'|'unknown')}[]}=} secret_config  // declared secret fields and whether each is set now (never a value); null when none are declared
  * @property {Object=} grants
+ * @property {SkillMcpServerFact[]=} mcp_servers  // absent on identity-collision rows
  * @property {?{slug: string, version: string, content_hash: string, repository: string, pr_number: number, pr_url: string, published_at: string}=} published
  * @property {boolean=} published_malformed
  * @property {Object=} presence_runtime
@@ -715,6 +730,7 @@
  * @property {*=} processing
  * @property {boolean=} use_local
  * @property {ModelPrice=} price  OpenRouter rows only, when the catalog states a whole token price (llm_pricing.openrouter_catalog_price)
+ * @property {string=} price_condition  DeepSeek rows whose published entry prices them only off-peak in USD: `off_peak_usd`
  */
 
 /**
@@ -795,6 +811,8 @@
  * @property {boolean=} schemas_at_start
  * @property {boolean=} task_session
  * @property {boolean=} browser_policy
+ * @property {string=} skill
+ * @property {string=} skill_error
  * @property {string=} instructions
  * @property {number=} map_tokens
  * @property {number=} schema_tokens

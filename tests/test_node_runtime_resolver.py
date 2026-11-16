@@ -630,6 +630,8 @@ def test_run_shell_applies_attested_prepend_and_healthy_env_is_untouched(
     del ctx._active_interpreter_resolution
     seen.clear()
     expected_env = dict(os.environ)
+    from ouroboros.node_runtime import forward_playwright_node
+    forward_playwright_node(expected_env)  # only Playwright's driver key is added, when the pinned Node is ready
     result = shell._run_shell(ctx, ["npm", "--version"], cwd="system_repo")
     assert "exit_code=0" in result
     assert seen["env"] == expected_env  # explicit task env; no Node PATH rewrite

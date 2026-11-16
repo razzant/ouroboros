@@ -45,6 +45,11 @@ def wire(event, actor=USER, reaction=None, *, facts=None, message=None, text="",
 
 @pytest.fixture
 def room(tmp_path, monkeypatch):
+    from ouroboros.presence_carrier import set_presence_runner
+    from tests.conversation_carrier_support import host_lane, join_host_lane_carriers
+
+    host_lane(monkeypatch, tmp_path)  # its Hosts serve alone over tmp_path: no supervisor queue of their own
+
     def connect(wakes=("any_message",)):
         place = p.connect_place(tmp_path, connector="bridge", provider="chat", account_id="a", conversation_id="r",
                                 wakes=list(wakes))
@@ -62,7 +67,9 @@ def room(tmp_path, monkeypatch):
         client = TestClient(host_service.create_host_service_app(tmp_path, presence_runner=run))
         event = PresenceTurnEvent("event1", "chat", "a", "r", "", "chat:a:r:0", dict(USER), {}, {}, "", facts=())
         return SimpleNamespace(root=tmp_path, place=place, client=client, calls=calls, event=event)
-    return connect
+    yield connect
+    join_host_lane_carriers()  # its carriers settle after the waiters: that tail stays in this world
+    set_presence_runner(tmp_path, None)  # the runner its Hosts registered for this root leaves with it
 
 
 def stored(root):

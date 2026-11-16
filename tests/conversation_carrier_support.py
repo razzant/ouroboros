@@ -11,6 +11,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional
 
+import pytest
+
 from ouroboros.task_carrier import EXECUTOR_WORKER, LANE_CONVERSATION
 
 
@@ -76,6 +78,41 @@ def host_lane(monkeypatch, root) -> None:
     isolate_lane_pool(monkeypatch, root, spares=0)
     monkeypatch.setattr(queue, "INITIALIZED", False)
     monkeypatch.setattr(workers, "REPO_DIR", root / "repo")
+
+
+def join_host_lane_carriers(timeout: float = 60.0) -> None:
+    """Wait for every turn carrier of a ``host_lane`` world to end, before its tables and roots are given back.
+
+    Precondition: ``host_lane`` gave this world its own ``workers.WORKERS``, so each inline carrier there runs one
+    of this world's turns and nothing else's; the world's holds are released, the caller holds no queue lock (a
+    carrier leaves its slot under it) and the monkeypatch is not undone yet. A Presence carrier still settles after
+    its Host waiter resolved (``handle_presence_turn_settled``: row, author intake, queue mark), so an empty turn
+    registry is not its end; joined here, that tail runs in the world. A carrier that does not end fails the caller.
+    """
+    import time
+
+    from supervisor import queue, workers
+    from supervisor.inline_carrier import InlineCarrier
+
+    with queue._queue_lock:  # a carrier is registered and started under Q: none is seen half-started
+        carriers = [(slot.process_birth, slot.proc) for slot in workers.WORKERS.values()
+                    if isinstance(slot.proc, InlineCarrier)]
+    deadline = time.monotonic() + timeout
+    for birth, carrier in carriers:
+        carrier.join(max(0.0, deadline - time.monotonic()))
+        assert not carrier.is_alive(), f"carrier {birth} did not end within {timeout}s"
+
+
+@pytest.fixture
+def lone_host_world(tmp_path, monkeypatch):
+    """``host_lane`` over ``tmp_path`` for a test whose Host serves alone there (it builds the app and posts the
+    turns): its teardown joins the world's carriers, then drops the runner its Hosts registered for that root."""
+    from ouroboros.presence_carrier import set_presence_runner
+
+    host_lane(monkeypatch, tmp_path)
+    yield
+    join_host_lane_carriers()
+    set_presence_runner(tmp_path, None)
 
 
 def booted_host_lane(monkeypatch, workers_module) -> None:

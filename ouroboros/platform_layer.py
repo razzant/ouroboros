@@ -1221,8 +1221,9 @@ def _resolve_bundled_payload(candidates_for: Callable[[pathlib.Path], List[pathl
 
 
 def resolve_bundled_node() -> Optional[str]:
-    """Locate the bundled signed Node; callers own health and PATH preference (§1)."""
-    return _resolve_bundled_payload(embedded_node_candidates)
+    """The pin's Node (shipped, prepared, or exact at any base), else None (``node_runtime.reviewed_host_node``)."""
+    from ouroboros.node_runtime import reviewed_host_node
+    return reviewed_host_node(_resolve_bundled_payload(embedded_node_candidates))
 
 
 def resolve_bundled_ripgrep() -> Optional[str]:
@@ -1232,13 +1233,13 @@ def resolve_bundled_ripgrep() -> Optional[str]:
 
 def get_system_memory() -> str:
     """Return total system memory as a human-readable string."""
-    os_name = platform.system()
+    from ouroboros.process_logging import check_output_with_relayed_stderr
     try:
-        if os_name == "Darwin":
-            mem_bytes = int(subprocess.check_output(["sysctl", "-n", "hw.memsize"]).strip())
+        if (os_name := platform.system()) == "Darwin":
+            mem_bytes = int(check_output_with_relayed_stderr(["sysctl", "-n", "hw.memsize"]).strip())
             return f"{mem_bytes / (1024**3):.1f} GB"
         elif os_name == "Linux":
-            return subprocess.check_output(
+            return check_output_with_relayed_stderr(
                 ["awk", '/MemTotal/ {print $2/1024/1024 " GB"}', "/proc/meminfo"]).strip().decode()
         elif os_name == "Windows":
             mem_bytes = int(_wmic_value_line("ComputerSystem", "get", "TotalPhysicalMemory").split("=")[1])
@@ -1256,10 +1257,11 @@ def _wmic_value_line(*query: str) -> str:
 
 def get_cpu_info() -> str:
     """Return CPU model string."""
+    from ouroboros.process_logging import check_output_with_relayed_stderr
     os_name = platform.system()
     try:
         if os_name == "Darwin":
-            return subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"]).strip().decode()
+            return check_output_with_relayed_stderr(["sysctl", "-n", "machdep.cpu.brand_string"]).strip().decode()
         elif os_name == "Windows" and (line := _wmic_value_line("cpu", "get", "Name")):
             return line.split("=", 1)[1].strip()
     except Exception:
@@ -1577,8 +1579,7 @@ def resume_process(pid: int) -> bool:
         return False
 
 
-# Preserve import order without the node_runtime -> platform_layer eager cycle.
-# PEP 562 re-exports retain callers' spellings (ARCHITECTURE §1 "Platform substrate").
+# Lazy PEP 562 compatibility exports avoid node_runtime's eager cycle (ARCHITECTURE §1 "Platform substrate").
 _NODE_RUNTIME_REEXPORTS = (
     "NodeRuntimeHealth",
     "node_runtime_health",

@@ -54,6 +54,7 @@ from ouroboros.task_results import (
     write_task_result,
 )
 from ouroboros.task_status import execution_owner_record, reconcile_orphaned_running_tasks
+from tests.conversation_carrier_support import lone_host_world as lone_host_world  # noqa: F401 -- fixture
 from tests.presence_legacy_helpers import _finish_presence
 from ouroboros.utils import append_jsonl
 from tests.test_host_service_api import _seed_presence_behavior, _seed_token
@@ -413,6 +414,7 @@ def _host_refused(response, task_id):
 
 
 @pytest.mark.parametrize("prior_send", [None, "delivered", "uncertain"])
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_host_replay_of_a_lost_turn_is_retained_never_a_rerun(tmp_path, monkeypatch, prior_send):
     """Through POST /presence/turn: a lost v1 attempt, retries before and after the reconciler, a second
     retry — all refused, whatever the lost attempt's receipts said. Formerly the placeholder re-ran with
@@ -463,6 +465,7 @@ def test_host_replay_of_a_lost_turn_is_retained_never_a_rerun(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("status", [STATUS_RUNNING, STATUS_INTERRUPTED])
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_host_replays_the_late_canonical_terminal_of_a_refused_turn(tmp_path, status):
     """An older worker still finishing the turn writes its terminal after a refusal: the retry answers
     from that durable row, once, and never builds an agent."""
@@ -487,6 +490,7 @@ def test_host_replays_the_late_canonical_terminal_of_a_refused_turn(tmp_path, st
     assert stored["status"] == STATUS_COMPLETED and "superseded_placeholder" not in stored
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_host_retry_of_a_live_turn_joins_it_instead_of_refusing(tmp_path):
     """A RUNNING row whose execution is live in this Host is not a lost attempt: the retry joins it."""
     agents: list = []
@@ -533,6 +537,7 @@ def test_host_retry_of_a_live_turn_joins_it_instead_of_refusing(tmp_path):
     assert json.loads(first.body)["text"] == "Real answer"
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path
 def test_host_turn_that_never_started_runs_on_its_retry(tmp_path, monkeypatch):
     """No thread, or no agent before the running write: nothing of the turn ran, so the retry answers it."""
     agents: list = []

@@ -110,13 +110,12 @@ def collect_routes(
         api_extensions_index,
         api_skill_daemons,
         api_skill_delete,
-        api_skill_grants,
         api_owner_skill_attest_review,
         api_skill_lifecycle_queue,
-        api_skill_reconcile,
         api_skill_review,
         api_skill_review_history_detail,
         api_skill_toggle,
+        skill_setup_routes,
     )
     from ouroboros.gateway.widgets import api_widget_fault_post, api_widgets
     from ouroboros.gateway.widget_assets import api_widget_asset_lease, api_widget_bridge_script
@@ -183,6 +182,7 @@ def collect_routes(
     from ouroboros.gateway.projects import (
         api_fs_dirs,
         api_project_delete,
+        api_project_folder,
         api_project_from_task,
         api_project_update,
         api_projects_create,
@@ -257,8 +257,7 @@ def collect_routes(
         ),
         Route("/api/owner/skills/{skill}/attest-review", endpoint=api_owner_skill_attest_review, methods=["POST"]),
         *places_routes(),
-        Route("/api/skills/{skill}/grants", endpoint=api_skill_grants, methods=["POST"]),
-        Route("/api/skills/{skill}/reconcile", endpoint=api_skill_reconcile, methods=["POST"]),
+        *skill_setup_routes(),
         Route("/api/marketplace/clawhub/search", endpoint=api_marketplace_search, methods=["GET"]),
         Route("/api/marketplace/clawhub/installed", endpoint=api_marketplace_installed, methods=["GET"]),
         Route("/api/marketplace/ouroboroshub/installed", endpoint=api_hub_installed, methods=["GET"]),
@@ -298,6 +297,7 @@ def collect_routes(
         Route("/api/projects/from-task", endpoint=api_project_from_task, methods=["POST"]),
         Route("/api/projects/{project_id}/update", endpoint=api_project_update, methods=["POST"]),
         Route("/api/projects/{project_id}/delete", endpoint=api_project_delete, methods=["POST"]),
+        Route("/api/projects/{project_id}/folder", endpoint=api_project_folder, methods=["GET", "POST"]),
         Route("/api/fs/dirs", endpoint=api_fs_dirs, methods=["GET"]),
         Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"]),
         Route("/api/tasks", endpoint=api_tasks_list, methods=["GET"]),

@@ -32,14 +32,15 @@ def main_loop(tmp_path, monkeypatch):
     monkeypatch.setattr(loop, "_maybe_inject_finalization_nudges", lambda *_args: False)
     registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
     registry._ctx.repo_dir.mkdir()
-    registry._ctx.context_fit_plan = _plan(preferred="max", window=900_000)
+    effort = "medium"  # The synthetic fit and first send price the same request shape.
+    registry._ctx.context_fit_plan = replace(_plan(preferred="max", window=900_000), start_reasoning_effort=effort)
     source = "Exact original evidence with its trailing conclusion.\n" * 160
     (registry._ctx.repo_dir / "evidence.txt").write_text(source, encoding="utf-8")
     f = SimpleNamespace(registry=registry, ctx=registry._ctx, source=source,
                         inputs=[], progress=[], incoming=queue.Queue(), events=queue.Queue())
     f.messages = f.ctx.context_fit_plan.messages_for("max")
 
-    def run(responses):
+    def run(responses, *, initial_effort=effort):
         replies = iter(responses)
 
         class Provider:
@@ -72,6 +73,7 @@ def main_loop(tmp_path, monkeypatch):
 
         return loop.run_llm_loop(
             messages=f.messages, tools=f.registry, llm=Provider(),
+            initial_effort=initial_effort,
             drive_logs=f.ctx.drive_root / "logs", drive_root=f.ctx.drive_root,
             emit_progress=lambda text, **kw: f.progress.append(text), incoming_messages=f.incoming,
             task_id="authored-main", event_queue=f.events)
