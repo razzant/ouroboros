@@ -28,6 +28,28 @@ so a later change to them writes neither a record nor a copy. A busy
 running an earlier version during an update) answers ``import_pending``; nothing
 is lost and the next caller imports. Each memory tool activates first and waits
 for a busy lock (``wait=True``), so it never reads or writes before the import.
+
+A **transfer** brings words written elsewhere (another installation's or agent's biography)
+into this chronicle as ``legacy`` records, with no tool, table or model call of its own: an
+importer runs ``ensure_activated(store, wait=True)`` first, keeps each source's exact bytes
+(``chat_chain.retain_memory_source``, read back by ``memory_read(source_ref=…)``, the
+records' ``source_refs``), then publishes the records in its source's order (readers tell
+transfers after the activation's records, by sequence). ``metadata.transfer`` — exactly
+``operator``, ``tool`` and ``task_id``, each a string or null — is the one marker of the
+format. Its ``text`` is the source's words, nothing added; its author is who wrote them:
+the old writer that signed them (``legacy_helper`` or ``host``, its recorded fields kept),
+or ``source_author`` with ``label`` and ``model`` (strings or null) and ``basis`` ``source``
+(the source signs them), ``importer`` (the importer says so) or ``unknown`` (neither is
+stated): a claim, never an identity the host confirmed, and never a local mind or helper.
+Readers print the words a transfer brought only as quoted data
+(``memory_inventory.quoted``). The store dates the publication (``ts``, never supplied);
+``metadata.legacy_written_at`` is when the source says the words were written and
+``metadata.stated_period`` (``start``, ``end``, ``incomplete``) the period of events it
+states, both ISO or null. A transfer refuses an ``exact`` ``raw_range``: those coordinates
+name this installation's chat rows, not its source's. Keep foreign coordinates in the
+retained source and supply an unknown range or none. A transfer's id is one token (letters, digits, ``.``, ``_``,
+``:``, ``-``) outside the ``legacy-`` names of this import, its room ``legacy`` or a chat
+id, and it takes no ``legacy_block``.
 """
 from __future__ import annotations
 
@@ -35,6 +57,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -63,6 +86,63 @@ Kept = Dict[int, Dict[str, Any]]
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+TRANSFER_FIELDS = ("operator", "tool", "task_id")
+_SOURCE_AUTHOR_FIELDS = {"kind", "label", "model", "basis"}
+# Addresses readers print bare (a header, a memory_read call): one token, never a line of its own.
+_TRANSFER_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*")
+_CHAT_ROOM = re.compile(r"-?[0-9]+")
+
+
+def _stated(value: Any) -> bool:
+    return value is None or isinstance(value, str) and bool(value.strip())
+
+
+def _iso(value: Any) -> bool:
+    """An ISO date or null. ``fromisoformat`` takes any one character between date and time, a line break included;
+    readers print these dates as they are, so only a printable one keeps a header one line."""
+    from ouroboros.deadline_utils import parse_deadline_ts
+
+    return value is None or isinstance(value, str) and value.isprintable() and value == value.strip() and (
+        parse_deadline_ts(value) is not None)
+
+
+def transfer_problem(record: Dict[str, Any]) -> str:
+    """Why a ``legacy`` record breaks the transfer format (module docstring), or ``''``.
+
+    A record without ``metadata.transfer`` is judged as before, unless a ``source_author`` signs it.
+    """
+    meta = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    author, moved = record.get("author") or {}, meta.get("transfer")
+    if moved is None:
+        return "a source_author's words came from elsewhere: metadata.transfer says how" if author.get(
+            "kind") == "source_author" else ""
+    if not isinstance(moved, dict) or set(moved) != set(TRANSFER_FIELDS) or not all(map(_stated, moved.values())):
+        return "metadata.transfer has exactly operator, tool and task_id, each a non-blank string or null"
+    covers = record.get("covers") if isinstance(record.get("covers"), dict) else {}
+    raw = covers.get("raw_range") if isinstance(covers.get("raw_range"), dict) else {}
+    if raw.get("status") == "exact":
+        return "a transfer cannot claim an exact raw_range of local chat rows; keep foreign coordinates in its source"
+    if author.get("kind") in ("mind", "helper"):
+        return "a transfer is signed by its source_author or the old writer that signed it, never a local mind or helper"
+    if author.get("kind") == "source_author" and (set(author) != _SOURCE_AUTHOR_FIELDS or not (
+            _stated(author["label"]) and _stated(author["model"])) or author["basis"] not in (
+            ("unknown",) if author["label"] is None and author["model"] is None else ("source", "importer"))):
+        return ("a source_author has label and model, each a string or null, and basis source or importer "
+                "(unknown exactly when both are null)")
+    if "legacy_block" in meta or str(record.get("id") or "").startswith("legacy-"):
+        return "a transfer takes no legacy_block and no legacy- id: those name the activation import's records"
+    if not _TRANSFER_ID.fullmatch(str(record.get("id") or "")) or not (
+            record.get("room_id") == LEGACY_ROOM_ID or _CHAT_ROOM.fullmatch(str(record.get("room_id") or ""))):
+        return "a transfer's id is one token of letters, digits, '.', '_', ':' or '-', and its room legacy or a chat id"
+    period = meta.get("stated_period")
+    if not _iso(meta.get("legacy_written_at")) or period is not None and (
+            not isinstance(period, dict) or set(period) - {"start", "end", "incomplete"} or not (
+                _iso(period.get("start")) and _iso(period.get("end"))) or type(period.get("incomplete", False)) is not bool):
+        return ("metadata.legacy_written_at (when the source says the words were written) and stated_period "
+                "{start, end, incomplete} (the events it states) take ISO dates or null")
+    return ""
 
 
 def legacy_frontier(store: Any) -> Dict[str, Any]:

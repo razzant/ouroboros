@@ -66,6 +66,22 @@ def test_output_and_body_errors_keep_precedence(prefix):
     assert classify_llm_exception(error).kind == ("request_too_large" if prefix else "context_overflow")
 
 
+@pytest.mark.parametrize("accepted,capped", [(841_181, False), (600_000, True), (500_000, True), (0, True)])
+def test_a_stated_limit_below_an_input_the_scope_accepted_teaches_no_ceiling(tmp_path, monkeypatch, accepted, capped):
+    """One endpoint behind a gateway model said «maximum context length is 600000 tokens» an hour after the same
+    scope had 841,181 accepted (15.11). The scope does not name the serving endpoint, so that statement is the
+    endpoint's: it writes no refusal row and every room keeps the declared window. With no larger acceptance on
+    record the 24-hour rule caps as before (an equal one included)."""
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    if accepted:
+        record_observation(tmp_path, "route", accepted=accepted)
+    record_refusal({"_last_llm_provider_message": "This endpoint's maximum context length is 600000 tokens."},
+                   SimpleNamespace(route_fp="route"))
+    record = resolve_window(ce.CapabilityEvidence(1_048_576, "confirmed", "metadata", "route"), 65_536, root=tmp_path)
+    assert (record.total.source, record.total.tokens) == (("refusal", 600_000) if capped else ("metadata", 1_048_576))
+    assert record.usable == (534_464 if capped else 983_040)
+
+
 VLLM = ("'max_tokens' or 'max_completion_tokens' is too large: {reply}. This model's maximum context length is {window} "
         "tokens and your request has {size} input tokens ({reply} > {window} - {size}).")
 

@@ -60,7 +60,7 @@ from ouroboros.config import (
     get_task_idle_timeout_sec,
 )
 from ouroboros.deadline_utils import parse_deadline_ts
-from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY, _TRANSIENT_BACKOFF_CAP_SEC, _exception_body
+from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY, _TRANSIENT_BACKOFF_CAP_SEC
 from ouroboros.llm_claudexor import daemon_not_delivered
 from ouroboros.llm_probe import upstream_transport_reachable
 from ouroboros.model_concurrency import capacity_refusal
@@ -934,7 +934,7 @@ def _provider_terminal_text(
             "⚠️ Context-size recovery ended without a fitting request; no further provider call was made. "
             "The recovery passes, the configured fallback and a renewed view could not make it fit"
             f"{f' ({facts})' if facts else ''}. The exact transcript and any files written so far are preserved."
-            + request_window_fact(accumulated_usage, overflow=True, round_idx=round_idx)
+            + request_window_fact(accumulated_usage, overflow=True, round_idx=round_idx) + _provider_quote(accumulated_usage)
         )
     if is_transport_wait:
         if unknown:
@@ -1014,27 +1014,28 @@ _DIAGNOSTIC_POINTER = "The task's Logs keep the host's record of this failure."
 _OWNER_QUOTE_LIMIT = 600
 
 
-def owner_provider_message(failure: Any) -> str:
-    """Whole provider sentence from a structured body/stream error or body-error dict.
+def owner_provider_answer(failure: Any, classification: Any = None) -> Dict[str, Any]:
+    """The provider's answer as the owner line and the continuing mind read it (``ProviderAnswer.facts``): the
+    sentence that carried the classifier's recognition, else the innermost party's own on the current path (an
+    upstream's words, not its gateway's wrapper), with its speaker.
 
-    No sentence returns "". Exception repr belongs to ``llm_api_error`` and
-    ``_last_llm_error`` diagnostics, not owner text. Claudexor's composed display
-    (stage/cause/engine/capability facts) and private body are excluded; only its
+    An HTTP 200 body error brings the record its transport seam read from the whole object (``answer``). Exception
+    repr belongs to ``llm_api_error`` and ``_last_llm_error`` diagnostics, not owner text. Claudexor's composed
+    display (stage/cause/engine/capability facts) and private body are excluded; only its
     ``owner_provider_fields`` speak. ``_provider_quote`` bounds the owner's quote.
     """
-    from ouroboros.llm_claudexor import ClaudexorModelError
-    from ouroboros.utils import sanitize_tool_result_for_log
+    from ouroboros._usage_response import provider_answer
 
-    if isinstance(failure, ClaudexorModelError):
-        return ""
-    if isinstance(failure, dict):
-        authored = (failure.get("message"),)
-    else:
-        body = _exception_body(failure)
-        nested = body.get("error") if isinstance(body.get("error"), dict) else {}
-        authored = (nested.get("message"), body.get("message"), getattr(failure, "provider_message", None))
-    text = next((value for value in authored if isinstance(value, str) and value.strip()), "")
-    return sanitize_tool_result_for_log(" ".join(text.split())) if text else ""
+    if isinstance(failure, dict) and isinstance(failure.get("answer"), dict):
+        return failure["answer"]
+    return provider_answer(failure).facts(
+        getattr(classification, "said", ("", "")), basis=getattr(classification, "basis", ""),
+        untyped=getattr(classification, "untyped", False))
+
+
+def owner_provider_message(failure: Any) -> str:
+    """The quoted provider sentence of a failure, or "" (``owner_provider_answer``)."""
+    return owner_provider_answer(failure).get("sentence", "")
 
 
 def owner_provider_fields(failure: Any) -> Dict[str, str]:
@@ -1051,14 +1052,16 @@ def owner_provider_fields(failure: Any) -> Dict[str, str]:
             if isinstance(value := context.get(key), str) and value.strip()}
 
 
-def stamp_owner_provider_message(accumulated_usage: Dict[str, Any], failure: Any) -> None:
-    """Replace/clear this call's provider sentence, fields and producer-cut marker.
+def stamp_owner_provider_message(accumulated_usage: Dict[str, Any], failure: Any, classification: Any = None) -> None:
+    """Replace/clear this call's provider answer: its quoted sentence, the record that sentence came from
+    (speaker, recognition basis, each party's words), typed fields and producer-cut marker.
 
-    ``loop_llm_call`` stamps each failure so older words cannot speak for it;
-    body-error messages may already be bounded (``_last_llm_provider_message_cut``).
+    ``loop_llm_call`` stamps each failure so older words cannot speak for it. Every later reader (the owner line,
+    the window record, the sizing of a pass, the continuing request's facts) reads this one stamp.
     """
-    cut = isinstance(failure, dict) and failure.get("message_truncated") is True
-    for key, value in (("_last_llm_provider_message", owner_provider_message(failure)),
+    answer = owner_provider_answer(failure, classification)
+    cut = isinstance(failure, dict) and failure.get("message_truncated") is True and "answer" not in failure
+    for key, value in (("_last_llm_provider_message", answer.get("sentence")), ("_last_llm_provider_answer", answer),
                        ("_last_llm_provider_message_cut", cut),
                        ("_last_llm_provider_fields", owner_provider_fields(failure))):
         accumulated_usage.pop(key, None)
@@ -1072,16 +1075,18 @@ def _failure_words(kind: str) -> str:
 
 
 def _provider_quote(accumulated_usage: Dict[str, Any]) -> str:
-    """The provider's own sentence, a long one shortened in words beside the Logs pointer, or ""."""
+    """The stamped sentence with its speaker (the upstream a gateway named, else "The provider"), a long one
+    shortened in words beside the Logs pointer, or ""."""
     from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
 
     message = " ".join(sanitize_tool_result_for_log(
         str(accumulated_usage.get("_last_llm_provider_message") or "")).split()).strip()
     cut = accumulated_usage.get("_last_llm_provider_message_cut") is True
+    speaker = (accumulated_usage.get("_last_llm_provider_answer") or {}).get("speaker") or "The provider"
     if message and not cut and truncate_review_artifact(message, limit=_OWNER_QUOTE_LIMIT) == message:
-        return f" The provider said: \"{message}\""
+        return f" {speaker} said: \"{message}\""
     if message:  # its producer or the SSOT cut it (the SSOT's anti-waste floor lets a small overflow through whole)
-        return f" The provider said: \"{message[:_OWNER_QUOTE_LIMIT].rstrip()}…\" (shortened). {_DIAGNOSTIC_POINTER}"
+        return f" {speaker} said: \"{message[:_OWNER_QUOTE_LIMIT].rstrip()}…\" (shortened). {_DIAGNOSTIC_POINTER}"
     return ""
 
 

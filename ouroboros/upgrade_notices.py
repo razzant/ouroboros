@@ -224,7 +224,7 @@ def legacy_memory_facts(root: Any) -> Optional[Dict[str, Any]]:
     activated by the same import the first memory view runs; while that import is
     pending (another importer holds the legacy lock) or refused, the facts stay
     unknown, so the notice stays owed for a later boot. A piece is one imported
-    ``legacy`` section (gaps are not pieces), a period is one old block, and the
+    ``legacy`` section (gaps and transfers' records are not pieces), a period is one old block, and the
     span is the sections' chat-row time bounds, else the block labels the old
     writer wrote (in period order). A model is never asked.
     """
@@ -237,7 +237,8 @@ def legacy_memory_facts(root: Any) -> Optional[Dict[str, Any]]:
     if store.ensure_activated().get("kind") != "activation":
         return None
     pieces = [pointer for pointer in store.legacy_pointer_rows()
-              if pointer.get("kind") == "legacy" and pointer.get("legacy_type") not in _NOT_PIECES]
+              if pointer.get("kind") == "legacy" and pointer.get("legacy_type") not in _NOT_PIECES
+              and not pointer.get("transfer")]
     spans = [((pointer.get("covers") or {}).get("raw_range") or {}).get("ts_span") or {} for pointer in pieces]
     starts = [span["start"][:10] for span in spans if isinstance(span.get("start"), str)]
     ends = [span["end"][:10] for span in spans if isinstance(span.get("end"), str)]

@@ -206,9 +206,9 @@ def test_a_body_error_inside_an_empty_response_carries_the_providers_sentence(tm
 
 
 def test_a_body_error_sentence_its_producer_cut_is_quoted_as_shortened(tmp_path):
-    """The HTTP-200 body-error producer keeps a bounded ``message`` and says when it
-    cut it; the owner's row then never closes that prefix as the provider's whole
-    sentence. Classification and retry read code/type/kind and do not change."""
+    """The HTTP-200 body-error producer keeps a bounded ``message`` for Logs and says when it
+    cut it; the owner's row never closes that prefix as the provider's whole sentence: it quotes
+    the sentence the producer read from the whole body. Retry reads code/type/kind and does not change."""
     from ouroboros.llm import LLMClient
 
     client = LLMClient()
@@ -235,9 +235,8 @@ def test_a_body_error_sentence_its_producer_cut_is_quoted_as_shortened(tmp_path)
     llm, usage = _Empty(), {}
     msg, _cost = _call(tmp_path, llm, usage)
     assert msg is None and llm.calls == 1 and usage["_last_llm_error_kind"] == "provider_body_error"
-    assert usage["_last_llm_provider_message_cut"] is True
-    assert provider_failure_hint(usage) == (f' The provider said: "{" ".join(sentence[:300].split())}…" (shortened). '
-                                            "The task's Logs keep the host's record of this failure.")
+    assert "_last_llm_provider_message_cut" not in usage  # before: the 300-character prefix, marked as cut
+    assert provider_failure_hint(usage) == f' The provider said: "{" ".join(sentence.split())}"'
 
 
 def test_a_usable_response_clears_the_stale_provider_sentence(tmp_path):
@@ -327,13 +326,14 @@ def test_owner_provider_message_reads_body_and_stream_shapes_never_engine_displa
     assert owner_provider_fields(ClaudexorModelError(problem, unknown=True)) == {}, "an unknown outcome exposes none"
     assert owner_provider_fields(_BodyError("x", status_code=400, body={"message": "m"})) == {}
     assert owner_provider_message(_BodyError("x", status_code=400, body={"message": "  Flat  body  message. "})) == "Flat body message."
-    stream = RuntimeError("stream died")
-    stream.provider_message = "Upstream closed the stream."
+    from ouroboros.llm_stream import ProviderStreamError
+
+    stream = ProviderStreamError({"error": {"message": "Upstream closed the stream."}})
     assert owner_provider_message(stream) == "Upstream closed the stream."
     assert owner_provider_message(RuntimeError(REPR)) == "", "a bare exception has no provider sentence"
     # An empty response's body-error dict: its own message, or nothing.
     assert owner_provider_message({"code": "401", "message": "  Incorrect  API key. "}) == "Incorrect API key."
-    assert owner_provider_message({"code": "401", "message": {"nested": "not a sentence"}}) == ""
+    assert owner_provider_message({"code": "401", "message": {"id": "req_1f429ab0"}}) == "", "an id is no sentence"
 
 
 @pytest.mark.parametrize("unknown", [False, True])

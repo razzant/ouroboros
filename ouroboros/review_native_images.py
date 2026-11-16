@@ -169,13 +169,13 @@ class NativeReviewImages:
                 fact.setdefault("unconfirmed_requests", []).append({"round": round_idx, **candidate, "reason": reason})
 
     def refuse_send(self, error, slot, round_idx, serialized_chars):
-        """Existing typed provider facts, never estimates or error-text matching."""
-        from ouroboros.llm_attempt import _is_structured_context_overflow_exception
+        """The provider's own answer by the shared recognition, never estimates."""
+        from ouroboros.llm_attempt import is_size_refusal
         from ouroboros.vision_routing import completed_image_refusal
 
         if not self.candidates:
             return False
-        if _is_structured_context_overflow_exception(error):
+        if is_size_refusal(error):
             reason = "provider context window refused the request containing this image; original retained"
         elif refusal := completed_image_refusal(error):
             reason = f"provider refused the request containing this image: {refusal}; original retained"

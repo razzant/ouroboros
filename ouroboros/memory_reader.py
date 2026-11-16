@@ -318,11 +318,28 @@ def _field_text(value: Any) -> Tuple[str, str]:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str), "json"
 
 
-def _dated(store: ChronicleStore, record: Mapping[str, Any]) -> Dict[str, Any]:
+def _period_projection(span: Any, address: Mapping[str, Any], budget: List[int], *, stated: bool = False) -> Any:
+    """Stored stated dates have a field address; computed spans only have their record as a source.
+
+    A derived span that does not fit is a JSON preview, not a ref to a nonexistent field. The source record
+    exposes its members/sources for complete reading, as for other compositions (``_derived_text``).
+    """
+    if span is None:
+        return None
+    if stated:
+        return _project(span, address, ["metadata", "stated_period"], budget)
+    text = _field_text(span)[0]
+    available = max(0, min(PREVIEW_CHARS, budget[0] - 8))
+    budget[0] -= 8 + min(len(text), available)
+    return span if len(text) <= available else {
+        "preview": text[:available], "chars": len(text), "derived_from": dict(address)}
+
+
+def _dated(store: ChronicleStore, record: Mapping[str, Any], budget: List[int]) -> Dict[str, Any]:
     """A page's, part's, account's or retold record's period keyed as its story entry is: ``source_period`` and
     ``period_basis`` from ``memory_inventory.record_period``, ``period`` as the view prints it; ``{}`` for any other
-    kind. No legacy unit is computed, so a retold record is dated by its block's recorded period (``block``), never by
-    reading the legacy history; a part reads its members and an account its sources, recursively, one ``get`` each."""
+    kind. No legacy unit is computed: a retold record uses its block's recorded period (``block``), a transfer its
+    source's stated period (``stated``); a part reads its members and an account its sources, one ``get`` each."""
     if record.get("kind") not in ("page", "part", "account", "legacy", "gap"):
         return {}
     from ouroboros.memory_inventory import record_period
@@ -330,30 +347,42 @@ def _dated(store: ChronicleStore, record: Mapping[str, Any]) -> Dict[str, Any]:
 
     period = record_period(store, record, {})
     metadata = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
-    text = (_legacy_period({"covers": record.get("covers"), "range_text": metadata.get("legacy_range_text")})
+    text = (_legacy_period(period, metadata.get("legacy_range_text"))
             if record.get("kind") in ("legacy", "gap") else _period(period.span, period.note()))
-    return {"period": _derived_text(text, _record_address(record["id"])), "source_period": period.span,
-            "period_basis": period.source}
+    address = _record_address(record["id"])
+    stated = record.get("kind") in ("legacy", "gap") and bool(metadata.get("transfer")) and period.source == "stated"
+    return {"period": _derived_text(text, address),
+            "source_period": _period_projection(period.span, address, budget, stated=stated),
+            "period_basis": period.source, "period_bases": list(period.bases or (period.source,))}
 
 
 def _record_entry(record: Mapping[str, Any], budget: Optional[List[int]] = None,
                   store: Optional[ChronicleStore] = None) -> Dict[str, Any]:
     """One chronicle record as a list shows it: its own words previewed, its acting state, its stored facts
     projected (``_project``) and a count where history grows; never a list of its history. With ``store``, a
-    record the story dates carries its period (``_dated``)."""
+    record the story dates carries its period (``_dated``). ``byline`` is who wrote it (``record_byline``); a
+    transfer (``chronicle_import``) adds ``transfer``, ``written_at`` and ``stated_period``, ``ts`` staying the
+    local publication."""
+    from ouroboros.memory_inventory import TRANSFER_FACTS, record_byline
+
     budget, address = [ENTRY_BUDGET] if budget is None else budget, _record_address(record["id"])
     author = record.get("author") if isinstance(record.get("author"), Mapping) else {}
     entry = {"address": address, "id": record["id"], "kind": record.get("kind"), "room_id": record.get("room_id"),
              "sequence": record.get("sequence"), "ts": record.get("ts"), "author": _project(author, address, ["author"], budget),
+             "byline": _derived_text(record_byline(record), {**address, "field": ["author"]}),
              "signer": draft_signer(author) if author.get("kind") in ("mind", "helper") else None,
              "status": record.get("status"), "folded_into": record.get("folded_into"), "revision": record.get("revision"),
              "corrections": len(record.get("corrections") or ()), "target_id": record.get("target_id") or None,
              **_preview(_words(record, own=True))}
     if store is not None:
-        entry.update(_dated(store, record))
+        entry.update(_dated(store, record, budget))
     for key in ("covers", "task_id", "accepted", "shown", "replaces", "visibility", "scope", "quote", "target_ref", "anchor"):
         if key in record:
             entry[key] = _project(record[key], address, [key], budget)
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
+    for key, name in TRANSFER_FACTS if metadata.get("transfer") else ():
+        if metadata.get(name) is not None:
+            entry[key] = _project(metadata[name], address, ["metadata", name], budget)
     if record.get("kind") == "account":
         selection = record.get("selection")
         entry["sources"] = len(record.get("sources") or ())
@@ -435,13 +464,29 @@ def _records(root: pathlib.Path, params: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _story_entry(entry: Mapping[str, Any]) -> Dict[str, Any]:
-    """One story entry as the memory view composed it, its words and lists bounded: the record reads them whole."""
+    """One captured story entry: author and transfer fields share one projection budget and name their stored
+    addresses. No record is read here; ``document`` reads each field whole."""
+    from ouroboros.memory_inventory import TRANSFER_FACTS
+
     out: Dict[str, Any] = {key: entry.get(key) for key in (
-        "kind", "id", "room_id", "period", "source_period", "period_basis", "status", "signer", "told_by", "block",
-        "rows", "chars", "messages", "written", "selection", "selection_sequence", "sequence") if key in entry}
-    record = _record_address(entry["id"])
+        "kind", "id", "room_id", "period", "source_period", "period_basis", "period_bases", "status", "signer", "told_by",
+        "block", "rows", "chars", "messages", "written", "selection", "selection_sequence", "sequence") if key in entry}
+    record, budget = _record_address(entry["id"]), [ENTRY_BUDGET]
+    if "author" in entry:
+        out["author"] = _project(entry["author"], record, ["author"], budget)
+    for key, name in TRANSFER_FACTS:
+        if key in entry:
+            out[key] = _project(entry[key], record, ["metadata", name], budget)
+    if entry.get("transfer") and entry.get("period_basis") == "stated" and entry.get("source_period"):
+        out["source_period"] = out["stated_period"]  # the same stored dates, with the same bounded projection
+    elif "source_period" in entry:
+        out["source_period"] = _period_projection(entry["source_period"], record, budget)
+    if "period" in entry:
+        out["period"] = _derived_text(str(entry["period"]), record)
     out.update(address=record, told_by=entry.get("told_by"), label=_derived_text(str(entry.get("label") or ""), record),
                **_preview(str(entry.get("text") or "")))
+    if entry.get("byline"):
+        out["byline"] = _derived_text(str(entry["byline"]), {**record, "field": ["author"]})
     # The view's own compositions: a stamp summary of the stored host_stamp, a legacy unit's [start, end] minutes,
     # a gap's stored source_gap (or the view's short default). None is a stored field of that name.
     if entry.get("stamp"):
@@ -798,7 +843,7 @@ def _record_document(root: pathlib.Path, address: Mapping[str, Any], revision: O
             "corrections_shown": entry["corrections"], "current_revision": later[-1] if later else read["revision"],
             "later_corrections": _later_corrections(store, record["id"], read["revision"], later),
             "room_label": room_labeler(root)(record["room_id"]) if record.get("room_id") else None,
-            "told_by": told_by(store, [record["id"]])[record["id"]], **_dated(store, record)}
+            "told_by": told_by(store, [record["id"]])[record["id"]], **_dated(store, record, budget)}
     return _words(read), {**meta, "revision": read["revision"]}
 
 

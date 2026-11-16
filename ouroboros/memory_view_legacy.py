@@ -1,14 +1,18 @@
 """How my story shows the old memory a helper retold before the update, and how the floor shortens it.
 
+The helper's retelling comes first under its heading, then the records a transfer brought
+(``chronicle_import``) under theirs, each naming its author and how it came, in place of
+"retold" (``memory_inventory.author_byline``, ``transfer_words``).
 An unfolded retold record is whole in the story, whatever its block and whoever reads it:
 its id, period, room and length as a header, then its words. A record whose words the
 capture did not keep is one line that says what its address holds: the room, the period,
 how many of that room's chat rows it retells (where none is established, the old writer's
 own message count) and the length of the retelling, then the ``memory_read`` call that
 reads it. A journal gap is named with its detail. Under the physical floor (F3) a room's
-records, whole ones included, are one line: the room, its whole period, their total length
-and every id. A record a selected account tells in its place (``told_by``) is not among
-these lines: it stands under the account (``memory_view_account``).
+records, whole ones included, are one line for the helper's retelling and one for its
+transfers, each under its heading: the room, its whole period, their total length and every
+id. A record a selected account tells in its place (``told_by``) is not among these lines: it
+stands under the account (``memory_view_account``).
 
 Only facts of the record, never a reason to read it. Nothing here reads a file.
 """
@@ -17,6 +21,10 @@ from __future__ import annotations
 from typing import Any, Dict, List, Mapping
 
 INDENT = "  "
+TRANSFER_LABEL = "Transferred memory"  # a transfer's label in the room-less ``legacy`` room, never "Unknown provenance"
+HEADINGS = {False: "### Old memory retold by a helper before the update (not lived; exact sources readable by id)",
+            True: "### Memory transferred from its source (author and transfer named per record; exact sources "
+                  "readable by id)"}
 
 
 def indented(text: Any) -> str:
@@ -29,8 +37,11 @@ def _count(n: int, noun: str) -> str:
 
 
 def retold_size(entry: Mapping[str, Any]) -> str:
-    """``4 rows retold in 1234 chars``; without rows of its room, the old writer's message count if it kept one."""
+    """``4 rows retold in 1234 chars``; without rows of its room, the old writer's message count if it kept one;
+    a transfer's author and coming, then its length."""
     rows, said, chars = entry.get("rows"), entry.get("messages"), entry.get("chars")
+    if entry.get("transfer"):
+        return "; ".join([str(entry.get("provenance") or "transferred"), *([f"{chars} chars"] if chars else [])])
     if rows:
         held = _count(rows, "row") + " retold"
     elif type(said) is int and said > 0:
@@ -43,7 +54,8 @@ def retold_size(entry: Mapping[str, Any]) -> str:
 def pointer_line(entry: Mapping[str, Any]) -> str:
     read = f"memory_read(node_id='{entry['id']}')"
     if entry.get("gap"):
-        return f"- memory gap: {entry['label']}; {entry['period']}; {entry['gap']}; {read}"
+        provenance = f"; {retold_size(entry)}" if entry.get("transfer") else ""
+        return f"- memory gap: {entry['label']}; {entry['period']}; {entry['gap']}{provenance}; {read}"
     return f"- {entry['label']}; {entry['period']}; {retold_size(entry)}; {read}"
 
 
@@ -64,24 +76,51 @@ def pointer_rooms(story: Any) -> Dict[str, List[Dict[str, Any]]]:
     return rooms
 
 
-def room_pointer(entries: List[Dict[str, Any]]) -> str:
-    """A room's retold records as one line: the room, its whole period, their length, every id (F3)."""
-    spans = [entry["span"] for entry in entries if entry.get("span")]
-    period = "; ".join(([f"{min(s[0] for s in spans)} → {max(s[1] for s in spans)}"] if spans else [])
-                       + sorted({entry["period"] for entry in entries if not entry.get("span")}))
-    chars = sum(entry.get("chars") or 0 for entry in entries)
-    return (f"- {entries[0]['label']}; {period}; {_count(len(entries), 'retold record')}"
+def _tellings(entries: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """A room's records by who told them, as ``HEADINGS`` part them: the helper's retelling, then the transfers."""
+    return [told for moved in (False, True) if (told := [e for e in entries if bool(e.get("transfer")) is moved])]
+
+
+def _room_line(entries: List[Dict[str, Any]]) -> str:
+    merged = []
+    for key, source, note in (("span", "source_period", ""),
+                              ("stated_span", "stated_period", " (stated by its source)")):
+        dated = [e for e in entries if e.get(key)]
+        if dated:
+            incomplete = " (incomplete)" if any((e.get(source) or {}).get("incomplete") for e in dated) else ""
+            merged.append(f"{min(e[key][0] for e in dated)} → {max(e[key][1] for e in dated)}{incomplete}{note}")
+    period = "; ".join(merged + sorted({entry["period"] for entry in entries
+                                        if not entry.get("span") and not entry.get("stated_span")}))
+    chars, moved = sum(entry.get("chars") or 0 for entry in entries), bool(entries[0].get("transfer"))
+    return (f"- {TRANSFER_LABEL if moved else entries[0]['label']}; {period}; "
+            f"{_count(len(entries), 'transferred record' if moved else 'retold record')}"
             + (f" in {chars} chars" if chars else "") + ": "
             + ", ".join(entry["id"] for entry in entries) + "; memory_read(node_id=<id>) reads each")
 
 
+def room_pointer(entries: List[Dict[str, Any]]) -> str:
+    """A room's retold records in the floor's form (F3): the helper's retelling and the room's transfers each one line,
+    the room (a transfer's as ``TRANSFER_LABEL``), its whole period (its rows', then the span its transfers' sources
+    state), their length, every id."""
+    return "\n".join(map(_room_line, _tellings(entries)))
+
+
 def retold_lines(retold: List[Dict[str, Any]], rooms: Any) -> List[str]:
-    """The retold records in story order; a room the floor took is one line where its first record stood."""
-    grouped, lines = pointer_rooms(retold), []
+    """The retold records in story order under their headings (``HEADINGS``: a transfer's after the helper's); in a
+    room the floor took, its helper retelling and its transfers are each one line where their first record stood."""
+    firsts = {told[0]["id"]: told for room, entries in pointer_rooms(retold).items() if room in rooms
+              for told in _tellings(entries)}
+    lines, heading = [], None
     for entry in retold:
-        room = str(entry["room_id"])
-        if entry.get("gap") or room not in rooms:
-            lines.append(retold_record(entry))
-        elif grouped[room][0] is entry:
-            lines.append(room_pointer(grouped[room]))
+        if entry.get("gap") or str(entry["room_id"]) not in rooms:
+            line = retold_record(entry)
+        elif entry["id"] in firsts:
+            line = _room_line(firsts[entry["id"]])
+        else:
+            continue
+        moved = bool(entry.get("transfer"))
+        if moved is not heading:
+            lines += ["", HEADINGS[moved]]
+            heading = moved
+        lines.append(line)
     return lines

@@ -97,7 +97,8 @@ def test_a_place_list_reads_its_stores_in_fixed_transactions_and_a_place_s_rooms
     """#3399 (14.11): a place view opened ten store transactions per place and stepped one statement per captured
     room, and every step hands the interpreter lock over and waits to take it back: on the owner's busy server 31
     places with 2,169 rooms took 4 to 20 seconds. A list opens as many store transactions for any number of places,
-    reads a place's rooms in one statement, and answers the same rooms, counts, activity and candidates."""
+    reads a place's rooms in one statement, and answers the same rooms, counts, activity and candidates. Main's read
+    of every place's rooms (``place_room_chats``) is one statement after the index check, whatever the places."""
     from contextlib import contextmanager
     from ouroboros import dialogue_store, place_projection, store
     from tests._store_shared import seed_result
@@ -126,6 +127,8 @@ def test_a_place_list_reads_its_stores_in_fixed_transactions_and_a_place_s_rooms
     for n, chat in enumerate((901, 902, 903)):
         _arrive(tmp_path, first.place_id, chat, n)
     _arrive(tmp_path, second.place_id, 904, 3)
+    from ouroboros.place_arrivals import place_room_chats
+    assert place_room_chats(tmp_path) == set(), 'a Main read never builds the room index'
     seed_result(tmp_path, 'focus1', {'status': 'running', 'chat_id': 902, 'metadata': {
         'presence': {'binding_id': first.place_id}, 'wake_cause': 'focus'}})
 
@@ -143,6 +146,9 @@ def test_a_place_list_reads_its_stores_in_fixed_transactions_and_a_place_s_rooms
     assert [p['platform_actor_id'] for p in rows[first.place_id]['account_candidates']] == ['person-2', 'person-1', 'person-0']
     assert room_statements == 2, 'one rooms statement per place, whatever its rooms'
     assert opened.count('dialogue') == 2, 'the index check and one read of the dialogue for the whole list'
+    statements.clear()
+    assert place_room_chats(tmp_path) == {901, 902, 903, 904}
+    assert sum('INDEXED BY dialogue_place_rooms' in sql for sql in statements) == 1, 'every place and room at once'
     for n, chat in enumerate((905, 906, 907, 908), start=4):
         _arrive(tmp_path, first.place_id, chat, n)
     third = places.connect_place(tmp_path, connector='bridge', provider='chat', account_id='c')
@@ -153,6 +159,9 @@ def test_a_place_list_reads_its_stores_in_fixed_transactions_and_a_place_s_rooms
     assert list(grown[third.place_id]['rooms'][0]) == ['room_chat_id', 'unanswered_count', 'address'], 'wire order'
     assert more_transactions == transactions, 'as many store transactions for the list, whatever its places'
     assert more_room_statements == 3
+    statements.clear()
+    assert place_room_chats(tmp_path) == {901, 902, 903, 904, 905, 906, 907, 908, 909}
+    assert sum('INDEXED BY dialogue_place_rooms' in sql for sql in statements) == 1, 'still one, for three places'
     # The list's bindings ride one parameter: no SQL variable ceiling however many places an install keeps.
     from types import SimpleNamespace
     from ouroboros.place_arrivals import _open_counts
@@ -170,3 +179,11 @@ def test_a_place_list_reads_its_stores_in_fixed_transactions_and_a_place_s_rooms
     isolated = {row['place_id']: row for row in place_projection.places_view(tmp_path)['places']}
     assert isolated[first.place_id]['rooms'] is None and isolated[first.place_id]['unanswered'] is None
     assert isolated[second.place_id]['rooms'] == grown[second.place_id]['rooms']
+    # A room two places share is one room; an arrival without a room and a room no arrival reached stay out.
+    _arrive(tmp_path, second.place_id, 901, 10)
+    dialogue_store.append(tmp_path, 'chat', {'ts': '2026-11-14T10:00:11+00:00', 'direction': 'in', 'type': 'place_arrival',
+                                             'chat_id': None, 'text': 'no room', 'client_message_id': 'no-room',
+                                             'place_id': third.place_id})
+    dialogue_store.append(tmp_path, 'chat', {'ts': '2026-11-14T10:00:12+00:00', 'direction': 'in', 'chat_id': 950,
+                                             'text': 'a room of its own', 'client_message_id': 'own-950'})
+    assert place_room_chats(tmp_path) == {901, 902, 903, 904, 905, 906, 907, 908, 909}

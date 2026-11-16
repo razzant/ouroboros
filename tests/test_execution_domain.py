@@ -22,6 +22,7 @@ import pytest
 from ouroboros import delegate_custody as custody
 from ouroboros import delegate_custody_current as current
 from ouroboros import execution_domain as domain
+from ouroboros import platform_layer
 from ouroboros.gateways import claudexor as wire
 from ouroboros.gateways.claudexor import ClaudexorUnavailable
 from tests._safety_fixtures import disable_safety
@@ -29,6 +30,17 @@ from tests._store_shared import seed_result
 from tests._workspace_executor_shared import fake_docker_cli
 
 WORK_PORT, STORE = 47111, "store-work"
+# A test that needs a usable policy naming ``execution`` runs where the product allows one: a Windows service host
+# refuses the section (``domain.WINDOWS_HOST_REFUSAL``, proved on every host by the policy suite), so this boundary
+# cannot outlive that rule. A test that needs no section runs on every host, one that names a section its path never
+# reads included (the custody sweep, a result's taken decision and its telling route by each record's own engine).
+posix_host = pytest.mark.skipif(platform_layer.IS_WINDOWS, reason=(
+    f"{domain.WINDOWS_HOST_REFUSAL.split(';')[0]} (a Windows service host refuses it: "
+    "tests/test_deployment_policy.py::test_an_execution_section_needs_a_posix_service_host)"))
+# A test that needs no section but whose stand-in for the Linux work container (``fake_docker``, a container shell
+# under the host's ``/bin/sh``) runs POSIX shell and process facilities on the test host.
+posix_container = pytest.mark.skipif(platform_layer.IS_WINDOWS, reason=(
+    "its stand-in for the Linux work container runs POSIX shell and process facilities on the test host"))
 
 
 @pytest.fixture
@@ -138,6 +150,7 @@ def test_without_an_execution_section_nothing_is_managed_here(env):
     assert executor_ref_from_ctx(ctx).container_name == "task-box"  # a task's own executor stays its own
 
 
+@posix_host
 def test_an_execution_section_pins_one_domain(env):
     env.manage(section(env))
     found = domain.current()
@@ -147,6 +160,7 @@ def test_an_execution_section_pins_one_domain(env):
     assert found.dedicated_containers == ("ouro-work", "ouro-engine") and domain.panic_scope()
 
 
+@posix_host
 @pytest.mark.parametrize("change,reason", [
     (lambda s, e: s["executor"].update(type="local"), "must be 'docker_exec'"),
     (lambda s, e: s["executor"].pop("container_name"), "container_name must name one container"),
@@ -172,6 +186,7 @@ def test_an_unusable_execution_section_never_reads_as_unmanaged(env, change, rea
             read()
 
 
+@posix_host
 @pytest.mark.parametrize("which", ["data root", "checkout"])
 def test_the_domain_may_not_reach_what_enforces_the_policy(env, monkeypatch, which):
     from ouroboros import deployment_policy
@@ -193,6 +208,7 @@ def test_the_domain_may_not_reach_what_enforces_the_policy(env, monkeypatch, whi
         domain.current()
 
 
+@posix_host
 def test_a_skill_state_root_is_the_work_domains_own_and_kept_apart(env, monkeypatch):
     """``skill_state_root`` is a normalized folder the work sees at its own address; neither it nor a mapping may
     reach the policy file, the work engine's descriptor or the service's import path."""
@@ -277,6 +293,7 @@ def test_unmanaged_task_executor_and_host_fallback_are_unchanged(env, monkeypatc
     assert execs and {call[call.index("--workdir") + 2] for call in execs} == {"task-box"}
 
 
+@posix_host
 def test_managed_work_runs_only_in_the_pinned_container_and_never_falls_back(env, monkeypatch):
     disable_safety(monkeypatch)
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
@@ -306,6 +323,7 @@ def test_managed_work_runs_only_in_the_pinned_container_and_never_falls_back(env
 
 # --- the work engine's gateway -----------------------------------------------------------------------------------
 
+@posix_host
 def test_the_work_gateway_proves_its_store_and_withholds_its_run_directory(env, monkeypatch):
     env.manage(section(env))
     detail = {"summary": {"runId": "run-w", "state": "running", "runDir": "/engine/runs/run-w"}, "lastSeq": 2}
@@ -318,11 +336,11 @@ def test_the_work_gateway_proves_its_store_and_withholds_its_run_directory(env, 
 
 
 @pytest.mark.parametrize("case,code", [
-    ("other_descriptor", "execution_domain_changed"),
-    ("no_engine", "execution_domain_unavailable"),
-    ("unmanaged", "execution_domain_unavailable"),
-    ("other_store", "work_engine_store_changed"),
-    ("no_store", "work_engine_identity_unproven"),
+    pytest.param("other_descriptor", "execution_domain_changed", marks=posix_host),
+    pytest.param("no_engine", "execution_domain_unavailable", marks=posix_host),
+    ("unmanaged", "execution_domain_unavailable"),  # its section is no longer named when it asserts
+    pytest.param("other_store", "work_engine_store_changed", marks=posix_host),
+    pytest.param("no_store", "work_engine_identity_unproven", marks=posix_host),
 ])
 def test_a_work_reference_never_reaches_another_engine(env, monkeypatch, case, code):
     env.manage(section(env, engine=case != "no_engine", containers=None if case == "no_engine" else ("e",)))
@@ -340,6 +358,7 @@ def test_a_work_reference_never_reaches_another_engine(env, monkeypatch, case, c
     assert raised.value.code == code
 
 
+@posix_host
 def test_a_start_naming_a_path_the_domain_does_not_see_is_never_sent(env, monkeypatch):
     env.manage(section(env))
     starts = []
@@ -487,6 +506,7 @@ def test_the_sweep_replays_and_settles_each_engines_work_only_through_that_engin
 
 # --- the delegate tools: start, retry, continuation and controls ---------------------------------------------------
 
+@posix_host
 def test_a_start_binds_its_engine_and_a_retry_or_continuation_keeps_it(env, tmp_path, monkeypatch):
     from ouroboros import claudexor_daemon
 
@@ -516,6 +536,7 @@ def test_a_start_binds_its_engine_and_a_retry_or_continuation_keeps_it(env, tmp_
     gateway.close()
 
 
+@posix_host
 def test_a_work_start_with_an_unseen_path_is_refused_before_its_row(env, tmp_path):
     from ouroboros.delegate_start_claims import claimed_start_request
 
@@ -586,6 +607,7 @@ def _panic(tmp_path, monkeypatch):
     return raised.value.code, time.monotonic() - started_at
 
 
+@posix_host
 def test_panic_kills_the_measured_containers_and_never_waits_for_them(env, tmp_path, monkeypatch):
     import threading
 
@@ -613,6 +635,7 @@ def test_panic_kills_the_measured_containers_and_never_waits_for_them(env, tmp_p
     assert still_asking  # requested by measured identity, never by name, and still unanswered at the exit
 
 
+@posix_host
 def test_panic_settlement_reports_only_what_docker_answered(env, tmp_path, monkeypatch):
     env.manage(section(env))
     monkeypatch.setattr(domain, "_MEASURED", {"ouro-work": "id-work", "ouro-engine": "id-engine"})
@@ -638,6 +661,7 @@ def test_unmanaged_panic_names_no_execution_domain(env, tmp_path, monkeypatch):
 
 # --- the owned engine keeps raw inference; observers and passes reach each engine for its own objects ------------
 
+@posix_host
 def test_model_operations_keep_the_owned_engine_while_the_work_engine_serves_runs(env, tmp_path, monkeypatch):
     from ouroboros import claudexor_daemon as daemon
     from ouroboros.gateways import claudexor_metadata as metadata
@@ -682,6 +706,7 @@ def test_model_operations_keep_the_owned_engine_while_the_work_engine_serves_run
     assert handshakes.count(47222) == 1 and handshakes.count(WORK_PORT) == 2
 
 
+@posix_host
 def test_review_seats_start_on_the_work_engine_and_recover_on_their_own(env, monkeypatch):
     from ouroboros import claudexor_daemon
 
@@ -734,6 +759,7 @@ def test_the_body_observes_a_work_run_through_its_own_engine(env, tmp_path, monk
     assert ("closed",) in asked
 
 
+@posix_host
 def test_the_router_answers_each_store_with_its_engine_and_waits_when_it_is_unreachable(env, monkeypatch):
     env.manage(section(env))
     owned = _gateway("store-s")
@@ -908,6 +934,7 @@ def attached(docker, needle):
     return [call for call in docker.calls() if call[:2] == ["exec", "-i"] and needle in call[-1]]
 
 
+@posix_host
 def test_an_attached_launch_keeps_the_services_facts_and_refuses_what_the_domain_does_not_see(env, monkeypatch):
     import os
 
@@ -938,6 +965,7 @@ def test_an_attached_launch_keeps_the_services_facts_and_refuses_what_the_domain
             domain.attached_launch(["server"], cwd, variables)
 
 
+@posix_host
 def test_a_stdio_mcp_server_runs_in_the_pinned_executor_and_its_group_is_settled(env, monkeypatch):
     import sys
 
@@ -988,6 +1016,7 @@ for line in sys.stdin:
     assert len(docker.calls()) == before and not docker.records()  # the never-started CLI's record is abandoned
 
 
+@posix_host
 def test_skill_scripts_and_dependency_builds_run_in_the_pinned_executor_or_not_at_all(env, monkeypatch):
     import os
 
@@ -1053,6 +1082,7 @@ def _reviewed_skill(env, monkeypatch, name, script, *, runtime="python3", entry=
     return ToolContext(repo_dir=env.root / "repo", drive_root=drive), drive
 
 
+@posix_host
 def test_a_reviewed_skill_keeps_its_state_in_the_work_domain_across_runs(env, monkeypatch):
     """The real tool, managed: the script runs in the pinned executor, writes its state into the administrator's work
     root and reads it back on its next run; the service keeps its own records apart and spawns only its CLI."""
@@ -1080,6 +1110,7 @@ def test_a_reviewed_skill_keeps_its_state_in_the_work_domain_across_runs(env, mo
     assert len([call for call in docker.calls() if call[:2] == ["exec", "-i"]]) == 2 and not docker.records()
 
 
+@posix_host
 def test_a_managed_skill_without_its_work_folders_is_refused_before_anything_starts(env, monkeypatch, tmp_path):
     """No ``skill_state_root``, or an installed skill under the data root with no ``staging_root`` to copy its
     reviewed payload into (``work_skill_payloads``): refused, and nothing runs, here or in the container."""
@@ -1122,6 +1153,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
 """
 
 
+@posix_host
 def test_a_skill_bound_mcp_server_inside_the_mappings_gets_its_state_and_key_and_no_service_path(env, monkeypatch):
     """A skill folder inside the work mappings starts as installed in the pinned executor, with its scripts'
     environment: the work domain's own state folder, its granted key and its own packages. No service search or
@@ -1178,6 +1210,7 @@ def test_a_skill_bound_mcp_server_inside_the_mappings_gets_its_state_and_key_and
                for value in crossing.values() for part in str(value).split(os.pathsep))
 
 
+@posix_host
 def test_a_skill_bound_mcp_server_starts_its_verified_work_copy_in_the_pinned_executor(env, monkeypatch, tmp_path):
     """Connect tools' row, managed, its skill installed outside every mapping: binding and the Connect preview copy and
     start nothing (the preview names what the work domain will start); each real start (listing, call) runs the
@@ -1259,6 +1292,7 @@ def test_a_skill_bound_mcp_server_starts_its_verified_work_copy_in_the_pinned_ex
     assert len(docker.calls()) == before and not docker.records()  # nothing started, here or in the container
 
 
+@posix_host
 def test_env_deno_permission_and_go_build_use_the_one_work_state_path(env, monkeypatch):
     from ouroboros.tools import skill_exec
 
@@ -1289,6 +1323,7 @@ def test_env_deno_permission_and_go_build_use_the_one_work_state_path(env, monke
     assert not pathlib.Path(folder).exists()  # made and removed in the work domain (here, by the fake CLI)
 
 
+@posix_host
 def test_network_none_is_checked_before_every_attached_start(env, monkeypatch):
     """``network: none`` holds only while the container has none: the executor's own check runs before each attached
     start; a container with a network refuses with nothing started, and an unchecked one never passes."""
@@ -1322,6 +1357,7 @@ def test_network_none_is_checked_before_every_attached_start(env, monkeypatch):
     assert domain.attached_launch(["server"], str(env.work), {}) is not None
 
 
+@posix_host
 def test_folder_commands_are_the_works_own_and_check_the_network_first(env, monkeypatch):
     """The commands that make a skill's state and build folders resolve inside the work domain: ``network: none`` is
     checked before them as before any start, and one the CLI did not confirm is never reported as unstarted."""
@@ -1387,6 +1423,7 @@ def test_a_work_result_is_told_while_the_owned_engine_is_down(env, tmp_path, mon
     assert taken.tell_engine(a_pass(), task) == rt.DONE and told == ["run-w"]  # recorded once, never told again
 
 
+@posix_host
 def test_thread_retention_asks_each_objects_own_engine(env, tmp_path, monkeypatch):
     """Managed, a release or thread waits only for the engine holding it: the owned engine's absence holds nothing
     of the work engine's, and what it does hold is named."""
@@ -1461,6 +1498,7 @@ def _work_git_repo_with_clean_filter(env):
     return repo, witness
 
 
+@posix_host
 def test_a_work_repo_file_write_lands_as_the_work_domain_with_bytes_on_stdin(env, monkeypatch):
     """A write to a work-domain file runs in the pinned container, its bytes on stdin and never the shell, so an
     ancestor swap could reach only the work domain and the service never opens that pathname for writing."""
@@ -1482,6 +1520,7 @@ def test_a_work_repo_file_write_lands_as_the_work_domain_with_bytes_on_stdin(env
     assert attached(docker, "cat >>")  # the append grew it there
 
 
+@posix_host
 def test_a_work_tree_status_and_diff_run_their_filters_in_the_work_container(env, monkeypatch):
     """status and diff over a work repository run its configured clean filter — a supported, tested capability —
     IN the container, so an employee's filter never executes with the service's authority."""
@@ -1504,6 +1543,7 @@ def test_a_work_tree_status_and_diff_run_their_filters_in_the_work_container(env
     assert not docker.records()  # every launch's group confirmed ended and its record retired
 
 
+@posix_container
 def test_unmanaged_work_file_write_stays_on_the_service(env, monkeypatch):
     """Without a policy the write is byte-identical to before: it lands directly on the service, no container start."""
     docker = fake_docker(env, monkeypatch)  # a CLI is on PATH, but nothing here should call it
@@ -1513,6 +1553,7 @@ def test_unmanaged_work_file_write_stays_on_the_service(env, monkeypatch):
     assert not [call for call in docker.calls() if call[:1] == ["exec"]]  # the service wrote it, no work container
 
 
+@posix_host
 def test_apply_patch_writes_and_deletes_run_as_the_work_domain(env, monkeypatch):
     """apply_patch's multi-file write and delete over a work tree run in the pinned container, so neither an
     added file's write nor a delete can be redirected by a path race out of the work domain."""
@@ -1535,6 +1576,7 @@ def test_apply_patch_writes_and_deletes_run_as_the_work_domain(env, monkeypatch)
 
 # --- custody of an attached launch: the group, not only its leader; an ambiguous start is settled -------------
 
+@posix_host
 def test_an_attached_launch_keeps_custody_of_its_group_until_every_member_ended(env, monkeypatch):
     """The leader exits while a member of its group still runs: settlement does not take the leader's end for the
     group's. The executor's bounded group stop ends the member and only then is the record retired, so nothing the
@@ -1556,6 +1598,7 @@ def test_an_attached_launch_keeps_custody_of_its_group_until_every_member_ended(
     assert not later.exists()  # the member was stopped at settlement, never left running outside custody
 
 
+@posix_host
 @pytest.mark.parametrize("uncertain", [False, True])
 def test_skill_bookkeeping_failure_stops_the_backend_or_retains_uncertainty(env, monkeypatch, uncertain):
     from ouroboros.tools import skill_exec
@@ -1591,6 +1634,7 @@ def test_skill_bookkeeping_failure_stops_the_backend_or_retains_uncertainty(env,
     assert not later.exists() and not docker.records()
 
 
+@posix_host
 def test_an_ambiguous_mcp_startup_failure_settles_the_container_side_and_never_abandons_it(env, monkeypatch):
     """The SDK can fail attaching its pipes AFTER the Docker CLI was spawned: that start is settled, so the
     container side is confirmed ended or stays recorded. Only the service's own proof that it has no CLI to start
