@@ -3316,7 +3316,9 @@ readers ends with the same words. The list stands beside the room and is never l
 name is the meta ink at the regular weight, its line the secondary ink, or the primary ink of the room's own text
 while it says what waits for the owner, and only the chosen row is strong. Its menu opens
 from its ⋯ (a fine pointer), a right-click, Shift+F10 or a long press; it first says the row's state as its mark
-and words, then offers Pin or Unpin; pinning neither opens nor reads it. Pins lead the one list, one `--space-2`
+and words, then offers Pin or Unpin; pinning neither opens nor reads it. Its Working folder… shows and repairs
+missing, unusable or unset bindings. No folder stays until a folder is chosen. It names work keeping
+its folder before Save. Closing during Save reports an unknown outcome; reopening reads afresh. Pins lead the one list, one `--space-2`
 of air before the next shown row their only boundary: no caption, tint, rule or column, and no glyph, so nothing
 reads as one more Project; their tooltip and accessible name say Pinned. Within each group the newest message
 leads: what Unread (§4) counts, the owner's own, of System rows only a work's end or a reminder; unread only

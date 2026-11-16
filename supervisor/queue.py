@@ -450,6 +450,7 @@ def enqueue_task(
 
                 bindings_snapshot = _load_bindings(DRIVE_ROOT, strict=True)["bindings"]
                 binding = pending_placement(DRIVE_ROOT, t, bindings_snapshot=bindings_snapshot)
+                t.pop("_placement_folder", None)  # a saved lane projection is dropped: the chooser decides it again
                 if binding:
                     if not refresh_pending_placement(DRIVE_ROOT, t, binding=binding):
                         raise ProjectAdmissionError(lookup, "The moved work could not be readmitted.")

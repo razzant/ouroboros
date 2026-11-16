@@ -428,7 +428,11 @@ def test_the_cards_quiet_label_keeps_its_words_in_a_narrow_sidebar() -> None:
     assert "order" not in label and "flex-basis" not in label, "wide cards keep the label beside the name"
     small = narrow.group(1)
     assert _declarations(small, ".nav-ouro-line1").get("flex-wrap") == "wrap"
-    assert _declarations(small, ".nav-ouro-name").get("flex") == "1 1 auto", "the count and mark keep their column"
+    name = _declarations(small, ".nav-ouro-name")
+    assert name.get("flex") == "1 1 0" and name.get("min-width") == "0", "a wide name yields to the count and mark"
+    assert {key: name.get(key) for key in ("overflow", "white-space", "text-overflow")} == {
+        "overflow": "hidden", "white-space": "nowrap", "text-overflow": "ellipsis"}, name
+    assert _declarations(source, ".nav-ouro-line1 > .nav-mark-slot").get("flex") == "0 0 18px"
     label = _declarations(small, ".nav-ouro-line1 > .nav-row-label")
     assert label == {"order": "4", "flex-basis": "100%"}, label
 

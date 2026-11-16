@@ -528,7 +528,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
    The phone's 293px drawer has that room; 282px and 270px columns need the second line. */
 @container ourocard (max-width: 200px) {
     .nav-ouro-line1 { flex-wrap: wrap; row-gap: 0; }
-    .nav-ouro-name { flex: 1 1 auto; }
+    /* A wide system face or 99+ leaves less room for the name, never a new line for the mark. */
+    .nav-ouro-name { flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
     .nav-ouro-line1 > .nav-row-label { order: 4; flex-basis: 100%; }
 }
 /* the count stands just before the mark, a step before it, and the mark keeps the rows' own column */
@@ -5434,6 +5435,16 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     clip-path: inset(50%);
     white-space: nowrap;
 }
+/* Folded rings keep their look, but their 44px hit areas need separate room on both sides. The chips slot gives back
+   the gap it starts after (its own rule above), so it gives back this wider one too and never wraps the row. */
+@media (pointer: coarse) {
+    .chat-toolbar-row[data-owner-glyphs="true"] {
+        --composer-glyph-gap: max(var(--composer-row-gap), calc(var(--touch-target-min) - var(--composer-control-height)));
+        column-gap: var(--composer-glyph-gap);
+    }
+    .chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips { margin-inline-start: calc(-1 * var(--composer-glyph-gap)); }
+    .chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips::before { width: calc(var(--composer-glyph-gap) - 6px); }
+}
 /* While a drag runs, and when the layout itself changes (opening, a resize, a new padding),
    the marks land with the words at once, so a pill never trails behind the word it names. */
 .chat-capsule:is([data-dragging="true"], [data-settling="true"]) :is(.chat-effort-band, .chat-effort-handle, .chat-effort-seg, .chat-context-thumb) {
@@ -6263,6 +6274,8 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 @container dashboard (max-width: 27.75rem) {
     .logs-filters { display: grid; grid-template-columns: repeat(3, auto) minmax(0, 1fr); justify-items: start; }
     .logs-filters > .logs-inline-clear { grid-column: 4; grid-row: 1; justify-self: end; }
+    /* Consciousness can use the space below Clear; its wider system-font word must not widen column three. */
+    .logs-filters > .filter-chip:nth-child(6) { grid-column: 3 / -1; }
 }
 
 .logs-card { display: grid; gap: var(--space-2); min-width: 0; }
@@ -9688,6 +9701,14 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     color: var(--status-warn-word, var(--text-primary));
     font-size: var(--type-meta);
     margin: 0;
+}
+
+/* Working folder dialog (project_folder.js): the New Project dialog's parts, plus the registered address, which
+   wraps inside the dialog however long it is. */
+.project-folder-path {
+    color: var(--text-primary);
+    font-size: var(--type-body);
+    overflow-wrap: anywhere;
 }
 
 .project-panel {
