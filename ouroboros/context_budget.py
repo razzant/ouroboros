@@ -318,8 +318,9 @@ def size_refusal(answer: Any, status: Optional[int], typed: Any = (), printed: s
             return "typed", code, *answer.innermost()
     for speaker, code, history in answer.codes:
         if code.lower() in CONTEXT_OVERFLOW_CODES:
-            return "typed", code, speaker, next(
-                (text for who, text, earlier in answer.said if (who, earlier) == (speaker, history)), "")
+            own = [text for who, text, earlier in answer.said if (who, earlier) == (speaker, history)]
+            # Its sentence that states the size, else its last: a gateway's empty wrapper line is not the cause.
+            return "typed", code, speaker, next((text for text in own if context_overflow_message(text)), own[-1] if own else "")
     for speaker, text, _history in answer.said:
         if context_overflow_message(text):
             return "frozen", "", speaker, text

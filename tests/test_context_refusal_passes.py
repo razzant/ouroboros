@@ -134,6 +134,7 @@ def test_a_cited_limit_declared_for_the_route_recognises_size_sizes_the_pass_and
             and "established no size cause" not in told and f'Alibaba said "{bracket}"' in told)
     long = failed_attempt_facts({**stamped("too long " * 100), "_last_llm_failure": row}, plan.model, False)
     assert long.count("[cut here]") == 1 and "[cut here]" not in told  # a cut sentence says so; a whole one does not
+    assert "Logs" in long.split("[cut here]")[1] and "Logs" not in told  # and where the rest is kept
     terminal = dict(is_context_overflow=True, is_transport_wait=False, waited_sec=0.0, is_deadline_exhausted=False)
     ended = provider_terminal_fallback_text({**usage, "_last_llm_error_kind": "context_overflow"}, **terminal)
     assert f'Alibaba said: "{bracket}"' in ended  # the one-route terminal keeps the provider's own sentence
@@ -156,6 +157,50 @@ def test_a_cited_limit_declared_for_the_route_recognises_size_sizes_the_pass_and
                            (stamped(bracket), SimpleNamespace(physical_context=SimpleNamespace(route_fp="other")))):
         assert cited_limit_refusal(quiet, capture, fit.measurement, plan) is False
         assert "basis" not in quiet["_last_llm_provider_answer"]
+
+    # The round itself: the refusal as the transport raised it reaches the same-route passes only through the seam.
+    import httpx
+    import openai
+
+    from ouroboros import loop as loop_mod, primary_route_observation as pro, project_placement, vision_routing
+    from ouroboros.loop_llm_call import classify_llm_exception
+    from ouroboros.loop_transport import stamp_owner_provider_message
+
+    raw = 'data: {"error":{"code":"invalid_parameter_error","message":"' + bracket + '","type":"invalid_request_error"}}\n\n'
+    founding = openai.OpenAI(api_key="x", base_url="https://openrouter.ai/api/v1")._make_status_error_from_response(httpx.Response(
+        400, json={"error": {"message": "Provider returned error", "code": 400, "metadata": {"raw": raw, "provider_name": "Alibaba"}}},
+        request=httpx.Request("POST", "https://openrouter.ai/api/v1/chat/completions")))
+
+    def refuse(ctx, disposition, **_kw):
+        filed = classify_llm_exception(founding)
+        ctx.accumulated_usage.update(_last_llm_error_kind=filed.kind, _last_llm_failure={
+            "model": ctx.active_model, "failure_code": filed.kind, "status_code": 400})
+        stamp_owner_provider_message(ctx.accumulated_usage, founding, filed)
+        return None, 0.0
+
+    entered = []
+    for module, name, value in (
+            (loop_mod, "_measure_round_main_fit", lambda ctx, **_kw: SimpleNamespace(measurement=fit.measurement)),
+            (loop_mod, "_dispatch_round_model", refuse), (loop_mod, "last_physical_attempt_capture", lambda: refused),
+            (lmc, "_fit_route_tool_ceiling", lambda ctx: False), (lmc, "_append_routing_receipts", lambda ctx: False),
+            (lmc, "_project_wake_input", lambda ctx, overflowed=False: False),
+            (lmc, "_recover_context_overflow", lambda ctx, failed, cost, **kw: entered.append(kw) or ("answered", cost, "max")),
+            (pro, "observe_primary_route", lambda ctx: ""), (project_placement, "append_placement_notice", lambda *a, **k: None),
+            (vision_routing, "retry_refused_image_round", lambda ctx, cap: None)):
+        monkeypatch.setattr(module, name, value)
+
+    def round_once():
+        ctx = SimpleNamespace(accumulated_usage={}, tools=SimpleNamespace(_ctx=SimpleNamespace()), context_fit_plan=plan,
+                              messages=[{"role": "user", "content": "hi"}], active_model=plan.model, active_context_mode="max",
+                              defer_resource_wait=False, attempt_cap=None, refused_density=None, round_idx=3)
+        return lmc._call_round_model_once(ctx)[0], ctx.accumulated_usage
+
+    answered, round_usage = round_once()
+    assert answered == "answered" and len(entered) == 1 and round_usage["_last_llm_error_kind"] == "context_overflow"
+    assert round_usage["_last_llm_provider_answer"]["basis"] == "number_equals_declared"
+    catalogue.clear()  # no declaration equals the cited number: the round walks, informed
+    answered, round_usage = round_once()
+    assert answered is None and len(entered) == 1 and round_usage["_last_llm_error_kind"] == "bad_request"
 
 
 def test_a_providers_requested_total_holds_the_reply_once():

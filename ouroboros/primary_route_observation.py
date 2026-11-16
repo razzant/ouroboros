@@ -232,7 +232,7 @@ def failed_attempt_facts(usage: dict, model: str, use_local: bool, *, fresh: boo
     record, and what the host did. Never a cause the host did not establish, a unit the provider did not state,
     advice, or the printed exception. "" unless the last failure row is this route's own (``fresh``:
     ``loop_transport.fallback_reason_text``)."""
-    from ouroboros.loop_transport import _OWNER_QUOTE_LIMIT, _failure_words
+    from ouroboros.loop_transport import _DIAGNOSTIC_POINTER, _OWNER_QUOTE_LIMIT, _failure_words
 
     failure, answer = usage.get("_last_llm_failure") or {}, usage.get("_last_llm_provider_answer") or {}
     if not fresh or failure.get("model") != model:
@@ -259,12 +259,13 @@ def failed_attempt_facts(usage: dict, model: str, use_local: bool, *, fresh: boo
     if kind == "context_overflow":
         basis = (f"a cited {answer['limit']:,} equal to the {answer.get('limit_kind')} limit of {answer.get('declaration')}"
                  if answer.get("limit") else _BASIS_WORDS.get(str(answer.get("basis") or ""), "its own measurement"))
-        did = f"The host read it as a size refusal by {basis}; its size passes on that route ended without an answer."
+        did = f"The host read it as a size refusal by {basis}; that route gave no answer."
     else:
         did = f"The host filed it as {_failure_words(kind)}, established no size cause and changed nothing in the request for it."
     return (f"[ATTEMPT FACTS] The attempt before this request, on {model}{' (local)' if use_local else ''}, ended without "
             f"a usable answer at {failure.get('ts') or 'an unrecorded time'}{' with HTTP ' + str(failure['status_code']) if failure.get('status_code') else ''}"
-            f"{': ' + '; '.join(said) if said else '; it carried no sentence the host can quote'}.{size} {did}")
+            f"{': ' + '; '.join(said) if said else '; it carried no sentence the host can quote'}.{size} {did}"
+            + (f" {_DIAGNOSTIC_POINTER}" if "[cut here]" in "".join(said) else ""))
 
 
 def tell_failed_attempt(messages: list, facts: str, asked: str) -> dict | None:

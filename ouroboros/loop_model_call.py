@@ -231,6 +231,8 @@ def _run_cross_model_fallback_chain(
     entry_model, entry_kind = active_model, str(accumulated_usage.get("_last_llm_error_kind") or "")
     own_wait = entry_kind in _ROUND_WAIT_KINDS
     entry_failure = failure_facts(accumulated_usage)  # the failing attempt's own row, before any candidate adds one
+    if entry_kind == "context_overflow" and entry_failure:  # the round's verdict (a recognition at the seam), not the first filing
+        entry_failure = {**entry_failure, "failure_code": entry_kind}
     facts = failed_attempt_facts(accumulated_usage, active_model, active_use_local)  # each candidate reads its own predecessor's
     # A primary resource refusal returned here, not waited: the configured routes come
     # first, and the owner question is that refusal's own wait, asked after them.

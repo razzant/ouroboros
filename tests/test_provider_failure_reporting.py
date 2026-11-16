@@ -834,6 +834,14 @@ def test_one_reader_gives_each_party_of_an_answer_its_own_sentence_and_codes():
     whole = provider_answer({"id": "gen-1", "user_id": "user 1", "error": _OPENAI_200})  # an HTTP 200 body: its status
     assert whole.status == 400 and whole.innermost() == ("", _OPENAI_200["message"]) and "user 1" not in str(whole.said)
     assert "context_length_exceeded" in whole.own_codes()
+    # A typed size code quotes its party's sentence that states the size, not an empty wrapper line before it.
+    from ouroboros.context_budget import size_refusal
+
+    wrapped = provider_answer({"error": {"code": "context_length_exceeded", "message": "Failed to create completion. Text: ''",
+                                         "detail": "The input (4026551 tokens) is longer than the model's context length (1048576 tokens)."}})
+    assert size_refusal(wrapped, 400)[3].startswith("The input (4026551 tokens)")
+    bare = provider_answer({"error": {"code": "context_length_exceeded", "message": "Failed to create completion. Text: ''"}})
+    assert size_refusal(bare, 400)[3] == "Failed to create completion. Text: ''"
 
 
 @pytest.mark.parametrize(("status", "body", "kind", "basis", "speaker"), [
@@ -851,6 +859,7 @@ def test_one_reader_gives_each_party_of_an_answer_its_own_sentence_and_codes():
     (400, {"code": 400, "message": "Provider returned error", "metadata": {"raw": '{"message":"Invalid request"}',
            "previous_errors": [{"code": 429, "message": "Rate limit exceeded: too many tokens per minute"},
                                {"code": 402, "message": "Insufficient credits"}]}}, "bad_request", "", ""),
+    (400, {"code": 400, "message": "Rate limit exceeded, please retry later"}, "bad_request", "", ""),  # words re-type no known status
     (400, {"code": 400, "message": "Input length 4026546 exceeds the maximum allowed input length of 1048544 tokens."},
      "bad_request", "", ""),                                          # digits inside a count restate no status
 ])
@@ -887,6 +896,15 @@ def test_an_http_200_error_body_is_a_refusal_under_the_status_its_code_names(tmp
     facts, usage = filed(_OPENAI_200)
     assert is_size_refusal(_OPENAI_200) and facts["kind"] == "provider_error" and facts["answer"]["basis"] == "typed"
     assert usage["_last_llm_error_kind"] == "context_overflow" and usage["_last_llm_provider_answer"]["basis"] == "typed"
+    quota = {"code": 400, "type": "insufficient_quota", "message": "Account quota exceeded. Maximum context length is 128000 tokens."}
+    facts, usage = filed(quota)  # a typed cause of another kind keeps its kind on the body path too: no size recovery, no ceiling
+    assert usage["_last_llm_error_kind"] != "context_overflow"
+    facts, usage = filed({**quota, "type": "invalid_request_error"})
+    assert usage["_last_llm_error_kind"] == "context_overflow"
+    nested = {"code": 400, "message": "Provider returned error", "metadata": {
+        "raw": '{"error":{"code":"context_length_exceeded","message":"Input range exceeded"}}'}}
+    facts, usage = filed(nested)  # the code sits only inside the upstream body: the body's own recognition is read once
+    assert facts["answer"]["basis"] == "typed" and usage["_last_llm_error_kind"] == "context_overflow"
     facts, usage = filed(_MAKORA_200)
     assert not is_size_refusal(_MAKORA_200) and facts["kind"] == "provider_error" and facts["answer"]["untyped"] is True
     assert usage["_last_llm_error_kind"] == "provider_body_error"
