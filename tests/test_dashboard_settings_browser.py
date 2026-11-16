@@ -336,15 +336,33 @@ def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, widt
     assert page.evaluate("(s) => { const el = document.querySelector(s); return el.scrollHeight > el.clientHeight + 100; }", HOME), \
         "the home scrolls at this size"
 
+    # Two panes: whether the home row naming the page open beside it is in the list's view (None in one column).
+    named_shown = """(s) => { const box = document.querySelector(s), r = box.getBoundingClientRect();
+        const row = box.closest('[data-section-view="page"]') && box.querySelector('[aria-current="page"]');
+        const seen = (n) => { const b = n.getBoundingClientRect(); return b.top >= r.top - 1 && b.bottom <= r.bottom + 1; };
+        return row ? seen(row) : null; }"""
+
     def leave_home(tab):
         """Press the home row of a tab where it stands (no scroll of the test's own) and say where the home was."""
         row = page.locator(f'{HOME} [data-settings-open="dashboard:{tab}"]')
         row.evaluate("(el) => el.scrollIntoView({ block: 'center' })")
         page.wait_for_timeout(120)
         top = page.evaluate("(s) => document.querySelector(s).scrollTop", HOME)
+        named[tab] = page.evaluate(named_shown, HOME)
         row.evaluate("(el) => el.click()")
         page.wait_for_selector(f"#dashboard-panel-{tab}.active")
         return top
+
+    def returned_where_it_was(tab, top, leave):
+        """The home is where it was; only a row naming the open page beside it that was out of view comes in, and the
+        pressed row stays in view (owner's critic, 16.11: a return never leaves the open page unnamed)."""
+        now = page.evaluate("(s) => document.querySelector(s).scrollTop", HOME)
+        if named[tab] is False:
+            assert page.evaluate(named_shown, HOME) is True, f"{leave} from {tab} shows the row naming the open page"
+            assert page.evaluate("""(s) => { const r = document.querySelector(s).getBoundingClientRect(),
+                b = document.activeElement.getBoundingClientRect(); return b.top >= r.top - 1 && b.bottom <= r.bottom + 1; }""", HOME)
+        else:
+            assert now == top, f"{leave} from {tab} returns where Settings was"
 
     def check_back(tab, leave):
         back = page.locator("#page-dashboard > .app-page-header [data-shell-back]")
@@ -370,17 +388,18 @@ def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, widt
         assert focus['input'] == ('keyboard' if leave == 'Escape' else 'pointer'), focus
         assert (focus['ring'] != 'none') == (leave == 'Escape'), focus
 
-    tops = {}
+    tops, named = {}, {}
     for tab in TABS:
         tops[tab] = leave_home(tab)
         check_back(tab, "Escape")
-        assert page.evaluate("(s) => document.querySelector(s).scrollTop", HOME) == tops[tab], f"Escape from {tab} returns where Settings was"
+        returned_where_it_was(tab, tops[tab], "Escape")
     assert tops["storage"] > 0 and tops["updates"] > 0, f"the home was scrolled when its last rows were pressed: {tops}"
+    assert (width < 640) == all(value is None for value in named.values()), named
     for leave in ("Back", "system Back"):
         top = leave_home("storage")
         check_back("storage", leave)
         assert top > 0
-        assert page.evaluate("(s) => document.querySelector(s).scrollTop", HOME) == top, f"{leave} returns where Settings was"
+        returned_where_it_was("storage", top, leave)
     # The primary map clears returns and opens the section list.
     _nav(page, "dashboard", width)
     assert page.locator("#page-dashboard [data-shell-back]").count() == 0
