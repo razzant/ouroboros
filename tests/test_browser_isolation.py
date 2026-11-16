@@ -27,6 +27,13 @@ def _pinned_layout(root: pathlib.Path, receipt: dict | None = None) -> pathlib.P
 
 
 @pytest.fixture(autouse=True)
+def pinned_driver_node(monkeypatch):
+    # These tests fake the SDK and browser files; driver Node selection: test_node_runtime_policy.py.
+    from ouroboros import node_runtime
+    monkeypatch.setattr(node_runtime, "select_playwright_node", lambda **kwargs: "/fixture/node")
+
+
+@pytest.fixture(autouse=True)
 def current_control_binding(tmp_path, monkeypatch):
     from ouroboros import config
     from ouroboros.server_process import record_service_binding
@@ -301,8 +308,88 @@ class TestHasPlatformWebKit:
         assert browser_mod._has_platform_webkit(root) is expected
 
 
+@pytest.mark.parametrize("engine", ["chromium", "webkit"])
+@pytest.mark.parametrize("allow_install", [True, False])
+def test_driver_node_is_selected_before_either_engine_starts(monkeypatch, tmp_path, engine, allow_install):
+    """Before the Chromium early return as well: neither engine's SDK start or installer runs first. A local Node is
+    selected at once; only a missing one is prepared, beside the calls as a browser is (R2: the inline ~50 MB download
+    sat outside ``_install_beside_calls``), and a refused preparation starts no engine on the SDK's own Node."""
+    from ouroboros import claudexor_runtime, node_runtime
+
+    monkeypatch.setitem(sys.modules, "playwright", types.SimpleNamespace(__file__=str(tmp_path / "__init__.py")))
+    order, beside = [], []
+    monkeypatch.setattr(node_runtime, "select_playwright_node",
+                        lambda **kwargs: order.append(("node", kwargs.get("allow_install", False))) or "/managed/node")
+    monkeypatch.setattr(browser_mod, "_pinned_chromium", lambda **kwargs: order.append("chromium") or "/cft")
+    monkeypatch.setattr(browser_mod, "_playwright_ready", True)
+    monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "operator-browsers"))
+    # The operator's own browsers path, whatever ran before: once another test had left the module's path marked
+    # as managed, the WebKit row replaced it with the data root's cache, no longer found its ready engine and ran
+    # the real ``playwright install webkit`` (QA 457: alone it passed, in another order it downloaded).
+    monkeypatch.setattr(browser_mod, "_playwright_browsers_path_managed", False)
+    monkeypatch.setattr(browser_mod, "_playwright_ready_engines", {("webkit", str(tmp_path / "operator-browsers"))})
+    real_beside = browser_mod._install_beside_calls
+
+    def beside_calls(key, what, install, hint=""):
+        beside.append(key)
+        assert key == "pinned-node", f"an engine install was started: {key}"  # never an installer from this test
+        return real_beside(key, what, install, hint)
+
+    monkeypatch.setattr(browser_mod, "_install_beside_calls", beside_calls)
+    browser_mod._ensure_playwright_installed(engine=engine, allow_install=allow_install)
+    assert order[0] == ("node", False) and "pinned-node" not in beside  # local: no preparation
+
+    def local_missing(**kwargs):
+        if not kwargs.get("allow_install"):
+            raise claudexor_runtime.ClaudexorRuntimeError("runtime_node_unavailable", "Node 24.22.3 is not prepared yet")
+        order.append(("node", True))
+        return "/managed/node"
+
+    order.clear()
+    monkeypatch.setattr(node_runtime, "select_playwright_node", local_missing)
+    if allow_install:
+        browser_mod._ensure_playwright_installed(engine=engine, allow_install=True)
+        assert order[0] == ("node", True) and beside == ["pinned-node"]  # prepared beside the calls, then the engine
+    else:
+        with pytest.raises(RuntimeError, match="reviewed Node for Playwright's driver.*PLAYWRIGHT_NODEJS_PATH"):
+            browser_mod._ensure_playwright_installed(engine=engine, allow_install=False)  # read-only: never prepares
+        assert order == [] and beside == []
+
+    def unavailable(**kwargs):
+        raise claudexor_runtime.ClaudexorRuntimeError("runtime_node_unavailable", "the reviewed Node 24.22.3 is not installed here")
+
+    order.clear()
+    monkeypatch.setattr(node_runtime, "select_playwright_node", unavailable)
+    with pytest.raises(RuntimeError, match="reviewed Node for Playwright's driver.*PLAYWRIGHT_NODEJS_PATH") as plain:
+        browser_mod._ensure_playwright_installed(engine=engine, allow_install=allow_install)
+    assert order == [] and not isinstance(plain.value, chromium_runtime.ChromiumRefusal)  # no engine on the SDK's Node
+
+    def another_process_installs(**kwargs):  # R7 (Fable): the install lock is held past its 4 s wait
+        if not kwargs.get("allow_install"):
+            raise claudexor_runtime.ClaudexorRuntimeError("runtime_node_unavailable", "Node 24.22.3 is not prepared yet")
+        raise claudexor_runtime.ClaudexorRuntimeError("runtime_install_in_progress",
+                                                      "another process is installing the managed runtime")
+
+    monkeypatch.setattr(node_runtime, "select_playwright_node", another_process_installs)
+    beside.clear()
+    if allow_install:  # the typed preparing outcome a browser install gives, not "set PLAYWRIGHT_NODEJS_PATH"
+        with pytest.raises(chromium_runtime.ChromiumRefusal) as preparing:
+            browser_mod._ensure_playwright_installed(engine=engine, allow_install=True)
+        assert preparing.value.code == chromium_runtime.PREPARING and beside == ["pinned-node"]
+        assert "PLAYWRIGHT_NODEJS_PATH" not in preparing.value.tool_text()
+    assert order == []
+
+
 class TestSetPlaywrightBrowsersPathIfBundled:
     """_set_playwright_browsers_path_if_bundled: sets env var when a bundled engine is found."""
+
+    @pytest.fixture(autouse=True)
+    def _module_state_ends_with_the_test(self, monkeypatch):
+        """The function assigns the module's own path state; left behind, it changed what later tests installed."""
+        import ouroboros.tools.browser as bmod
+        for name in ("_playwright_browsers_path_managed", "_playwright_ready"):
+            monkeypatch.setattr(bmod, name, getattr(bmod, name))
+        monkeypatch.setattr(bmod, "_playwright_ready_engines", set(bmod._playwright_ready_engines))
 
     def test_no_op_when_env_already_set(self, monkeypatch, tmp_path):
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "/some/custom/path")

@@ -68,13 +68,14 @@ def entry_problem(skill_dir: Any, entry: str) -> str:
 
 def _derive_launch(skill: Any, decl: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], str]:
     """``({command, args, cwd}, "")`` for one declaration, or ``(None, reason)``."""
+    from ouroboros import work_domain
     from ouroboros.tools.skill_exec import _resolve_runtime_binary
 
     if why := entry_problem(skill.skill_dir, decl["entry"]):
         return None, why
     root = pathlib.Path(skill.skill_dir).resolve()
     entry = (root / decl["entry"]).resolve()
-    if _work_copy(skill)[0] is not None:  # the work container runs the copy with its own runtime (``launch``)
+    if work_domain.managed():  # mapped or staged: the work container resolves its own runtime
         from ouroboros.work_skill_payloads import _CONTAINER_RUNTIMES
 
         return {"command": _CONTAINER_RUNTIMES.get(decl["runtime"], decl["runtime"]), "args": [str(entry)],

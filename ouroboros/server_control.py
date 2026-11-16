@@ -155,7 +155,9 @@ def restart_current_process(
     re-pins from ``load_settings()``; an agent- or supervisor-initiated restart
     keeps inheriting it exactly as before.
     """
-    env = os.environ.copy()
+    from ouroboros.node_runtime import without_selected_driver_node
+
+    env = without_selected_driver_node(os.environ.copy())  # the successor selects Playwright's driver Node itself
     desired_host = str(host)
     try:
         from ouroboros.config import load_settings

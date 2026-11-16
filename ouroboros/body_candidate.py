@@ -821,8 +821,18 @@ def process_environment(ctx: Any, work_dir: Any, *, source=None) -> Optional[Dic
         else:
             declare_scratch(env_root, "body-process", owner=json.dumps({
                 "task_id": str((bound or {}).get("task_id") or getattr(ctx, "task_id", "") or ""), "copy": str(candidate)}))
-        return isolated_environment(env_root, candidate,
-                                    source=runtime_environ() if source is None else source)
+        env = isolated_environment(env_root, candidate,
+                                   source=runtime_environ() if source is None else source)
+        if source is None:  # a process on this host; an executor's container runs its own runtime, never a host path
+            from ouroboros.config import DATA_DIR
+            from ouroboros.node_runtime import carry_pinned_node, forward_playwright_node
+
+            # The serving installation's pinned Node as one carried executable, never its store: the candidate's
+            # lookups find it by its record (``claudexor_node_seed.generation_roots``), a nested safe_test keeps it.
+            # An operator's literal driver stays the driver's, unmarked, even when it equals that executable.
+            forward_playwright_node(env)
+            carry_pinned_node(env, str(DATA_DIR))
+        return env
     except Exception as exc:
         log.warning("candidate process environment unavailable", exc_info=True)
         raise CandidateRefused(

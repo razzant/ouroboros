@@ -254,8 +254,15 @@ def test_shell_env_keeps_captured_settings_while_scrubbing_external_repo(tmp_pat
     (repo / "sub").mkdir(parents=True)
     ext.mkdir()
     ctx = SimpleNamespace(repo_dir=str(repo))
+    from ouroboros import claudexor_runtime
     from ouroboros.route_choice import ROUTE_SETTING_KEYS
 
+    # The driver Node is a fixed prepared fact, not this host's: an automatic selection carries its marker beside it.
+    node = "/managed/node-24.22.3"
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: SimpleNamespace(
+        reviewed_node=lambda allow_install=False, prepared=False: node))
+    for name in ("PLAYWRIGHT_NODEJS_PATH", "OUROBOROS_PLAYWRIGHT_NODE_SELECTED"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join([str(repo), str(ext)]))
     monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "new-task-effort")
     snapshot = task_settings_snapshot(
@@ -269,7 +276,8 @@ def test_shell_env_keeps_captured_settings_while_scrubbing_external_repo(tmp_pat
     assert os.environ["OUROBOROS_EFFORT_TASK"] == "new-task-effort"
     # Outside a task the shell sees the process environment, its route keys as the document reads now.
     plain = {k: v for k, v in _shell_env_for_cwd(ctx, repo / "sub").items() if k not in ROUTE_SETTING_KEYS}
-    assert plain == {k: v for k, v in os.environ.items() if k not in ROUTE_SETTING_KEYS}
+    assert plain == {**{k: v for k, v in os.environ.items() if k not in ROUTE_SETTING_KEYS},
+                     "PLAYWRIGHT_NODEJS_PATH": node, "OUROBOROS_PLAYWRIGHT_NODE_SELECTED": node}  # the only added pair
 
 
 def test_task_snapshot_does_not_become_explicit_probe_settings(monkeypatch):
