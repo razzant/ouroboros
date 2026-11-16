@@ -56,7 +56,8 @@ def test_ticks_only_write_liveness_and_derive_durations_on_read(published, monke
     now[0] += 60
     queue.RUNNING["task"]["last_heartbeat_at"] = now[0] - 1
     assert queue.persist_queue_snapshot("main_loop")
-    assert [name for name, _ in writes] == ["queue.alive"] and writes[0][1] < 250
+    # The certificate alone, a few hundred bytes (generation, time, one heartbeat, the pool's counts), not the 100 KB row.
+    assert [name for name, _ in writes] == ["queue.alive"] and writes[0][1] < 500
     assert (root / "state/queue_snapshot.json").read_bytes() == before
     assert _read(root, "queue.alive")["generation"] == generation
     observed = task_status._load_queue_snapshot(root)

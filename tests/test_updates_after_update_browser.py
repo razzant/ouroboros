@@ -431,15 +431,21 @@ def test_samples_wait_for_their_attempt_and_never_join_another(updates_ui):
 
 
 def drawer(page, width, opened):
-    """A phone keeps the notice in the navigation drawer: open it to reach the notice, close it to read the panel."""
+    """A phone keeps the notice in the navigation drawer: open it to reach the notice, close it to read the panel.
+    On a section's page Back leads the header, and Ouroboros's picture, the drawer's door, leads it only at the
+    section's list (docs/DESIGN.md "The drawer"): so the helper goes Back to the Dashboard's list and opens the drawer
+    from its picture, and once the drawer closes, the Updates row (still the chosen one) brings the page back."""
     if width >= 980:
         return
     if opened:
+        page.click("[data-dashboard-list-back]")
         page.locator("[data-mobile-nav-toggle]:visible").first.click()
         page.wait_for_function("document.getElementById('content').inert === true")
     else:
         page.keyboard.press("Escape")
         wait_drawer_closed(page)
+        page.click('[data-dashboard-tab="updates"]')
+        page.wait_for_selector("#dashboard-panel-updates", state="visible")
     page.evaluate("() => Promise.all(document.getAnimations().filter(a => a.effect?.getTiming().iterations !== Infinity)"
                   ".map(a => a.finished.catch(() => {})))")
     rw.settle_frames(page)

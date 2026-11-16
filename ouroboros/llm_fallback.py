@@ -12,10 +12,12 @@ callers that decide how far down the ladder a call walks.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import logging
 import time
+from dataclasses import replace
 from typing import Any, Dict, Optional
 
 from ouroboros.model_concurrency import limit_physical_send
@@ -37,6 +39,7 @@ from ouroboros.llm_attempt import (
     single_physical_send_active,
 )
 from ouroboros.deadline_utils import physical_dispatch_timeout
+from ouroboros.pricing_catalog import pin_tariff
 from ouroboros.llm_stream import consume_stream, consume_stream_async
 from ouroboros.transport_custody import ProviderNotDispatched
 from ouroboros.reasoning_artifacts import (
@@ -63,6 +66,21 @@ def _response_body_error(client: Any, response: Any) -> Optional[Dict[str, Any]]
         return client._provider_body_error(response.model_dump())
     except Exception:
         return None
+
+
+def _with_tariff(request, target: Dict[str, Any], candidate: Dict[str, Any]):
+    """The request with the selected key's price evidence pinned before reservation (DeepSeek only; else no I/O),
+    merged into what it already carries. The input kind is a fact of the final candidate, never its content: text
+    alone when every message holds a string or text parts (an image, audio or file part is not text)."""
+    if target.get("provider") != "deepseek":
+        return request
+    text_only = all(isinstance(message, dict) and (
+        message.get("content") is None or isinstance(message.get("content"), str)
+        or (isinstance(message["content"], list)
+            and all(isinstance(part, dict) and part.get("type") == "text" for part in message["content"])))
+        for message in candidate.get("messages") or [])
+    pinned = pin_tariff(target, text_only=text_only and "input" not in candidate)
+    return replace(request, cost_evidence={**(request.cost_evidence or {}), **pinned}) if pinned else request
 
 
 class _RecoveryLadderMixin:
@@ -416,7 +434,7 @@ class _RecoveryLadderMixin:
                 target, candidate, "messages" if target.get("provider") == "anthropic" else "chat.completions",
                 fresh_clock=True,
             )
-            request = _attempt_request(target, candidate)
+            request = _with_tariff(_attempt_request(target, candidate), target, candidate)
 
             def dispatch():
                 timeout = physical_dispatch_timeout(transport_timeout)
@@ -595,6 +613,8 @@ class _RecoveryLadderMixin:
             nonlocal prior_capture
             candidate = _finalized_physical_candidate(target, candidate, "chat.completions", fresh_clock=True)
             request = _attempt_request(target, candidate)
+            if target.get("provider") == "deepseek":  # its key's balance read stays off the event loop
+                request = await asyncio.to_thread(_with_tariff, request, target, candidate)
 
             async def dispatch():
                 timeout = physical_dispatch_timeout(transport_timeout)

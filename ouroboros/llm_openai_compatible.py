@@ -583,6 +583,10 @@ class _OpenAICompatibleLaneMixin:
         _write_split = self._cache_write_split(usage)
         if _write_split and not usage.get("cache_write_tokens_by_ttl"):
             usage["cache_write_tokens_by_ttl"] = _write_split
+        if usage["provider"] == "deepseek" and usage.get("cost") is None and not usage.get("cost_invalid"):
+            from ouroboros._usage_settlement import settled_cost_facts
+
+            usage.update(settled_cost_facts(usage))  # its attempt row's pinned amount, never a fresh price
         if (usage.get("cost") is None and not usage.get("cost_invalid")
                 and (usage.get("prompt_tokens") or usage.get("completion_tokens"))):
             from ouroboros.pricing import estimate_cost_optional

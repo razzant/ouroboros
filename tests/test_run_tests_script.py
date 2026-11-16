@@ -4,6 +4,11 @@ import importlib.util
 import json
 import os
 import pathlib
+import signal
+import subprocess
+import sys
+import textwrap
+import time
 import types
 
 import pytest
@@ -47,6 +52,13 @@ def standalone_budget(monkeypatch, tmp_path):
     monkeypatch.setattr(test_parallelism, "other_runs", lambda: test_parallelism.HostRuns())
     monkeypatch.setattr(test_parallelism, "_ledger_dir", lambda: tmp_path / "slots")
     return tmp_path / "slots"
+
+
+def _started(argv, workers=3):
+    """A pass's command as ``_run`` starts it on a reservation admitting ``workers`` (a builder gets that Admission)."""
+    from ouroboros import test_parallelism
+
+    return argv(test_parallelism.Admission(workers, test_parallelism.HostRuns())) if callable(argv) else argv
 
 
 def _item(nodeid, *, serial, parent=None):
@@ -158,6 +170,221 @@ def test_the_worker_override_steers_xdist_like_the_gate(run_tests, monkeypatch, 
     assert list(standalone_budget.glob("*.json")) == [], "the lease outlived its run"
 
 
+def test_a_pass_waits_out_critical_memory_pressure_says_so_and_then_starts_by_itself(
+        run_tests, monkeypatch, capsys, standalone_budget):
+    """A new pass starts nothing while the kernel confirms critical pressure: the runner names the wait and its end
+    with each reading's date, holds no ledger row meanwhile, and starts the tree at the first reading that is not
+    critical, with the admission that reading allows (owner choice, 2026-11-14)."""
+    from ouroboros import config, host_memory, process_containment, test_parallelism
+
+    seen, verdicts = {}, [True, True, False, False]  # first and last: the admissions; between: the wait's readings
+    monkeypatch.setattr(config, "TEST_PROCESS_SAMPLE_SEC", 0.01)
+
+    def physical_memory():
+        seen.setdefault("rows", []).append(len(list(standalone_budget.glob("*.json"))))
+        return host_memory.MemorySnapshot(100 * 1024 ** 3, 100 * 1024 ** 3, verdicts.pop(0))
+
+    monkeypatch.setattr(test_parallelism, "physical_memory", physical_memory)
+
+    class Owner:
+        def __init__(self, **options):
+            pass
+
+        def spawn(self, argv, *, cwd, env):
+            seen["leases"] = [json.loads(path.read_text(encoding="utf-8")) for path in standalone_budget.glob("*.json")]
+            return types.SimpleNamespace(wait=lambda **kwargs: 0)
+
+        def reap(self):
+            return ""
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(process_containment, "ProcessContainer", Owner)
+    monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "3")
+    assert run_tests._run("focused", [run_tests.sys.executable, "-m", "pytest", "-n", "8"], REPO) == 0
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("=== focused: ")]
+    assert lines[0].startswith("=== focused: waiting to start: the kernel reports critical memory pressure (read ")
+    assert lines[1].startswith("=== focused: memory pressure no longer critical (read ") and "pytest -n 3" in lines[2]
+    assert seen["rows"] == [0, 0, 0, 0] and not verdicts, "no row while it waited"
+    assert [lease["workers"] for lease in seen["leases"]] == [3], "the tree started on the cleared admission"
+    assert list(standalone_budget.glob("*.json")) == []
+
+
+def test_a_pass_sized_by_its_workers_is_built_from_the_one_admission_it_reserved(
+        run_tests, monkeypatch, standalone_budget):
+    """Carbon r1: the warm's shards and the Node lane's concurrency were read before the pass reserved, so after a
+    wait for memory during which another run took seven of eight slots the ledger held one while the warm (which no
+    bound reaches) started eight. Each is now built once, from the admission its reservation returned, wait included."""
+    from ouroboros import host_memory, preflight_node, process_containment, test_parallelism
+
+    state = {"cleared": False}
+    monkeypatch.setenv("OUROBOROS_PREFLIGHT_TEST_WORKERS", "8")
+    monkeypatch.setattr(test_parallelism, "physical_memory", lambda: host_memory.MemorySnapshot(
+        100 * 1024 ** 3, 100 * 1024 ** 3, not state["cleared"]))
+    monkeypatch.setattr(test_parallelism, "other_runs", lambda: test_parallelism.HostRuns(7 * state["cleared"]))
+
+    def until_not_critical(stop=None):  # meanwhile pressure clears and another run reserves seven slots
+        state["cleared"] = True
+        return "2026-11-15T00:00:00Z", "not_critical"
+
+    monkeypatch.setattr(test_parallelism, "_until_not_critical", until_not_critical)
+    monkeypatch.setattr(preflight_node, "candidate_node_tests", lambda repo: ["tests/one.test.js"])
+    monkeypatch.setattr(preflight_node, "resolve_node", lambda: "node")
+    monkeypatch.setattr(preflight_node, "probe_node_version", lambda node: "24.0.0")
+    started = []
+
+    class Owner:
+        def __init__(self, **options):
+            pass
+
+        def spawn(self, argv, *, cwd, env):
+            leases = [json.loads(path.read_text(encoding="utf-8")) for path in standalone_budget.glob("*.json")]
+            started.append((argv, [lease["workers"] for lease in leases]))
+            return types.SimpleNamespace(wait=lambda **kwargs: 0)
+
+        def reap(self):
+            return ""
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(process_containment, "ProcessContainer", Owner)
+    for lane in (run_tests._warm_bytecode, run_tests._node_lane):
+        state["cleared"] = False
+        assert lane() in (None, 0)
+    (warm, warm_held), (node, node_held) = started
+    assert (warm[-2:], warm_held) == (["--workers", "1"], [1])
+    assert ([arg for arg in node if arg.startswith("--test-concurrency")], node_held) == (["--test-concurrency=1"], [1])
+    admissions, state["cleared"] = [], False
+    assert run_tests._run("parallel", lambda admitted: admissions.append(admitted) or [
+        run_tests.sys.executable, "-m", "pytest", "-n", "8"], run_tests.REPO) == 0
+    assert started[-1][0][-2:] == ["-n", "1"] and started[-1][1] == [1]
+    (admitted,) = admissions
+    assert admitted.workers == 1 and admitted.waited[1:] == ("2026-11-15T00:00:00Z", "not_critical")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX SIGINT/SIGTERM delivery to one process; Windows Ctrl-C reaches a "
+                    "console group and its Stop is the Job")
+@pytest.mark.parametrize("ending", ["clears", "interrupt", "stop"])
+def test_a_real_runner_waits_out_pressure_and_then_runs_or_is_ended_with_nothing_started(tmp_path, ending):
+    """A real runner process waiting out critical pressure holds neither the ledger's lock (another run reserves
+    meanwhile) nor a row. When a reading clears it starts its own small child through the real container; an
+    interrupt (Ctrl-C, safe_test's forwarded INT) ends the wait at once with exit 130, said; a stop (a task's Stop
+    kills its worker) ends it with no row left. Ended either way, its command never ran."""
+    from ouroboros import platform_layer as pl, test_parallelism
+
+    ledger, ran = tmp_path / "slots", tmp_path / "ran"
+    readings = [True] * 40 + [False] if ending == "clears" else [True]  # clears after about two seconds
+    child = textwrap.dedent(f"""
+        import os, runpy, sys
+        sys.path.insert(0, {str(REPO)!r})
+        from pathlib import Path
+        from ouroboros import config, host_memory, test_parallelism as budget
+        os.environ.pop(budget.NESTED_WORKERS_ENV, None)  # a run of its own, not a test's child
+        budget._ledger_dir = lambda: Path({str(ledger)!r})
+        budget._process_table = lambda: ([], "")
+        verdicts = {readings!r}
+        budget.physical_memory = lambda: host_memory.MemorySnapshot(
+            2 ** 40, 2 ** 40, verdicts.pop(0) if len(verdicts) > 1 else verdicts[0])
+        config.TEST_PROCESS_SAMPLE_SEC = 0.05
+        runner = runpy.run_path({str(REPO / "scripts" / "run_tests.py")!r})
+        raise SystemExit(runner["_run"]("focused", [sys.executable, "-c", "open({str(ran)!r}, 'w')"], Path.cwd()))
+    """)
+    env = {key: value for key, value in os.environ.items() if key != test_parallelism.NESTED_WORKERS_ENV}
+    proc = subprocess.Popen([sys.executable, "-c", child], cwd=tmp_path, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    try:
+        lines = []
+        while not any("waiting to start" in line for line in lines):
+            line = proc.stdout.readline()
+            assert line, "".join(lines)
+            lines.append(line)
+        descriptor = os.open(ledger / "ledger.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            pl.file_lock_exclusive_nb(descriptor)  # raises if the waiting run still held the lock
+            pl.file_unlock(descriptor)
+        finally:
+            os.close(descriptor)
+        assert not list(ledger.glob("*.json")), "a waiting run holds no row"
+        started = time.monotonic()
+        if ending != "clears":
+            proc.send_signal(signal.SIGINT if ending == "interrupt" else signal.SIGTERM)
+        out, _ = proc.communicate(timeout=60 if ending != "clears" else 300)  # a loaded host starts the child slowly
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+    out = "".join(lines) + out
+    assert ending == "clears" or time.monotonic() - started < 30, "an ended wait must end promptly:\n" + out
+    assert not list(ledger.glob("*.json")), out
+    if ending == "clears":
+        assert proc.returncode == 0 and ran.exists(), out
+        assert "=== focused: memory pressure no longer critical (read " in out and "=== focused: exit 0" in out
+    else:
+        assert proc.returncode == (130 if ending == "interrupt" else -signal.SIGTERM) and not ran.exists(), out
+        assert ("=== focused: interrupted before it started; the run ends with exit 130" in out) is (
+            ending == "interrupt")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX SIGINT delivery to one process; Windows Ctrl-C reaches a console group")
+def test_an_interrupt_while_the_warm_waits_for_memory_ends_the_whole_battery(tmp_path):
+    """The warm decides nothing when it fails (the passes run cold), but an interrupt while it waits out critical
+    pressure is the owner cancelling the run: the real ``main`` ends with 130 before any pass, instead of carrying
+    on into the next pass's wait. Only the machine's readings are substituted (always critical); the Node lane is
+    taken as green so the battery reaches its warm."""
+    import queue
+    import threading
+
+    from ouroboros import test_parallelism
+
+    ledger = tmp_path / "slots"
+    child = textwrap.dedent(f"""
+        import os, runpy, sys
+        sys.path.insert(0, {str(REPO)!r})
+        from pathlib import Path
+        from ouroboros import config, host_memory, test_parallelism as budget
+        os.environ.pop(budget.NESTED_WORKERS_ENV, None)  # a battery of its own, not a test's child
+        budget._ledger_dir = lambda: Path({str(ledger)!r})
+        budget._process_table = lambda: ([], "")
+        budget.physical_memory = lambda: host_memory.MemorySnapshot(2 ** 40, 2 ** 40, True)
+        config.TEST_PROCESS_SAMPLE_SEC = 0.05
+        main = runpy.run_path({str(REPO / "scripts" / "run_tests.py")!r})["main"]
+        main.__globals__["_node_lane"] = lambda: 0  # run_path returns a copy: the functions read their own globals
+        raise SystemExit(main([]))
+    """)
+    env = {key: value for key, value in os.environ.items() if key != test_parallelism.NESTED_WORKERS_ENV}
+    proc = subprocess.Popen([sys.executable, "-c", child], cwd=tmp_path, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
+    arrived: queue.Queue = queue.Queue()
+    threading.Thread(target=lambda: [*map(arrived.put, proc.stdout), arrived.put("")], daemon=True).start()
+    lines = []
+    try:
+        while not any(line.startswith("=== warm: waiting to start") for line in lines):
+            line = arrived.get(timeout=120)
+            assert line and ("waiting to start" not in line or line.startswith("=== warm:")), "".join(lines) + line
+            lines.append(line)
+        proc.send_signal(signal.SIGINT)
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=10)
+            while (line := arrived.get(timeout=30)):
+                lines.append(line)
+            pytest.fail("the battery went on after its warm's wait was interrupted:\n" + "".join(lines))
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=10)
+    while (line := arrived.get(timeout=30)):
+        lines.append(line)
+    out = "".join(lines)
+    assert proc.returncode == 130, out
+    assert "=== warm: interrupted before it started; the run ends with exit 130" in out, out
+    assert "decides nothing" not in out and "=== parallel" not in out and not list(ledger.glob("*.json")), out
+
+
 @pytest.mark.parametrize("interrupted, diagnostic, expected", [
     (False, "overload_stop: largest pid=123 rss=456", 1),
     (True, "", 130),
@@ -256,8 +483,7 @@ def test_node_lane_uses_the_shared_worker_budget(run_tests, monkeypatch):
     monkeypatch.setattr(preflight_node, "candidate_node_tests", lambda repo: ["tests/one.test.js"])
     monkeypatch.setattr(preflight_node, "resolve_node", lambda: "node")
     monkeypatch.setattr(preflight_node, "probe_node_version", lambda node: "24.0.0")
-    monkeypatch.setattr(run_tests, "_workers", lambda: 3)
-    monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: seen.append(argv) or 0)
+    monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: seen.append(_started(argv)) or 0)
     assert run_tests._node_lane() == 0
     assert seen == [["node", "--test", "--test-timeout=300000", "--test-concurrency=3", "tests/one.test.js"]]
 
@@ -302,7 +528,7 @@ def test_a_deferred_full_escalation_runs_the_floor_and_says_so(run_tests, monkey
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "outputs"))
     monkeypatch.setattr(run_tests, "_node_lane", lambda: ran.append("node") or 0)
-    monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: ran.append((label, argv)) or 0)
+    monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: ran.append((label, _started(argv))) or 0)
     exit_after_warm = run_tests.main(["--selected", "--defer-full", "--evidence-dir", str(tmp_path / "evidence")])
     record = json.loads((tmp_path / "evidence" / "selection.json").read_text(encoding="utf-8"))
     # The leg still runs the Node lane, warms the prefix for the selection, and runs a pytest pass.
@@ -318,7 +544,8 @@ def test_a_deferred_full_escalation_runs_the_floor_and_says_so(run_tests, monkey
         assert not summary.exists()
     # The warm decides nothing: a warm stopped for memory (-9, run 42126810926) leaves the leg its own exit.
     before = len(ran)
-    monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: ran.append((label, argv)) or -9 * (label == "warm"))
+    monkeypatch.setattr(run_tests, "_run",
+                        lambda label, argv, cwd: ran.append((label, _started(argv))) or -9 * (label == "warm"))
     assert run_tests.main(["--selected", "--defer-full", "--evidence-dir", str(tmp_path / "cold")]) == exit_after_warm
     assert ran[before] == "node" and ran[before + 1][0] == "warm" and ran[before + 2][0] == "parallel"
 
@@ -399,8 +626,7 @@ def test_evidence_option_keeps_selection_and_gives_each_pytest_phase_its_own_arg
     root with the run's workers as shards); a focused run does not."""
     calls, node = [], []
     monkeypatch.setattr(run_tests, "_node_lane", lambda: node.append(True) or 0)
-    monkeypatch.setattr(run_tests, "_workers", lambda: 3)
-    monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: calls.append((label, argv)) or 0)
+    monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: calls.append((label, _started(argv))) or 0)
     monkeypatch.chdir(tmp_path)
     assert run_tests.main(["--evidence-dir", "diagnostics", *arguments]) == 0
     assert [label for label, _ in calls] == phases

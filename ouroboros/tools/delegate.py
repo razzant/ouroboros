@@ -449,10 +449,10 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         (request_body, route, authority, root, key, project_id, owned_project_id,
          project_persistent, seconds, snapshot_id, target_root, baseline_sha,
          authority_source, resource_ref, processing_info, binding_fingerprint,
-         seconds_basis, continuation, ttl_info, retained_inputs) = binding
+         seconds_basis, continuation, ttl_info, retained_inputs, row_processing) = binding
         invocation_id, inputs = retry_token, inputs._replace(selected=retained_inputs)
     else:
-        route = actor["route"]
+        route, row_processing = actor["route"], actor.get("row_processing")  # the row's own tier: custody, never the request
         if selector_root:
             authority, payload_auth, payload_error = _payload_mutation_authority(
                 ctx, drive, bucket, skill_name, _resolved_binding, actor.get("access", "workspace_write"))
@@ -487,7 +487,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
                                         "effort": route.effort, "access": authority.access},
         selected_subagent_id=actor_facts["selected_subagent_id"], task_id=str(getattr(ctx, "task_id", "") or ""),
         route=route.route_id, processing=processing_info if recovering else {"requested": actor.get("processing_preference")},
-        row_effort=None if recovering else actor.get("row_effort"))
+        row_effort=None if recovering else actor.get("row_effort"), row_processing=row_processing)
     try:
         # Health checks the stored route/confinement shape on retries, never current
         # environment defaults; blockers stay typed instead of falling through to API spend.
@@ -609,7 +609,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
             execution_root=(root if snapshot_id or resource_ref.get("strategy") in ("direct", "in_place") else ""),
             # Recovery proves the original actor and compiled brief before adoption.
             **actor_facts,
-            processing=processing_info,
+            processing=processing_info, **({"row_processing": row_processing} if isinstance(row_processing, str) else {}),
             prompt_cache_ttl=ttl_info, **documents.custody, **inputs.custody,
         )
         if not requested and not claim_refusal:
@@ -681,6 +681,7 @@ def _delegate_start(ctx: ToolContext, prompt: str, max_seconds: Optional[int] = 
         capture_mode=("engine_directory" if resource_ref.get("workspace_kind") == "directory" else
                       _CAPTURE_DELEGATED_SNAPSHOT if snapshot_id else resource_ref.get("strategy", "")),
         max_seconds_basis=seconds_basis, row_effort=None if recovering else actor.get("row_effort"),
+        row_processing=row_processing,
     )
     from ouroboros.tools.control import maybe_emit_delegated_run_fanout
     maybe_emit_delegated_run_fanout(ctx, run_id=run_id, route_id=route.route_id, objective=text, durable=durable)

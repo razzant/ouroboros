@@ -78,13 +78,11 @@ Heartbeat proves liveness only, dated by its own source time (never before its a
 
 Deadlines and finite execution bounds freeze under Q, mark `reaping` and enter `task_reaper`; queued deadlines expire undispatched; kill/join precede salvage and settlement. Unconfirmed death keeps custody without terminalization, retry or replacement; `task_reaper_wedged` suggests Restart. A result file proves no process exit; typed incidents keep `TIMEOUT_TERMINAL_REASONS` identity.
 
-`worker_pool_lifecycle.pool_slot_counts` separates acting tasks and idle/booting/sleeping processes; cold sleepers have none (§6). Cap and wait/claim classification: §7 and `pool_admission.py`.
-
-`pool_admission.py` admits new project processes against physical memory without stopping or cooling existing work; its docstring owns the formula, floor, unknown readings, cap/readiness fences, probe scope and residual limits. Dated readings/counts: `pool_admission.facts`.
+`worker_pool_lifecycle.pool_slot_counts` separates acting tasks and idle/booting/sleeping processes; cold sleepers have none (§6); the cap: §7. `pool_admission.py` owns physical admission and dated facts: confirmed critical pressure holds new processes, floor included; running work continues. Its docstring specifies measurements, fences and unknown readings.
 
 The conversation spare starts first; project workers have no spare and grow only for rows the pass chose and no idle worker took; surplus retires, no idle timer (idle memory over burst startup). Startup verification and bytecode storage: PERSISTENCE.md; `worker_boot` remains per process. Unchanged skills reuse catalogs/digests (§13). `booting` slots are capacity, unresolved reservations stay charged.
 
-Assignment/free counts require current live readiness (`worker_pool_lifecycle.py` docstring); growth obeys `pool_admission`'s finiteness rule. With no healthy slot, pooled ingress closes (`/review` too); `disable_exhausted_worker_pool` fails unstarted rows with a Restart hint, sparing chat, control, boot and update recovery.
+Assignment/free counts require current live readiness (`worker_pool_lifecycle.py` docstring). With no healthy slot, pooled ingress closes (`/review` too); `disable_exhausted_worker_pool` fails unstarted rows with a Restart hint, sparing chat, control, boot and update recovery.
 
 Surplus retires only after local-work quiescence and confirmed death, keeping services; unknown defers, no history scans. The off-loop reservation/token/serializer protocol: `request_worker_quiescence`, `retire_quiescent_worker`, `reap_idle_worker` docstrings. No rotation or setting; intentional retirement is not a crash.
 

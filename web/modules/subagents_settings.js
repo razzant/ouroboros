@@ -16,7 +16,7 @@ import {
     encodeRouteChoice, indexProfilesByHarness, mintStableId, profileOptionsFor,
     routeChoiceGroups, sameEngineAs, selectHtml, serializeRouteSpec, sessionModelOptions, subagentHandle, updateRouteControlOptions,
     PROCESSING_CHOICES, PROCESSING_PREFERENCE_KEY, processingDetailsHtml, processingIntentLabel, accountScopedModelCatalog,
-    tierPriced } from './route_editor_primitives.js';
+    tierPriced, withoutPrice } from './route_editor_primitives.js';
 import { catalogPrograms } from './model_program.js';
 import { modelChooserHtml, bindModelChoosers } from './model_chooser.js';
 import { mergeModelCatalog, catalogReadNote, mergeHarnessModelCatalog, refreshModelCatalog, watchAccountModelCatalog } from './settings_catalog.js';
@@ -188,7 +188,7 @@ function rowErrors(row, index, ids, rows = null, inherited = '') {
         }
     }
     if (row?.effort && !EFFORT_CHOICES.includes(String(row.effort))) errors.push('has an unsupported reasoning effort.');
-    if (row?.processing_preference && !PROCESSING_CHOICES.includes(row.processing_preference)) errors.push('needs Standard, Fast, Economy or inherited processing.');
+    if (row?.processing_preference && !PROCESSING_CHOICES.includes(row.processing_preference)) errors.push('needs Standard, Fast, Flex or inherited processing.');
     // A session slug's level refuses a contradicting pin, as the server does. An API-wrapped
     // `claudexor::cursor=…` row keeps a stored pin readable: the name wins when it runs.
     const encodedEffort = route.kind === ROUTE_KIND_AGENT_SESSION
@@ -573,7 +573,7 @@ function subagentFormParts(row, state, index) {
                 <div class="ui-field available-subagent-field available-subagent-field-model">Model ${session
                     ? modelChooserHtml(`data-subagent-field="model" aria-label="Agent session model for Subagent ${ordinal}"`, split.model, `actor-${rowKey}-models`, modelOptions, { placeholder: 'Engine default model', programs: catalogPrograms(harnesses[split.harness], {harness: split.harness, profile: row.route.credential_profile_id}) })
                     : routeModelInputHtml(`data-subagent-field="model" aria-label="${split.subscription ? 'Subscription' : 'API'} model for Subagent ${ordinal}"`, row.route, tierPriced(row.processing_preference || state.processingPreference)
-                        ? state.apiModels.map((item) => ({ ...item, price: null })) : state.apiModels, `actor-${rowKey}-models`, {programs: split.subscription ? catalogPrograms(state.modelCatalog, {source: split.source, profile: row.route.credential_profile_id, sources: state.modelSources}) : []})}</div>
+                        ? state.apiModels.map((item) => withoutPrice(item, { tiered: true })) : state.apiModels, `actor-${rowKey}-models`, {programs: split.subscription ? catalogPrograms(state.modelCatalog, {source: split.source, profile: row.route.credential_profile_id, sources: state.modelSources}) : []})}</div>
                 ${routeSupportsAccount(row.route)
                     ? field('Account', selectHtml(`data-subagent-field="account" aria-label="Account for Subagent ${ordinal}"`, [{ label: '', options: profileOptions }], row.route.credential_profile_id || ''))
                     : ''}
@@ -585,7 +585,7 @@ function subagentFormParts(row, state, index) {
                 <textarea class="ui-control" data-subagent-field="recommended_use" rows="1" aria-label="Description for Subagent ${ordinal}" placeholder="When should Ouroboros choose this subagent?">${escapeHtml(row.recommended_use)}</textarea>
             </label>`,
         meta: `<div id="actor-${escapeHtml(rowKey)}-meta" class="available-subagent-meta ui-field-help" data-subagent-meta${meta.qualifier ? ' data-availability-qualifier' : ''}${meta.tone ? ` data-tone="${escapeHtml(meta.tone)}"` : ''}${meta.text ? '' : ' hidden'}>${escapeHtml(meta.text)}</div>`,
-        more: `${processingDetailsHtml(`data-subagent-field="processing_preference" aria-label="Processing for Subagent ${ordinal}"`, row.processing_preference, state.processingPreference)}
+        more: `${processingDetailsHtml(`data-subagent-field="processing_preference" aria-label="Processing for Subagent ${ordinal}"`, row.processing_preference, state.processingPreference, { helper: true })}
             ${rowDetailsHtml(row, state, rowKey)}`,
     };
 }
@@ -802,7 +802,7 @@ export function createAvailableSubagentsEditor({
             const el = container.querySelector(`[data-subagent-row="${row._uiKey || row.subagent_id}"]`);
             if (!el) return;
             const processingSummary = el.querySelector('[data-processing-summary]');
-            if (processingSummary) processingSummary.textContent = processingIntentLabel(row.processing_preference, state.processingPreference);
+            if (processingSummary) processingSummary.textContent = processingIntentLabel(row.processing_preference, state.processingPreference, { helper: true });
             el.toggleAttribute('data-invalid', judged);
             el.querySelectorAll('[data-subagent-field]').forEach((field) => {
                 const prefix = `actor-${row._uiKey || row.subagent_id}`;

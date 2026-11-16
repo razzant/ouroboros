@@ -177,12 +177,14 @@ def test_core_catalog_schema_bytes_and_handler_owners_are_stable():
     # Rolled for the one release of words (#3257): escalate's first sentence asks by authority (BIBLE P0),
     # its wait clause names work that cannot go on without the answer, and "with an explanation" leaves
     # the closing sentence; nothing else changed (76a2871b... before).
+    # Rolled for card images: show_card's description says an image takes file (a PNG, JPEG, GIF or WebP the
+    # host copies into the card) or, like audio and video, an inline data: URI; nothing else changed (4da8992f... before).
     # Rolled for the owner's decision on questions many works share (15.11): escalate's description adds
     # the asking side (a shared cause framed at its reach, no new card for an applicable answer already
     # in view, open cards kept consistent with it) and says the rest in fewer words, so its lead still fits
-    # whole beside its bare structure on the direct-OpenAI custom route; nothing else changed (4da8992f... before).
+    # whole beside its bare structure on the direct-OpenAI custom route; nothing else changed (7a1e368b... before).
     assert hashlib.sha256(schema_bytes).hexdigest() == (
-        "d8c849fc7517b07e1a690bc21ab4399e135fe2650c88087e186bdd9d44d8c204"
+        "c54daa33a49ed4103045b6a1568f0ea58e0aed56680dcf96f802177563e6c3f3"
     )
     assert {
         entry.name: (entry.handler.__module__, entry.handler.__name__)

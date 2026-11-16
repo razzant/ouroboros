@@ -378,6 +378,96 @@ def test_the_sleep_on_runs_wakes_on_what_its_tick_woke_on_and_on_nothing_else(tm
     assert model_sleep.wake_reason(ctx, chosen) == "run:run-sel"
 
 
+def test_a_sleepers_tick_reads_no_child_whose_end_its_last_wake_showed(tmp_path, monkeypatch):
+    """Every assignment tick asks each sleeper on runs whether a direct child ended or asks for attention. An end the
+    last acknowledged wake already showed ends no sleep, so the tick reads neither that child's row nor its replica (a
+    nanny with dozens of ended children decoded them all on every tick). The running child is read and wakes it when it
+    ends; a beacon of an ended child still wakes it, and so does the end of a retry an ended child is redirected to,
+    even one that names no parent and is a child only through the ended child's queued row."""
+    from ouroboros import delegate_supervision as ds, model_sleep, task_status, task_store
+    from ouroboros.task_results import write_task_result
+    from ouroboros.task_tree_ledger import tree_ledger_append
+
+    ctx, _limit = _nanny(tmp_path)
+    _run(tmp_path, "run-sel")
+    chosen = ds._choice({"runs": ["run-sel"]})
+
+    def child(task_id, status):
+        write_task_result(tmp_path, task_id, status, parent_task_id=_NANNY, root_task_id=_NANNY, chat_id=0,
+                          delegation_role="subagent")
+
+    def acknowledged():  # the nanny's next wake showed what is there: the cursor moves past it
+        state = ds._load_state(ctx, "")
+        state["coordination_cursor"] = ds._coordination_wakes(ctx, state)[1]
+        ds._save_state(ctx, state)
+
+    ended = {"ended-1", "ended-2", "ended-3"}
+    for task_id in sorted(ended):
+        child(task_id, "completed")
+    child("busy", "running")
+    acknowledged()
+    read, documents, effective = [], task_store._documents, task_status.effective_task_result
+    monkeypatch.setattr(task_store, "_documents", lambda pages: [
+        read.append(task_id) or (task_id, document) for task_id, document in documents(pages)])
+    monkeypatch.setattr(task_status, "effective_task_result", lambda root, row, **kw: read.append(
+        row.get("task_id")) or effective(root, row, **kw))
+    assert model_sleep.wake_reason(ctx, chosen) == ""
+    assert "busy" in read and not ended & set(read), "only the child whose end is not shown yet is read"
+    assert tree_ledger_append(_NANNY, "blocker", "stuck", task_id="ended-2", role="subagent",
+                              needs_parent_attention=True, data_root=tmp_path).startswith("OK")
+    assert model_sleep.wake_reason(ctx, chosen) == "coordination:ended-2", "an ended child's beacon still wakes"
+    acknowledged()
+    child("busy", "completed")
+    assert model_sleep.wake_reason(ctx, chosen) == "coordination:busy"
+    acknowledged()
+    child("retry-1", "completed")
+    task_store.patch_document(tmp_path, "ended-1", lambda current: {**current, "retry_task_id": "retry-1"})
+    assert model_sleep.wake_reason(ctx, chosen) == "coordination:retry-1"
+    acknowledged()
+    # a retry that names no parent is this nanny's child only through the queued row of the ended child it redirects
+    write_task_result(tmp_path, "retry-3", "completed", chat_id=0)
+    task_store.patch_document(tmp_path, "ended-3", lambda current: {**current, "retry_task_id": "retry-3"})
+    queued = {"id": "ended-3", "parent_task_id": _NANNY, "delegation_role": "subagent"}
+    (tmp_path / "state" / "queue_snapshot.json").write_text(
+        json.dumps({"pending": [], "running": [{"id": "ended-3", "task": queued}]}), encoding="utf-8")
+    assert model_sleep.wake_reason(ctx, chosen) == "coordination:retry-3", "the queue still recovers a redirected child"
+    acknowledged()
+    read.clear()
+    assert model_sleep.wake_reason(ctx, chosen) == "" and "busy" not in read
+
+
+def test_a_sleeper_wakes_only_on_what_its_acknowledging_read_shows(tmp_path, monkeypatch):
+    """The tick's read that skips ended children only says that nothing is new: on an event it reads every child again,
+    as the wake's acknowledging read does. While an ended child cannot be read, both reads are blind and the sleep stays
+    quiet, as before; it never wakes on a sibling's end that its wake cannot show (every acknowledged delegate_wait
+    would then return at once, showing nothing)."""
+    from ouroboros import delegate_supervision as ds, model_sleep, task_status
+    from ouroboros.task_results import write_task_result
+
+    ctx, _limit = _nanny(tmp_path)
+    _run(tmp_path, "run-sel")
+    chosen = ds._choice({"runs": ["run-sel"]})
+    for task_id, status in (("ended", "completed"), ("busy", "running"), ("busy", "completed")):
+        write_task_result(tmp_path, task_id, status, parent_task_id=_NANNY, root_task_id=_NANNY, chat_id=0,
+                          delegation_role="subagent")
+        if status == "running":
+            state = ds._load_state(ctx, "")
+            state["coordination_cursor"] = ds._coordination_wakes(ctx, state)[1]  # acknowledged: "ended" shown
+            ds._save_state(ctx, state)
+    effective = task_status.effective_task_result
+
+    def unreadable(root, row, **kw):
+        if row.get("task_id") == "ended":
+            raise OSError("the ended child's store cannot be read")
+        return effective(root, row, **kw)
+
+    monkeypatch.setattr(task_status, "effective_task_result", unreadable)
+    assert ds._coordination_wakes(ctx, ds._load_state(ctx, ""))[0] == [], "the acknowledging read is blind"
+    assert model_sleep.wake_reason(ctx, chosen) == "", "so the tick is quiet too"
+    monkeypatch.setattr(task_status, "effective_task_result", effective)
+    assert model_sleep.wake_reason(ctx, chosen) == "coordination:busy"
+
+
 def test_the_wake_read_is_one_detail_read_and_never_the_journal(tmp_path):
     """(c) The body is the only journal reader: a wake's addressed read of its run is one detail read, no window, no
     run-event stream and no speech, whatever the engine serves."""

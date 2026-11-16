@@ -68,7 +68,7 @@ def qenv(tmp_path, monkeypatch):
     monkeypatch.setattr(q, "PENDING", [])
     monkeypatch.setattr(q, "RUNNING", {}, raising=False)
     monkeypatch.setattr(workers, "WORKERS", {}, raising=False)
-    monkeypatch.setattr(workers, "respawn_worker", lambda wid: None, raising=False)
+    monkeypatch.setattr(workers, "respawn_worker", lambda wid, **_kwargs: None, raising=False)
     monkeypatch.setattr(q, "persist_queue_snapshot", lambda reason="": None)
     monkeypatch.setattr(task_lifecycle, "CANCELLED_ROOT_FENCES", {}, raising=False)
     monkeypatch.setattr(task_lifecycle, "_ACTIVE_CASCADE_FENCES", {}, raising=False)

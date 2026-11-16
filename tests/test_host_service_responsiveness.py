@@ -27,9 +27,11 @@ from tests.test_host_service_api import _seed_presence_behavior, _seed_token
 @pytest.fixture(autouse=True)
 def _host_lane_roots(tmp_path, monkeypatch):
     """A Host-only process: its turns run on the disclosed degraded executor in this process (no pool generation)."""
-    from tests.conversation_carrier_support import host_lane
+    from tests.conversation_carrier_support import host_lane, join_host_lane_carriers
 
     host_lane(monkeypatch, tmp_path)
+    yield
+    join_host_lane_carriers()  # its carriers settle after the waiters: that tail stays in this world
 
 TOKEN = "presence-token"
 BUDGET = "telegram-bot:presence"

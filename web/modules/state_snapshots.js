@@ -21,6 +21,8 @@ import { carryOpenQuestions } from './question_presentation.js';
  * first forced caller receives that request, the others resolve to null once
  * the follow-up has applied or failed. Gated requests settle via `apply`/`fail` even if a callback throws.
  * Only `fail` fans out `onUnavailable`; socket changes and confirmed mutations `retire()` older bodies.
+ * A reader outside the apply callback that follows `latest()` (Settings' card) `watch`es it: it is told after every
+ * change, an applied body, a failed read or a retire, each watcher on its own.
  *
  * A gated request carries the `signal` of its read. `retire()` detaches the
  * read in flight: it aborts that signal, releases everyone waiting on the read
@@ -58,6 +60,12 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
     let cancelInflight = null;  // aborts the signal of the read in flight
     let settled = null;
     let followUp = null;
+    // Told after `latest()` changed; a watcher that throws neither skips another nor fails the read that changed it,
+    // and says so in the console (as ws.js does for a message handler).
+    const watchers = new Set();
+    const tell = () => watchers.forEach((watcher) => {
+        try { watcher(); } catch (error) { console.error('A state snapshot watcher failed:', error); }
+    });
     const deferred = () => { let resolve; const promise = new Promise((r) => { resolve = r; }); return { promise, resolve }; };
     const begin = () => ({ generation: ++requestedGeneration, requestedAt: now(),
         path: held ? `/api/state?bindings_since=${encodeURIComponent(held.revision)}` : '/api/state' });
@@ -94,6 +102,7 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
             const cancel = cancelInflight;
             settle(inflight);
             cancel?.();
+            tell();
         },
         gate(force = false) {
             if (!inflight) return Promise.resolve(open());
@@ -102,11 +111,13 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
             return followUp.promise.then((f) => f.done).then(() => null);
         },
         apply(request, data) {
+            let changed = false;
             try {
                 const generation = Number(request?.generation) || 0;
                 if (!generation || generation <= appliedGeneration) return false;
                 appliedGeneration = generation;
                 latest = data = carryOpenQuestions(asked, heldFeed(asked, withBindings(data)));
+                changed = true;
                 if (data?.rooms && Array.isArray(data.works)) {
                     const fed = Array.isArray(data.projects);
                     asked = { rooms: data.rooms, projects: fed ? data.projects : asked?.projects,
@@ -114,22 +125,34 @@ export function createStateSnapshotSequencer(onApply, now = () => Date.now(), on
                 }
                 onApply(data, request.requestedAt, generation);
                 return true;
-            } finally { settle(request); }
+            } finally {
+                settle(request);
+                if (changed) tell();  // a consumer that threw while painting does not keep the watchers on the old body
+            }
         },
         isCurrent(request) {
             return (Number(request?.generation) || 0) > appliedGeneration;
         },
         fail(request) {
+            let changed = false;
             try {
                 const generation = Number(request?.generation) || 0;
                 if (!generation || generation <= appliedGeneration) return false;
                 appliedGeneration = generation;
                 latest = null;
+                changed = true;
                 onUnavailable(request.requestedAt, generation);
                 return true;
-            } finally { settle(request); }
+            } finally {
+                settle(request);
+                if (changed) tell();
+            }
         },
         latest: () => latest,
+        watch(watcher) {
+            watchers.add(watcher);
+            return () => { watchers.delete(watcher); };
+        },
     };
 }
 

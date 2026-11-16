@@ -14,7 +14,7 @@ import { accountRows, bindStatusSurface, claudexorStatus } from './claudexor_sta
 import { parseModelSource, composeModelSource, apiConnections, configuredApiProviders, indexProfilesByHarness,
     profileOptionsFor, routeChoiceGroups, selectHtml, mintStableId, unavailableConnectionState, API_CHOICE_PREFIX,
     DEFAULT_API_PROVIDER, PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_CHOICES,
-    processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, priceWords, tierPriced,
+    processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, modelPriceWords, withoutPrice, tierPriced,
     KEY_PROBLEM_WORDS, PRICE_UNKNOWN, routeKeyProblem, keyProblemLine, apiProviderLabel } from './route_editor_primitives.js';
 import { windowWords } from './chat_model_routes.js';
 import { fmt, translateString } from './i18n.js';
@@ -173,7 +173,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     function changed(slot = '') { onChange(collect(), { slot }); }
     function rowErrors(row) {
         const errors = [];
-        if (row.processing_preference && !PROCESSING_CHOICES.includes(row.processing_preference)) errors.push({ field: '[data-model-role-processing]', message: `${row.slot.label}: choose Standard, Fast, Economy or inherited processing.` });
+        if (row.processing_preference && !PROCESSING_CHOICES.includes(row.processing_preference)) errors.push({ field: '[data-model-role-processing]', message: `${row.slot.label}: choose Standard, Fast, Flex or inherited processing.` });
         if (['main', 'fallback'].includes(row.slot.slot) && !row.model.trim()) {
             errors.push({ field: '[data-model-role-model]', message: `${row.slot.label}: choose a model${row.slot.slot === 'fallback' ? ' or remove this fallback' : ''}.` });
         }
@@ -184,7 +184,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         return errors;
     }
     function validateAll() { return [
-        ...(processingPreference && !PROCESSING_CHOICES.includes(processingPreference) ? ['Choose Standard, Fast, Economy or route defaults for Processing.'] : []),
+        ...(processingPreference && !PROCESSING_CHOICES.includes(processingPreference) ? ['Choose Standard, Fast, Flex or route defaults for Processing.'] : []),
         ...rows.flatMap((row) => rowErrors(row).map(({ message }) => message)),
     ]; }
     // The row an empty role resolves to, along its inherit chain (safety → light → main).
@@ -310,7 +310,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             element.innerHTML = slot?.managed ? fixedGroupHtml(slot) : row ? rowHtml(row, only.index || 0, 1) : '';
         } else element.innerHTML = (showContext ? `<section class="model-role-group"><label class="ui-field">Processing
             ${processingSelectHtml('data-global-processing aria-label="Global processing"', processingPreference, { global: true })}</label>
-            <p class="model-role-copy">Applies to new tasks. Fast permits accelerated paid service within existing limits. Economy may fall back to the ordinary rate. Model and reasoning effort stay the same.</p>
+            <p class="model-role-copy">Applies to new tasks. Fast permits accelerated paid service within existing limits. Flex may fall back to the ordinary rate. Model and reasoning effort stay the same.</p>
             <details class="model-role-details ui-disclosure"><summary>Details</summary><div class="ui-field-help">Keep route defaults preserves existing native choices. Explicit native service choices take precedence; the requested mode is not proof of the mode served.</div></details></section>` : '') + offeredSlots.map((slot) => {
             if (slot.managed) return fixedGroupHtml(slot);
             const matching = rows.filter((row) => row.slot.slot === slot.slot);
@@ -371,7 +371,8 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const accountOptions = accountHtml.slice(accountHtml.indexOf('>') + 1, accountHtml.lastIndexOf('</select>'));
             if (account.innerHTML !== accountOptions) account.innerHTML = accountOptions;
             updateModelChooser(node.querySelector('[data-model-role-model]'), catalogModelOptions(itemsFor(row).map((item) => ({
-                ...item, value: parseModelSource(item.value || item.id).model, ...(tieredProcessing(row) ? { price: null } : {}),
+                ...withoutPrice(item, { tiered: tieredProcessing(row), media: row.slot.slot === 'vision' }),
+                value: parseModelSource(item.value || item.id).model,
             }))), row.local ? [] : catalogPrograms(catalogs.get(catalogKey(row)), {source: sourceId(row), profile: row.account, sources: catalog.model_sources}));
             if (showContext) node.querySelector('[data-model-context-note]').textContent = modelContextNote(row.windowPreview);
             if (showContext) node.querySelector('[data-processing-summary]').textContent = processingIntentLabel(row.processing_preference, processingPreference);
@@ -390,7 +391,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             status.classList.toggle('ui-status', choosing);
             if (choosing) status.dataset.tone = 'warn'; else delete status.dataset.tone;
             const price = local || keyNote(row) || note || !row.model || sourceId(row) || tieredProcessing(row) ? ''
-                : priceWords(currentItem(row)?.price, { unit: true });
+                : modelPriceWords(withoutPrice(currentItem(row), { media: row.slot.slot === 'vision' }), { unit: true });
             const unlisted = rowCatalog?.read_state === 'ok' && !rowCatalog.items.length;
             const plain = local ? 'Uses the local runtime.'
                 : keyNote(row) || note || (!row.model ? (row.slot.slot === 'main' ? 'Choose a model to continue.' : `Uses ${inheritName(row)}.`)

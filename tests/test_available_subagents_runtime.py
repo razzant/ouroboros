@@ -1039,6 +1039,34 @@ def test_undisposed_capture_allows_an_independent_actor_selection(monkeypatch, t
     assert not custody.replay(tmp_path)["run-old"].patch_disposed
 
 
+@pytest.mark.parametrize("own,work_tier,expected", [
+    ("", "fast", "fast"),  # a session row without a tier of its own runs on the work's (owner 13.11)
+    ("standard", "fast", "standard"),  # a row with one keeps it
+    ("", "", ""),  # nothing to inherit: the row's resolution (none here)
+])
+def test_the_prepared_session_actor_asks_the_tier_its_start_selected(tmp_path, own, work_tier, expected):
+    """``prepare_delegate_start_actor`` is the one hop from the start's selection to the run's request."""
+    import ouroboros.subagent_runtime as runtime
+    from ouroboros.subagent_history import execution_identity
+    from ouroboros.tools.registry import ToolContext
+
+    row = _session_row()
+    if own:
+        row["processing_preference"] = own
+    snapshot = runtime.select_subagent_snapshot(_settings(row), subagent_id="session-builder", work_tier=work_tier)[0]
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="child1")
+    token = runtime._EXACT_START_SELECTION.set({"snapshot": snapshot})
+    try:
+        actor, refusal = runtime.prepare_delegate_start_actor(ctx, tmp_path, recovering=False, invocation_id="",
+            work_order_fingerprint="new", authority_fingerprint="authority")
+    finally:
+        runtime._EXACT_START_SELECTION.reset(token)
+    assert refusal is None and actor["processing_preference"] == expected
+    assert execution_identity(snapshot) == execution_identity(_snapshot(_settings(row), "session-builder"))
+    # The run's custody and history file it under the row's own tier, as effort is under the row's pin.
+    assert actor["row_processing"] == execution_identity(snapshot)["processing_preference"] == own
+
+
 def test_replacement_refuses_unreadable_custody_before_fail_soft_scan(
     monkeypatch, tmp_path,
 ):

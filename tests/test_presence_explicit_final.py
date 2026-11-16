@@ -157,10 +157,13 @@ def finish(**arguments):
 
 @pytest.fixture
 def room(tmp_path, monkeypatch):
+    from ouroboros.presence_carrier import set_presence_runner
+    from tests.conversation_carrier_support import host_lane, join_host_lane_carriers
     from tests.test_host_service_api import _seed_token
-    from tests.test_presence_continuation_bootstrap import install_bootstrap_harness
+    from tests.test_presence_continuation_bootstrap import install_bootstrap_harness, wait_for
 
     data = tmp_path / "data"
+    host_lane(monkeypatch, data)  # a Host serving alone: no supervisor queue of its own
     h = install_bootstrap_harness(monkeypatch, data, review_mode="off")
     _seed_token(data, skill="bridge", token=TOKEN, permissions=["presence"], manifest_permissions=["presence"])
     place = places.connect_place(data, connector="bridge", provider="chat", account_id="a",
@@ -182,6 +185,11 @@ def room(tmp_path, monkeypatch):
     with TestClient(app) as client:
         transport.client, transport.recorder = client, app.state.host_service_context.presence_deliveries
         yield SimpleNamespace(h=h, data=data, place=place, client=client, transport=transport)
+        # The room's turns end and their carriers settle before its Host, tables and roots are given back.
+        h.release.set()
+        wait_for(lambda: not app.state.host_service_context.presence_turns.live(), timeout=60, what="the room's turns")
+        join_host_lane_carriers()
+    set_presence_runner(data, None)
 
 
 @pytest.fixture

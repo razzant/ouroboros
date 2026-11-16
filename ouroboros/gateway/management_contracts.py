@@ -914,6 +914,7 @@ class ModelCatalogItem(TypedDict, total=False):
     processing: Any
     use_local: bool
     price: ModelPrice  # OpenRouter rows only, when the catalog states a whole token price (llm_pricing.openrouter_catalog_price)
+    price_condition: str  # DeepSeek rows whose published entry prices them only off-peak in USD: ``off_peak_usd``
 
 
 class ModelCatalogResponse(TypedDict, total=False):

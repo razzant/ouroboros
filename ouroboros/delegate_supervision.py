@@ -39,7 +39,7 @@ import logging
 import pathlib
 import time
 import uuid
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from ouroboros import delegate_custody as custody
 from ouroboros.delegate_shared import _fail, delegate_result, refusal_host_code
@@ -335,8 +335,9 @@ def _coordination_cursor(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _direct_children(ctx: Any, materialize: bool = True) -> dict[str, dict[str, Any]]:
-    """Read the existing durable direct-child projection for this nanny (a readiness check needs no artifacts)."""
+def _direct_children(ctx: Any, materialize: bool = True, settled: Iterable[str] = ()) -> dict[str, dict[str, Any]]:
+    """Read the existing durable direct-child projection for this nanny (a readiness check needs no artifacts, and
+    its first read no row of a child its cursor holds settled: ``find_child_tasks(settled=...)``)."""
     task_id = str(getattr(ctx, "task_id", "") or "").strip()
     if not task_id:
         return {}
@@ -345,7 +346,7 @@ def _direct_children(ctx: Any, materialize: bool = True) -> dict[str, dict[str, 
 
         children = find_child_tasks(
             custody.custody_root(ctx), parent_task_id=task_id,
-            root_task_id="", scope="direct", materialize_artifacts=materialize,
+            root_task_id="", scope="direct", materialize_artifacts=materialize, settled=settled,
         )
     except Exception:
         return {}
@@ -375,57 +376,69 @@ def _child_marker(child: dict[str, Any]) -> dict[str, str]:
 
 
 def _coordination_wakes(
-    ctx: Any, state: dict[str, Any], materialize: bool = True,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    ctx: Any, state: dict[str, Any], readiness: bool = False,
+) -> tuple[list[dict[str, Any]], Optional[dict[str, Any]]]:
     """Collect direct-child beacons and terminal transitions on one cursor (pure: the next cursor is
-    returned, committed only by the acknowledgement of the wake that showed them)."""
+    returned, committed only by the acknowledgement of the wake that showed them).
+
+    A sleeper's ``readiness`` check (``run_wait_reason``, every assignment tick) reads no artifacts and returns no
+    cursor. Its first read skips each child whose end the cursor already holds (``find_child_tasks(settled=...)``):
+    such a child shows no transition, and its id still stands in the beacon filter. That read only answers that
+    nothing is new: when it sees an event, every child is read again and the events are those of that read, the one
+    the wake's acknowledging read repeats."""
     from ouroboros.task_tree_ledger import tree_ledger_row_id
+    from ouroboros.task_status import SETTLED_STATUSES
 
     cursor = _coordination_cursor(state)
-    children = _direct_children(ctx, materialize)
-    markers = {
-        child_id: _child_marker(child) for child_id, child in children.items()
-    }
+    prior_children = cursor.get("children") if isinstance(cursor.get("children"), dict) else {}
+
+    def shown_settled(child_id: str) -> bool:  # the cursor already holds this child's end
+        previous = prior_children.get(child_id)
+        return isinstance(previous, dict) and str(previous.get("status") or "") in SETTLED_STATUSES
+
+    held = {child_id for child_id in prior_children if shown_settled(child_id)} if readiness else set()
     metadata = getattr(ctx, "task_metadata", {})
     root_id = str(metadata.get("root_task_id") or "").strip() if isinstance(metadata, dict) else ""
     root_id = root_id or str(getattr(ctx, "task_id", "") or "").strip()
-    attention: list[dict[str, Any]] = []
     seen = {str(item) for item in cursor.get("attention_seen", []) if str(item)}
-    try:
-        from ouroboros.task_tree_ledger import tree_ledger_attention_after
 
-        attention = tree_ledger_attention_after(
-            root_id,
-            str(cursor.get("attention_after_ts") or ""),
-            task_ids=set(children),
-            seen_ids=seen,
-            data_root=custody.custody_root(ctx),
-        )
-    except Exception:
-        attention = []
-    new_attention = [row for row in attention if tree_ledger_row_id(row) not in seen]
-    terminal_events: list[dict[str, Any]] = []
-    prior_children = cursor.get("children") if isinstance(cursor.get("children"), dict) else {}
-    from ouroboros.task_status import SETTLED_STATUSES
+    def observe(children: dict[str, dict[str, Any]]) -> tuple[list, dict, list]:
+        try:
+            from ouroboros.task_tree_ledger import tree_ledger_attention_after
 
-    for child_id, marker in markers.items():
-        previous = prior_children.get(child_id) if isinstance(prior_children.get(child_id), dict) else {}
-        status = marker["status"]
-        if (
-            status in SETTLED_STATUSES
-            and str(previous.get("status") or "") not in SETTLED_STATUSES
-        ):
-            terminal_events.append({
-                "type": "child_terminal",
-                "child_task_id": child_id,
-                "status": status,
-                "updated_at": marker["updated_at"],
-                "result_sha256": marker["result_sha256"],
-            })
+            attention = tree_ledger_attention_after(
+                root_id,
+                str(cursor.get("attention_after_ts") or ""),
+                task_ids=set(children),
+                seen_ids=seen,
+                data_root=custody.custody_root(ctx),
+            )
+        except Exception:
+            attention = []
+        new_attention = [row for row in attention if tree_ledger_row_id(row) not in seen]
+        markers = {child_id: _child_marker(child) for child_id, child in children.items() if child_id not in held}
+        terminal_events: list[dict[str, Any]] = []
+        for child_id, marker in markers.items():
+            status = marker["status"]
+            if status in SETTLED_STATUSES and not shown_settled(child_id):
+                terminal_events.append({
+                    "type": "child_terminal",
+                    "child_task_id": child_id,
+                    "status": status,
+                    "updated_at": marker["updated_at"],
+                    "result_sha256": marker["result_sha256"],
+                })
+        return new_attention, markers, terminal_events
+
+    new_attention, markers, terminal_events = observe(_direct_children(ctx, not readiness, held))
+    if held and (new_attention or terminal_events):  # what ends the sleep is what the acknowledging read will show
+        new_attention, markers, terminal_events = observe(_direct_children(ctx, not readiness))
     events = [
         {"type": "child_attention_beacon", "beacon": row}
         for row in new_attention
     ] + terminal_events
+    if readiness:
+        return events, None  # a held child's marker is not read: nothing here may become a cursor
     next_cursor = {
         "attention_after_ts": str(cursor.get("attention_after_ts") or ""),
         "attention_seen": list(cursor.get("attention_seen", [])),
@@ -1089,11 +1102,13 @@ def run_wait_reason(ctx: Any) -> str:
     input and controls, a question of any run this task owns, the selected runs' terminals, the chosen
     time): the task's own cancel intent or spent deadline, and a direct child's attention beacon or
     terminal past the coordination cursor the last acknowledged wake committed. Reads only: no cursor
-    moves here, and no child's artifacts are materialized for it."""
+    moves here, no child's artifacts are materialized for it, and a quiet tick reads no row of a child
+    that cursor holds settled unless a pointer redirects it or the queue names it
+    (``_coordination_wakes(readiness=True)``)."""
     controls = _control_wakes(ctx)
     if controls:
         return "control:" + ("cancelled" if controls[0]["type"] == "cancellation_intent" else "deadline")
-    events, _cursor = _coordination_wakes(ctx, _load_state(ctx, ""), materialize=False)
+    events, _cursor = _coordination_wakes(ctx, _load_state(ctx, ""), readiness=True)
     for event in events:
         beacon = event.get("beacon") if isinstance(event.get("beacon"), dict) else {}
         return "coordination:" + str(event.get("child_task_id") or beacon.get("task_id") or "unknown")

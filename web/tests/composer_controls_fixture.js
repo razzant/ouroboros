@@ -69,10 +69,39 @@ export function mount({ hover = false, save, win } = {}) {
     };
 }
 
+/* The Model sheet's list as model_list.js writes it, read from its markup in order: a row is `{ key, kind, selected,
+   name, tags, facts, pin }` (`pin`: null where the row has no Pin cell, else whether it is pressed; `expanded` on the
+   `All sources` row), a heading `{ section }`, a note `{ note }`. Words are read as a reader gets them: no marks, no
+   entities. */
+const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', '#39': '\'' };
+const plain = (html) => String(html).replace(/<svg[\s\S]*?<\/svg>/g, '').replace(/<[^>]+>/g, '')
+    .replace(/&(amp|lt|gt|quot|#39);/g, (_all, name) => ENTITIES[name]);
+const rowPart = (inner, name) => plain(inner.match(new RegExp(`<span class="chat-model-row-${name}"[^>]*>(.*?)</span>`))?.[1] || '');
+export function modelSheetList(html) {
+    const out = [];
+    const grammar = /<div role="row" class="chat-model-row([^"]*)" data-row="([^"]*)" aria-selected="(true|false)"([^>]*)>(.*?)<\/div>|<p class="chat-model-(section|note)"[^>]*>(.*?)<\/p>/g;
+    for (const [, kinds, key, selected, attrs, inner, part, words] of String(html).matchAll(grammar)) {
+        if (part) { out.push({ [part]: plain(words) }); continue; }
+        const pin = inner.match(/class="chat-model-pin[^"]*"[^>]*aria-pressed="(true|false)"/);
+        const expanded = attrs.match(/aria-expanded="(true|false)"/);
+        out.push({ key: plain(key), kind: kinds.trim().replace(/^chat-model-/, ''), selected: selected === 'true',
+            name: rowPart(inner, 'id'), tags: [...inner.matchAll(/<span class="chat-model-row-tag">(.*?)<\/span>/g)].map((tag) => plain(tag[1])),
+            facts: rowPart(inner, 'facts'), pin: pin ? pin[1] === 'true' : null, ...(expanded ? { expanded: expanded[1] === 'true' } : {}) });
+    }
+    return out;
+}
+/** Only the rows of `modelSheetList`. */
+export const modelSheetRows = (html) => modelSheetList(html).filter((entry) => entry.key !== undefined);
+/** The list in brief: a row as its key, `*` while it is the chosen one, and its Pin (`+pin` pressed, `-pin` not, nothing
+ *  where the row has none); a heading as `§ words`, a note as `note: words`. */
+export const modelSheetOutline = (html) => modelSheetList(html).map((entry) => (entry.section !== undefined ? `§ ${entry.section}`
+    : entry.note !== undefined ? `note: ${entry.note}`
+        : [entry.key, entry.selected ? '*' : '', entry.pin === null ? '' : entry.pin ? '+pin' : '-pin'].filter(Boolean).join(' ')));
+
 /* The composer row as chat.js builds it: the Model anchor, the Subagents anchor, then the context anchor; Effort mounts
    after Context. `subagents` mounts the Subagents capsule on its anchor too (its writer answers `subagentAnswer`), and
-   `model` the Model capsule on its own (its writer answers `modelAnswer`; `model` holds its seams: `store`, `askMain`,
-   `isStack`, `isCoarse`). */
+   `model` the Model capsule on its own (its writers answer `modelAnswer` and `tierAnswer`; `model` holds its seams:
+   `store`, `askMain`, `isStack`, `isCoarse`, `place`, `saveTier`). Each place the Model sheet is given is in `places`. */
 export function mountPair({ hover = false, reply, win, withBox = false, projectId = '', chatId, subagents = false, model = null } = {}) {
     const doc = stubDocument();
     doc.body = doc.createElement('body');  // where a capsule's floating list is put
@@ -98,6 +127,8 @@ export function mountPair({ hover = false, reply, win, withBox = false, projectI
     const effortAnswer = { value: null };
     const subagentAnswer = { value: null };
     const modelAnswer = { value: null };
+    const tierAnswer = { value: null };
+    const places = [];
     const settingsOpened = [];
     const subagentsWriter = subagents ? {
         saveSubagentsMode: async (body) => {
@@ -117,7 +148,18 @@ export function mountPair({ hover = false, reply, win, withBox = false, projectI
                 model_choice: body.kind === 'main' ? { kind: 'main' } : { kind: 'model', ...route } }
                 : { ok: true, project_id: '', main_route: route, previous_main_route: route, account: 'none', window_reset: false };
         },
-        modelDeps: { watchLayout: () => () => {}, placeList: () => ({ reposition() {}, destroy() {} }), ...model },
+        modelDeps: {
+            place: (sheet, anchor) => { places.push([sheet, anchor]); return { reposition() {}, destroy() {} }; },
+            // A room's tier as saved, or Main's own with what Default resolves to (CLIENT_CONTRACT §9).
+            saveTier: async (body) => {
+                posts.push(['/api/owner/chat-processing', body]);
+                const reply = await tierAnswer.value;
+                if (reply) return reply;
+                return body.project_id ? { ok: true, project_id: body.project_id, processing_choice: body.processing, previous_processing_choice: '' }
+                    : { ok: true, project_id: '', main_processing: body.processing, previous_main_processing: '', processing_default: 'standard' };
+            },
+            ...model,
+        },
     } : {};
     const controls = createComposerOwnerControls({
         ...subagentsWriter, ...modelWriter, openSettings: (tab) => settingsOpened.push(tab),
@@ -141,7 +183,7 @@ export function mountPair({ hover = false, reply, win, withBox = false, projectI
     const onSeg = (mode) => ({ closest: (selector) => (selector === '.chat-seg' ? subSeg(mode) : null) });
     return {
         controls, row, box, doc, contextEl, effortEl, posts, toasts, refreshes, answer, effortAnswer, seg,
-        modelEl, modelAnswer, modelHead: modelEl.querySelector('.chat-model-head'), modelHint: modelEl.querySelector('.ui-hint'),
+        modelEl, modelAnswer, tierAnswer, places, modelHead: modelEl.querySelector('.chat-model-head'),
         fire,
         subagentsEl, subagentAnswer, settingsOpened, subSeg, subHead: subagentsEl.querySelector('.chat-subagents-head'),
         subHint: subagentsEl.querySelector('.ui-hint'),

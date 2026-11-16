@@ -5,7 +5,7 @@ Descriptive, not runtime validation. The browser twin is ``web/modules/work_type
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Optional
 
 try:  # Python 3.11+
     from typing import NotRequired, TypedDict  # type: ignore[attr-defined]
@@ -42,22 +42,57 @@ class WorkLead(WorkPrimaryRoute):
     pending: NotRequired[ChatModelRoute]
 
 
+ProcessingTier = Literal["", "standard", "fast", "economy", "ultrafast"]  # '' = no tier of its own: the default resolution
+
+
+class ProcessingTiers(TypedDict):
+    """Main's own tier ('' = none: Main takes the default) and the default every lead pays (Settings values)."""
+
+    main: Literal["", "standard", "fast", "economy"]
+    default: Literal["", "standard", "fast", "economy"]
+
+
+class ProcessingReceipt(TypedDict):
+    """One call's processing as its receipt states it: what was asked, sent and seen (``_usage_response``), the
+    provider's own words beside the folded ones (an older Codex reports ``ultrafast`` it folds into ``fast``)."""
+
+    requested: Optional[str]
+    submitted: Optional[str]
+    submittedNative: NotRequired[Optional[str]]
+    observed: str  # standard, fast, economy or unknown
+    observedNative: NotRequired[List[str]]
+    reason: Optional[str]  # processing_not_submitted, submitted_mode_differs, provider_mode_changed
+
+
+class WorkProcessing(TypedDict):
+    """A root's own tier (its room's at admission, or the owner's card act; '' = the default resolution) and the
+    newest call's receipt this host saw, so a choice is never shown as what ran."""
+
+    choice: ProcessingTier
+    resolved: NotRequired[ProcessingTier]  # server resolver, including the acting fallback row
+    source: NotRequired[Literal["room", "owner"]]
+    last: NotRequired[ProcessingReceipt]
+
+
 class WorkLeadFields(TypedDict):
     lead: NotRequired[WorkLead]
+    processing: NotRequired[WorkProcessing]
 
 
 class TaskModelRequest(TypedDict):
     request_id: str
-    action: Literal["set", "follow", "return", "wait", "keep"]
+    action: Literal["set", "follow", "return", "wait", "keep", "processing"]
     model: NotRequired[str]
     use_local: NotRequired[bool]
+    processing: NotRequired[ProcessingTier]  # action ``processing`` only: the work's own tier from its next call
 
 
 class TaskModelResponse(TypedDict):
     ok: Literal[True]
     task_id: str
     applied: Literal["next_step", "at_start"]
-    lead: WorkLead
+    lead: NotRequired[WorkLead]  # every model act
+    processing: NotRequired[WorkProcessing]  # a tier act
 
 
 class WorkReason(TypedDict):

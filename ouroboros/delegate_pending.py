@@ -85,6 +85,7 @@ def pending_invocations(
                 "work_order_fingerprint": str(row.get("work_order_fingerprint") or ""),
                 "work_order_coverage": str(row.get("work_order_coverage") or ""),
                 "authority_fingerprint": str(row.get("authority_fingerprint") or ""),
+                **{key: copy.deepcopy(row[key]) for key in ("processing", "row_processing") if key in row},
                 "work_order_source_request": (
                     copy.deepcopy(row.get("work_order_source_request"))
                     if isinstance(row.get("work_order_source_request"), dict) else {}
@@ -123,6 +124,9 @@ def current_rows(root, rows):
         source = facts["request"]
         for record in projected:
             record.update(store_facts(source))  # a cached projection may predate a store fact its row holds
+            for key in ("processing", "row_processing"):
+                if key in source:
+                    record[key] = copy.deepcopy(source[key])
         if source.get("request_ref") is not None and not (isinstance(source.get("request"), dict) and source["request"]):
             for record in projected:
                 # Older projections cached a body without its ref. The source row

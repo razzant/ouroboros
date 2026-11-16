@@ -32,9 +32,33 @@ import pytest
 
 from tests import fixtures_mock_llm
 from tests._model_choice_browser import (
-    _CAPSULE, _CARD, AT_START, MAIN, OTHER, PICKED, QUEUED, SOURCE, Provider,
-    _announce, _answered, _asked, _capsule_ready, _close_project, _idle, _open_project,
-    _post, _preferences, _search_pick, _send, _state, _work_of,
+    _CAPSULE,
+    _CARD,
+    _SHEET,
+    AT_START,
+    MAIN,
+    OTHER,
+    PICKED,
+    QUEUED,
+    QUEUED_SCOPE,
+    SOURCE,
+    Provider,
+    _announce,
+    _answered,
+    _asked,
+    _capsule_ready,
+    _close_project,
+    _close_sheet,
+    _idle,
+    _open_project,
+    _open_sheet,
+    _post,
+    _preferences,
+    _row,
+    _send,
+    _sheet_pick,
+    _state,
+    _work_of,
 )
 from tests.test_effort_range_browser import _launch
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 -- fixture
@@ -79,8 +103,9 @@ def test_a_rooms_model_mains_write_and_a_queued_works_model_reach_the_provider(d
             capsule = f"#{prefix}-model-mode"
             closed = page.evaluate(_CAPSULE, capsule)
             assert (closed["name"], closed["value"], closed["own"]) == ("Main", "mock-main", "false"), closed
-            _search_pick(page, capsule, PICKED)
+            _sheet_pick(page, capsule, PICKED)
             page.wait_for_function("(sel) => document.querySelector(sel).dataset.own === 'true'", arg=capsule, timeout=20_000)
+            page.wait_for_function("() => !document.querySelector('.ui-popup.model-sheet')", timeout=10_000)  # a room's pick closes it
             picked = page.evaluate(_CAPSULE, capsule)
             assert picked["value"] == "mock-picked" and picked["name"] != "Main", picked
             assert writes[-1] == ("owner/chat-model", {"kind": "model", "model": PICKED, "use_local": False, "project_id": alpha["id"]}), writes
@@ -133,15 +158,15 @@ def test_a_rooms_model_mains_write_and_a_queued_works_model_reach_the_provider(d
             assert queued["chip"] == "Queued" and queued["fact"].endswith("· mock-main") and queued["why"] == "", queued
             assert provider.models_of("ROOM_WIRE_DELTA") == [], "a queued work has asked no model yet"
             page.click(f"{beta_card} button.card-model-fact")
-            page.wait_for_selector(".card-model-pop .chat-model-row", timeout=20_000)
-            popover = page.evaluate("""() => ({ title: document.querySelector('.card-model-pop-title').innerText,
-                acts: document.querySelectorAll('.card-model-pop .card-model-act').length,
-                main: document.querySelector('.card-model-pop .chat-model-row').innerText.replace(/\\s+/g, ' ').trim(),
-                rule: document.querySelector('.card-model-pop .chat-model-rule').innerText })""")
+            page.wait_for_selector(".ui-popup.model-sheet .card-model-head", timeout=20_000)
+            page.wait_for_selector(_row(QUEUED), timeout=20_000)
+            popover = page.evaluate(_SHEET)
             seen["queued_popover"] = popover
-            assert popover["title"] == "Model for this work · follows Main" and popover["acts"] == 0, popover
-            assert popover["main"] == "mock-main Main this work follows Main" and popover["rule"] == AT_START, popover
-            page.click(f'.card-model-pop .chat-model-row[data-row="route|{QUEUED}"]')
+            main_row = popover["groups"][0]["rows"][0]
+            assert popover["title"] == "Model for this work · follows Main" and popover["acts"] == [], popover
+            assert (main_row["row"], main_row["id"], main_row["facts"], main_row["selected"]) == ("main", "Main", "this work follows Main", True), popover
+            assert popover["scope"] == f"Default · Standard · {QUEUED_SCOPE}", ("the tier strip says when it applies", popover)
+            page.click(f"{_row(QUEUED)} .chat-model-cell")
             page.wait_for_function("(words) => [...document.querySelectorAll('.toast')].some((toast) => toast.innerText.includes(words))",
                                    arg=AT_START, timeout=20_000)
             task_write = writes[-1]
@@ -183,7 +208,14 @@ def test_a_rooms_model_mains_write_and_a_queued_works_model_reach_the_provider(d
 
             # --- 5. The Main chat's capsule is Main itself: a pick asks first, then writes Main; the next work runs on it.
             _close_project(page)
-            _search_pick(page, "#chat-model-mode", OTHER)
+            # Main's sheet counts the works that follow Main from the page's last state: the answered turn leaves the
+            # server's works first, then the page reads the state once more (under load that read can lag the turn).
+            page.wait_for_function("""async () => { const s = await (await fetch('/api/state', { cache: 'no-store' })).json();
+                return s.works_complete === true && !(s.works || []).some((w) => (w.lead || {}).basis === 'main' && w.activity !== 'queued'); }""",
+                                   timeout=60_000)
+            with page.expect_response(lambda r: r.url.split("?")[0].endswith("/api/state"), timeout=30_000):
+                pass
+            _sheet_pick(page, "#chat-model-mode", OTHER)
             page.wait_for_selector(".confirm-dialog [data-main-followers]", timeout=20_000)
             sheet = page.evaluate("""() => { const d = document.querySelector('.confirm-dialog'); const text = (n) => n.innerText.replace(/\\s+/g, ' ').trim();
                 return { title: text(d.querySelector('h3')), row: text(d.querySelector('.chat-model-sheet-row')), count: text(d.querySelector('[data-main-followers]')),
@@ -222,12 +254,18 @@ def test_a_rooms_model_mains_write_and_a_queued_works_model_reach_the_provider(d
             for _ in range(2):
                 page.reload(wait_until="domcontentloaded")
                 _capsule_ready(page, "#chat-model-mode")
-                page.click("#chat-model-mode .chat-model-head")
-                page.wait_for_function("() => document.querySelectorAll('#chat-model-mode .chat-model-strip .chat-seg').length >= 4", timeout=20_000)
-                strip = page.evaluate(_CAPSULE, "#chat-model-mode")
-                assert strip["strip"] == ["mock-other", "mock-queued", "mock-picked", "Search"], strip
-                assert strip["checked"] == ["mock-other"], strip
+                _open_sheet(page, "#chat-model-mode")
+                page.wait_for_function("() => [...document.querySelectorAll('.ui-popup.model-sheet .chat-model-section')]"
+                                       ".some((node) => node.textContent === 'Recent')", timeout=20_000)
+                sheet = page.evaluate(_SHEET)
+                seen.setdefault("recent_sheets", []).append(sheet)
+                # Main's own model first, chosen; then the recent picks, newest first, Main's not again.
+                assert [(row["row"], row["id"], row["tag"], row["selected"]) for row in sheet["groups"][0]["rows"]] == \
+                    [("main", "mock-other", "Main", True)], sheet
+                recent = next(group for group in sheet["groups"] if group["heading"] == "Recent")
+                assert [row["id"] for row in recent["rows"]] == ["mock-queued", "mock-picked"], sheet
                 assert _preferences(page)["model_recents"] == recents
+                _close_sheet(page)
         finally:
             provider.release_all()
             (evidence / "wire-seen.json").write_text(json.dumps(seen, indent=2, default=str), encoding="utf-8")

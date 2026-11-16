@@ -163,6 +163,11 @@ async def _fetch_openai_compatible_model_catalog(
                 str(item.get("name", "") or "").strip() or model_id,
             )
         )
+    if provider_id == "deepseek":  # what its published entry prices only under a condition, never a figure
+        from ouroboros.pricing_catalog import price_condition
+
+        conditions = await asyncio.to_thread(lambda: [price_condition(entry["id"]) for entry in models])
+        models = [{**entry, "price_condition": said} if said else entry for entry, said in zip(models, conditions)]
     return models
 
 
@@ -563,8 +568,10 @@ async def catalog_payload(settings: dict, subscription: dict, *, refused: Callab
             value = str(item.get("value", "") or "")
             if value in kept_at:
                 kept = items[kept_at[value]]
-                if "price" in kept and kept["price"] != item.get("price"):  # records disagree: no one price to show
-                    items[kept_at[value]] = {key: field for key, field in kept.items() if key != "price"}
+                # Records that disagree on a price or its condition show none of either.
+                if any(key in kept and kept[key] != item.get(key) for key in ("price", "price_condition")):
+                    items[kept_at[value]] = {key: field for key, field in kept.items()
+                                             if key not in ("price", "price_condition")}
                 continue
             if value:
                 kept_at[value] = len(items)
