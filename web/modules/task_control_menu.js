@@ -525,8 +525,9 @@ function watchTaskControlMenu(anchor, menu) {
         // (a late history page, a refit) cannot have moved it.
         if (event.type === 'scroll' && event.target?.nodeType === 1 && !event.target.contains(anchor)) return;
         // A late card fact can grow the feed while its reading-place keeper compensates the scroll. The menu
-        // is still anchored at the same point; a deferred scroll from before opening is harmless too.
-        if (event.type === 'scroll' && anchor.isConnected) {
+        // is still anchored at the same point; a deferred feed scroll from before opening is harmless too.
+        // The document itself keeps its page-level dismissal contract.
+        if (event.type === 'scroll' && event.target?.nodeType === 1 && anchor.isConnected) {
             const now = anchor.getBoundingClientRect();
             if (['top', 'right', 'bottom', 'left'].every(edge => Math.abs(now[edge] - openedAt[edge]) < 0.5)) return;
         }

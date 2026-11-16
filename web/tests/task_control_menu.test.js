@@ -253,8 +253,6 @@ test('a compensated feed scroll keeps an anchored menu; moving or losing its tri
     feed.scrollTop = 26;  // a late card fact grew above the trigger; the feed restored its place
     scroll(feed);
     assert.equal(menu.isConnected, true, 'the same on-screen trigger still owns the open choice');
-    scroll(env.doc);  // also a deferred page scroll delivered after opening
-    assert.equal(menu.isConnected, true);
     scroll(menu);
     assert.equal(menu.isConnected, true, 'a constrained menu can scroll inside itself');
     anchor.rect = { ...anchor.rect, top: 10, bottom: 40 };
@@ -267,6 +265,9 @@ test('a compensated feed scroll keeps an anchored menu; moving or losing its tri
     anchor.rect = { ...anchor.rect, left: 12, right: 112 };
     scroll(feed);
     assert.equal(menu.isConnected, false, 'horizontal movement dismisses too');
+    menu = open();
+    scroll(env.doc);
+    assert.equal(menu.isConnected, false, 'the document keeps its page-level dismissal contract');
     menu = open();
     env.doc.defaultView.emit('resize');
     assert.equal(menu.isConnected, false, 'a changed viewport still dismisses');
