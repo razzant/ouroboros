@@ -115,7 +115,8 @@ MEASURE = """root => {
             const margin = secondLine ? parseFloat(getComputedStyle(rail).marginBottom) || 0 : 0;
             const height = r.height - (secondLine ? rb.height + gap + margin : 0);
             const docked = document.documentElement.dataset.layout === 'docked';
-            const band = docked && !e.closest('#page-chat') ? (coarse ? 80 : 66) : 56;
+            // A phone's page row stands 18px below a browser's top, a room's bar at its own (DESIGN "Page header").
+            const band = docked && !e.closest('#page-chat') ? (coarse ? 80 : 66) : e.closest('#page-chat') ? 56 : 67;
             if (height > band + .1)
                 headers.push({node:name(e),height:Math.round(height*10)/10});
             if (secondLine && new Set([...rail.children].filter(shown).map(n=>Math.round(n.getBoundingClientRect().top))).size > 1)

@@ -389,7 +389,8 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         page.set_viewport_size({'width': 390, 'height': 844})
         page.wait_for_function("document.documentElement.dataset.layout === 'stack'")
         phone = page.evaluate(BAR, 'dashboard')
-        assert not phone['under'] and phone['height'] <= 56, phone
+        # One row whose controls stand 18px below a browser's top: 18 + 44 + the row's 5px foot.
+        assert not phone['under'] and phone['height'] <= 67, phone
         # Residual guarantee: a chosen page survives narrowing. Return once to reach the retained list.
         assert page.locator('#page-costs').is_visible()
         page.locator('#page-dashboard .app-page-header [data-shell-back]').click()
@@ -398,7 +399,7 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         page.locator('#page-dashboard [data-dashboard-tab="costs"]').click()
         page.locator('#page-costs').wait_for(state='visible')
         assert page.locator('#page-dashboard .app-page-header [data-dashboard-lead-name]').inner_text() == 'Costs'
-        assert page.evaluate(BAR, 'dashboard')['height'] <= 56
+        assert page.evaluate(BAR, 'dashboard')['height'] <= 67
         page.locator('#page-dashboard .app-page-header [data-shell-back]').click()
         assert page.evaluate("document.activeElement?.dataset.dashboardTab === 'costs'")
         setup_browser.capture(page, f'bar-a-dashboard-{engine}-390')
