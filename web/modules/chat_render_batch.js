@@ -123,11 +123,12 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
             if (hydrating) root.setAttribute('aria-busy', 'true'); else root.removeAttribute('aria-busy');
             if ((snapshot.initialized || error || hydrating) && !root.isConnected) messagesDiv.prepend(root);
             root.classList.toggle('has-gaps', !migrating && (incomplete || Boolean(error)));
-            // For ↓: `failed`, a read of the present it retries where the reader is (the room's newest, or the pager's
-            // `latest`, ↓'s own included); `waiting`, a migrating store read again until it publishes: no Retry answers it.
-            const waiting = migrating || Boolean(recent?.waiting);
-            return { ...coverage, complete: Boolean(coverage.complete && !error), error: Boolean(error), waiting,
-                failed: !waiting && Boolean(recent?.error && !recent.partial || snapshot.retryDirection === 'latest'),
+            // For ↓, each read of the present by its own error, whichever note heads the edge: `failed`, one it retries where
+            // the reader is (the room's newest, or the pager's `latest`); else `waiting`, one the migrating store refused.
+            const latest = snapshot.retryDirection === 'latest', latestWaits = latest && isStoreMigrating(snapshot.error);
+            const failed = Boolean(recent?.error && !recent.partial && !isStoreMigrating(recent.error)) || latest && !latestWaits;
+            const waiting = !failed && (isStoreMigrating(recent?.error) || Boolean(recent?.waiting) || latestWaits);
+            return { ...coverage, complete: Boolean(coverage.complete && !error), error: Boolean(error), failed, waiting,
                 note: noteText, truncated_by: incomplete ? ['unloaded'] : [] };
         },
     };

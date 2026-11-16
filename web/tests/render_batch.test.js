@@ -194,6 +194,12 @@ test('a migrating store is waiting for ↓, never a failed read, also while its 
     assert.deepEqual(facts({ ...snapshot, error: migrating, retryDirection: 'latest' }), { waiting: true, failed: false },
         '↓\'s own read refused by the upgrade waits too');
     assert.deepEqual(facts({ ...snapshot, error: new Error('offline'), retryDirection: 'latest' }), { waiting: false, failed: true });
+    controls.endRecent(new Error('cut short'), true);  // a partial read's note heads the edge
+    assert.deepEqual(facts({ ...snapshot, error: migrating, retryDirection: 'latest' }), { waiting: true, failed: false },
+        '↓\'s own read refused by the upgrade waits, whichever note heads the edge');
+    controls.endRecent(new Error('offline'));
+    assert.deepEqual(facts({ ...snapshot, error: migrating, retryDirection: 'latest' }), { waiting: false, failed: true },
+        'an earlier refusal never hides the room\'s later ordinary failure');
 });
 
 // ─────────────── sticky hydration / replay contracts ──────────────────────

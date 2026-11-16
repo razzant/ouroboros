@@ -2488,7 +2488,7 @@ export function createChatInstance({
             const cardsAtStart = new Set(liveCardRecords.keys());
             // Replay can refill the feed without moving the reader's intent.
             const followingAtStart = reading.stick, generationAtStart = reading.generation;
-            const landedAtStart = historyPager.arrivalsLanded();
+            const landedAtStart = historyPager.arrivalsLanded(), recovering = !lastHistorySyncSucceeded;
             try {
                 // No welcome until this read lands.
                 emptyWelcome?.historyPending();
@@ -2503,7 +2503,7 @@ export function createChatInstance({
                 }
                 if (data.recentVersion < recentApplied) return lastHistorySyncSucceeded;
                 const messages = Array.isArray(data.messages) ? data.messages : [];
-                const oldRecentIds = retainedRecentIds(), recovering = historyControls.recentFailed();
+                const oldRecentIds = retainedRecentIds();
                 const admitted = acceptRecentWindow(data, messages);
                 const pagerBeforeRecent = historyPager.getState();
                 // Older reading keeps its chain; a follower's healthy read restores the present, also after ↓ failed.

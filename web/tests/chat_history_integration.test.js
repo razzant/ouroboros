@@ -1308,6 +1308,28 @@ test('a reconnect into a store upgrade keeps ↓ waiting through its automatic r
     assert.deepEqual(drawn(), [true, 'Retry loading latest messages'], 'an ordinary failed catch-up still names Retry');
 });
 
+test('an upgrade refusing ↓ after a partial read still waits; the room\'s later ordinary failure still names Retry', async (t) => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    pressLatest();
+    await drain();
+    const drawn = () => [latestButton().classList.contains('visible'), latestButton().getAttribute('aria-label')];
+    f.respond({ ...present(row('chat:903', 'Part of the answer')),
+        window: { complete: false, truncated_by: ['quota', 'chat_projection_failed'] } });
+    await f.instance.refreshHistory({ revision: 66 });
+    await drain();
+    assert.deepEqual(drawn(), [true, 'Retry loading latest messages'], 'the partial read is unconfirmed');
+    f.respond(upgrading);
+    pressLatest();
+    await drain();
+    assert.equal(atBottom(f), true, 'the immediate return stands');
+    assert.deepEqual(drawn(), [false, 'Scroll to latest message'], 'its read refused by the upgrade waits, whatever note the partial left');
+    f.respond({ httpStatus: 503, body: { error: 'History source unavailable' } });
+    await f.instance.refreshHistory({ revision: 67 });
+    await drain();
+    assert.deepEqual(drawn(), [true, 'Retry loading latest messages'], 'the earlier refusal does not hide this failure');
+});
+
 test('a reopened revision waits for catch-up instead of consuming its unread arrival with old hydration', async t => {
     const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
     await f.refresh();
@@ -1649,7 +1671,15 @@ test('a disconnect while ↓ reads, the socket still down: retained return stays
     assert.equal(atBottom(f), true);
 });
 
-test('↓ sharing the room\'s own read of the present names its Retry when that read fails, with no absence owed', async (t) => {
+// ↓ gives up its own read when the room's read it shares fails, ordinarily or refused by an upgrade: the next healthy
+// read restores a follower's present chain, and a reader who moved on keeps place and chain.
+for (const [title, failure, readOn] of [
+    ['↓ sharing the room\'s own read of the present names its Retry when that read fails, with no absence owed',
+        { httpStatus: 503, body: { error: 'History source unavailable' } }, false],
+    ['↓ sharing the room\'s own read of the present that an upgrade refuses waits; the next healthy read restores the chain',
+        upgrading, false],
+    ['a reader who moves on after ↓ shared a refused read keeps place and chain through the next healthy read', upgrading, true],
+]) test(title, async (t) => {
     const f = await awayRoom(t);
     const recent = held();
     f.respond(recent.promise);
@@ -1659,15 +1689,28 @@ test('↓ sharing the room\'s own read of the present names its Retry when that 
     await drain();
     assert.equal(busy(), true);
     const place = f.messages.scrollTop;
-    recent.release({ httpStatus: 503, body: { error: 'History source unavailable' } });
+    recent.release(failure);
     await refreshing;
     await drain();
     assert.deepEqual([busy(), f.messages.scrollTop], [false, place]);
-    assert.equal(latestButton().getAttribute('aria-label'), 'Retry loading latest messages');
+    assert.equal(latestButton().getAttribute('aria-label'),
+        failure === upgrading ? 'Scroll to latest message' : 'Retry loading latest messages', 'an upgrade waits, a failure names Retry');
+    if (readOn) readUp(f);
+    const kept = f.messages.scrollTop;
     f.respond(present(row('chat:901', 'Arrived while away')));
+    // An ordinary healthy read of the present: no ↓, reconnect or failure of ↓'s own.
+    await f.instance.refreshHistory({ revision: 51 });
+    await drain();
+    assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:901'));
+    if (readOn) assert.equal(f.messages.scrollTop, kept, 'the reader\'s place stays');
+    else assert.equal(latestButton().getAttribute('aria-label'), 'Scroll to latest message');
+    const before = f.calls.length;
+    await f.clickOlder();
+    assert.deepEqual(f.calls.slice(before), [readOn ? 'before:4' : 'before:1'], readOn
+        ? 'and so does their older chain' : 'Load more history goes on from the present, not the older chain');
     pressLatest();
     await drain();
-    assert.equal(atBottom(f), true);
+    assert.equal(atBottom(f), true, '↓ still reaches the present');
 });
 
 test('a recent read failing after immediate ↓ leaves visible Retry at the retained end', async t => {
