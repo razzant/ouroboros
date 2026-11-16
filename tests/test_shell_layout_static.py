@@ -131,6 +131,17 @@ def test_logs_use_the_space_below_clear_for_the_long_filter_word():
     assert "grid-column: 3 / -1;" in _block(logs, ".logs-filters > .filter-chip:nth-child(6) {")
 
 
+def test_an_automatic_section_page_keeps_its_list_when_the_container_narrows_before_javascript():
+    css = _read("web/ui.css")
+    two = _block(css, "@container sectionplace (min-width: 40rem) {")
+    assert '.section-shell[data-section-view="auto"] > .section-pane { display: grid; }' in two
+    assert '.section-place[data-section-view="auto"] .section-lead-page { display: flex; }' in two
+    # Only an explicit page hides the rail; auto shows the list immediately below the two-pane query.
+    assert '.section-shell[data-section-view="page"] > .section-rail,\n.section-shell:is([data-section-view="home"], [data-section-view="auto"]) > .section-pane { display: none; }' in css.replace(two, "")
+    phone = _block(_read("web/style.css"), SECTION_PAGE_ALONE)
+    assert '#page-dashboard[data-section-view="auto"] > .app-page-header .app-page-lead { display: none; }' in phone
+
+
 def test_a_section_gives_the_places_control_up_only_where_a_page_replaced_its_list():
     """In the stack layout a section's page is one row, Back and its name, where the places control stood. From 40rem
     a section holds its list beside the page and the first-level page has no Back: there the places control is the
@@ -155,7 +166,7 @@ def test_a_touch_window_names_a_sections_two_columns_in_its_one_header_row():
     title = _block(two, f"{header} .app-page-title-row {{")
     assert "position: absolute;" in title and "clip-path: inset(50%);" in title
     assert f"{header} .app-page-lead {{ grid-area: lead; min-height: var(--touch-target-min); }}" in two
-    lead = _block(two, 'html[data-layout="stack"] .section-place[data-section-view="page"] .section-lead {')
+    lead = _block(two, 'html[data-layout="stack"] .section-place:is([data-section-view="page"], [data-section-view="auto"]) .section-lead {')
     assert "margin-inline-start: 0;" in lead
     assert ("grid-template-columns: calc(var(--section-rail-w) - var(--section-rail-end) - var(--space-3) - 44px - var(--space-2)) minmax(0, 1fr);") in lead
     assert '"leading title toolbar" "lead lead lead"' not in _read("web/settings.css")
