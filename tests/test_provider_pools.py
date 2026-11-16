@@ -150,3 +150,37 @@ def test_a_pool_label_must_be_text():
         {"kind": "gigachat", "name": "pool", "members": ["a"], "label": 7},
     ])
     assert rows == [] and "label must be text" in error
+
+
+def test_single_spends_only_the_pools_first_member(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_ACCOUNT_POOL_MODE", "single")
+    read, rows = settings_view(SETTINGS)
+    served = [connection_values(POOL, read, rows)("credentials") for _ in range(4)]
+    assert served == [_key("client-a")] * 4, "single mode must never move to a sibling"
+
+
+def test_an_unknown_mode_reads_as_pool(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_ACCOUNT_POOL_MODE", "nonsense")
+    read, rows = settings_view(SETTINGS)
+    served = [connection_values(POOL, read, rows)("credentials") for _ in range(2)]
+    assert served == [_key("client-a"), _key("client-b")]
+
+
+def test_rotate_puts_the_whole_pool_on_one_queue(monkeypatch):
+    from ouroboros import model_concurrency as mc
+
+    monkeypatch.setenv("OUROBOROS_ACCOUNT_POOL_MODE", "rotate")
+    routes = [{"provider": "gigachat", "base_url": "https://g.invalid/v1",
+               "api_key": _key(cid)} for cid in ("client-a", "client-b")]
+    digests = {mc._route_digest("GigaChat-3-Pro", False, dict(route)) for route in routes}
+    assert len(digests) == 1, "rotate admits one call at a time across the pool"
+
+
+def test_pool_keys_each_account_to_its_own_queue(monkeypatch):
+    from ouroboros import model_concurrency as mc
+
+    monkeypatch.setenv("OUROBOROS_ACCOUNT_POOL_MODE", "pool")
+    routes = [{"provider": "gigachat", "base_url": "https://g.invalid/v1",
+               "api_key": _key(cid)} for cid in ("client-a", "client-b")]
+    digests = {mc._route_digest("GigaChat-3-Pro", False, dict(route)) for route in routes}
+    assert len(digests) == 2, "a pool's parallel capacity is one queue per account"

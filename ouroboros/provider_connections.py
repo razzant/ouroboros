@@ -98,6 +98,26 @@ def _member_rows(kind: str, row: Mapping[str, Any], rows: Iterable[Mapping[str, 
     return tuple(out)
 
 
+_POOL_MODES = ("pool", "rotate", "single")
+
+
+def pool_mode() -> str:
+    """The owner's relation between a pool's accounts: ``pool``, ``rotate`` or ``single``.
+
+    An unreadable or unknown value is ``pool``: the setting may never silently stop
+    spending accounts an install already pays for, and rotating members IS what a pool
+    did before this choice existed. ``rotate`` shares one queue across the pool
+    (``model_concurrency``), ``single`` never leaves the first serveable member.
+    """
+    from ouroboros.config import runtime_setting
+
+    try:
+        value = str(runtime_setting("OUROBOROS_ACCOUNT_POOL_MODE", "pool") or "").strip().lower()
+    except (OSError, ValueError):
+        return "pool"
+    return value if value in _POOL_MODES else "pool"
+
+
 def _choose_member(kind: str, name: str, row: Mapping[str, Any], rows: Iterable[Mapping[str, Any]]) -> dict:
     """The member THIS call uses: the one after the last choice, in owner order."""
     candidates = _member_rows(kind, row, rows)
@@ -178,8 +198,16 @@ def connection_values(route: RouteParts, read: Reader, rows: Iterable[Mapping[st
     if row is None:
         raise unavailable(route, "missing")
     if pool_members(row):
-        row = (_choose_member(route.kind, route.connection, row, rows) if choose
-               else _member_rows(route.kind, row, rows)[0])
+        members = _member_rows(route.kind, row, rows)
+        if pool_mode() == "single":
+            # "Only one selected": the pool's first serveable member, never a sibling.
+            if not members:
+                raise unavailable(route, "missing")
+            row = members[0]
+        elif choose:
+            row = _choose_member(route.kind, route.connection, row, rows)
+        else:
+            row = members[0]
     return lambda field, default="": row.get(field, default)
 
 

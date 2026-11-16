@@ -94,6 +94,7 @@ One row per key (`settings_defaults.py`). Env-only rows have no settings.json ca
 | OUROBOROS_MODEL_FALLBACKS | openai/gpt-6.1-terra | Cross-model fallback chain, Safety's too on outage (not owner-guarded; `fallback_cooldown.py`); blank = none |
 | OUROBOROS_SERVED_MODEL_REDOS | 2 | Redos of a round another model answered, each a new operation (clamped 0-5) |
 | OUROBOROS_MODEL_MAX_CONCURRENCY | "" | Calls in flight per model route (credential, endpoint), install-wide, one fair queue, awaited turns first; blank: API routes unlimited, local 3; ≤0 = off (Settings › Models › More; live); Claudexor routes: the engine's; where the provider meters streams per ACCOUNT the account is the unit and its declared ceiling bounds the queue under this cap (`account_streams.py`) |
+| OUROBOROS_ACCOUNT_POOL_MODE | `pool` | How a connection's pool of `members` is spent: `pool` rotates them per call and each account keeps its own stream, `rotate` rotates but admits ONE call at a time across the pool, `single` always spends the first serveable member; unknown reads as `pool` (`provider_connections.py`, `model_concurrency.py`) |
 | OUROBOROS_PROJECT_NAMING_TIMEOUT_SEC | 60 | Project-naming operation ceiling |
 | OUROBOROS_PROJECT_NAMING_ASYNC_TIMEOUT_SEC | 8 | Inline naming bound when a card becomes a project (`gateway/projects.py`) |
 | OUROBOROS_UI_TRANSLATION_TIMEOUT_SEC | 120 | One translation batch, slot wait and call together (`ui_translation.py`) |

@@ -170,6 +170,16 @@ def _account_streams(route: dict | None) -> tuple[str, int | None]:
     return label, ceiling
 
 
+def _rotate_shares_one_queue(route: dict | None) -> bool:
+    """``rotate``: the pool's accounts take turns on ONE stream, so the queue is per provider."""
+    if not isinstance(route, dict):
+        return False
+    from ouroboros.account_streams import stream_ceiling
+    from ouroboros.provider_connections import pool_mode
+
+    return pool_mode() == "rotate" and stream_ceiling(str(route.get("provider") or "")) is not None
+
+
 def _route_digest(model: str, use_local: bool, route: dict | None) -> str:
     if route is None:
         if use_local:
@@ -190,6 +200,11 @@ def _route_digest(model: str, use_local: bool, route: dict | None) -> str:
         # The provider meters streams per ACCOUNT: every model of one account draws on the
         # same quota, so the account -- never the model -- is this queue's unit.
         identity = [provider, str(route.get("source") or ""), endpoint, account_label]
+    if _rotate_shares_one_queue(route):
+        # "Switch": accounts take turns on one stream -- account and model leave the key,
+        # so consecutive calls alternate instead of stacking streams the provider meters
+        # per account.
+        identity = [provider, str(route.get("source") or ""), endpoint]
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
