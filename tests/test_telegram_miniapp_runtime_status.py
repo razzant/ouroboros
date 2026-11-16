@@ -63,3 +63,31 @@ def test_heartbeat_failure_sets_fatal_event(monkeypatch: pytest.MonkeyPatch, tmp
         assert failed.is_set()
 
     asyncio.run(scenario())
+
+
+def test_heartbeat_republishes_a_waits_deadline_unchanged(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A long wait transitions once; each heartbeat refreshes its age and keeps its state, reason, attempt and
+    next attempt exactly as published, so a reader sees one deadline for the whole wait."""
+    async def scenario() -> list[dict]:
+        ticks = iter(range(1_800_000_000, 1_800_000_100))
+        monkeypatch.setattr(runtime_status, "time", type("Clock", (), {"time": staticmethod(lambda: next(ticks))}))
+        monkeypatch.setattr(runtime_status, "HEARTBEAT_INTERVAL_SEC", 0.01)
+        status = runtime_status.RuntimeStatus(tmp_path, cloudflared_version="2026.7.2")
+        status.transition("reconnecting", "waiting", reason_code="cloudflare_rate_limited", attempt=2,
+                          next_retry_at_epoch=1_800_005_400)
+        publish, published, stop = status.publish, [], asyncio.Event()
+
+        def recorded() -> None:
+            publish()
+            published.append(json.loads((tmp_path / runtime_status.STATUS_NAME).read_text(encoding="utf-8")))
+            if len(published) == 3:
+                stop.set()
+
+        monkeypatch.setattr(status, "publish", recorded)
+        await status.heartbeat(stop)
+        return published
+
+    published = asyncio.run(scenario())
+    assert [payload["updated_at_epoch"] for payload in published] == [1_800_000_001, 1_800_000_002, 1_800_000_003]
+    assert {(payload["state"], payload["reason_code"], payload["attempt"], payload["next_retry_at_epoch"])
+            for payload in published} == {("reconnecting", "cloudflare_rate_limited", 2, 1_800_005_400)}

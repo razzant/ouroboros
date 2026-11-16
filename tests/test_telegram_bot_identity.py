@@ -1303,6 +1303,63 @@ def test_every_mini_app_state_reads_in_owner_words_never_its_code(core_settings,
     assert _companion_states() <= set(connection._MINIAPP_WORDS) | set(connection._MINIAPP_LEADS)
 
 
+@pytest.mark.parametrize("wait", ["creation_limit", "registering", "stale_creation_limit"])
+def test_a_companion_wait_reads_as_its_cause_and_next_automatic_attempt(core_settings, world, monkeypatch, wait):
+    """The status the companion itself publishes (its own wait code and status writer, not a hand-made file):
+    a creation limit names its cause and the planned time of the next automatic attempt on this computer's clock,
+    a new link names its registration, and a heartbeat gone stale still reads as stale."""
+    scripts = str(Path(__file__).resolve().parents[1] / "skills" / "telegram" / "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import companion
+
+    api = _core(world)
+
+    async def publish() -> int:
+        status = companion.RuntimeStatus(world.state, cloudflared_version="2026.7.2")
+        observer = companion.TelegramSettingsObserver(world.state, 8765)
+        stop, server = asyncio.Event(), asyncio.create_task(asyncio.Event().wait())
+        pacing = companion.CreationPacing()
+
+        async def first_wait(*_args, **_kwargs):
+            raise companion.ShutdownRequested("published")
+
+        async def unmarked(*_args, **_kwargs):
+            return companion.PublicProbeOutcome.UNHEALTHY_RESPONSE
+
+        monkeypatch.setattr(companion, "_wait_or_stop", first_wait)
+        monkeypatch.setattr(companion, "probe_public_gateway_once", unmarked)
+        try:
+            with pytest.raises(companion.ShutdownRequested):
+                if wait == "registering":
+                    await companion._wait_for_public_verification(
+                        "https://calm-lake-1.trycloudflare.com/", object(), observer, 42, status, stop, server)
+                else:
+                    pacing.limit_confirmed()
+                    await companion._wait_out_creation_limit(companion._GenerationContext(
+                        menu=object(), settings_observer=observer, owner=42, button_text="Ouroboros",
+                        core_port=8765, status=status, stop_event=stop, server_task=server, pacing=pacing))
+        finally:
+            server.cancel()
+            await asyncio.gather(server, return_exceptions=True)
+        return pacing.until_epoch
+
+    deadline = asyncio.run(publish())
+    if wait.startswith("stale"):
+        payload = json.loads((world.state / "status.json").read_text(encoding="utf-8"))
+        payload["updated_at_epoch"] -= 120
+        (world.state / "status.json").write_text(json.dumps(payload), encoding="utf-8")
+    connection = sys.modules[world.plugin.__package__ + ".lib.telegram_connection"]
+    shown = world.plugin._connection_fields(api)["miniapp_status"]
+    assert shown == {
+        "creation_limit": "Waiting: Cloudflare limits new links from this network; next automatic attempt "
+                          "planned for " + connection._when(deadline, time.time()),
+        "registering": "Checking its new public link while Cloudflare registers it",
+        "stale_creation_limit": "Not running: no recent heartbeat",
+    }[wait]
+    assert "cloudflare_rate_limited" not in shown and "public_marker_pending" not in shown
+
+
 def test_a_working_bridge_that_loses_telegram_says_so_and_recovers_without_a_probe(tmp_path, monkeypatch):
     """getUpdates failing after a validated start records the outage once; Connection says Telegram cannot be
     reached instead of Connected; the next successful poll records ready again. Only the poller's own
