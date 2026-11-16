@@ -508,6 +508,26 @@ def test_safe_log_detail_redacts_urls_and_credential_shapes() -> None:
         assert hidden not in detail
 
 
+def test_safe_log_detail_reads_a_bounded_head_and_shows_the_cut(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 64 KiB line reaches the quadratic patterns only as its first 2 x 180 characters. A quoted credential
+    value the cut leaves open stays redacted although delimiters inside it end an unquoted value, and the cut
+    shows as "…" even when what is left after redaction is short."""
+    class _Bounded:
+        def __init__(self, pattern: Any) -> None:
+            self.pattern = pattern
+
+        def sub(self, replacement: str, text: str) -> str:
+            assert len(text) <= 360, f"a pattern read {len(text)} characters"
+            return self.pattern.sub(replacement, text)
+
+    monkeypatch.setattr(cloudflare, "_LOG_URL_RE", _Bounded(cloudflare._LOG_URL_RE))
+    monkeypatch.setattr(cloudflare, "_LOG_CREDENTIAL_RE", _Bounded(cloudflare._LOG_CREDENTIAL_RE))
+    assert cloudflare._safe_log_detail("z" * 65_536) == "z" * 179 + "…"
+    # The URL shrinks to [url], so the cut (inside the quoted value) falls within the 180 characters shown.
+    line = "ERR https://" + "h" * 300 + ' secret="' + "s1,s2;" * 100 + '" tail'
+    assert cloudflare._safe_log_detail("an earlier line\n" + line) == "ERR [url] secret=[redacted]…"
+
+
 class _FakeStream:
     def __init__(self, chunks: list[bytes]) -> None:
         self.chunks = list(chunks)
@@ -743,6 +763,298 @@ def test_stop_recovers_already_cancelled_owned_watcher(
 def test_quick_tunnel_accepts_only_a_numeric_sidecar_port(port: Any) -> None:
     with pytest.raises(cloudflare.CloudflaredError):
         cloudflare.QuickTunnel(Path("/not-used"), Path("/not-used"), port)
+
+
+# cloudflared 2026.7.2's stderr when Cloudflare refuses the tunnel request, written from its quick_tunnel.go (not
+# captured from a live run): the non-JSON answer is logged with its HTTP status, then the process exits on a generic
+# line that names neither the status nor Cloudflare's code.
+_REQUESTED = b"2026-11-14T09:12:01Z INF Requesting new quick Tunnel on trycloudflare.com...\n"
+_REFUSAL = (
+    b"2026-11-14T09:12:02Z ERR Error unmarshaling QuickTunnel response: error code: 1015 "
+    b"error=\"invalid character 'e' looking for beginning of value\" status_code=\"429 Too Many Requests\"\n"
+)
+_GENERIC_LAST = b"failed to unmarshal quick Tunnel: invalid character 'e' looking for beginning of value\n"
+# What the companion matched in the message before (PR #3533): the error's last line carries none of them.
+_MESSAGE_MARKERS = ("error code: 1015", 'status_code="429', "too many requests")
+# zerolog's console writer puts the body raw in the message, then the record's own fields on its last line:
+# error first, the other fields sorted after it, each value quoted on one line.
+_MARKER = b"Error unmarshaling QuickTunnel response: "
+_FIELDS_429 = b" error=\"invalid character 'e' looking for beginning of value\" status_code=\"429 Too Many Requests\"\n"
+_FIELDS_503 = b" error=\"invalid character '<' looking for beginning of value\" status_code=\"503 Service Unavailable\"\n"
+
+
+def _refusal_with(body: bytes, fields: bytes = _FIELDS_429) -> bytes:
+    return b"2026-11-14T09:12:02Z ERR " + _MARKER + body + fields
+
+
+def _reads(data: bytes, size: int = 4096) -> list[bytes]:
+    return [data[index:index + size] for index in range(0, len(data), size)]
+
+
+def _reads_splitting(data: bytes, *tokens: bytes) -> list[bytes]:
+    """Reads of at most 4096 bytes, one boundary falling inside each of ``tokens``."""
+    cuts = sorted({data.index(token) + len(token) // 2 for token in tokens} | set(range(4096, len(data), 4096)))
+    reads = [data[start:end] for start, end in zip([0, *cuts], [*cuts, len(data)]) if end > start]
+    assert max(map(len, reads)) <= 4096 and not any(token in read for read in reads for token in tokens)
+    return reads
+
+
+def _tunnel_on(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process: _FakeProcess) -> Any:
+    spec = _fixture_spec(b"binary", _archive(b"binary"))
+    monkeypatch.setattr(cloudflare, "_current_asset", lambda: spec)
+    monkeypatch.setattr(cloudflare, "_verify_binary", lambda *_args: None)
+    binary = cloudflare._installed_path(cloudflare._safe_state_root(tmp_path / "state"), spec)
+    binary.write_bytes(b"binary")
+
+    async def fake_spawn(*_args: Any, **_kwargs: Any) -> _FakeProcess:
+        return process
+
+    async def fake_watchdog(_self: Any, _env: dict[str, str]) -> None:
+        return None
+
+    monkeypatch.setattr(cloudflare.asyncio, "create_subprocess_exec", fake_spawn)
+    monkeypatch.setattr(cloudflare.QuickTunnel, "_start_watchdog", fake_watchdog)
+    monkeypatch.setattr(cloudflare, "WindowsKillJob", _FakeWindowsJob)
+    return cloudflare.QuickTunnel(binary, tmp_path / "state", 43123)
+
+
+def _exited(stderr: list[bytes]) -> _FakeProcess:
+    process = _FakeProcess(stderr)
+    process.returncode = 1
+    process._done.set()
+    return process
+
+
+_NOISE = b"2026-11-14T09:12:02Z DBG " + b"n" * 1000 + b"\n"
+
+
+@pytest.mark.parametrize("stderr", [
+    pytest.param([_REQUESTED + _REFUSAL + _GENERIC_LAST], id="one-read"),
+    pytest.param(_reads(_REQUESTED + _REFUSAL + _GENERIC_LAST, 7), id="seven-byte-reads"),
+    # More output than the bounded log keeps follows the refusal, so only a reading made as it arrived saw it.
+    pytest.param(_reads(_REQUESTED + _REFUSAL + _NOISE * 70 + _GENERIC_LAST), id="evicted-from-the-log"),
+    # A line longer than the 16 KiB scan window comes first.
+    pytest.param(_reads(b"y" * 20_000 + b"\n" + _REQUESTED + _REFUSAL + _GENERIC_LAST), id="oversized-line-before"),
+    # A body line with a level-like word but no RFC 3339 time stays inside the record.
+    pytest.param([_REQUESTED + _refusal_with(b"<html>\nNotice INF limits apply\n</html>") + _GENERIC_LAST],
+                 id="level-word-inside-the-body"),
+])
+def test_a_refused_tunnel_request_is_read_from_the_stream_not_the_last_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: list[bytes]
+) -> None:
+    async def scenario() -> None:
+        tunnel = _tunnel_on(tmp_path, monkeypatch, _exited(stderr))
+        await tunnel.start()
+        with pytest.raises(cloudflare.CreationRateLimited) as captured:
+            await tunnel.wait_url(1)
+        assert isinstance(captured.value, cloudflare.CloudflaredError)
+        message = str(captured.value)
+        assert message.startswith("Cloudflare refused a new Quick Tunnel with HTTP 429.") and "(exit 1)" in message
+        last = cloudflare._safe_log_detail(tunnel.stderr_tail)
+        assert last == _GENERIC_LAST.decode().strip() and last in message
+        assert not any(marker in last.lower() for marker in _MESSAGE_MARKERS)
+        if len(tunnel.stderr_tail) < len(b"".join(stderr)):
+            assert "status_code" not in tunnel.stderr_tail
+        await tunnel.stop()
+
+    asyncio.run(scenario())
+
+
+def test_a_refusal_read_after_the_exit_is_still_the_exit_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The process ends before its last output is read: the error waits for the readers, so it is still typed."""
+    async def scenario() -> None:
+        process = _FakeProcess([])
+
+        class _LateStream:
+            def __init__(self) -> None:
+                self.reads = 0
+
+            async def read(self, _size: int) -> bytes:
+                self.reads += 1
+                if self.reads == 1:
+                    return _REQUESTED
+                if self.reads == 2:
+                    process.returncode = 1
+                    process._done.set()
+                    for _ in range(5):  # the watcher sees the exit while this read still holds the refusal
+                        await asyncio.sleep(0)
+                    return _REFUSAL + _GENERIC_LAST
+                return b""
+
+        process.stderr = _LateStream()
+        tunnel = _tunnel_on(tmp_path, monkeypatch, process)
+        await tunnel.start()
+        with pytest.raises(cloudflare.CreationRateLimited, match=r"exit 1"):
+            await tunnel.wait_url(1)
+        await tunnel.stop()
+
+    asyncio.run(scenario())
+
+
+class _OpenStream:
+    """Gives its reads, then stays open until its process ends, as a pipe does."""
+
+    def __init__(self, process: _FakeProcess, reads: list[bytes]) -> None:
+        self.process, self.reads = process, list(reads)
+
+    async def read(self, _size: int) -> bytes:
+        await asyncio.sleep(0)
+        if self.reads:
+            return self.reads.pop(0)
+        await self.process._done.wait()
+        return b""
+
+
+@pytest.mark.parametrize("ending", ["exit", "url_timeout"])
+@pytest.mark.parametrize("body", [
+    # One unbroken run, the last line on the URL-timeout path: _safe_log_detail reads only a bounded head of it
+    # (read whole, the credential pattern spent seconds on such a run).
+    pytest.param(b"error code: 1015 " + b"z" * 20_800, id="20-KiB-body-on-one-line"),
+    pytest.param(b"<html>\n" + (b"<p>" + b"y" * 200 + b"</p>\n") * 100 + b"</html>", id="21-KiB-body-on-many-lines"),
+])
+def test_an_oversized_refusal_record_keeps_its_own_status_across_split_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: bytes, ending: str
+) -> None:
+    """More than the 16 KiB scan window separates the record's message from its own status, and reads of at most
+    4096 bytes split both the message and the status token: the refusal is typed when the process exits and,
+    with its stream still open, when the URL wait times out."""
+    async def scenario() -> None:
+        record = _refusal_with(body)
+        assert record.index(b'status_code="429') - record.index(_MARKER) > 16_384
+        stream = _REQUESTED + record + (_GENERIC_LAST if ending == "exit" else b"")
+        reads = _reads_splitting(stream, _MARKER, b'status_code="429')
+        process = _exited(reads) if ending == "exit" else _FakeProcess([])
+        if ending == "url_timeout":
+            process.stderr = _OpenStream(process, reads)
+        tunnel = _tunnel_on(tmp_path, monkeypatch, process)
+        await tunnel.start()
+        with pytest.raises(cloudflare.CreationRateLimited, match="exit 1" if ending == "exit" else "Timed out"):
+            await tunnel.wait_url(1 if ending == "exit" else 0.2)
+        await tunnel.stop()
+
+    asyncio.run(scenario())
+
+
+def test_a_refusal_record_is_read_in_bounded_memory() -> None:
+    """A one-line record of 1 MiB: what the reading keeps of it never grows past its fixed bounds."""
+    log = cloudflare._BoundedLog()
+    answer = log.answer
+    log.add(b"2026-11-14T09:12:02Z ERR " + _MARKER)
+    for _ in range(256):
+        log.add(b"z" * 4096)
+        assert len(answer._head) <= 256 and len(answer._tail) <= 1024 and answer._own == ""
+    log.add(_FIELDS_429)
+    assert (answer.now(), answer.status) == ("429", "")  # the open record shows it; its end decides it
+    answer.finish()
+    assert answer.status == "429"
+
+
+@pytest.mark.parametrize("refused", [True, False])
+def test_a_url_timeout_carries_a_refusal_already_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refused: bool
+) -> None:
+    async def scenario() -> None:
+        process = _FakeProcess([_REQUESTED, _REFUSAL] if refused else [_REQUESTED])  # it does not exit
+        tunnel = _tunnel_on(tmp_path, monkeypatch, process)
+        await tunnel.start()
+        with pytest.raises(cloudflare.CloudflaredError, match="Timed out waiting") as captured:
+            await tunnel.wait_url(0.05)
+        assert isinstance(captured.value, cloudflare.CreationRateLimited) is refused
+        await tunnel.stop()
+        assert process.terminated
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("stderr", [
+    # Cloudflare's refusal as JSON parses, so cloudflared logs no status: an ordinary failure, nothing invented.
+    pytest.param([_REQUESTED, b"failed to parse quick Tunnel ID: invalid UUID length: 0\n"], id="json-answer"),
+    # The record's own status decides, not a 429 printed after it.
+    pytest.param([_REQUESTED, b"2026-11-14T09:12:02Z ERR Error unmarshaling QuickTunnel response: upstream error "
+                  b"error=\"invalid character 'u' looking for beginning of value\" "
+                  b"status_code=\"503 Service Unavailable\"\n",
+                  b'2026-11-14T09:12:02Z WRN later status_code="429 Too Many Requests"\n', _GENERIC_LAST],
+                 id="non-json-503"),
+    pytest.param([b'2026-11-14T09:12:01Z ERR Failed to fetch features status_code="429 Too Many Requests"\n',
+                  b"failed to request quick Tunnel: dial tcp: i/o timeout\n"], id="429-outside-the-request"),
+    pytest.param([_REQUESTED, b"2026-11-14T09:12:02Z ERR error code: 1015 Too Many Requests\n",
+                  b"failed to request quick Tunnel: EOF\n"], id="code-without-the-record"),
+    # The record's own fields are missing, so its status is unavailable; the next record's 429 is not its own.
+    pytest.param([_REQUESTED, b"2026-11-14T09:12:02Z ERR " + _MARKER + b"error code: 1015\n",
+                  b'2026-11-14T09:12:02Z ERR Failed to fetch features error="EOF" status_code="429 Too Many Requests"\n',
+                  _GENERIC_LAST], id="no-own-status-then-an-unrelated-429"),
+    pytest.param([_REQUESTED, b"2026-11-14T09:12:02Z ERR " + _MARKER + b"error code: 1015\n", _GENERIC_LAST],
+                 id="no-own-status-at-all"),
+    # 429 text inside the untrusted body, the record's own status a 503 at the end of its last line.
+    pytest.param([_REQUESTED, _refusal_with(b'<p>status_code="429 Too Many Requests"</p>', _FIELDS_503), _GENERIC_LAST],
+                 id="body-429-text-then-own-503"),
+    pytest.param([_REQUESTED, _refusal_with(b'<html>\n<p>x error="a" status_code="429 Too Many Requests"\n</html>',
+                                            _FIELDS_503), _GENERIC_LAST], id="body-line-shaped-as-own-429-then-own-503"),
+])
+def test_other_failures_before_a_url_stay_ordinary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: list[bytes]
+) -> None:
+    async def scenario() -> None:
+        tunnel = _tunnel_on(tmp_path, monkeypatch, _exited(stderr))
+        await tunnel.start()
+        with pytest.raises(cloudflare.CloudflaredError, match=r"exit 1") as captured:
+            await tunnel.wait_url(1)
+        assert type(captured.value) is cloudflare.CloudflaredError
+        await tunnel.stop()
+
+    asyncio.run(scenario())
+
+
+class _Clocks:
+    def __init__(self) -> None:
+        self.wall, self.mono = 1_800_000_000.0, 5_000.0
+
+    def step(self, seconds: float) -> None:
+        self.wall += seconds
+        self.mono += seconds
+
+
+def _pacing(clocks: _Clocks) -> Any:
+    return cloudflare.CreationPacing(wall=lambda: clocks.wall, monotonic=lambda: clocks.mono)
+
+
+def test_creation_pacing_waits_an_hour_then_ninety_minutes_until_a_url() -> None:
+    clocks = _Clocks()
+    pacing = _pacing(clocks)
+    assert pacing.remaining() == 0 and pacing.until_epoch == 0
+    pacing.limit_confirmed()
+    assert (pacing.limits, pacing.remaining(), pacing.until_epoch) == (1, 3600, 1_800_003_600)
+    clocks.step(3599)
+    assert pacing.remaining() == 1
+    clocks.step(1)
+    assert pacing.remaining() == 0
+    for _further in range(3):  # every further refusal before a URL is the repeated class: 2, the longer window
+        pacing.limit_confirmed()
+        assert (pacing.limits, pacing.remaining()) == (2, 5400)
+        clocks.step(5400)
+    pacing.url_allocated()
+    assert (pacing.limits, pacing.remaining(), pacing.until_epoch) == (0, 0, 0)
+    pacing.limit_confirmed()
+    assert pacing.remaining() == 3600
+
+
+@pytest.mark.parametrize("wall_step,mono_step,left", [
+    pytest.param(1000, 1000, 2600, id="both-clocks-run"),
+    pytest.param(3600, 0, 0, id="computer-slept"),  # the wall clock ran on: the deadline is reached
+    pytest.param(-7200, 1000, 2600, id="wall-clock-set-back"),  # the monotonic deadline still ends it on time
+    pytest.param(7200, 1000, 0, id="wall-clock-set-forward"),  # one early request; no provider reset is claimed
+])
+def test_creation_pacing_ends_on_either_clock(wall_step: float, mono_step: float, left: float) -> None:
+    clocks = _Clocks()
+    pacing = _pacing(clocks)
+    pacing.limit_confirmed()
+    published = pacing.until_epoch
+    clocks.wall += wall_step
+    clocks.mono += mono_step
+    assert pacing.remaining() == left
+    assert pacing.until_epoch == published  # status keeps naming the same deadline
 
 
 def test_download_is_bounded_by_a_whole_download_deadline(
