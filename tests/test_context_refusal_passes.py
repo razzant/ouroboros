@@ -83,6 +83,65 @@ def test_the_target_is_measured_on_this_conversation_or_stays_unknown():
     assert _target(stated, _fit(390_000, anchor=None, accepted=None, reply=20_000)) is None
 
 
+def test_a_cited_limit_declared_for_the_route_recognises_size_sizes_the_pass_and_teaches_nothing(tmp_path, monkeypatch):
+    """15.11 18:20: Alibaba refused a request estimated at 819,929 with «Range of input length should be [1, 983616]»
+    behind the gateway's «Provider returned error». 983,616 is that endpoint's declared ``max_prompt_tokens``, so the
+    round recognises a size refusal by equality and its passes run on the same route, sized on an input cap (the
+    reply is not subtracted again); nothing is written to the window record, the measured size included. A total
+    on the record recognises alike without the catalogue read. A typed cause, a number at or below the reply
+    allowance, a capture of another route or a route with no matching declaration recognise nothing."""
+    from ouroboros import capability_evidence as ce, pricing
+    from ouroboros.context_anchor import cited_limit_refusal
+    from ouroboros.context_window import WindowLimit, WindowRecord
+
+    monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
+    declared = WindowLimit(1_000_000, "total", "provider_metadata")
+    plan = SimpleNamespace(provider="openrouter", model="qwen/qwen3.8-max-0902", route_fp="scope", window_witness_bound=True,
+                           window_record=WindowRecord("scope", total=declared, reserve=65_536, declared=(declared,)))
+    fit = SimpleNamespace(measurement=SimpleNamespace(**vars(_fit(819_929, anchor=803_073, accepted=803_073).measurement),
+                                                      route_fp="route", measurement_density=1.0))
+    refused = SimpleNamespace(max_completion_tokens=65_536, prompt_tokens_bounded_estimate=819_929,
+                              physical_context=SimpleNamespace(route_fp="route"))
+    reads, catalogue = [], {}
+    monkeypatch.setattr(pricing, "get_pricing", lambda **route: reads.append(route) or dict(catalogue))
+
+    def stamped(sentence, *, speaker="Alibaba", untyped=True):
+        return {"_last_llm_error_kind": "bad_request", "_last_llm_provider_message": sentence, "_last_llm_provider_answer": {
+            "speaker": speaker, "sentence": sentence, "untyped": untyped,
+            "said": [["", "Provider returned error", False], [speaker, sentence, False]]}}
+
+    bracket = "Range of input length should be [1, 983616]"
+    usage = stamped(bracket)
+    assert cited_limit_refusal(usage, refused, fit.measurement, plan) is False  # no catalogue row: the walk, informed
+    assert reads == [{"provider": "openrouter", "model": "qwen/qwen3.8-max-0902"}] and "basis" not in usage["_last_llm_provider_answer"]
+    catalogue["alibaba"] = pricing.PricingSchedule((1.0, None, None, 2.0), source={"context_length": 1_000_000,
+                                                                                   "max_prompt_tokens": 983_616})
+    assert cited_limit_refusal(usage, refused, fit.measurement, plan) is True
+    answer = usage["_last_llm_provider_answer"]
+    assert (answer["basis"], answer["limit"], answer["limit_kind"], answer["speaker"]) == (
+        "number_equals_declared", 983_616, "input", "Alibaba")
+    assert answer["declaration"] == "the endpoint catalogue (alibaba max_prompt_tokens)" and "untyped" not in {
+        key for key, value in answer.items() if value}
+    ctx = SimpleNamespace(accumulated_usage=usage, active_context_mode="max", context_fit_plan=plan)
+    near = SimpleNamespace(**{**vars(refused), "prompt_tokens_bounded_estimate": 950_000})
+    assert lmc._refusal_target(ctx, fit, near) == (0 + 122_952, 122_952)  # under the input cap: only the slack is asked
+    assert usage[REFUSED_INPUTS_KEY] and not ce._load(tmp_path).get("main_windows")  # this task knows; no record row
+    reads.clear()
+    total = stamped("This model's maximum context length is 1000000 tokens. However, you requested 1 output tokens and "
+                    "your prompt contains at least 1000000 input tokens.", speaker="Cloudflare")
+    assert cited_limit_refusal(total, refused, fit.measurement, plan) is True and reads == []  # the record's own total
+    assert (total["_last_llm_provider_answer"]["limit_kind"], total["_last_llm_provider_answer"]["declaration"]) == (
+        "total", "the window record (provider_metadata)")
+    ctx = SimpleNamespace(accumulated_usage=total, active_context_mode="max", context_fit_plan=plan)
+    assert lmc._refusal_target(ctx, fit, near) == (950_000 + 65_536 - 1_000_000 + 125_000, 125_000)  # a total holds the reply
+    for quiet, capture in ((stamped(bracket, untyped=False), refused),                      # a typed cause of another kind
+                           (stamped("Image exceeds 8000 pixels; the limit is 65536"), refused),  # not above the reply sent
+                           (stamped("Range of input length should be [1, 983615]"), refused),    # equal to no declaration
+                           (stamped(bracket), SimpleNamespace(physical_context=SimpleNamespace(route_fp="other")))):
+        assert cited_limit_refusal(quiet, capture, fit.measurement, plan) is False
+        assert "basis" not in quiet["_last_llm_provider_answer"]
+
+
 def test_a_providers_requested_total_holds_the_reply_once():
     """Review r3 (18.10): "you requested (about) N tokens" is the input plus the reply that request reserved.
 
