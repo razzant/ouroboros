@@ -92,6 +92,9 @@ on:
       - 'ouroboros/harness_maintenance.py'
       - 'ouroboros/harness_program_facts.py'
       - 'ouroboros/claudexor_runtime.py'
+      - 'ouroboros/claudexor_runtime_retention.py'
+      - 'ouroboros/claudexor_node_seed.py'
+      - 'ouroboros/node_runtime.py'
       - 'ouroboros/claudexor_runtime_pin.json'
       - 'ouroboros/platform_layer.py'
       - 'ouroboros/platform_process_target.py'
@@ -112,6 +115,7 @@ on:
       - 'tests/test_launcher_quit_engine.py'
       - 'scripts/claudexor_toolchain_smoke.py'
       - 'scripts/fetch_claudexor_runtime.py'
+      - 'scripts/download_node_standalone*'
       - 'Ouroboros.spec'
       - 'build.sh'
       - 'build_linux.sh'
@@ -131,6 +135,9 @@ on:
       - 'ouroboros/harness_maintenance.py'
       - 'ouroboros/harness_program_facts.py'
       - 'ouroboros/claudexor_runtime.py'
+      - 'ouroboros/claudexor_runtime_retention.py'
+      - 'ouroboros/claudexor_node_seed.py'
+      - 'ouroboros/node_runtime.py'
       - 'ouroboros/claudexor_runtime_pin.json'
       - 'ouroboros/platform_layer.py'
       - 'ouroboros/platform_process_target.py'
@@ -151,6 +158,7 @@ on:
       - 'tests/test_launcher_quit_engine.py'
       - 'scripts/claudexor_toolchain_smoke.py'
       - 'scripts/fetch_claudexor_runtime.py'
+      - 'scripts/download_node_standalone*'
       - 'Ouroboros.spec'
       - 'build.sh'
       - 'build_linux.sh'
@@ -419,7 +427,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           # Lockstep pair: must equal pin.node_version in ouroboros/claudexor_runtime_pin.json.
-          node-version: '24.16.0'
+          node-version: '24.22.3'
       - name: Stage the host-owned bundled Node layout
         run: |
           set -euo pipefail

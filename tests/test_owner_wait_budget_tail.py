@@ -50,6 +50,7 @@ def test_cold_grant_checks_saved_budget_before_ordinary_dispatch(tmp_path, monke
             if queued_override:
                 # The switch_model tool leaves this pending until the NEXT round.
                 call.tools._ctx.active_model_override = "after-budget"
+                call.tools._ctx.active_effort_override = "none"
             name, args = "escalate", {"question": "Continue the prepared result?",
                 "options": [{"label": "Continue"}, {"label": "Stop"}],
                 "stake": "Fixture action", "wait_for_answer": True}
@@ -109,6 +110,8 @@ def test_cold_grant_checks_saved_budget_before_ordinary_dispatch(tmp_path, monke
             assert state["round_idx"] == 1 and state["usage"]["cost"] == pytest.approx(.2)
             assert state["route"]["active_model"] == "same-model"
             assert state["route"]["active_model_override"] == ("after-budget" if queued_override else None)
+            assert state["route"]["active_effort"] == "medium"
+            assert state["route"]["active_effort_override"] == ("none" if queued_override else None)
             assert [row["tool"] for row in state["trace"]["tool_calls"]] == ["escalate"]
         finally:
             budget_pause.end_dispatch_fence("t-wait")

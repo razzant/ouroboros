@@ -418,10 +418,7 @@ def test_the_managed_update_estimate_prices_real_api_slots_and_counts_sessions(
     import ouroboros.usage_admission as admission_mod
     from ouroboros.tools.review_admission import managed_update_wave_estimate
 
-    if routes:
-        monkeypatch.setenv("OUROBOROS_SUBAGENTS", _review_catalog(*routes))
-    else:
-        monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", _review_catalog(*routes))
     real, seen = admission_mod.review_wave_admission, []
     monkeypatch.setattr(admission_mod, "review_wave_admission",
                         lambda *args, **kwargs: seen.append(list(kwargs["models"])) or real(*args, **kwargs))

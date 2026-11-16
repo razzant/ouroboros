@@ -616,7 +616,7 @@ def _publish_hold(ctx: Any, row: Dict[str, Any]) -> None:
 
 def _exact_continuation_row(limit_ctx: Any, ctx: Any, *, pause_id: str, rail: str, scope: str,
                             reason_text: str, root_task_id: str,
-                            local: Dict[str, Any]) -> Dict[str, Any]:
+                            local: Dict[str, Any], context_view: tuple | None = None) -> Dict[str, Any]:
     """Observe external custody, store the ONE continuation source, build the row."""
     from ouroboros.owner_wait import continuation_state, store_continuation_source
 
@@ -666,7 +666,7 @@ def _exact_continuation_row(limit_ctx: Any, ctx: Any, *, pause_id: str, rail: st
                                       "_best_effort_extracted", "budget_pause_hold", "_llm_round_started")}
     state = {
         **continuation_state(ctx, messages, trace, usage_for_state, limit_ctx.round_idx,
-                             list(limit_ctx.tool_schemas or []), set(limit_ctx.owner_msg_seen or ())),
+                             list(limit_ctx.tool_schemas or []), set(limit_ctx.owner_msg_seen or ()), context_view=context_view),
         "pause_id": pause_id, "reason": reason, "rail": rail, "scope": scope,
         "resume_point": point, "external_runs": external, "local_producers": local,
     }
@@ -736,7 +736,7 @@ def _exact_continuation_row(limit_ctx: Any, ctx: Any, *, pause_id: str, rail: st
 
 
 def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
-                  root_task_id: str = "") -> None:
+                  root_task_id: str = "", context_view: tuple | None = None) -> None:
     """Fence, save and unwind only after producer quiescence and a stored source.
 
     Unsettled producers/ambiguous transfer retain the worker and typed pausing hold;
@@ -862,7 +862,7 @@ def request_pause(limit_ctx: Any, *, rail: str, scope: str, reason_text: str,
                     if prepared is None:
                         prepared = _exact_continuation_row(
                             limit_ctx, ctx, pause_id=pause_id, rail=rail, scope=scope,
-                            reason_text=reason_text, root_task_id=root_task_id, local=local)
+                            reason_text=reason_text, root_task_id=root_task_id, local=local, context_view=context_view)
                     # A publication that failed is retried with the SAME prepared
                     # snapshot: its custody stop requests and its stored source are
                     # one observation, not one per poll.

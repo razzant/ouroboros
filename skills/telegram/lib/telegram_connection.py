@@ -193,6 +193,11 @@ _MINIAPP_LEADS = {
     "stopped": "Stopped",
     "rollback_pending": "Stopped",
 }
+# Waits whose cause the companion names by its reason; the time it planned the next attempt for follows if set.
+_MINIAPP_REASONS = {
+    "cloudflare_rate_limited": "Waiting: Cloudflare limits new links from this network",
+    "public_marker_pending": "Checking its new public link while Cloudflare registers it",
+}
 
 
 def connection_components() -> list[dict[str, Any]]:
@@ -455,6 +460,9 @@ def _connection_fields(api) -> Dict[str, Any]:
     # Never the raw state: a state this module does not know shows the companion's sentence alone.
     mini_words = _MINIAPP_WORDS.get(mini_state) or (f"{lead}: {sentence}" if lead and sentence else lead
                                                      or sentence or "Unknown")
+    if cause := _MINIAPP_REASONS.get(str(mini_app.get("reason_code") or "")):
+        at = int(mini_app.get("next_retry_at_epoch") or 0)
+        mini_words = cause + (f"; next automatic attempt planned for {_when(at, time.time())}" if at else "")
     if binding.companion in {"retained", "stop_unconfirmed"}:
         mini_words = "Applying the token once the old Mini App has stopped"
     elif binding.companion == "start_failed":

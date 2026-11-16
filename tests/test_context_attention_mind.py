@@ -11,33 +11,12 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 from ouroboros import context_compaction as cc
-from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, OWNER_WORDS_KIND, bound_host_row
+from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, bound_host_row
 from ouroboros.context_source_view import _EMERGENCY_LABELS
 from ouroboros.loop_messages import CONTEXT_FACTS_NAME
+from tests._context_reclaim_fixtures import ASSISTANT, HOST, OWNER, _owner, _tool, _transcript
 from tests.test_context_reclaim_materializer import _request
 from tests.test_loop_compaction import _ctx, _failed_capture, _fit, _measure_cycle
-
-OWNER = ("Owner: keep the old API alive until the migration is verified. " * 20).strip()
-HOST = "[Context view receipt] status=applied " + "detail " * 400
-ASSISTANT = "I concluded the migration is safe because both code paths are covered. " * 30
-# _transcript() rows: 0 system, 1 assignment, 2-3 tool "one", 4 own prose, 5 owner words, 6 host prose, 7-8 tool "two"
-
-
-def _tool(call_id="read", text="exact evidence " * 400):
-    return [{"role": "assistant", "content": "", "tool_calls": [{"id": call_id, "type": "function", "function": {
-        "name": "read_file", "arguments": json.dumps({"path": f"{call_id}.py"})}}]},
-        {"role": "tool", "tool_call_id": call_id, "content": text}]
-
-
-def _owner(text):
-    """The owner's words as delivery types them (``context_budget.OWNER_WORDS_KIND``)."""
-    return {"role": "user", HOST_CONTEXT_KIND_KEY: OWNER_WORDS_KIND, "content": text}
-
-
-def _transcript():
-    return [{"role": "system", "content": "SYSTEM"}, {"role": "user", "content": "Assignment: migrate the API."},
-            *_tool("one"), {"role": "assistant", "content": ASSISTANT}, _owner(OWNER),
-            {"role": "user", "content": HOST}, *_tool("two")]
 
 
 def _kinds(messages, units):
@@ -190,9 +169,11 @@ def test_memory_step_passes_the_actual_window_and_current_transcript(tmp_path, m
         p.reproject_transcript = lambda messages, mode: [{"role": "system", "content": system}, *messages[1:]]
 
         def reproject_for_route(*, window_tokens, known_window, ratio, output_reserve, admitted,
-                                tool_schemas, start_mode, current_messages, refused_tokens, measured_input_tokens):
+                                tool_schemas, start_mode, current_messages, refused_tokens, measured_input_tokens,
+                                reasoning_effort):
             assert measured_input_tokens is None  # this fixture has no prepared-input anchor
             assert admitted is True  # a view under way is read at the line its own requests go out at
+            assert reasoning_effort == "high"  # the round's effort: the request shape its measurement counted
             seen.append({"window": window_tokens, "known": known_window, "mode": start_mode,
                          "messages": list(current_messages), "schemas": list(tool_schemas),
                          "reserve": output_reserve, "refused": refused_tokens})

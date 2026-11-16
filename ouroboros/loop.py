@@ -367,16 +367,16 @@ def _apply_runtime_overrides(
     active_effort: str,
 ) -> Tuple[str, bool, str]:
     """Apply one-shot per-round model/locality/effort overrides from tool ctx."""
+    from ouroboros.loop_routes import pending_runtime_route
+
+    route = pending_runtime_route(ctx, active_model, active_use_local, active_effort)
     if ctx.active_model_override:
-        active_model = ctx.active_model_override
         ctx.active_model_override = None
     if getattr(ctx, "active_use_local_override", None) is not None:
-        active_use_local = ctx.active_use_local_override
         ctx.active_use_local_override = None
     if ctx.active_effort_override:
-        active_effort = normalize_reasoning_effort(ctx.active_effort_override, default=active_effort)
         ctx.active_effort_override = None
-    return active_model, active_use_local, active_effort
+    return route
 
 
 def carried_inline_round_cap(task_metadata: Dict[str, Any]) -> Optional[int]:

@@ -46,10 +46,9 @@ LANE_RECOMMENDATION = "Minted from the former review lane"
 
 
 @pytest.fixture(autouse=True)
-def _pool_ceiling(monkeypatch):
-    """Package A raises the catalog ceiling to 26 for the pool; until it lands, this tree
-    caps at 10. The migration reads the live constant, so the tests set the pool value."""
-    monkeypatch.setattr(cs, "MAX_CONFIGURED_SUBAGENTS", 26)
+def _fresh_migration_memory():
+    """Nothing remembered between tests. The migration reads the shipped catalog ceiling: no
+    override here, so these tests meet the ceiling the install runs."""
     m._MIGRATIONS_SEEN.clear()
     cfg._RETIREMENT_NOTICE_SEEN.clear()
     yield
@@ -520,25 +519,34 @@ def test_m3_a_disabled_row_of_a_factory_engine_does_not_claim_the_factory_seat()
     assert [row.target_id for row in pool] == list(OPENROUTER_REVIEW_DEFAULTS["triad"])
 
 
-def test_f5a_the_pool_ceiling_is_the_catalog_ceiling():
-    rows = [api_row(f"h{i}", f"vendor/model-{i}", "low") for i in range(10)]
+def full_lanes_document(helpers):
+    """``helpers`` catalog rows beside every lane full: 10 triad + 4 scope + advisory + deep = 16 seats."""
+    rows = [api_row(f"h{i}", f"vendor/model-{i}", "low") for i in range(helpers)]
     triad = [direct(f"t{i}", f"vendor/triad-{i}", "high", delivery="native") for i in range(10)]
     scope = [direct(f"s{i}", f"vendor/scope-{i}", "high") for i in range(4)]
-    doc = {SUBAGENTS: catalog(*rows),
-           SLOTS: lanes(triad=triad, scope=scope,
-                        advisory={"enabled": True, "route": {"kind": "api_chat", "target_id": "vendor/adv"}, "effort": "low"},
-                        deep_review={"route": {"kind": "api_chat", "target_id": "vendor/deep"}, "effort": "high"})}
-    outcome, after = _migrated(doc)
-    assert len(after["items"]) == 26 and len(_marked(after["items"])) == 14
-    assert [r["subagent_id"] for r in after["items"][10:]] == [f"review-{i}" for i in range(1, 17)]
-    # A 27th row refuses the WHOLE migration: no partial pool, the lanes stay.
-    doc27 = dict(doc, **{SUBAGENTS: catalog(*rows, api_row("h10", "vendor/model-10", "low"))})
-    refused = m.migrate_review_lanes(doc27)
-    assert refused.error and "27 rows" in refused.error and "26" in refused.error
+    return {SUBAGENTS: catalog(*rows),
+            SLOTS: lanes(triad=triad, scope=scope,
+                         advisory={"enabled": True, "route": {"kind": "api_chat", "target_id": "vendor/adv"}, "effort": "low"},
+                         deep_review={"route": {"kind": "api_chat", "target_id": "vendor/deep"}, "effort": "high"})}
+
+
+@pytest.mark.parametrize("helpers", [10, 34, 35], ids=["lane-era-full-26", "ceiling-50", "one-past-51"])
+def test_f5a_the_pool_ceiling_is_the_catalog_ceiling(helpers):
+    """The lane era's fullest install (the 10-row catalog of its day plus 16 lane seats) is 26 rows; the shipped
+    ceiling is 50, and one row past it refuses the WHOLE migration: no partial pool, the lanes stay."""
+    assert cs.MAX_CONFIGURED_SUBAGENTS == 50
+    doc, total = full_lanes_document(helpers), helpers + 16
+    if total <= cs.MAX_CONFIGURED_SUBAGENTS:
+        _outcome, after = _migrated(doc)
+        assert len(after["items"]) == total and len(_marked(after["items"])) == 14
+        assert [r["subagent_id"] for r in after["items"][helpers:]] == [f"review-{i}" for i in range(1, 17)]
+        return
+    refused = m.migrate_review_lanes(doc)
+    assert refused.error and f"{total} rows; the maximum is {cs.MAX_CONFIGURED_SUBAGENTS}" in refused.error
     assert refused.catalog_after is None and refused.retained_keys == (SLOTS,)
-    loaded = dict(doc27)
+    loaded = dict(doc)
     m.apply_outcome(loaded, refused)
-    assert loaded == doc27
+    assert loaded == doc
 
 
 def test_f5b_twins_of_one_engine_become_two_marked_rows():

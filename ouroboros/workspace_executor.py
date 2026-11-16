@@ -228,6 +228,10 @@ def _execute_local(
     from ouroboros.process_scope import record_task_group, scoped_child_env, task_launch_target
 
     base_env = local_env if local_env is not None else scrub_repo_from_pythonpath(runtime_environ(), _system_repo_dir())
+    if local_env is None:
+        from ouroboros.node_runtime import forward_playwright_node
+
+        forward_playwright_node(base_env)  # Playwright's driver in a child runs on the pinned Node
     process_env = overlay_env(overlay_env(base_env, target_env), env_overlay)
     target = task_launch_target(invocation_binding())
     if target is not None:  # after every overlay: the task marker is the last word on a task launch
@@ -1299,8 +1303,10 @@ def service_env() -> dict[str, str]:
             continue
         env[key] = str(value)
     from ouroboros.process_scope import installation_scope_entries
+    from ouroboros.node_runtime import forward_playwright_node
 
     env.update(installation_scope_entries(os.environ))  # a service stays in the installation's scope
+    forward_playwright_node(env)  # both local service doors use this baseline; caller overrides still win
     return env
 
 

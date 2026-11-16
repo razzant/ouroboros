@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import pathlib
 import queue
 import sys
@@ -322,9 +323,10 @@ def test_a_managed_work_domain_is_read_passively_and_refuses_only_what_it_cannot
 
 
 def test_a_managed_work_copy_needs_the_containers_runtime_not_the_services(world, monkeypatch):
-    """Managed, the work container runs a work copy with its own interpreter (``work_skill_payloads.launch``), so a
-    service with no usable Node still previews, connects, binds and starts it there. Where the service names the
-    interpreter (unmanaged, or a folder inside the mappings), its runtime check stays and refuses."""
+    """Managed, the work container runs every skill server with its own interpreter, staged (a work copy,
+    ``work_skill_payloads.launch``) or mapped (a skills folder inside the mappings), so a service with no usable Node
+    still previews, connects, binds and starts it there, never asked. Unmanaged, the service names the interpreter:
+    its runtime check stays and refuses."""
     from ouroboros import work_domain, work_skill_payloads
 
     path = _write_settings(world, {"MCP_ENABLED": True, "MCP_SERVERS": []})
@@ -346,12 +348,17 @@ def test_a_managed_work_copy_needs_the_containers_runtime_not_the_services(world
     assert bound.skill_error == "" and bound.command == "node" and copies == [] and probed == []  # passive, no probe
     argv, cwd, _env = skill_mcp.work_start(bound, {})  # the real launch: the copy, named in the container
     assert argv == ["node", str(home / "scripts/server.mjs")] and cwd == str(home) and len(copies) == 1
-    monkeypatch.setattr(work_domain, "is_work", lambda _path: True)  # the service names the interpreter again
+    monkeypatch.setattr(work_domain, "is_work", lambda _path: True)  # mapped: still the container's runtime
     inside = skill_mcp.bind_config(mcp_client.normalize_server_config(_bound_row()))
-    assert inside.command == "" and "no usable node runtime was found (bundled:absent; path:missing)" in inside.skill_error
-    monkeypatch.setattr(work_domain, "managed", lambda: False)
-    assert "no usable node runtime" in skill_mcp.bind_config(mcp_client.normalize_server_config(_bound_row())).skill_error
-    assert probed == ["node", "node"]
+    entry = str(world.skill_dir.resolve() / "scripts/server.mjs")
+    assert inside.skill_error == "" and (inside.command, inside.args) == ("node", [entry]) and probed == []
+    argv, _cwd, _env = skill_mcp.work_start(inside, {})  # started where it is mapped: no work copy
+    assert argv == ["node", entry] and len(copies) == 1 and probed == []
+    monkeypatch.setattr(work_domain, "managed", lambda: False)  # unmanaged: the service names the interpreter
+    unmanaged = skill_mcp.bind_config(mcp_client.normalize_server_config(_bound_row()))
+    assert unmanaged.command == "" and "no usable node runtime was found (bundled:absent; path:missing)" in (
+        unmanaged.skill_error)
+    assert probed == ["node"] and len(copies) == 1  # only the unmanaged binding asked the service
 
 
 _WITNESSED = ("WITNESS_VALUE", "WITNESS_SECRET", "UNDECLARED_SECRET", "ROW_VALUE", "OWNER_PICK", "OUROBOROS_SKILL_NAME",
@@ -369,7 +376,7 @@ def test_a_real_start_gets_its_skill_scripts_environment_and_nothing_undeclared(
 
     from mcp.client.stdio import get_default_environment
 
-    from ouroboros import mcp_browser_guard, work_domain, workspace_executor
+    from ouroboros import mcp_browser_guard, node_runtime, work_domain, workspace_executor
     from ouroboros.mcp_schema import _redact_error_text
     from ouroboros.process_scope import installation_scope_entries
     from ouroboros.skill_loader import (
@@ -430,8 +437,19 @@ def test_a_real_start_gets_its_skill_scripts_environment_and_nothing_undeclared(
         "OUROBOROS_SKILL_STATE_DIR": str(skill_state_dir_path(drive, "env_witness")),
         "NODE_PATH": str(skill_dir / ".ouroboros_env" / "node" / "node_modules"),
         mcp_browser_guard.ADDRESS_ENV: "http://127.0.0.1:9/guard"}
-    plain_params = mcp_client._transport_factory(unbound, host)
-    assert plain_params.env == {**installation_scope_entries(), "ROW_VALUE": "row", **host}  # as before: no skill
+    # An unbound local server: as before, no skill, plus Playwright's driver Node (the pin's prepared one, marked as
+    # selected; an explicit operator value is kept as given, unmarked). Nothing else is added.
+    driver, plain = "/managed/node-24.22.3", {**installation_scope_entries(), "ROW_VALUE": "row", **host}
+    with monkeypatch.context() as pinned:
+        pinned.setattr("ouroboros.claudexor_runtime.get_runtime_manager",
+                       lambda: types.SimpleNamespace(reviewed_node=lambda prepared=False: driver))
+        pinned.delenv(node_runtime.PLAYWRIGHT_NODE_ENV, raising=False)
+        pinned.delenv(node_runtime.SELECTED_DRIVER_NODE_ENV, raising=False)
+        assert mcp_client._transport_factory(unbound, host).env == {
+            **plain, node_runtime.PLAYWRIGHT_NODE_ENV: driver, node_runtime.SELECTED_DRIVER_NODE_ENV: driver}
+        pinned.setenv(node_runtime.PLAYWRIGHT_NODE_ENV, "/operator/node")
+        assert mcp_client._transport_factory(unbound, host).env == {
+            **plain, node_runtime.PLAYWRIGHT_NODE_ENV: "/operator/node"}
     masked = _redact_error_text("echo witness-secret-0123 fixture-value owner-secret-7890 undeclared-secret-4567", cfg)
     assert not {"witness-secret-0123", "fixture-value", "owner-secret-7890"} & set(masked.split())
     assert "undeclared-secret-4567" in masked  # neither granted nor referenced: never sent, so never masked
@@ -1119,7 +1137,39 @@ def _agent_call(world, **kwargs):
     return json.loads(rendered.split("SKILL_ACTION_BLOCKED: ", 1)[-1]), rendered.startswith("⚠️")
 
 
-def test_agent_connect_carries_an_answered_quiz_through_real_owner_source_validation(agent_world):
+def test_agent_connect_waits_for_an_unprepared_pin_even_with_an_answered_quiz(agent_world, monkeypatch):
+    """The preparation-absent control: a node skill waits for the pin's Node (owner, 14 Nov 2026); a real answered
+    quiz carries owner intent, never a runtime, so the preview names the unprepared pin and the confirmed Connect
+    writes nothing."""
+    from ouroboros import node_runtime, platform_layer
+    from ouroboros.claudexor_runtime import get_runtime_manager
+    from ouroboros.owner_quiz import record_answered, record_asked
+
+    # Empty DATA alone does not exclude an exact packaged Node or a carried prepared generation.
+    monkeypatch.setattr(platform_layer, "bundled_resource_bases", lambda: [])
+    monkeypatch.delenv(node_runtime.CARRIED_NODE_ENV, raising=False)
+    manager = get_runtime_manager()  # read from the pin itself, not from the policy under test
+    if not manager.pin_error and not manager.planned_node(manager.pin):
+        pytest.skip("the pin has no Node archive for this host, so its skills keep the PATH rollback")
+    source = {"kind": "quiz", "task_id": "connect-task", "quiz_id": "connect-chrome"}
+    record_asked(agent_world.drive, "connect-task", quiz_id="connect-chrome", options=["Connect", "Not now"],
+                 question="Connect Chrome (shared tab)? Turning MCP on also starts GitHub.")
+    record_answered(agent_world.drive, "connect-task", quiz_id="connect-chrome", option_index=0, request_id="answer-1")
+    preview, blocked = _agent_call(agent_world, owner_source=source, preview=True)
+    assert not blocked and not preview["ready"] and preview["servers"][0]["executable"] == {}
+    assert len(preview["blockers"]) == 1 and "chrome_browser" in preview["blockers"][0]
+    assert ":not_prepared" in preview["blockers"][0] and "no usable node runtime" in preview["blockers"][0]
+    path = agent_world.drive / "settings.json"
+    refused, blocked = _agent_call(agent_world, owner_source=source, settings_digest=preview["settings_digest"],
+                                   confirm_other_servers=True)
+    assert blocked and refused["code"] == "skill_not_ready" and ":not_prepared" in refused["error"]
+    assert json.loads(path.read_text()) == {"MCP_SERVERS": [OTHER], "OUROBOROS_STARTER_SKILLS_TURN_ON": False}
+
+
+def test_agent_connect_carries_an_answered_quiz_through_real_owner_source_validation(agent_world, pinned_path_node):
+    """With the pin's Node prepared (``pinned_path_node``: an isolated pin whose exact bundle is the PATH Node), the
+    answered quiz carries the Connect through owner provenance, confirmation, the settings write and the audit."""
+    from ouroboros import platform_layer
     from ouroboros.owner_quiz import record_answered, record_asked
 
     source = {"kind": "quiz", "task_id": "connect-task", "quiz_id": "connect-chrome"}
@@ -1132,6 +1182,8 @@ def test_agent_connect_carries_an_answered_quiz_through_real_owner_source_valida
     assert not blocked and preview["ready"] and preview["other_servers"] == [{"id": "github", "name": "GitHub"}]
     entry = agent_world.drive / "skills" / "external" / "chrome_browser" / "scripts" / "server.mjs"
     assert preview["servers"][0]["executable"]["args"] == [str(entry.resolve())]
+    prepared = platform_layer.embedded_node_candidates(agent_world.drive.parent / "pinned-path-node")[0]
+    assert os.path.normcase(preview["servers"][0]["executable"]["command"]) == os.path.normcase(str(prepared))
     path = agent_world.drive / "settings.json"
     assert json.loads(path.read_text()) == {"MCP_SERVERS": [OTHER], "OUROBOROS_STARTER_SKILLS_TURN_ON": False}
     foreign = {**source, "task_id": "another-task"}

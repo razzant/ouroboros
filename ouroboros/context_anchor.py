@@ -151,16 +151,21 @@ def main_input_anchor(usage: Optional[Mapping[str, Any]], plan: Any, *,
     return anchor, (int(floor) if floor else None)
 
 
-def record_refused_input(usage: Dict[str, Any], plan: Any, estimate_tokens: int, *, measured: bool = False) -> None:
+def record_refused_input(usage: Dict[str, Any], plan: Any, estimate_tokens: int, *, measured: bool = False,
+                         candidate: Any = None) -> None:
     """Remember the smallest input estimate ``plan``'s model refused by size in this task.
 
     ``measured`` (the estimate is anchored on an accepted request) also bounds the refusing account's
-    window when the provider stated no limit; a cold estimate stays task-local."""
+    window when the provider stated no limit; a cold estimate stays task-local. ``candidate``, the refused
+    request, says how that size was known: a local instance's exact count (its ``input_tokens`` with its
+    ``context_window_tokens``) is stored as such, any other as an anchored estimate (``WindowLimit.basis``)."""
     if plan is None or int(estimate_tokens or 0) <= 0:
         return
     from ouroboros.context_window import record_refusal
 
-    record_refusal(usage, plan, refused_input=int(estimate_tokens) if measured else 0)
+    exact = getattr(candidate, "context_window_tokens", None) and getattr(candidate, "input_tokens", None)
+    record_refusal(usage, plan, refused_input=int(estimate_tokens) if measured else 0,
+                   basis="exact_local_count" if exact else "anchored_estimate")
     refused = usage.setdefault(REFUSED_INPUTS_KEY, {})
     key = _anchor_model_key(plan)
     refused[key] = min(int(refused.get(key) or estimate_tokens), int(estimate_tokens))
@@ -243,3 +248,30 @@ def measured_units(refused_density: Optional[float], measurement: Any,
     scale = measurement.measurement_density / refused_density if refused_density else 1.0
     return tuple(None if value is None else math.ceil(value * scale) if refused_density else int(value)
                  for value in tokens)
+
+
+CONTEXT_REFUSAL_ROUND_KEY = "_context_refusal_round"
+
+
+def _route_fit_key(key: str) -> bool:
+    """Route-fit state a failed candidate's walk must not leave behind. The conversation's per-model
+    facts (anchors, accepted floors, refused sizes) and this round's own size refusal (its round, its whole facts)
+    are not route state: a candidate's refusal keeps the round's renewal (review r2, 18.10) and its own facts."""
+    from ouroboros.context_view_facts import SIZE_REFUSAL_KEY
+
+    return key.startswith("_context_") and key not in {
+        INPUT_ANCHOR_KEY, ACCEPTED_INPUTS_KEY, REFUSED_INPUTS_KEY, CONTEXT_REFUSAL_ROUND_KEY, SIZE_REFUSAL_KEY}
+
+
+def _snapshot_context_fit_usage(usage: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in usage.items() if _route_fit_key(key)}
+
+
+def _restore_context_fit_usage(
+    usage: Dict[str, Any],
+    snapshot: Dict[str, Any],
+) -> None:
+    for key in tuple(usage):
+        if _route_fit_key(key):
+            usage.pop(key, None)
+    usage.update(snapshot)

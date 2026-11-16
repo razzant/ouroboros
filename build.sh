@@ -36,13 +36,12 @@ if [ ! -f "python-standalone/bin/python3" ]; then
     exit 1
 fi
 
-# Bundle the official notarized Node.js runtime so node-runtime skills work in
-# the packaged app (Homebrew node is code-signing-killed by macOS). The signing
-# pass below re-signs node-standalone/bin/node under the hardened runtime.
-if [ ! -f "node-standalone/bin/node" ]; then
-    echo "--- Downloading bundled Node.js runtime ---"
-    bash scripts/download_node_standalone.sh
-fi
+# Bundle the official notarized Node.js runtime the Claudexor pin names, so node-runtime skills work in
+# the packaged app (Homebrew node is code-signing-killed by macOS). Always re-verified: a reused tree's
+# node-standalone/ is never trusted. The signing pass below re-signs it under the hardened runtime.
+echo "--- Verifying and staging the pinned Node.js runtime ---"
+bash scripts/download_node_standalone.sh
+export PLAYWRIGHT_NODEJS_PATH="$PWD/node-standalone/bin/node"
 
 if [ ! -f "ripgrep-standalone/bin/rg" ]; then
     echo "--- Downloading bundled ripgrep runtime ---"
@@ -187,6 +186,9 @@ mkdir -p "$CLI_BIN_DIR"
 cp packaging/cli/ouroboros "$CLI_BIN_DIR/ouroboros"
 cp packaging/cli/install-ouroboros-cli "$CLI_BIN_DIR/install-ouroboros-cli"
 chmod +x "$CLI_BIN_DIR/ouroboros" "$CLI_BIN_DIR/install-ouroboros-cli"
+
+echo "--- Giving every bundled Playwright driver the pinned Node (before signing) ---"
+python-standalone/bin/python3 scripts/download_node_standalone.py --replace-playwright "$APP_PATH"
 
 # WA6 (macOS codesign integrity): precompile + seal .pyc instead of deleting them.
 # A signed+notarized .app must not write __pycache__/*.pyc into its own bundle at

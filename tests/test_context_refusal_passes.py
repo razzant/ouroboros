@@ -101,7 +101,7 @@ def test_a_cited_limit_declared_for_the_route_recognises_size_sizes_the_pass_and
     fit = SimpleNamespace(measurement=SimpleNamespace(**vars(_fit(819_929, anchor=803_073, accepted=803_073).measurement),
                                                       route_fp="route", measurement_density=1.0))
     refused = SimpleNamespace(max_completion_tokens=65_536, prompt_tokens_bounded_estimate=819_929,
-                              physical_context=SimpleNamespace(route_fp="route"))
+                              physical_context=SimpleNamespace(route_fp="route", round_id="other"))
     reads, catalogue = [], {}
     monkeypatch.setattr(pricing, "get_pricing", lambda **route: reads.append(route) or dict(catalogue))
 

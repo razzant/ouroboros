@@ -55,7 +55,8 @@
  * @typedef {Object} ResponseLimitPreview
  * @property {ResponseLimitRoute} route
  * @property {ResponseLimit} response_limit
- * @property {Object} window Sourced context projection, including contradiction and retired acknowledgement.
+ * @property {Object} window Sourced context projection, including contradiction, retired acknowledgement and a
+ *   refusal's `basis` (`provider_stated`, `exact_local_count`, `anchored_estimate` or `unrecorded`).
  * @property {Object} window_route The window acknowledgement's independent route and fingerprint.
  * @property {boolean} window_ack Whether a confirmation can be cleared.
  */

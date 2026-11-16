@@ -24,6 +24,10 @@ class WindowLimit:
     source: str
     observed_at: str = ""
     acceptance_can_raise: bool = True
+    # A refusal's number: ``provider_stated``, ``exact_local_count`` (a local instance counted the request the
+    # host refused before sending), ``anchored_estimate`` from a numberless refusal (a measured input or
+    # confirmation of an existing total), or ``unrecorded`` (stored before bases were kept); "" for every other source.
+    basis: str = ""
 
 
 @dataclass(frozen=True)
@@ -91,7 +95,8 @@ class WindowRecord:
 
 
 def record_observation(root, route_fp: str, *, accepted: int = 0, refused: int = 0,
-                       kind: str = "total", reserve: int = 0, transmitted: int = 0) -> None:
+                       kind: str = "total", reserve: int = 0, transmitted: int = 0, basis: str = "") -> None:
+    """``basis``: how a refused size was known (``WindowLimit.basis``), kept on its row; rows without one stay as written."""
     from ouroboros import capability_evidence as ce
 
     if not route_fp or not (accepted > 0 or refused > 0):
@@ -120,7 +125,8 @@ def record_observation(root, route_fp: str, *, accepted: int = 0, refused: int =
             if refused or accepted > high or any(
                     accepted > rows[index]["refused"] for index in refusals() if answer(index) is None):
                 rows.append({"accepted": accepted, "refused": refused, "kind": "input" if accepted else kind,
-                             "reserve": reserve, "transmitted": transmitted, "ts": ce.utc_now_iso()})
+                             "reserve": reserve, "transmitted": transmitted, "ts": ce.utc_now_iso(),
+                             **({"basis": basis} if refused and basis else {})})
             keep = set()
             largest = max(range(len(rows)), key=lambda i: rows[i].get("accepted", 0), default=None)
             if largest is not None and rows[largest].get("accepted"):
@@ -203,7 +209,8 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
                     later.get("accepted", 0) > row["refused"] for later in rows[index + 1:]):
                 current = limits.get(row["kind"])
                 if current is None or row["refused"] <= current.tokens:
-                    limits[row["kind"]] = WindowLimit(row["refused"], row["kind"], "refusal", row["ts"])
+                    limits[row["kind"]] = WindowLimit(row["refused"], row["kind"], "refusal", row["ts"],
+                                                      basis=str(row.get("basis") or "unrecorded"))
                 else:  # above the stated number it names no limit under it; a total's says the reply is counted inside
                     inside = inside or row["kind"] == "total"
     output = getattr(evidence, "response_limit", {}) or {}
@@ -221,8 +228,9 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
                         retired_ack=getattr(evidence, "retired_ack", {}) or (captured.retired_ack if captured else {}))
 
 
-def record_refusal(usage, plan, refused_input: int = 0) -> None:
-    """Record a typed size refusal for the refusing account: its stated limit, else ``refused_input``.
+def record_refusal(usage, plan, refused_input: int = 0, basis: str = "anchored_estimate") -> None:
+    """Record a typed size refusal for the refusing account: its stated limit (``provider_stated``), else
+    ``refused_input`` under ``basis``: ``anchored_estimate``, or ``exact_local_count`` where a local instance counted it.
 
     ``refused_input`` is the caller's measured provider-unit size of the refused request (anchored on an
     accepted request of this conversation), passed only when measured: Codex states no number, and a
@@ -251,7 +259,7 @@ def record_refusal(usage, plan, refused_input: int = 0) -> None:
             record, size = getattr(plan, "window_record", None), int(refused_input)
             total = record.total.tokens if record is not None and record.total else 0
             confirms = total - (record.reserve if record is not None else 0) < size <= total
-            record_observation(ce.canonical_evidence_root(), observation_scope(plan),
+            record_observation(ce.canonical_evidence_root(), observation_scope(plan), basis=basis,
                                refused=total if confirms else size, kind="total" if confirms else "input")
         return
     rows = (ce._read(ce.canonical_evidence_root()).get("main_windows", {}).get(observation_scope(plan)) or {})
@@ -260,7 +268,7 @@ def record_refusal(usage, plan, refused_input: int = 0) -> None:
     # Sglang shares its input bound with generation, so its length refusal stays total.
     input_only = any(marker in message.lower() for marker in ("prompt is too long", "maximum input", "input token count"))
     record_observation(ce.canonical_evidence_root(), observation_scope(plan), refused=limit,
-                       kind="input" if input_only else "total")
+                       kind="input" if input_only else "total", basis="provider_stated")
 
 
 def observed_plan(plan, usage):

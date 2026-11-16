@@ -326,9 +326,9 @@ export function roomStatusView(state, {
     case 'waiting': return view('online', activityWord(room), asked(room) ? 'wait' : 'held', mark, turn);
     case 'paused': return view('online', activityWord(room), 'held', mark, turn);
     case 'unknown': return view('online', activityWord(room), 'unknown', mark, turn);  // a listed turn still waits
-    // A room at rest keeps the owner's turn: a question of an ended work still waits there.
+    // A room at rest keeps the owner's turn: a question of an ended work still waits there, while the host starts too.
     default: return ready ? view('online', 'Online', 'online', mark, turn)
-        : { ...view('starting', 'Starting…', 'starting', 'none'), ...startingStatus(boot) };
+        : { ...view('starting', 'Starting…', 'starting', 'none', turn), ...startingStatus(boot) };
     }
 }
 

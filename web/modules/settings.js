@@ -514,5 +514,5 @@ export function initSettings(ctx = {}) {
 
     // Loopback-only debug hook, like app.js's __ouroWs: Settings has no URL, so browser tests open a path through it.
     window.__ouroSettings = { open: openFromOutside };
-    return { page, open: openFromOutside, pressedAgain };
+    return { page, open: openFromOutside, pressedAgain, stateApplied: (data) => home.stateApplied(data) };
 }

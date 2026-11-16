@@ -243,6 +243,7 @@ export function roomSocket(ws) {
         send: (...args) => ws.send(...args),
         isConnected: () => !paused && ws.isConnected?.() !== false,
         serverAnswersWhileDown: () => !paused && ws.serverAnswersWhileDown?.() === true,
+        previouslyConnected: () => ws.previouslyConnected?.() === true,  // the page's history, never paused
         on(event, fn) {
             const sub = { event, fn, off: null };
             subscriptions.add(sub);

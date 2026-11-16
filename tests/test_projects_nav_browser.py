@@ -855,11 +855,18 @@ def test_show_more_keeps_sorting_and_holds_the_place_and_reads_again_when_an_old
     loaded room beyond the feed that a late message moves among the older rows is placed by the complete list read
     again on the moved revision (Astra), never on a timer."""
     ui, page, root = pins_ui, pins_ui["page"], pins_ui["root"]
+
+    def read_state():
+        # Advancing a quiet fixture's clock must not simulate a lost heartbeat. Exercise a real reconnect below,
+        # where its complete-list response can be awaited independently of the server-side socket acceptance.
+        ui["control"]["sockets"][-1].send(json.dumps({"type": "heartbeat"}))
+        refresh(page)
+
     seed_archive(root)
     spread(root)
     reads = []
     page.on("request", lambda request: reads.append(request.url))
-    refresh(page)
+    read_state()
     items = page.locator('#nav-projects-list > .nav-project-item')
     expect()(items).to_have_count(51)
     page.locator('#nav-projects-list > .nav-projects-more').click()
@@ -871,14 +878,14 @@ def test_show_more_keeps_sorting_and_holds_the_place_and_reads_again_when_an_old
     assert first.startswith("archive-4") and first != "archive-420", (first, shown_ids(page)[:4])
     # A room further down gets a message and goes to the top; the place being read stays.
     say(root, 40420, "News further down", ts=LATER(1))
-    refresh(page)
+    read_state()
     until(page, lambda: shown_ids(page)[1] == "archive-420", rounds=3000)  # behind a complete list being read again
     assert page.evaluate(FIRST_IN_VIEW) == [first, pytest.approx(y, abs=1)]
     # The row holding the place moves itself: the next one keeps the place, the view does not follow it up.
     after = shown_ids(page)[shown_ids(page).index(first) + 1]
     after_y = row(page, after).bounding_box()["y"]
     say(root, 40000 + int(first.split("-")[1]), "News in view", ts=LATER(2))
-    refresh(page)
+    read_state()
     until(page, lambda: shown_ids(page)[1] == first, rounds=3000)
     assert row(page, after).bounding_box()["y"] == pytest.approx(after_y, abs=1)
     assert len(shown_ids(page)) == 101  # every row the browse showed stays
@@ -886,15 +893,25 @@ def test_show_more_keeps_sorting_and_holds_the_place_and_reads_again_when_an_old
     # (as it did for each message above: a moved revision, never progress or a timer).
     lists = len(reads_of(reads, "/api/projects", all="1"))
     say(root, 40410, "A late answer", ts=SPREAD(415.5))
-    refresh(page)
+    read_state()
     until(page, lambda: len(reads_of(reads, "/api/projects", all="1")) > lists)
     until(page, lambda: shown_ids(page).index("archive-416") < shown_ids(page).index("archive-410")
           < shown_ids(page).index("archive-415"), rounds=5000)  # the complete list's answer, however slow
-    lists, sockets = len(reads_of(reads, "/api/projects", all="1")), len(ui["control"]["sockets"])
-    for _ in range(2):  # an unchanged revision reads nothing more (a reopened socket reads once, as it always did)
-        with page.expect_response(lambda response: urlparse(response.url).path == '/api/state'):
-            refresh(page)
-    assert len(reads_of(reads, "/api/projects", all="1")) == lists + len(ui["control"]["sockets"]) - sockets
+    lists = len(reads_of(reads, "/api/projects", all="1"))
+    for _ in range(2):  # an unchanged revision reads nothing more on a healthy connection
+        with page.expect_response(is_state) as refreshed:
+            read_state()
+        refreshed.value.finished()
+        page.evaluate("() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))")
+    assert len(reads_of(reads, "/api/projects", all="1")) == lists
+    # Acceptance of the replacement socket precedes the client's open handler and its list request. Wait for
+    # that request's answer, then require exactly one read, preserving the reconnect assertion on slower engines.
+    sockets = len(ui["control"]["sockets"])
+    with page.expect_response(is_list) as reconnected:
+        reopen(page, ui["control"])
+    reconnected.value.finished()
+    assert len(ui["control"]["sockets"]) == sockets + 1
+    assert len(reads_of(reads, "/api/projects", all="1")) == lists + 1
     expect()(items).to_have_count(101)
     assert shown_ids(page)[:3] == ["archive-100", first, "archive-420"]
 

@@ -794,6 +794,7 @@ def test_the_handover_keeps_the_route_role_its_pause_ran_on(host, tmp_path, monk
     """Main and fallback share one model on different accounts; every new worker starts on Main."""
     monkeypatch.setenv(MODEL_ACCOUNTS_KEY, json.dumps({"main": "account-a", "fallback": ["account-b"]}))
     fresh = replace(_plan(), model="claudexor::codex=route-fixture-model")
+    monkeypatch.setenv("OUROBOROS_MODEL", fresh.model)  # Main is that one model: following it moves nowhere
     _recovered_then_paused(host, tmp_path, monkeypatch, "main", plan=replace(fresh, model_role=role))
     first = _run_loop(host, monkeypatch, _dispatch_one(host, monkeypatch), "after_resume", plan=fresh)
     saved = wc.read_working(host.root, "held", 2)[1]

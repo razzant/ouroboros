@@ -879,7 +879,8 @@ def provider_terminal_fallback_text(accumulated_usage: Dict[str, Any], *, round_
     each by its own kind (``round_failure_words``): such a refusal is never called an outage, an outage keeps its words."""
     from ouroboros.primary_route_observation import round_failure_words
 
-    return _provider_terminal_text(accumulated_usage, **facts) + round_failure_words(accumulated_usage, round_idx)
+    return (_provider_terminal_text(accumulated_usage, round_idx=round_idx, **facts)
+            + round_failure_words(accumulated_usage, round_idx))
 
 
 def _provider_terminal_text(
@@ -890,7 +891,7 @@ def _provider_terminal_text(
     waited_sec: float,
     interactive: bool = False,
     is_deadline_exhausted: bool,
-    control_reason: str = "", wait_cause: str = "",
+    control_reason: str = "", wait_cause: str = "", round_idx: Any = None,
 ) -> str:
     """Owner-facing terminal text when provider death left nothing to salvage.
 
@@ -903,8 +904,10 @@ def _provider_terminal_text(
     fact (0.0 when the binding window was already spent before the first wait
     iteration, so that terminal never claims a wait). The waited-out wording
     deliberately avoids the supervisor's lifecycle term INTERRUPTED
-    (STATUS_INTERRUPTED means pre-requeue, not terminal).
+    (STATUS_INTERRUPTED means pre-requeue, not terminal). ``round_idx``: the ending
+    round, whose own latest size refusal its size facts name (``context_view_facts``).
     """
+    from ouroboros.context_view_facts import refusal_frame_facts, request_window_fact
     from ouroboros.outcomes import REASON_OWNER_REQUESTED_FINALIZATION
     from supervisor.owner_stop import REASON_OWNER_STOPPED_DIRECT_TURN
 
@@ -926,17 +929,12 @@ def _provider_terminal_text(
                 f"after {waited_sec / 60.0:.1f} min. No new summary request was sent. "
                 "Completed work and the original attempt-cost records are preserved.")
     if is_context_overflow:
-        from ouroboros.context_anchor import REFUSED_INPUTS_KEY
-
-        refused = min((int(v) for v in (accumulated_usage.get(REFUSED_INPUTS_KEY) or {}).values() if v), default=0)
-        parts = ", ".join(f"{label} ~{int(tokens):,}" for label, tokens in accumulated_usage.get("_context_refusal_frame") or [])
-        facts = "; ".join(fact for fact in (f"smallest refused request ~{refused:,} tokens" if refused else "",
-                                             f"largest parts: {parts}" if parts else "") if fact)
+        facts = refusal_frame_facts(accumulated_usage, round_idx)
         return (
             "⚠️ Context-size recovery ended without a fitting request; no further provider call was made. "
             "The recovery passes, the configured fallback and a renewed view could not make it fit"
             f"{f' ({facts})' if facts else ''}. The exact transcript and any files written so far are preserved."
-            + _failure_window_fact(accumulated_usage, overflow=True) + _provider_quote(accumulated_usage)
+            + request_window_fact(accumulated_usage, overflow=True, round_idx=round_idx) + _provider_quote(accumulated_usage)
         )
     if is_transport_wait:
         if unknown:
@@ -946,6 +944,7 @@ def _provider_terminal_text(
                 f"{_unknown_wait_note(True, waited_sec, interactive)}"
                 " Inspect the preserved facts before starting another run."
                 f"{_unknown_terminal_recovery_hint(accumulated_usage)}{UNKNOWN_ATTEMPT_COST_NOTE}"
+                + request_window_fact(accumulated_usage, round_idx=round_idx, earlier_only=True)
             )
         # A released attempt proves only that the request never reached the provider: a broken
         # connect, an incomplete upload or an engine refusal before dispatch, never a provider reply.
@@ -967,12 +966,13 @@ def _provider_terminal_text(
         else:
             text = ("⚠️ The request did not reach the provider, and " + ("no wait window was left" if interactive else
                     "the owner deadline left no time to wait") + f"; {subject} ended as an outage, not completed.")
-        return text + kept + (f" Last reported code: {code}." if code else "")
+        return (text + kept + (f" Last reported code: {code}." if code else "")
+                + request_window_fact(accumulated_usage, round_idx=round_idx, earlier_only=True))
     if is_deadline_exhausted:
         text = "⚠️ The owner deadline ended primary model work; any files written so far are preserved."
         if unknown:
             text += _unknown_terminal_recovery_hint(accumulated_usage) + UNKNOWN_ATTEMPT_COST_NOTE
-        return text
+        return text + request_window_fact(accumulated_usage, round_idx=round_idx, earlier_only=True)
     released = accumulated_usage.get("_last_llm_attempt_custody") == "released" and not unknown
     return (
         ("⚠️ The model request did not start generation." if released else "⚠️ The model provider returned no usable response.")
@@ -981,27 +981,8 @@ def _provider_terminal_text(
         f"{_unknown_terminal_recovery_hint(accumulated_usage) if unknown else provider_recovery_hint(accumulated_usage)}"
         f"{UNKNOWN_ATTEMPT_COST_NOTE if unknown else ''} "
         "Any files written so far are preserved in the workspace."
-        + _failure_window_fact(accumulated_usage)
+        + request_window_fact(accumulated_usage, round_idx=round_idx)
     )
-
-
-def _failure_window_fact(usage, *, overflow=False):
-    if not overflow and usage.get("_last_llm_error_kind") not in {"bad_request", "request_too_large", "context_overflow"}:
-        return ""
-    from ouroboros.capability_evidence import _parse_ctx_requested
-    from ouroboros.context_view_facts import required_book_fact, window_projection
-    from ouroboros.context_window import WindowRecord
-
-    input_tokens, _reply, total = _parse_ctx_requested(usage.get("_last_llm_provider_message", ""))
-    if input_tokens or total:
-        request = f"request {'input' if input_tokens else 'total'} {input_tokens or total:,} tokens (provider stated)"
-    else:
-        estimate = int(usage.get("_context_prompt_estimate") or 0)
-        request = f"request input estimated {estimate:,} tokens" if estimate else "request size unknown"
-    window = usage.get("_context_window") or window_projection(WindowRecord("", reserve=int(
-        usage.get("_context_response_reserve_tokens") or 0)))
-    return f"\n{request}; assumed {window['text']}." + (required_book_fact(usage) if overflow else "")
-
 
 
 # Host vocabulary: terminal rows without provider words, and fallback's previous route.

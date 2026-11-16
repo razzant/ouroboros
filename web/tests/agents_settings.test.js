@@ -389,6 +389,51 @@ test('a new agent is an unsaved form whose on/off is a field of it; its Save add
     assert.deepEqual(page.opened, ['agents']);
 });
 
+test('a list of 50, switched-off agents included, holds Add and Duplicate, and their one hint says why; at 49 both act', async (t) => {
+    const said = ['The list holds at most 50 agents, including those switched off.', 'Remove one to add another.'];
+    const items = Array.from({ length: 50 }, (_, index) => api(`a${index}`, `openai/model-${index}`, index % 3 ? {} : { enabled: false }));
+    // A held control: reachable (not disabled), described by its own hint, which a mouse, a finger or the keyboard shows.
+    const heldWithHint = async (control) => {
+        const host = control.closest('[data-full-hint]');
+        const hint = host.querySelector('.ui-hint');
+        assert.deepEqual([control.disabled, control.getAttribute('aria-disabled'), control.getAttribute('aria-describedby')], [false, 'true', hint.id]);
+        assert.deepEqual([hint.hidden, hint.querySelector('.ui-hint-text').textContent, hint.querySelector('.ui-hint-rule').textContent], [true, ...said]);
+        for (const [show, hide] of [['pointerenter', 'pointerleave'], ['focusin', 'focusout'], ['click', 'focusout']]) {
+            await host.fire(show, {});
+            assert.equal(hint.hidden, false, `${show} shows why`);
+            await host.fire(hide, {});
+            assert.equal(hint.hidden, true, `${hide} hides it`);
+        }
+    };
+    const list = await open(t, 'agents', { items });
+    const add = list.container.querySelector('[data-subagent-add]');
+    assert.equal(list.heads().length, 50);
+    await heldWithHint(add);
+    assert.equal(list.container.querySelectorAll('.ui-hint').length, 1, 'one fact, in the hint of Add only');
+    assert.equal(list.container.textContent.split('holds at most').length, 2, 'said once: in that hint, by no line of the page');
+    await add.fire('click', { target: add });
+    assert.deepEqual(list.opened, [], 'a held Add opens no new agent');
+    list.handle.unmount();
+    const full = await open(t, 'agents/a49', { env: list.env, server: list.server });
+    const duplicate = full.container.querySelector('[data-subagent-duplicate]');
+    await heldWithHint(duplicate);
+    assert.equal(full.container.querySelectorAll('.ui-hint').length, 1, 'the page holds Duplicate only');
+    await duplicate.fire('click', { target: duplicate });
+    assert.deepEqual(full.opened, [], 'a full list opens no copy');
+    full.handle.unmount();
+    list.server.roster.items.pop();
+    const room = await open(t, 'agents/a0', { env: list.env, server: list.server });
+    const copy = room.container.querySelector('[data-subagent-duplicate]');
+    assert.deepEqual([copy.getAttribute('aria-disabled'), room.container.querySelector('.ui-hint')], [null, null]);
+    await copy.fire('click', { target: copy });
+    assert.deepEqual(room.opened, ['agents/new'], 'the 50th agent is a copy away');
+    room.handle.unmount();
+    const fewer = await open(t, 'agents', { env: list.env, server: list.server });
+    const free = fewer.container.querySelector('[data-subagent-add]');
+    assert.deepEqual([free.disabled, free.getAttribute('aria-disabled'), fewer.container.querySelector('.ui-hint')], [false, null, null]);
+    assert.equal(list.server.posts.length, 0, 'looking writes nothing');
+});
+
 test('Subagents may change files is a strip over the stored spelling: Auto is the unset value, and a receipt reads back in its words', async (t) => {
     const page = await open(t);
     const fold = page.container.querySelector('[data-agents-fold]');
