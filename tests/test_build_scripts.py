@@ -1541,7 +1541,7 @@ def test_ci_release_preflight_validates_tag_matches_version():
 
 _RELEASE_REQUIRED = ("build", "windows-proof", "release-preflight", "lint", "full-test", "system-e2e-mock",
                      "ui-smoke", "integration-test", "marker-guards", "docker-ui-smoke", "docker-portable-test",
-                     "skill-smoke", "test-verdict")
+                     "skill-smoke", "test-verdict", "quick-test")
 
 
 def test_ci_collects_independent_failures_without_relaxing_release_gates():

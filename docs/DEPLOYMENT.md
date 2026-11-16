@@ -179,16 +179,18 @@ Desktop (macOS, Windows, Linux):
 Each skill's Python environment is rebuilt from its declared packages under the
 new interpreter: enabled skills at the first start, others when enabled.
 Packages added to a skill environment by hand are not carried over. A fresh 3.12
-environment has no setuptools (`pkg_resources`, `distutils`), and neither has
-the app's own Python any more: a skill that imports them must declare
-`setuptools`. Without network, or when a declared package has no Python 3.12
-wheel, the rebuild fails and is retried at the next start (the latter until the
-skill moves its pin). To go back, quit the new app and start the kept one: it
-reads its own 3.10 packages and environments rebuild again. A managed container
-moves the same way: Update on the current image, then start the new image on the
-same volumes (Containers below). Android's Ubuntu 24.04 environment already runs
-Python 3.12, so its Update alone brings Pillow 13. A source checkout on Python
-3.10 keeps Pillow 12.3; recreating its environment on Python 3.12
+environment has no setuptools, and neither has the app's own Python any more: a
+skill that uses setuptools or its `distutils` shim must declare `setuptools`,
+and code that imports `pkg_resources`, which current setuptools no longer ships,
+moves to `importlib.metadata` or `importlib.resources`. Without network, or when
+a declared package has no Python 3.12 wheel, the rebuild fails and is retried at
+the next start (the latter until the skill moves its pin). To go back, quit the
+new app and start the kept one: it reads its own 3.10 packages and environments
+rebuild again. A managed container moves the same way: Update on the current
+image, then start the new image on the same volumes (Containers below).
+Android's Ubuntu 24.04 environment already runs Python 3.12, so its Update alone
+brings Pillow 13. A source checkout on Python 3.10 keeps Pillow 12.3; recreating
+its environment on Python 3.12
 (`uv sync --locked --extra browser --group dev --python 3.12`) brings Pillow 13.
 
 The move leaves what only the old app reads; delete it once that app is gone:

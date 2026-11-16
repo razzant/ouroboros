@@ -14,7 +14,7 @@ Secret-free `post-merge.yml` coalesces `ouroboros` pushes: affected Linux/WAL an
 
 | Tier | Jobs | Trust boundary |
 |---|---|---|
-| Read-only checks | `lint` (ruff F, ESLint, Pages), `shard-plan` → `quick-test` (PERSIST, 3 shards), `sqlite-floor` (SQLite 3.37.2), `betterleaks-platform-smoke`, `benchmark-methodology` | `lint` gates releases; it and `benchmark-methodology` also run on tags, the rest on dispatch. No provider secrets |
+| Read-only checks | `lint` (ruff F, ESLint, Pages), `shard-plan` → `quick-test` (PERSIST, 3 shards), `sqlite-floor` (SQLite 3.37.2), `betterleaks-platform-smoke`, `benchmark-methodology` | `lint`, `quick-test` gate releases; `benchmark-methodology` also on tags; others on dispatch. No provider secrets |
 | Android source/build proof | `android-test` | `release` runs and tags; `android/tests`, release tests and disposable-key APK compilation; no publisher secrets |
 | Android emulator proof | `android-emulator-smoke` | Tags or verified `android/` changes; install/start and same-UID PackageInstaller readback on an x86_64 API matrix; no publisher secrets |
 | Browser consumer proof | `ui-browser.yml`, called by `ci.yml` and `ui-browser-push.yml` | Full lane for manual/tag qualification; the manual entry adds partial diagnostics. Tags/dispatch never take the documentation-only skip. Nine `ui-shard` jobs and `ui-manifest` share the frozen plan; `ui-smoke` reconciles shards against that manifest and rejects red sessions. No schedule, no provider secrets |
