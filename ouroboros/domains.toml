@@ -38,6 +38,9 @@
 # Canonical working-view metadata/projections belong to D03. Plan author-source
 # retention belongs to the D06 review stack and reaches D05's source store lazily.
 
+# The pin's Node is prepared single-flight by D11's boot owner (server_boot.request_pinned_node);
+# its acting consumers ask it lazily: D07 attach, D14 skills/companions, D06 gate Node lane.
+
 [meta]
 reference_tree = "ouroboros_v7_wip @ 9f691656e7e756c483f72ef549418c0e7a1b8054 (frozen)"
 population_rule = "git-tracked *.py under ouroboros/ and supervisor/, plus server.py and launcher.py"
@@ -239,6 +242,7 @@ D20 = "Presence"
 "ouroboros/knowledge_rows.py" = "D15"  # how a history row stores a version's text (by change against a hash-named base, or whole) and its one verified reader
 "ouroboros/text_change.py" = "D15"  # the exact two-way change between two note versions (pure)
 "ouroboros/memory_publication.py" = "D15"
+"ouroboros/memory_texts.py" = "D15"  # one editor of identity, the world map and a project's workpad (overwrite, edit, revert) and their version reads
 "ouroboros/markdown_source.py" = "D18"
 "ouroboros/reference_books.py" = "D18"
 "ouroboros/context.py" = "D03"
@@ -369,6 +373,7 @@ D20 = "Presence"
 "ouroboros/gateway/extension_receipts.py" = "D11"
 "ouroboros/gateway/files.py" = "D11"
 "ouroboros/gateway/history.py" = "D11"
+"ouroboros/gateway/chat_search.py" = "D11"
 "ouroboros/gateway/place_history.py" = "D11"
 "ouroboros/gateway/history_paging.py" = "D11"
 "ouroboros/gateway/history_chronology.py" = "D11"
@@ -396,6 +401,7 @@ D20 = "Presence"
 "ouroboros/gateway/skill_my_skills.py" = "D11"
 "ouroboros/gateway/skill_publish.py" = "D11"
 "ouroboros/gateway/skill_source_contracts.py" = "D11"
+"ouroboros/gateway/skill_mcp_contracts.py" = "D11"
 "ouroboros/gateway/skill_sources.py" = "D11"
 "ouroboros/gateway/state.py" = "D11"
 "ouroboros/gateway/state_publication.py" = "D11"  # the /api/state display publication: one producer per revision
@@ -407,6 +413,7 @@ D20 = "Presence"
 "ouroboros/gateway/work_projection.py" = "D11"  # server observations for the work projection
 "ouroboros/gateway/completion_gist.py" = "D11"  # completion openings at the browser boundary
 "ouroboros/gateway/work_contracts.py" = "D11"
+"ouroboros/gateway/project_folder_contracts.py" = "D11"
 "ouroboros/gateway/task_events.py" = "D11"
 "ouroboros/gateway/task_reviews.py" = "D11"
 "ouroboros/gateway/task_archive.py" = "D11"
@@ -500,6 +507,7 @@ D20 = "Presence"
 "ouroboros/marketplace/install_specs.py" = "D14"
 "ouroboros/marketplace/isolated_deps.py" = "D14"
 "ouroboros/marketplace/provenance.py" = "D14"
+"ouroboros/mcp_discovery.py" = "D05"  # the manager-owned configuration/listing worker
 "ouroboros/mcp_client.py" = "D05"
 "ouroboros/mcp_catalog.py" = "D05"
 "ouroboros/mcp_schema.py" = "D05"
@@ -608,6 +616,7 @@ D20 = "Presence"
 "ouroboros/project_sources.py" = "D17"
 "ouroboros/projects_registry.py" = "D17"
 "ouroboros/project_closure.py" = "D17"  # reversible closure, separate from routing lifecycle
+"ouroboros/project_folder.py" = "D17"  # one room's working folder: the view and the change its menu and the mind share
 "ouroboros/promotion_source.py" = "D08"
 "ouroboros/protected_artifacts.py" = "D04"
 "ouroboros/provider_connections.py" = "D02"
@@ -700,6 +709,7 @@ D20 = "Presence"
 "ouroboros/skill_identity.py" = "D14"
 "ouroboros/skill_install_record.py" = "D14"
 "ouroboros/skill_lifecycle_actions.py" = "D14"
+"ouroboros/skill_mcp.py" = "D14"
 "ouroboros/secret_requests.py" = "D14"  # a skill's declared secret fields, their readers and the form outcome
 "ouroboros/skill_conflicts.py" = "D14"
 "ouroboros/skill_lifecycle_queue.py" = "D14"
@@ -805,6 +815,8 @@ D20 = "Presence"
 "ouroboros/tools/__init__.py" = "D04"
 "ouroboros/tools/arg_feedback.py" = "D04"
 "ouroboros/tools/browser.py" = "D05"
+"ouroboros/browser_output.py" = "D05"
+"ouroboros/tools/browser_session.py" = "D05"
 "ouroboros/tools/chronicle.py" = "D15"
 "ouroboros/tools/preflight_review.py" = "D06"
 "ouroboros/tools/commit_gate.py" = "D10"
@@ -1021,6 +1033,7 @@ D20 = "Presence"
 "supervisor/git_ops_updates.py" = "D10"
 "supervisor/log_addressing.py" = "D08"
 "supervisor/message_bus.py" = "D08"
+"supervisor/message_origin.py" = "D08"
 "supervisor/message_ingress.py" = "D08"
 "supervisor/owner_stop.py" = "D09"
 "supervisor/queue.py" = "D08"
@@ -1364,6 +1377,7 @@ lazy_only = [
   "D06->D03",
   "D06->D05",
   "D06->D08",
+  "D06->D11",
   "D06->D14",
   "D06->D15",
   "D07->D03",

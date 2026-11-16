@@ -437,9 +437,12 @@ def test_ui_smoke_reversed_state_responses_do_not_resurrect_main_root(
 
                 # The follow-up N+1, started when the open retired N, proves queue
                 # loss and carries the fresh binding.
+                # A changed map comes whole with its own revision; the server answers a reader's
+                # `bindings_since` "unchanged" only while the map is the same (CLIENT_CONTRACT "Task bindings").
                 assert page.evaluate(
                     """() => window.__settleStateResponse(1, [], {
                         task_bindings: {'fresh-binding': {project_id: 'fresh', chat_id: 77}},
+                        task_bindings_revision: 'fresh-binding-revision', task_bindings_unchanged: false,
                     })"""
                 )
                 page.wait_for_function("() => window.__taskDetailCalls.length === 1")

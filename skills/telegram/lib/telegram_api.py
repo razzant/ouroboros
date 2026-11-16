@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import html as html_lib
 import mimetypes
 import os
 import pathlib
 import re
 import stat
+from contextlib import nullcontext
 from typing import Any, BinaryIO, Dict, Optional
 
 import httpx
@@ -30,6 +32,18 @@ _MAX_TELEGRAM_DOWNLOAD_BYTES = 10 * 1024 * 1024
 # Outgoing document transport is independent of this integration's inbound cap.
 _MAX_TELEGRAM_UPLOAD_BYTES = 50 * 1024 * 1024
 _NOT_MODIFIED_PREFIX = "bad request: message is not modified"
+# A failure before any request byte could reach Telegram: connecting, a proxy's refused tunnel, a pool wait.
+_UNSENT_FAILURES = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ProxyError)
+# The requests that create or change a message in the owner's chat. Inside an outbound operation
+# (lib/telegram_outbox.py, which sets OUTBOUND_JOURNAL around one mirrored event) each is one journaled part.
+JOURNALED_METHODS = frozenset({"sendMessage", "sendPhoto", "sendVideo", "sendDocument", "sendAudio", "editMessageText"})
+OUTBOUND_JOURNAL: contextvars.ContextVar = contextvars.ContextVar("telegram_outbound_journal", default=None)
+
+
+def replacing_request():
+    """Scope the handler's fallback to the refused request it replaces, including every new chunk."""
+    journal = OUTBOUND_JOURNAL.get()
+    return journal.replacement() if journal is not None and not journal.probing else nullcontext()
 
 
 def _u16len(value: str) -> int:
@@ -51,7 +65,7 @@ def _take_u16_prefix(value: str, budget: int) -> tuple[str, str]:
 
 
 class TelegramRequestRejected(RuntimeError):
-    """Telegram returned an explicit negative API response."""
+    """Telegram returned an explicit negative API response; ``retry_after`` is its flood-control wait (429)."""
 
     def __init__(
         self,
@@ -59,18 +73,35 @@ class TelegramRequestRejected(RuntimeError):
         *,
         status_code: int = 0,
         plain_retry_safe: bool = False,
+        retry_after: int = 0,
     ) -> None:
         super().__init__(message)
         self.status_code = int(status_code or 0)
         self.plain_retry_safe = bool(plain_retry_safe)
+        self.retry_after = max(0, int(retry_after or 0))
 
     @property
     def transient(self) -> bool:
         return self.status_code == 429 or self.status_code >= 500
 
+    @property
+    def unsent(self) -> bool:
+        """A 4xx answer created no message; a 5xx may follow a message Telegram already created."""
+        return 0 < self.status_code < 500
+
 
 class TelegramTransportError(RuntimeError):
-    """Telegram could not return a trustworthy API response yet."""
+    """Telegram could not return a trustworthy API response yet.
+
+    ``unsent`` is True only for a failure before any request byte could reach Telegram (connecting, a
+    proxy's refused tunnel, a pool wait); a broken or slow answer, a reset or an unreadable body may follow
+    a message Telegram already created, so it stays False: such a request is never sent again as new.
+    """
+
+    def __init__(self, message: str, *, unsent: bool = False, cause: str = "") -> None:
+        super().__init__(message)
+        self.unsent = bool(unsent)
+        self.cause = str(cause or "")  # the transport's own failure class, for status and logs
 
 
 class TelegramTokenMissing(ValueError):
@@ -86,17 +117,27 @@ class TelegramBindingChanged(RuntimeError):
     token's client. Broad fallbacks re-raise it instead of trying another form of the same request.
     """
 
-    def __init__(self, accepted: int = 0) -> None:
+    def __init__(self, accepted: int = 0, *, unsent: bool = True) -> None:
         super().__init__("The Telegram bot token changed; this operation stopped before its next request.")
         self.accepted = int(accepted)
+        self.unsent = bool(unsent)  # False: the request in flight at the change may have been delivered
 
 
-# Shared degraded-transport pacing contract for the poller and notifier loops:
+# Shared degraded-transport pacing contract for the poller, notifier and outbox loops:
 # the first retry waits TELEGRAM_RETRY_INITIAL_SEC and each further consecutive
 # failure doubles the wait monotonically up to TELEGRAM_RETRY_MAX_SEC; any
 # successful API round resets the wait to the initial value.
 TELEGRAM_RETRY_INITIAL_SEC = 5
 TELEGRAM_RETRY_MAX_SEC = 60
+
+
+def _retry_after(payload: Dict[str, Any]) -> int:
+    """Telegram's flood-control wait in whole seconds (``parameters.retry_after``); 0 when absent."""
+    parameters = payload.get("parameters")
+    try:
+        return max(0, int(parameters.get("retry_after") or 0)) if isinstance(parameters, dict) else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def next_telegram_retry_delay(current: float) -> float:
@@ -590,19 +631,19 @@ def _telegram_html_to_plain(value: str) -> str:
     return html_lib.unescape(re.sub(r"<[^>]+>", "", value))
 
 
-def message_chunks(text: str, parse_mode: str = "HTML") -> list[str]:
+def message_chunks(text: str, parse_mode: str = "HTML", *, limit: int = _TELEGRAM_TEXT_LIMIT) -> list[str]:
     """The Telegram messages ``send_message`` sends for ``text``, blank parts dropped."""
     source = str(text or "")
     if parse_mode != "HTML":
-        return [chunk for chunk in _chunk_raw_text(source) if chunk.strip()]
-    return [chunk for chunk in markdown_to_telegram_chunks(source) if _telegram_html_to_plain(chunk).strip()]
+        return [chunk for chunk in _chunk_raw_text(source, limit) if chunk.strip()]
+    return [chunk for chunk in markdown_to_telegram_chunks(source, limit) if _telegram_html_to_plain(chunk).strip()]
 
 
 class TelegramClient:
     def __init__(self, token: str, *, trust_env: bool = False, proxy: Optional[str] = None,
                  on_message=None, reply_to_message_id: int = 0,
                  api_base_url: Optional[str] = None, files_dir: Optional[str] = None, binding=None,
-                 generation: Optional[int] = None):
+                 generation: Optional[int] = None, origin_label: str = ""):
         # A client of the bridge's accepted token (lib/telegram_token.py) is one identity: the token and
         # generation of ONE snapshot (the caller's, which also chose its bot-specific references, or taken
         # here). A binding that moved on since makes it refuse its next request, never switch tokens.
@@ -618,6 +659,7 @@ class TelegramClient:
         # One observer per mirrored host row, called for EVERY confirmed part,
         # including media and edits. A later chunk failure cannot erase earlier ids.
         self.on_message = on_message
+        self.origin_label = str(origin_label or "")
         self.reply_to_message_id = int(reply_to_message_id)
         if not self.token:
             raise TelegramTokenMissing("TELEGRAM_BOT_TOKEN is missing")
@@ -637,18 +679,51 @@ class TelegramClient:
         if self._binding is not None and not self._binding.current(self.generation):
             raise TelegramBindingChanged(self.accepted)
 
+    def origin_prefix(self, parse_mode: str = "") -> str:
+        """The source label's own line; a name is literal text, never Markdown/HTML supplied by a task."""
+        if not self.origin_label:
+            return ""
+        return (f"<i>{html_lib.escape(self.origin_label)}</i>" if parse_mode == "HTML" else self.origin_label) + "\n"
+
+    @property
+    def text_limit(self) -> int:
+        return _TELEGRAM_TEXT_LIMIT - _u16len(self.origin_prefix("HTML"))
+
+    async def media_caption(self, chat_id: int, caption: str) -> str:
+        """Reserve the origin in Telegram's 1024-unit caption; spill full text once before a format fallback."""
+        if self.origin_label and _u16len(self.origin_prefix("HTML") + markdown_to_telegram_html(caption)) > 1024:
+            await self.send_message(chat_id, caption)
+            return ""
+        return caption
+
     def _failed(self, failure: Exception) -> Exception:
         """What a failed request raises: its own failure while this client's token is in force. Once the binding
         moved on, any failure (a refusal, a broken transport, an unreadable answer) belongs to the replaced token,
         so it ends as the typed change with the parts Telegram accepted, never as a failure of the token now in force."""
         if self._binding is not None and not self._binding.current(self.generation):
-            return TelegramBindingChanged(self.accepted)
+            return TelegramBindingChanged(self.accepted, unsent=bool(getattr(failure, "unsent", False)))
         return failure
 
     async def call(self, method: str, *, data: Optional[dict] = None, files: Optional[dict] = None, timeout: int = 30) -> Dict[str, Any]:
+        """One Bot API request; inside an outbound operation a message request is that operation's next part."""
+        journal = OUTBOUND_JOURNAL.get()
+        if journal is not None and method in JOURNALED_METHODS:
+            return await journal.call(self, method, data=data, files=files, timeout=timeout)
+        return await self.request(method, data=data, files=files, timeout=timeout)
+
+    async def request(self, method: str, *, data: Optional[dict] = None, files: Optional[dict] = None,
+                      timeout: int = 30) -> Dict[str, Any]:
+        """The request itself, never journaled: what ``call`` and an operation's part send."""
         self.check_binding()
         method_text = str(method or "")
         safe_method = method_text if re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,63}", method_text) else "request"
+        if self.origin_label and method_text in {"sendMessage", "editMessageText", "sendPhoto", "sendVideo", "sendDocument", "sendAudio"}:
+            data = dict(data or {})
+            mode = str(data.get("parse_mode") or "")
+            prefix = self.origin_prefix(mode)
+            field = "text" if method_text in {"sendMessage", "editMessageText"} else "caption"
+            body = str(data.get(field) or "")
+            data[field] = prefix.rstrip() if not body else prefix + body
         if self.reply_to_message_id and method_text in {"sendMessage", "sendPhoto", "sendVideo", "sendDocument", "sendAudio"}:
             data = {**(data or {}), "reply_to_message_id": self.reply_to_message_id,
                     "allow_sending_without_reply": True}
@@ -660,11 +735,14 @@ class TelegramClient:
             ) as client:
                 self.check_binding()  # entering the transport may yield: the request itself starts only here
                 response = await client.post(f"{self.api_base}/{method_text}", data=data, files=files)
-        except httpx.TimeoutException:
-            raise self._failed(TelegramTransportError(f"Telegram API timed out during {safe_method}.")) from None
+        except httpx.TimeoutException as exc:
+            raise self._failed(TelegramTransportError(f"Telegram API timed out during {safe_method}.",
+                                                      unsent=isinstance(exc, _UNSENT_FAILURES),
+                                                      cause=type(exc).__name__)) from None
         except httpx.HTTPError as exc:
             raise self._failed(TelegramTransportError(
-                f"Telegram API transport failed during {safe_method} ({type(exc).__name__})."
+                f"Telegram API transport failed during {safe_method} ({type(exc).__name__}).",
+                unsent=isinstance(exc, _UNSENT_FAILURES), cause=type(exc).__name__,
             )) from None
         try:
             payload = response.json()
@@ -694,12 +772,14 @@ class TelegramClient:
                 f"Telegram API {safe_method} returned HTTP {response.status_code}.",
                 status_code=response.status_code,
                 plain_retry_safe=(safe_method == "sendMessage" and response.status_code == 400),
+                retry_after=_retry_after(payload),
             ))
         if not payload.get("ok"):
             raise self._failed(TelegramRequestRejected(
                 f"Telegram API rejected {safe_method}.",
                 status_code=api_status,
                 plain_retry_safe=(safe_method == "sendMessage" and api_status == 400),
+                retry_after=_retry_after(payload),
             ))
         self.accepted += 1
         self._observe_message(data, payload.get("result"))
@@ -803,7 +883,7 @@ class TelegramClient:
         """
         muted = {"disable_notification": True} if disable_notification else {}
         last_message_id = 0
-        for formatted in message_chunks(text, parse_mode):
+        for formatted in message_chunks(text, parse_mode, limit=self.text_limit):
             data = {"chat_id": str(chat_id), "text": formatted, **muted}
             if parse_mode:
                 data["parse_mode"] = parse_mode
@@ -812,11 +892,12 @@ class TelegramClient:
             except TelegramRequestRejected as exc:
                 if parse_mode != "HTML" or not exc.plain_retry_safe:
                     raise
-                payload = await self.call(
-                    "sendMessage",
-                    data={"chat_id": str(chat_id), "text": _telegram_html_to_plain(formatted), **muted},
-                    timeout=20,
-                )
+                with replacing_request():
+                    payload = await self.call(
+                        "sendMessage",
+                        data={"chat_id": str(chat_id), "text": _telegram_html_to_plain(formatted), **muted},
+                        timeout=20,
+                    )
             try:
                 last_message_id = int((payload.get("result") or {}).get("message_id") or 0)
             except (TypeError, ValueError):
@@ -871,8 +952,8 @@ class TelegramClient:
         data = {"chat_id": str(chat_id)}
         if formatted:
             data["caption"] = formatted
-            if parse_mode:
-                data["parse_mode"] = parse_mode
+        if parse_mode and (formatted or self.origin_label):  # a label alone is still HTML
+            data["parse_mode"] = parse_mode
         await self.call("sendDocument", data=data, files=files, timeout=60)
 
     async def send_audio(
@@ -892,8 +973,8 @@ class TelegramClient:
         data = {"chat_id": str(chat_id)}
         if formatted:
             data["caption"] = formatted
-            if parse_mode:
-                data["parse_mode"] = parse_mode
+        if parse_mode and (formatted or self.origin_label):  # a label alone is still HTML
+            data["parse_mode"] = parse_mode
         await self.call("sendAudio", data=data, files=files, timeout=60)
 
     async def send_message_with_inline_keyboard(

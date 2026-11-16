@@ -247,8 +247,18 @@ def _presentation(page, feed, task_id, answer, case, project, *, managed=False):
         main_answer = page.locator("#chat-messages").get_by_text(answer, exact=True)
         if managed:
             mirror = page.locator(f'#chat-messages [data-system-type="project_completion_summary"][data-task-id="{task_id}"][data-project-id="{project["id"]}"]')
+            # A Project covering Main whole (the phone's card) leaves Main away and quiet until it shows again
+            # (PR #2951; DESIGN "Moving between places"): the mirror is read in Main, then the room is back.
+            covered = page.viewport_size["width"] < 980 and page.locator("#project-panel.open").count() == 1
+            if covered:
+                page.locator("#project-panel-close").click()
+                page.wait_for_function("() => !document.getElementById('project-panel').classList.contains('open')")
             mirror.get_by_text(answer, exact=True).wait_for(timeout=30000)
             assert mirror.count() == 1 and main_answer.count() == 1
+            if covered:
+                _click_project(page, project)
+                page.wait_for_function("feed => { const node = document.querySelector(feed); return node && !node.closest('[inert]'); }",
+                                       arg=feed)
         else:
             assert main_answer.count() == 0
     return {"answer_count": output.count(), "card_count": card.count(),

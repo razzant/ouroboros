@@ -5,7 +5,11 @@ refused/timed out before request bytes left this host, $0 in the ledger) is not 
 model failure, and one provider's failure does not prove the egress dead: the
 round first tries every configured route (``loop_model_call._recover_failed_round``),
 and only when none answered does the round gate in ``loop.py`` latch a
-:class:`TransportWaitEpisode` and wait: durable
+:class:`TransportWaitEpisode` and wait. Two unsent sends are no model failure and
+open no walk, which would write the work's whole start on another route; their
+round waits on its model (``fallback_chain_allowed``): no free slot in the install's
+own queue (``model_concurrency``), and its own Claudexor daemon unanswered before
+create, which every Claudexor route shares (``engine_unanswered``). A wait is durable
 ``network_wait`` events + owner progress notes, an interruptible backoff sleep,
 then a free redial of the SAME round (the round budget is not consumed). A managed
 task waits as long as its existing rails allow — owner deadline minus the
@@ -57,6 +61,7 @@ from ouroboros.config import (
 )
 from ouroboros.deadline_utils import parse_deadline_ts
 from ouroboros.loop_llm_call import TRANSPORT_DEATHS_KEY, _TRANSIENT_BACKOFF_CAP_SEC, _exception_body
+from ouroboros.llm_claudexor import daemon_not_delivered
 from ouroboros.llm_probe import upstream_transport_reachable
 from ouroboros.model_concurrency import capacity_refusal
 from ouroboros.owner_mailbox import OwnerMailboxPeek
@@ -91,6 +96,7 @@ class TransportWaitEpisode:
     final_redial_done: bool = False
     outcome_custody: Dict[str, Any] = field(default_factory=dict)
     continuation_granted: bool = False
+    engine_unanswered: bool = False  # its latest failure: the own Claudexor daemon, before create (``engine_unanswered``)
     # A context-only place arrival shortens no backoff: it reaches the next round's drain at the scheduled redial.
     mailbox_peek: OwnerMailboxPeek = field(default_factory=lambda: OwnerMailboxPeek(waking_only=True), repr=False)
 
@@ -265,6 +271,15 @@ def slot_wait_note(emit_progress: Optional[Callable[[str], Any]], usage: Any = N
     return note
 
 
+def engine_unanswered(usage: Any) -> bool:
+    """The acting route's latest attempt met the install's own Claudexor daemon unanswered before create
+    (``llm_claudexor.daemon_not_delivered``; a failed walk's candidate row never stands in for it). Like a full local
+    queue, it is no failure of the model: every Claudexor route shares that daemon, so the work waits on its model."""
+    if not isinstance(usage, dict) or usage.get("_last_llm_error_kind") != "transport_unavailable":
+        return False
+    return daemon_not_delivered(usage.get("_acting_route_failure") or usage.get("_last_llm_failure"))
+
+
 def primary_refusal_wait(ctx: Any, error_kind: str) -> bool:
     """A declared primary wait keeps temporary refusals on ordinary paced recovery."""
     return bool(getattr(ctx, "route_wait_on_primary", False) and error_kind in PRIMARY_REFUSAL_KINDS
@@ -291,7 +306,9 @@ def fallback_chain_allowed(
     (``loop_model_call._recover_context_overflow``) left the round unanswered: the
     candidates inherit the compacted view (owner decision 7A, rung f). A send that found
     no slot in the install's own queue (``model_concurrency``) never opens them: the model
-    did not fail, and a move would write the work's whole start on another route (owner, 13.11).
+    did not fail, and a move would write the work's whole start on another route (owner, 13.11). Nor does the
+    acting route's own Claudexor daemon left unanswered once its same-route repeats are spent (``engine_unanswered``;
+    owner wait-first, 13.11): the round's episode waits; a candidate's daemon failure mid-walk stops no walk.
     """
     usage = accumulated_usage or {}
     if bool(getattr(ctx, "exact_model_route", False)):
@@ -301,8 +318,8 @@ def fallback_chain_allowed(
         # repeat with no usable response since): no paid candidate may dial over
         # it, whatever the last kind says.
         return False
-    if primary_refusal_wait(ctx, last_error_kind) or capacity_refusal(usage):
-        return False  # a chosen wait on the primary; the install's own full queue is no failure of the model
+    if primary_refusal_wait(ctx, last_error_kind) or capacity_refusal(usage) or engine_unanswered(usage):
+        return False  # a chosen wait on the primary; the install's own full queue or silent daemon is no model failure
     if getattr(ctx, "route_wait_on_primary", False) and (
             last_error_kind in ("transport_unavailable", "provider_outcome_unknown", "content_filter")
             or usage.get("_last_llm_resource_refusal")):
@@ -333,7 +350,8 @@ def reconcile_transport_wait(
     without treating a ready account catalog as proof of generation recovery.
     Enters a new episode on a fresh ``transport_unavailable`` failure, or an
     eligible unknown outcome (``new_generation_after_unknown``), that the
-    configured routes did not answer, or ahead of them for an acting primary's first
+    configured routes did not answer or that opened none (a full local queue, the
+    own daemon unanswered: ``fallback_chain_allowed``), or ahead of them for an acting primary's first
     lost answer (durable ``entered`` event; the first owner note fires immediately). An interactive
     turn's episode gets the idle-timeout bound at entry, because the bound is
     measured from entry and the turn has no other rail. ``emit_progress``
@@ -361,7 +379,9 @@ def reconcile_transport_wait(
     probe's freshness bound at that failure. A granted continuation whose round
     made no new attempt (a failed probe, a call that yielded to control) keeps
     its grant untouched. An answer or any other failure class ends the latch
-    exactly as before.
+    exactly as before. ``engine_unanswered`` follows each redial's own failure (a deadline
+    refusal tries nothing and keeps it): a silent own daemon sets it; any other transport
+    failure, a dispatched unknown or a received refusal clears it.
     """
     pending = dict((getattr(ctx, "_accumulated_usage", {}) or {}).get("_pending_transport_outcome") or {})
     unknown_again = error_kind == "provider_outcome_unknown" and new_generation_after_unknown(ctx)
@@ -369,7 +389,8 @@ def reconcile_transport_wait(
     if refused and episode is not None:
         # Catalog readiness is not generation recovery. Keep the existing episode's
         # pacing, elapsed bound and prior unknown custody; only a real answer ends it.
-        episode.wait_cause, episode.continuation_granted = error_kind, False
+        # A received refusal is no silent daemon: the engine's words leave with that failure.
+        episode.wait_cause, episode.continuation_granted, episode.engine_unanswered = error_kind, False, False
         return episode
     if (episode is not None and not episode.continuation_granted and not msg_present and pending and not unknown_again
             and error_kind == episode.wait_cause == "provider_outcome_unknown"):
@@ -395,6 +416,7 @@ def reconcile_transport_wait(
             # disclosed in the transcript) and resumes free redials.
             episode.continuation_granted = False
             episode.wait_cause = error_kind
+            episode.engine_unanswered = engine_unanswered(getattr(ctx, "_accumulated_usage", None))
             if error_kind == "provider_outcome_unknown":
                 episode.started_at = time.time()
                 episode.outcome_custody = pending
@@ -414,7 +436,8 @@ def reconcile_transport_wait(
         # A formerly free redial crossed dispatch and died unknown: the same
         # episode now needs upstream proof before its next attempt; the clock,
         # backoff and redial count carry over instead of a fresh 4s episode.
-        episode.wait_cause = "provider_outcome_unknown"
+        # That attempt was sent: no "not sent" or silent-engine words remain.
+        episode.wait_cause, episode.engine_unanswered = "provider_outcome_unknown", False
         episode.started_at = time.time()
         if pending:
             episode.outcome_custody = pending
@@ -441,6 +464,7 @@ def reconcile_transport_wait(
             started_monotonic=time.monotonic(),
             interactive=interactive,
             wait_bound_sec=float(get_task_idle_timeout_sec()) if interactive else None,
+            engine_unanswered=engine_unanswered(getattr(ctx, "_accumulated_usage", None)),
         )
         emit_network_wait_event(
             drive_logs, task_id=task_id, phase="entered",
@@ -456,6 +480,8 @@ def reconcile_transport_wait(
              "Waiting for connectivity, then continuing from saved work with a new attempt; another charge is possible."
              if unknown else "🌐 No local model slot was free, so this request was not sent — waiting under Requests "
              "at once per model and trying again automatically ($0)." if capacity_refusal(getattr(ctx, "_accumulated_usage", None)) else
+             "🌐 The local Claudexor engine is not answering, so this request was not sent ($0 for it). The work keeps "
+             "its model, tries no other route and retries automatically within its existing limits." if episode.engine_unanswered else
              "🌐 The request did not reach the provider — waiting and redialing automatically (failed attempts are $0).")
             + ("" if interactive else " Stop cancels."),
             incident=None,
@@ -474,6 +500,8 @@ def reconcile_transport_wait(
         emit_progress(
             (f"🌐 Primary provider answered after {elapsed / 60.0:.1f} min — resuming."
              if episode.wait_cause in PRIMARY_REFUSAL_KINDS else
+             f"🌐 Model response received after {elapsed / 60.0:.1f} min — resuming."
+             if episode.engine_unanswered else
              f"🌐 Provider connection restored after {elapsed / 60.0:.1f} min — resuming."),
             incident=None,
         )
@@ -496,6 +524,8 @@ def reconcile_transport_wait(
                 incident=None,
             )
         return None
+    if error_kind == "transport_unavailable":  # the latest redial's own failure words the next notes
+        episode.engine_unanswered = engine_unanswered(getattr(ctx, "_accumulated_usage", None))
     return episode
 
 
@@ -671,8 +701,9 @@ def transport_wait_step(
     if remaining is not None:
         remaining = max(0.0, remaining)
     capacity = capacity_refusal(getattr(getattr(tools, "_ctx", None), "_accumulated_usage", None))
-    waiting_for = ("a free local model slot" if capacity else "the primary provider"
-                   if episode.wait_cause in PRIMARY_REFUSAL_KINDS else "a provider connection")
+    unsent = capacity or episode.engine_unanswered  # the latest request was not sent: no slot, or no own daemon
+    waiting_for = ("a free local model slot" if capacity else "the local Claudexor engine" if episode.engine_unanswered
+                   else "the primary provider" if episode.wait_cause in PRIMARY_REFUSAL_KINDS else "a provider connection")
 
     def _ended(detail: str) -> bool:
         emit_network_wait_event(
@@ -681,7 +712,7 @@ def transport_wait_step(
         )
         if episode.interactive:
             emit_progress(f"🌐 Stopped waiting for {waiting_for} after {elapsed / 60.0:.1f} min — " + (
-                "its last request was not sent, and this turn ends without an answer." if capacity
+                "its last request was not sent, and this turn ends without an answer." if unsent
                 else "this turn ends as an outage."), incident=None)
         return False
 
@@ -716,7 +747,8 @@ def transport_wait_step(
     if time.monotonic() - episode.last_note_monotonic >= note_interval:
         episode.last_note_monotonic = time.monotonic()
         emit_progress(f"🌐 Still waiting for {waiting_for} — {elapsed / 60.0:.0f} min elapsed, {episode.redials} " + (
-            "retries; the latest request was not sent" if capacity else "redials") + "; will resume automatically.",
+            "retries; the latest request was not sent" if unsent else "redials")
+            + ("; the work keeps its model" if episode.engine_unanswered else "") + "; will resume automatically.",
             incident=None)  # a periodic note is never a toast; the episode always passes incident=
     emit_network_wait_event(
         drive_logs, task_id=task_id, phase="waiting", elapsed_sec=elapsed,
@@ -882,8 +914,10 @@ def _provider_terminal_text(
     if control_reason in {REASON_OWNER_REQUESTED_FINALIZATION, REASON_OWNER_STOPPED_DIRECT_TURN}:
         action = "Stop" if control_reason == REASON_OWNER_STOPPED_DIRECT_TURN else "Wrap up"
         waited = f" The wait ended after {waited_sec / 60.0:.1f} min;" if waited_sec else ""
-        subject = ("the primary provider was refusing requests" if wait_cause in PRIMARY_REFUSAL_KINDS else "requests were not reaching the provider"
-                   if wait_cause == "transport_unavailable" else "the provider had not returned a usable answer")
+        subject = ("the primary provider was refusing requests" if wait_cause in PRIMARY_REFUSAL_KINDS
+                   else "the local Claudexor engine was not answering" if engine_unanswered(accumulated_usage)
+                   else "requests were not reaching the provider" if wait_cause == "transport_unavailable"
+                   else "the provider had not returned a usable answer")
         return (f"⚠️ The owner requested {action} while {subject}."
                 f"{waited} No new summary request was sent. Any files written so far are preserved."
                 + (provider_recovery_hint(accumulated_usage) if unknown else ""))
@@ -922,6 +956,11 @@ def _provider_terminal_text(
             waited = f" after {waited_sec / 60.0:.1f} min of waiting" if waited_sec > 0 else ""
             text = ("⚠️ Local model capacity stayed unavailable: no slot under Requests at once per model freed for "
                     f"the last request, so it was not sent, and {subject} ended{waited} without completing.")
+        elif engine_unanswered(accumulated_usage):  # the own daemon stayed silent before create: the model did not fail
+            # The last request's facts only: an earlier round may have walked, or adopted another route, before.
+            waited = f" after {waited_sec / 60.0:.1f} min of waiting" if waited_sec > 0 else ""
+            text = ("⚠️ The local Claudexor engine did not answer: the last request was not sent ($0 for it), and "
+                    f"{subject} ended{waited} without completing.")
         elif waited_sec > 0:
             text = (f"⚠️ The request did not reach the provider; {subject} waited and redialed for {waited_sec / 60.0:.1f} "
                     f"min{'' if interactive else ' until its own limits ran out'} and ended as an outage, not completed.")

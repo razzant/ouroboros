@@ -184,7 +184,7 @@ function ensureToolFold(record) {
 /**
  * One frame's fact about one invocation: {key, status, receipt, tool}. Status
  * preserves independent start/wait/settlement facts. Reordered starts never reopen
- * a settled call; a true result replaces only a provisional host-error settlement.
+ * a settled call; a true result replaces only one the host settled (host_error, interrupted).
  */
 export function noteToolCall(record, observation) {
     const key = observation?.key;
@@ -197,7 +197,8 @@ export function noteToolCall(record, observation) {
         tool: observation.tool || prev?.tool || '',
     };
     if (fact === 'settled') {
-        if (!next.settlement || (next.settlement.hostError && !observation.hostError)) {
+        const provisional = (settled) => settled.hostError || settled.status === 'interrupted';  // tool_call_log.HOST_SETTLED_STATUSES
+        if (!next.settlement || (provisional(next.settlement) && !provisional(observation))) {
             next.settlement = { status: observation.status, hostError: Boolean(observation.hostError) };
             next.receipt = Boolean(observation.receipt);
         }
@@ -1529,6 +1530,8 @@ export function renderLiveCardMeta(record, { agentModel = record?.agentModel || 
         ['Supervision', supervision && (rounds || toolCalls)
             ? `${[rounds, toolCalls].filter(Boolean).join(META_PART_SEPARATOR)} (supervising agent; executor session counts are not reported)` : ''],
         ['Updated', escapeHtml(updated)],
+        // Its tier and what its newest call was asked, sent and served as (card_model.js; CLIENT_CONTRACT works[].processing).
+        ['Processing', record.processingDetail ? `<span data-i18n-skip>${escapeHtml(record.processingDetail)}</span>` : ''],
         ...(record.costBreakdownRows || []),  // a root's detail: where its money and work went
     ]);
     const detailChanged = paintLiveDetail(record, 'liveCostDetail', String(record.costMeta?.detail || ''));

@@ -71,7 +71,7 @@ class StorageRemover(TypedDict):
     freed_bytes: NotRequired[int]  # the engine pass
     released: NotRequired[int]  # a retirer pass: items it released; absent from a job that keeps no such count
     holds: NotRequired[List[Dict[str, Any]]]  # a retirer pass, a job or the engine pass: typed holds {class, count, example, since}
-    held: NotRequired[int]  # the engine pass: folders it held (project roots and native homes); a retirer pass: items held
+    held: NotRequired[int]  # the engine pass: folders it held (project roots and native homes); a retirer pass: items held, absent while a hold is uncounted
     held_since: NotRequired[str]  # the earliest of those holds
     errors: NotRequired[int]  # the engine pass's errors; a retirer pass's pass-level errors
     first_error: NotRequired[Optional[str]]
@@ -116,7 +116,9 @@ def _job(name: str, rows: Optional[Dict[str, Dict[str, Any]]], place: str) -> St
     # holds, since when, and what it released where it counts that.
     if "holds" in row and plane in (None, _COMPRESSION_HOLDS) and (name != _RETIREMENT_JOB or place == _RETIREMENT_HOLDS):
         holds = [dict(hold) for hold in row.get("holds") or () if isinstance(hold, dict)]
-        fact["holds"], fact["held"] = holds, sum(int(h.get("count") or 0) for h in holds)
+        fact["holds"] = holds
+        if all(hold.get("count") is not None for hold in holds):  # an uncounted hold has no sum: unknown, never zero
+            fact["held"] = sum(int(hold["count"]) for hold in holds)
         released = row.get("released") if "released" in row else row.get("removed")  # the trash job counts what it removed
         if released is not None:  # a job that keeps no such count says none: unknown, never zero
             fact["released"] = int(released)

@@ -525,6 +525,24 @@ def test_api_only_preview_is_read_only_and_never_reads_claudexor(onboarding):
     assert onboarding.calls["supervisor"] == 0
 
 
+def test_the_preview_names_what_the_limits_of_its_draft_cannot_count(onboarding):
+    """The limits step says before the save what Dashboard › Costs says after it (`pricing.spend_coverage`, over
+    the draft and the roster the preview shows): the roles whose route has no known price, and none where each has."""
+    def gaps(**draft):
+        response = onboarding.client.post("/api/onboarding/subagents/preview", json={**WIZARD_PAYLOAD, **draft})
+        assert response.status_code == 200, response.text
+        return response.json()["known_spend_gaps"]
+
+    assert gaps() == [], "an OpenRouter draft: every route has a catalog price"
+    assert gaps(OPENROUTER_API_KEY="", LOCAL_MODEL_SOURCE="/models/owner.gguf", LOCAL_ROUTING_MODE="all",
+                OUROBOROS_MODEL="owner-main") == [], "a local model costs nothing"
+    direct = gaps(OPENROUTER_API_KEY="", OPENAI_API_KEY="sk-test-openai-key-123456", OUROBOROS_MODEL="openai::gpt-6")
+    assert direct[0] == "all model roles", "a direct key states no price: its limits count none of these calls"
+    assert gaps(OPENAI_API_KEY="sk-test-openai-key-123456", OUROBOROS_MODEL_LIGHT="openai::gpt-6-mini")[:2] == [
+        "Light", "Safety Supervisor"], "only the roles of this draft that leave the priced route"
+    assert not onboarding.settings_path.exists()
+
+
 def test_preview_does_not_persist_unrelated_context_mode_compat(onboarding):
     legacy_bytes = (
         b'{"OUROBOROS_CONTEXT_MODE":"low",'

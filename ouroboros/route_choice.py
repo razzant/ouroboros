@@ -31,6 +31,15 @@ started root reads its own destination. A carried model uses role ``lead``: Auto
 the model's own window and default processing. Place and circle models use the same carrier
 and derived role for place turns. Other Presence turns, delegated and autonomous work,
 role-named tasks and call turns keep their own routing. Failures use the ordinary chain walk.
+
+Processing. A room's own tier is stamped by the same admission into ``metadata.processing``
+(``{"source": "room", "tier": ...}``; a room without one records the decided Default,
+``{"source": "default"}``), and the owner's card act writes ``source: "owner"`` or, for Default,
+the decided Default. The carrier rides beside the lead, independent of it (a model act never
+changes it, a tier act never moves the route); Continue and Resume keep it as stored. Absent (work
+admitted before tiers), the work keeps the default resolution (``model_slots``) and its Continue
+records the decided Default; a separately started root, a promoted one too, reads its destination
+anew. A carrier binds the root's own calls only: a helper captures its tier when it starts.
 """
 
 from __future__ import annotations
@@ -39,7 +48,7 @@ import copy
 import json
 import os
 import threading
-from typing import Any, Mapping, Optional, Tuple
+from typing import Any, Callable, Mapping, Optional, Tuple
 
 from ouroboros import provider_models
 from ouroboros.model_slots import (
@@ -55,6 +64,9 @@ LEAD_SOURCES = (*OWNER_LEAD_SOURCES, "mind", "place", "circle")
 ROUTE_SOURCES = ("task_argument", "configured_row", "switch_model", "wait_card", "fallback", "presence", *LEAD_SOURCES)
 LEAD_KEY = "lead"  # host-minted primary, including a recorded follow
 LEAD_ROLE = "lead"  # no settings slot or role options
+PROCESSING_KEY = "processing"  # host-minted processing tier of a root: its room's at admission, or the owner's
+PROCESSING_SOURCES = ("room", "owner")
+DEFAULT_PROCESSING = {"source": "default"}  # a decided Default: no tier of its own, the default resolution
 ROLE_LABELS = {"main": "Main", "light": "Light", "safety": "Supervisor", "vision": "Vision",
                "consciousness": "Consciousness", "deep_review": "Deep self-review", "websearch": "Web search", LEAD_ROLE: "This work's model"}
 
@@ -215,51 +227,71 @@ def follows(choice: Any) -> str:
     return str(choice.get("role") or "main") if isinstance(choice, dict) and choice.get("kind") == "following" else ""
 
 
-def model_role_slot_override(task_metadata: Mapping) -> Optional[Tuple[str, bool]]:
+def box_checked(value: Any, *, typed: bool = False) -> bool:
+    """A local box. A settings document is read by the loader's own spellings (``config.py``: ``true``/``1``/
+    ``yes``/``on``), so a raw document answers as the runtime will after its load. The live settings arrive
+    ``typed`` and are read as the Safety routing reads them (``true``/``1``), so the two never name different
+    lanes for one value."""
+    return str(value or "").strip().lower() in (("true", "1") if typed else ("true", "1", "yes", "on"))
+
+
+def _runtime(key: str) -> Any:
+    return runtime_setting(key, "")
+
+
+def model_role_slot_override(task_metadata: Mapping, read: Callable[[str], Any] = _runtime) -> Optional[Tuple[str, bool]]:
     """The ``(model, use_local)`` pinned by a task's ``metadata.model_role``; ``None`` = Main.
 
-    A consciousness wake-up carries ``model_role="consciousness"`` (owner decision
-    В25=B): when the consciousness model slot is set, the turn runs on that model
-    with that slot's local flag; an empty slot means Main — the same model, the
-    same prefix, the same prompt cache. Roles without a single-model slot (Main
-    itself, the fallback chain) and unknown roles resolve to Main here; their
-    effort and account binding still follow the role (``_initial_effort_for``,
-    ``task_model_binding``).
+    The one rule of a role's slot, for the runtime (``read`` = the live settings) and for a settings document
+    (``read`` = its ``get``: what Dashboard › Costs and the Safety snapshot ask). A slot naming its model runs it
+    on its own local box. An empty slot is Main's route (the same model, prefix and prompt cache), and only its
+    own box, checked under a cloud Main, decides otherwise: Main's model on the local runtime (owner, В25=B for
+    Consciousness; 2026-11-15 for Light, one rule for every Light call, the Safety Supervisor's included: its
+    empty slot is Light's route). An unchecked box is the row's resting
+    state and the shipped default ("Uses Main." on the Models page), so it never takes the role off a local Main
+    (owner, 12.11, #3272); a local call never sends the model name (``llm.py``). Roles without a single-model
+    slot (Main itself, the fallback chain) and unknown roles resolve to Main here; their effort and account
+    binding still follow the role (``_initial_effort_for``, ``task_model_binding``).
     """
     metadata = task_metadata if isinstance(task_metadata, Mapping) else {}
     role = str(metadata.get("model_role") or "").strip().lower()
     key = MODEL_ROLE_SETTINGS.get(role)
     if not key or role in ("main", "fallback"):
         return None
-    model = str(runtime_setting(key, "") or "").strip()
-    use_local = str(runtime_setting(f"USE_LOCAL_{role.upper()}", "") or "").strip().lower() in ("true", "1")
+    if role == "safety" and not str(read(key) or "").strip():
+        role, key = "light", MODEL_ROLE_SETTINGS["light"]  # the Supervisor has no box: an empty slot checks on Light's route
+    model = str(read(key) or "").strip()
+    box = f"USE_LOCAL_{role.upper()}"  # Vision, the Supervisor's own slot and the helper roles have none
+    use_local = box in SETTINGS_DEFAULTS and box_checked(read(box), typed=read is _runtime)
     if not model:
-        # An empty model slot means Main's route. Only the role's own local box, checked under a cloud
-        # Main, decides otherwise (В25=B): Main's model on the local runtime. An unchecked box is the row's
-        # resting state and the shipped default ("Uses Main." on the Models page), so it never takes the
-        # role off a local Main (owner, 12.11, #3272); a local call never sends the model name (``llm.py``).
-        main_local = str(runtime_setting("USE_LOCAL_MAIN", "") or "").strip().lower() in ("true", "1")
-        main_model = str(runtime_setting("OUROBOROS_MODEL", "") or "").strip()
-        if not use_local or main_local or not main_model:
+        if not use_local or box_checked(read("USE_LOCAL_MAIN"), typed=read is _runtime):
             return None
-        return main_model, True
+        return _main_of(read), True
     return model, use_local
 
 
-def following_route(role: str, llm: Any = None) -> Tuple[str, bool]:
+def _main_of(read: Callable[[str], Any]) -> str:
+    """Main's model as ``read`` holds it; a blank Main runs the shipped one, as ``model_slots._main_model``
+    answers for the live settings."""
+    if read is _runtime:
+        from ouroboros.model_slots import _main_model
+
+        return _main_model()
+    return str(read("OUROBOROS_MODEL") or "").strip() or str(SETTINGS_DEFAULTS["OUROBOROS_MODEL"])
+
+
+def following_route(role: str, llm: Any = None, read: Callable[[str], Any] = _runtime) -> Tuple[str, bool]:
     """The binding a following route uses NOW: the role's own slot (an empty one is Main's model, local when its
-    own box is checked under a cloud Main), else Main and its local flag; ``llm`` is the loop's client if any."""
-    slot = model_role_slot_override({"model_role": role})
+    own box is checked under a cloud Main), else Main and its local flag; ``llm`` is the loop's client if any,
+    ``read`` the settings asked (the live ones, or a document's ``get``)."""
+    slot = model_role_slot_override({"model_role": role}, read)
     if slot is not None:
         return slot
-    from ouroboros.model_slots import _main_model
-
-    model = str(llm.default_model() if llm is not None else _main_model())
-    return model, str(runtime_setting("USE_LOCAL_MAIN", "") or "").strip().lower() in ("true", "1")
+    return str(llm.default_model() if llm is not None else _main_of(read)), box_checked(read("USE_LOCAL_MAIN"), typed=read is _runtime)
 
 
 def _local_flag(key: str) -> bool:
-    return str(runtime_setting(key, "") or "").strip().lower() in ("true", "1")
+    return box_checked(runtime_setting(key, ""), typed=True)
 
 
 def configured_references() -> dict:
@@ -286,6 +318,32 @@ def lead_snapshot(value: Any) -> Optional[dict]:
     return carrier
 
 
+def processing_snapshot(value: Any) -> Optional[dict]:
+    """Validate the host's processing carrier: ``{"source", "tier"}`` with a real tier, or the decided Default
+    (``{"source": "default"}``); anything else is None, which reads as Default too."""
+    from ouroboros.model_slots import normalize_call_tier
+
+    if not isinstance(value, Mapping):
+        return None
+    if value.get("source") == "default":
+        return dict(DEFAULT_PROCESSING)
+    if value.get("source") not in PROCESSING_SOURCES:
+        return None
+    try:
+        tier = normalize_call_tier(value.get("tier"))
+    except ValueError:
+        return None
+    return {"source": value["source"], "tier": tier} if tier else None
+
+
+def task_processing(metadata: Any) -> str:
+    """A root's carried tier, or ``""`` (the default resolution); a delegated child never reads one."""
+    if not isinstance(metadata, Mapping) or str(metadata.get("delegation_role") or "").lower() == "subagent":
+        return ""
+    carrier = processing_snapshot(metadata.get(PROCESSING_KEY))
+    return carrier.get("tier", "") if carrier else ""
+
+
 def task_lead(metadata: Any) -> Optional[dict]:
     """A root's carried model, else None; stray ``metadata.model`` never binds a root."""
     if not isinstance(metadata, Mapping) or str(metadata.get("delegation_role") or "").lower() == "subagent":
@@ -303,35 +361,52 @@ def capture_lead(task: dict, drive_root: Any, *, project: Mapping | None = None,
     An existing carrier wins, including a recorded follow. Unreadable rooms leave no
     carrier and follow Main with a warning, so a later door can still stamp the choice.
     A programming error never masquerades as an unreadable room.
+
+    The tier is captured on its own: a root that arrives with its own model (a ``start_task`` model,
+    the owner's words) still takes its room's tier, and a root without a room tier records the
+    decided Default, so a continuation or a retry never reads a later room tier.
     """
-    from ouroboros.composer_cognition import project_model_choice, read_model_choice
+    from ouroboros.composer_cognition import project_model_choice, project_processing_choice, read_room
     from ouroboros.settings_integrity import _actor_scope, SettingsIntegrityError
 
     given = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     canonical_root, actor = _actor_scope(task, drive_root)
-    if (LEAD_KEY in given or task.get("model") or str(task.get("model_role") or "").lower() in MODEL_ROLE_SETTINGS
+    if (str(task.get("model_role") or "").lower() in MODEL_ROLE_SETTINGS
             or str(given.get("model_role") or "").lower() in MODEL_ROLE_SETTINGS
             or actor.get("parent_task_id") or actor.get("autonomous")
             or str(task.get("delegation_role") or given.get("delegation_role") or "").lower() == "subagent"
             or (task.get("actor_id") == "consciousness" and not actor.get("scheduled"))):
+        return
+    lead = not (LEAD_KEY in given or task.get("model"))
+    # The tier is the first admission's: a resumed or retried step keeps what it carries and never reads the room's
+    # current tier (#2547's rule for the basis), so work admitted before tiers keeps the default resolution.
+    try:
+        first = int(task.get("_attempt") or 1) <= 1
+    except (TypeError, ValueError):
+        first = True
+    tier = PROCESSING_KEY not in given and first
+    if not (lead or tier):
         return
     metadata = task.setdefault("metadata", {})
     if not isinstance(metadata, dict):
         return
     project_id = str(task.get("project_id") or metadata.get("project_id") or "")
     try:
-        if admitted:
-            choice = project_model_choice(project) if project is not None else {"kind": "main"}
-        else:
-            choice = read_model_choice(canonical_root, project_id)
+        room = project if admitted else read_room(canonical_root, project_id)
     except (OSError, ValueError, SettingsIntegrityError):
         import logging
 
         logging.getLogger(__name__).warning("Room model choice unreadable for %s; admitted on Main",
                                             project_id or "Main", exc_info=True)
         return
-    metadata[LEAD_KEY] = ({"source": "room", "model": choice["model"], "use_local": choice["use_local"]}
-                          if choice["kind"] == "model" else {"source": "main"})
+    if lead:
+        choice = project_model_choice(room) if room is not None else {"kind": "main"}
+        metadata[LEAD_KEY] = ({"source": "room", "model": choice["model"], "use_local": choice["use_local"]}
+                              if choice["kind"] == "model" else {"source": "main"})
+    if tier:
+        # The room's own tier, once: a later change of the room reaches only work admitted after it.
+        own = project_processing_choice(room) if room is not None else ""
+        metadata[PROCESSING_KEY] = {"source": "room", "tier": own} if own else dict(DEFAULT_PROCESSING)
 
 
 def _metadata(ctx: Any) -> dict:

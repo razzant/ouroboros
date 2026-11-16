@@ -62,8 +62,8 @@ def test_cancel_of_a_never_scheduled_id_is_not_found_not_a_fabricated_row(qenv):
     assert qenv.tl.cancel_task_custody("ghost-typo") == qenv.tl.CANCEL_NOT_FOUND
     assert load_task_result(qenv.drive, "ghost-typo") in (None, {})
     assert ci.active_intent(qenv.drive, "ghost-typo") is None
-    trail = (qenv.drive / "logs" / "supervisor.jsonl").read_text(encoding="utf-8")
-    assert '"outcome": "not_found"' in trail
+    trail = (qenv.drive / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()
+    assert "not_found" in {json.loads(row).get("outcome") for row in trail}
 
 def test_finalize_on_miss_promotes_a_child_result_before_cancelling(qenv):
     """A-F23: a crash mid-custody must not bury a completed child result."""

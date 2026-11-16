@@ -415,8 +415,8 @@ def _compact_annotations_locked(drive_root: Any, path: pathlib.Path) -> None:
         (message_id for message_id in latest if message_id.startswith(AGENT_RECEIPT_ID_PREFIX)),
         key=lambda message_id: str(latest[message_id].get("ts") or ""),
     )[-_RETAINED_AGENT_RECEIPTS:])
-    retained_ids = {message_id for message_id in latest if not message_id.startswith(AGENT_RECEIPT_ID_PREFIX)
-                    and (coverage["gaps"] or ds.rows_by_client_id(drive_root, message_id, limit=1))}
+    named = [message_id for message_id in latest if not message_id.startswith(AGENT_RECEIPT_ID_PREFIX)]
+    retained_ids = set(named) if coverage["gaps"] else ds.carried_ids(drive_root, named)
     # Retained per (message, token): an older act's receipt under a message that
     # is still in the chat survives beside the message's newest act.
     rows = [
@@ -801,7 +801,7 @@ TASK_CAUSE_PHRASES = {
     "child_results_deferred": "Some sub-task results were deferred instead of being folded into this answer",
     "tool_failure": "A tool this task used failed and nothing recovered it",
     "receipt_absent": "No recorded check or result review examined this result after its last change; this does not establish whether other checks ran.",
-    "verification_red_unreconciled": "A check of this result failed and no later run of the same check passed.",
+    "verification_red_unreconciled": "A check did not pass and no later run recorded as the same check passed; this record does not say whether other checks passed after it.",
     "children_undecided": "Some finished sub-task results carry no recorded decision on how this answer used them.",
     "expected_output_ungrounded": "A retired check recorded no tool calls or structured answer; it does not assess the written result.",
     "residual_tool_errors_without_review": "Tool errors remain in the record.",
@@ -824,6 +824,8 @@ TASK_CAUSE_PHRASES = {
     # Recovery finalized a dead attempt from its already registered answer instead of a retry
     # (working_checkpoint.adopt_registered_answer): the answer stands, the packaging does not.
     "finalization_incomplete": "The answer was authored, but the task's finalization did not complete, so its review evidence, artifacts and cost accounting are incomplete.",
+    # The same row once the model's final answer is proven delivered (working_checkpoint.delivered_answer_cause): it reads Done.
+    "finalization_incomplete_delivered": "The answer was delivered. The task stopped before its review evidence, artifacts and cost accounting were stored.",
     # The Done card's delivery disposition (terminal_projection._project_row): not reason codes but the
     # row-level warning keys of a delivery the host could not confirm; terminal_delivery_clause adds the copy pointer.
     "terminal_delivery_exhausted": "Sending the final answer was not confirmed after the delivery attempts ran out",
@@ -866,6 +868,7 @@ def outcome_phase(result: Dict[str, Any], event: Dict[str, Any]) -> str:
                                     objective_warned)
     from ouroboros.post_task_checkpoint import post_task_synthesis_is_open
     from ouroboros.task_status import FINAL_STATUSES
+    from ouroboros.working_checkpoint import delivered_answer_cause
     from supervisor.owner_stop import owner_stop_ending
 
     record = {**event, **{key: value for key, value in result.items() if value not in (None, "")}}
@@ -886,8 +889,9 @@ def outcome_phase(result: Dict[str, Any], event: Dict[str, Any]) -> str:
     unanswered = ending == "stop"  # a Wrap up without an answer: its own failure is the stop
     author_stopped = (axes.get("objective", {}).get("source"), axes.get("objective", {}).get("reason")) == ("task_completion", "author_stop")
     author_finished = axis.get("objective") == "pass" and (axes.get("objective") or {}).get("source") == "author_acceptance"
-    if (((lifecycle == "failed" or axis.get("execution") == "failed") and not unanswered)
-            or axis.get("execution") == "infra_failed"
+    delivered = bool(delivered_answer_cause(record))  # only the lifecycle and infrastructure legs yield to it
+    if (((lifecycle == "failed" and not delivered or axis.get("execution") == "failed") and not unanswered)
+            or axis.get("execution") == "infra_failed" and not delivered
             or (axis.get("objective") == "fail" and not author_stopped) or (axis.get("review") == "fail" and not author_finished)
             or {axis.get("artifacts"), str(record.get("artifact_status") or "").lower()} & {"failed", "missing"}):
         return "error"
@@ -1214,10 +1218,10 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     of ``taskReasonDetail`` and ``taskReasonCodes``.
     """
     from ouroboros.outcomes import (
-        ACCEPTANCE_ACCEPTED, ACCEPTANCE_BYPASS_REASON_BY_RAIL, REASON_FINAL_MESSAGE, REASON_OWNER_REQUESTED_FINALIZATION,
-        DETAIL_ONLY_WARNINGS, WARN_DELEGATED_CUSTODY_UNRECONCILED, WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW, plan_review_awaiting,
+        ACCEPTANCE_ACCEPTED, ACCEPTANCE_BYPASS_REASON_BY_RAIL, REASON_FINAL_MESSAGE, REASON_OWNER_REQUESTED_FINALIZATION, DETAIL_ONLY_WARNINGS,
+        WARN_DELEGATED_CUSTODY_UNRECONCILED, WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW, WARN_VERIFICATION_RED, plan_review_awaiting,
     )
-    from ouroboros.tool_error_words import residual_tool_errors_phrase
+    from ouroboros.tool_error_words import red_check_phrase, residual_tool_errors_phrase
 
     decision: Dict[str, Any] = {}
     veto: Dict[str, Any] = {}
@@ -1282,7 +1286,9 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
         # state a debt the same record shows as empty. The recorded open-review
         # reason speaks through the wave's class when the record names one.
         detail = veto.get("detail") if veto.get("reason") == reason else ""
-        key = _plan_review_key(result, event, reason) if reason == "plan_review_advisory" else reason
+        from ouroboros.working_checkpoint import delivered_answer_cause
+        key = (_plan_review_key(result, event, reason) if reason == "plan_review_advisory"
+               else delivered_answer_cause({**event, **result}, reason) or reason)
         clause = (" ".join(strip_markdown(str(detail)).split()) if detail
                   else _cause_phrase(key, undescribed))
     # The bypass sentence already names its rail; do not repeat the same cause.
@@ -1293,9 +1299,9 @@ def _completion_verdict(result: Dict[str, Any], event: Dict[str, Any], *, includ
     excluded = {"", "delegated_custody_unreconciled", "terminal_delivery_unknown", "terminal_delivery_exhausted"}
     if not include_review_details:
         excluded |= DETAIL_ONLY_WARNINGS
-    named = residual_tool_errors_phrase(execution)  # the failure the record holds, in owner words
-    warning_clauses = [(str(w) == WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW and named) or TASK_CAUSE_PHRASES.get(str(w), str(w))
-                       for w in warnings if str(w) not in excluded]
+    # The failure the record holds, in owner words; a record without the fact keeps its code's sentence.
+    named = {WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW: residual_tool_errors_phrase(execution), WARN_VERIFICATION_RED: red_check_phrase(objective)}
+    warning_clauses = [named.get(str(w)) or TASK_CAUSE_PHRASES.get(str(w), str(w)) for w in warnings if str(w) not in excluded]
     record = {**event, **result}
     bundle = record.get("artifact_bundle") if isinstance(record.get("artifact_bundle"), dict) else {}
     artifact_status = bundle.get("status") or record.get("artifact_status") or artifacts.get("status")

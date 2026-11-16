@@ -3,6 +3,20 @@
  *  catalog, updates and core control. `UpdateLetter` sits in ./api_types.js. */
 
 /**
+ * One declared server's passive state in an installed skill's `mcp_servers` list.
+ * @typedef {Object} SkillMcpServerFact
+ * @property {string} id
+ * @property {string} title
+ * @property {boolean} conflict
+ * @property {boolean} bound  // the saved row belongs to this skill, even when off
+ * @property {boolean} configured  // bound and both the row and MCP are on
+ * @property {number} tool_count
+ * @property {boolean} listed
+ * @property {string} error  // skill refusal or failed listing
+ * @property {string} notes  // diagnostics from a successful listing
+ */
+
+/**
  * One `GET /api/extensions` `skills` row; a name collision gives one row per occupant (`identity_collision`).
  * @typedef {Object} InstalledSkill
  * @property {string} name
@@ -42,6 +56,7 @@
  * @property {{current: Object, history: Object[], history_omitted: (number|undefined)}|Object=} skill_review  // a history row of a Skills-page review may carry `continuable_seats`
  * @property {?{fields: {id: string, key: string, state: ('configured'|'missing'|'unknown')}[]}=} secret_config  // declared secret fields and whether each is set now (never a value); null when none are declared
  * @property {Object=} grants
+ * @property {SkillMcpServerFact[]=} mcp_servers  // absent on identity-collision rows
  * @property {?{slug: string, version: string, content_hash: string, repository: string, pr_number: number, pr_url: string, published_at: string}=} published
  * @property {boolean=} published_malformed
  * @property {Object=} presence_runtime
@@ -588,13 +603,24 @@
  */
 
 /**
- * Engine ControlAccountResourcesResponse (or ControlQuotaResponse), passed through.
+ * Host transport attempt dates, not provider observation dates. An identical attempt
+ * joined in flight keeps its original dates and sets reused.
+ * @typedef {Object} ClaudexorRefreshAttempt
+ * @property {string} started_at
+ * @property {string} completed_at
+ * @property {boolean} reused
+ */
+
+/**
+ * Engine ControlAccountResourcesResponse (or ControlQuotaResponse), passed through
+ * with optional host refresh provenance. Provider observation dates are unchanged.
  * @typedef {Object} ClaudexorAccountResources
  * @property {Object[]} snapshots
  * @property {Object[]=} absences
  * @property {string=} refreshed_at
  * @property {*=} refresh_skipped
  * @property {Object[]=} resources
+ * @property {ClaudexorRefreshAttempt=} refresh_attempt
  */
 
 /**
@@ -663,11 +689,15 @@
  */
 
 /**
- * A catalog's published token price, USD per 1M tokens; `tiers` only when input length changes it.
+ * A catalog's published token price, USD per 1M tokens; `tiers` only when input length changes it; `cache_write`
+ * only where the record states the prompt-cache write figure of the tier this install sends, with `cache_write_ttl`
+ * naming that tier (the resolved `OUROBOROS_PROMPT_CACHE_TTL` the catalog was read under).
  * @typedef {Object} ModelPrice
  * @property {number} input
  * @property {number} output
  * @property {ModelPriceTier[]=} tiers
+ * @property {number=} cache_write
+ * @property {string=} cache_write_ttl
  */
 
 /**
@@ -700,6 +730,7 @@
  * @property {*=} processing
  * @property {boolean=} use_local
  * @property {ModelPrice=} price  OpenRouter rows only, when the catalog states a whole token price (llm_pricing.openrouter_catalog_price)
+ * @property {string=} price_condition  DeepSeek rows whose published entry prices them only off-peak in USD: `off_peak_usd`
  */
 
 /**
@@ -780,6 +811,8 @@
  * @property {boolean=} schemas_at_start
  * @property {boolean=} task_session
  * @property {boolean=} browser_policy
+ * @property {string=} skill
+ * @property {string=} skill_error
  * @property {string=} instructions
  * @property {number=} map_tokens
  * @property {number=} schema_tokens

@@ -695,6 +695,8 @@ def test_the_owners_stop_outranks_a_pause_only_an_unbound_start_holds(tmp_path, 
     assert task_lifecycle.cancel_task_custody("root-1", deliver=False) == task_lifecycle.CANCEL_CANCELLED
     row = load_task_result(tmp_path, "root-1")
     assert row["status"] == "cancelled" and row["cancel_origin"]["request_id"]
+    # A parked work stays queued, so its Stop is the supervisor's own pending-drop cancel: an observed end (#3212).
+    assert row["terminal_time"]["source"] == "supervisor_cancel" and row["terminal_time"]["occurred_at"]
     # The real consumer of the task_done that terminal published: its census meets the recorded Stop.
     ctx = SimpleNamespace(DRIVE_ROOT=tmp_path, WORKERS=workers.WORKERS, append_jsonl=append_jsonl, RUNNING=workers.RUNNING,
                           persist_queue_snapshot=queue.persist_queue_snapshot)

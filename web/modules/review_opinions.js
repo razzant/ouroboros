@@ -60,12 +60,15 @@ export function reviewViews(groups) {
 }
 
 const ledgerTally = (panel) => {
-    const counted = list(panel.actors).filter(actor => !seatAdviser(actor));
-    const answered = counted.filter(actorAnswered).length;
-    const owed = counted.filter(actor => seatOwed(actor, panel)).length;
-    const unavailable = counted.length - answered - owed;
-    const counts = text(panel.surface) === 'preflight' || !counted.length ? 'answered' : 'counted answered';
-    return [`${answered} of ${counted.length} ${counts}`, unavailable > 0 ? `${unavailable} unavailable` : '',
+    const actors = list(panel.actors), counted = actors.filter(actor => !seatAdviser(actor));
+    // A wave of advisers alone (Cyber Pro) tallies them as advisers: none of them is counted.
+    const seats = counted.length || text(panel.surface) === 'preflight' ? counted : actors;
+    const answered = seats.filter(actorAnswered).length;
+    const owed = seats.filter(actor => seatOwed(actor, panel)).length;
+    const unavailable = seats.length - answered - owed;
+    const counts = seats !== counted && seats.length ? 'advisers answered'
+        : text(panel.surface) === 'preflight' || !counted.length ? 'answered' : 'counted answered';
+    return [`${answered} of ${seats.length} ${counts}`, unavailable > 0 ? `${unavailable} unavailable` : '',
         owed ? `${owed} awaiting` : ''].filter(Boolean).join(' · ');
 };
 

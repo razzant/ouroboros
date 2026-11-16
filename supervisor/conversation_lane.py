@@ -560,10 +560,7 @@ def reconcile_conversation_lane() -> None:
         next_id = max(pool.WORKERS, default=-1) + 1
     for wid in range(next_id, next_id + missing):
         try:
-            # Earlier slots serve already-waiting turns; only the final intended spare
-            # pays optional preparation before READY. A later arrival may still claim it.
-            if not _spawn_worker_slot(wid, lane=LANE_CONVERSATION,
-                                      warm_context_sources=(wid == next_id + missing - 1)):
+            if not _spawn_worker_slot(wid, lane=LANE_CONVERSATION):
                 break
             _SPAWN_REFUSED[0] = ""
         except Exception as exc:
@@ -642,9 +639,10 @@ def lane_turn_rows() -> List[Dict[str, Any]]:
                 row["model_activity"] = dict(active["model_activity"])
             if isinstance(sent := meta.get("context_attempt"), dict) and sent.get("task_attempt") == attempt:
                 row["context_attempt"] = dict(sent)
-            from ouroboros.lead_fact import lead_fields
+            from ouroboros.lead_fact import lead_processing_fields
 
-            row.update(lead_fields(meta.get("lead"), {**task, "_lead_request_id": meta.get("_lead_request_id")}))
+            row.update(lead_processing_fields(meta.get("lead"), {**task, "_lead_request_id": meta.get("_lead_request_id"),
+                                                                 "processing_last": meta.get("processing_last")}))
             rows.append(row)
     return rows
 
@@ -691,8 +689,8 @@ BOUND_FACTS = ("_project_admission", "project_id")  # the carrier's first-step f
 
 
 def handle_direct_turn_bound(evt: Dict[str, Any], ctx: Any) -> None:
-    """The carrier bound its turn (the Project basis of a room turn): the RUNNING row's task learns the
-    facts everything rebuilt from the row needs — the snapshot's running rows, the pooled park, restore."""
+    """The carrier bound its turn (the Project basis of a room turn, its admitted tier): the RUNNING row's task learns
+    the facts everything rebuilt from the row needs — the snapshot's running rows, the pooled park, restore."""
     from supervisor.queue_snapshot import persist_queue_snapshot
 
     task_id, facts = str(evt.get("task_id") or ""), evt.get("facts")
@@ -710,6 +708,11 @@ def handle_direct_turn_bound(evt: Dict[str, Any], ctx: Any) -> None:
         for key in BOUND_FACTS:
             if key in facts and facts[key] is not None:
                 meta["task"][key] = facts[key]
+        from ouroboros.route_choice import PROCESSING_KEY, processing_snapshot
+
+        # The admitted tier, for its card; an owner tier act already on the row is newer than any admission frame.
+        if (carrier := processing_snapshot(facts.get(PROCESSING_KEY))) and not meta["task"].get("owner_processing"):
+            meta["task"]["metadata"] = {**(meta["task"].get("metadata") or {}), PROCESSING_KEY: carrier}
         if meta["task"].get("_project_admission") is not None:
             meta["task"].pop("_project_scope_none", None)  # a real basis replaces attested absence
         persist_queue_snapshot(reason="conversation_turn_bound")

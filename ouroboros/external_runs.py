@@ -429,6 +429,26 @@ def _name(row: Dict[str, Any]) -> str:
     return f"run {row['run_id']}" if row.get("run_id") else f"start {row.get('invocation_id') or '?'}"
 
 
+def passed_reviews_notice(observation: Any) -> str:
+    """What a sleep's return names of the independent reviews its Resume did not wait for
+    (``budget_resume._resume_custody_refusal``): open when the Resume was granted, never a writer of this work.
+    ``""`` for none. The words speak of that grant's observation, which this return does not read again; a row
+    the observation tried to stop carries that attempt's recorded outcome word, sent or not."""
+    rows = [row for row in (observation or {}).get("runs") or [] if isinstance(row, dict)
+            and row.get("independent_review") is True and str(row.get("state") or "") != EXTERNAL_STOP_CONFIRMED]
+    named = ", ".join(_name(row) + (f" (stop outcome: {row.get('stop_outcome') or 'unrecorded'})"
+                                    if row.get("stop_policy") == "request_stop" else "") for row in rows)
+    return (f"[SYSTEM NOTICE]\nThis return was granted without waiting for {named}: independent review that cannot "
+            "change this work. Its outcome and cost were unresolved at that grant.") if rows else ""
+
+
+def held_run_line(row: Dict[str, Any]) -> str:
+    """One run of a Resume's "delegated runs this task holds" list: a start without a run id by its invocation,
+    and a review that cannot change the work said as that (no writer to keep clear of)."""
+    return (f"\n- {_name(row)}: {row.get('state')} (stop outcome: {row.get('stop_outcome') or 'n/a'})"
+            + ("; independent review that cannot change this work" if row.get("independent_review") is True else ""))
+
+
 def _participant_line(root: Any, task_id: str, row: Dict[str, Any], runs: Dict[str, Any], pending: set,
                       reader: str) -> str:
     from ouroboros.delegate_custody_current import collection_pending

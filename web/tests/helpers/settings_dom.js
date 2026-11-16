@@ -6,6 +6,10 @@ import { NodeStub, setup } from '../dashboard_dom_fixture.js';
 // The fixture's element, reading a self-closed tag (an SVG `<path … />` of a glyph) as childless, so a row drawn
 // after a glyph is that glyph's sibling here as it is in a browser.
 export class Stub extends NodeStub {
+    toggleAttribute(name, force = !this.hasAttribute(name)) {
+        if (force) this.setAttribute(name, ''); else this.removeAttribute(name);
+        return force;
+    }
     get innerHTML() { return super.innerHTML; }
     set innerHTML(html) {
         this.textContent = '';
@@ -31,6 +35,9 @@ export const ANSWERS = {
     '/api/update/status': { managed: true, check_ok: true, current_version: '7.10.2' },
     '/api/storage': { count: null },
     '/api/desktop/autostart': { state: 'unavailable' },
+    // The engine's roster and windows as last observed, the passive view Costs reads too: it starts and refreshes
+    // nothing. Every other read of the status (the full one, with models) is a start below.
+    '/api/claudexor/status?view=quota': { view: 'quota', profiles: {}, quota: [], reads: { catalog: 'not_read', accounts: 'not_read', quota: 'not_read' } },
 };
 export const STARTS = ['/api/model-catalog', '/api/review-pool', '/api/claudexor/wake', '/api/claudexor/status', '/api/mcp/refresh', '/api/providers/test',
     '/api/update/check', '/api/storage/measure'];
@@ -38,7 +45,16 @@ export const settle = async () => { for (let round = 0; round < 12; round += 1) 
 
 export function world(t) {
     forgetSettingRows();
-    const env = setup(t);
+    // A Settings shell mounted in this world is put away after its test (its `pagehide`, with the globals it was mounted
+    // with, which a second world of the same test may have replaced): a shell left mounted keeps the module-wide
+    // lifecycle subscription and reads in the next test.
+    let env = null;
+    t.after(() => {
+        const kept = { window: globalThis.window, document: globalThis.document };
+        Object.assign(globalThis, { window: env.window, document: env.document });
+        try { env.window.dispatchEvent({ type: 'pagehide', persisted: false }); } finally { Object.assign(globalThis, kept); }
+    });
+    env = setup(t);
     const posts = [];
     for (const [url, body] of Object.entries(ANSWERS)) {
         env.routes.set(url, async (_url, init = {}) => {

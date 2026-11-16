@@ -6,23 +6,27 @@
  * never touches the fact, and an open popover keeps its anchor. A card whose work publishes no such fact (an older
  * record, a child, a portal) keeps the line it has today.
  *
- * Where the server offers the work's `model` control the fact is a button. It opens the list of models the
- * composer's Model capsule uses (model_list.js): its Main row is the one way to follow Main, as `Main` is in the
- * capsule's strip, and its facts say so; while the work runs on a fallback its three exits stand above the list:
- * Return, Wait and Keep. Each press is one `POST /api/tasks/{id}/model` (CLIENT_CONTRACT §5) whose answer says when it
- * applies; a refusal is said in the popover in the owner's words, and one whose decision the server saved (a 503)
- * offers the same request again. Without the control the fact is plain text: a control is the server's decision and
- * is never guessed here.
+ * Where the server offers the work's `model` control the fact is a button. It opens the Model sheet the composer's
+ * capsule opens (model_sheet.js): its Main row is the one way to follow Main, and its facts say so; while the work runs
+ * on a fallback its three exits stand above the list: Return, Wait and Keep; at its foot this work's processing tier,
+ * from its next call. Each press is one `POST /api/tasks/{id}/model` (CLIENT_CONTRACT §5) whose answer says when it
+ * applies; a tier press is its own act and moves nothing else. A refusal is said in the sheet in the owner's words,
+ * and one whose decision the server saved (a 503) offers the same request again. Without the control the fact is plain
+ * text: a control is the server's decision and is never guessed here. Beside the model the fact names the work's tier
+ * when it is not Standard, and what its newest call was served as when that differs (`works[].processing`).
  */
 import { taskModel } from './api_client.js';
 import { renderLiveCardMeta } from './chat_activity.js';
 import { clampWithToggle } from './chat_reply_quote.js';
 import { observeLayout } from './capsule.js';
 import { fmt, tr, translateString } from './i18n.js';
-import { isCoarsePointer } from './layout.js';
+import { isCoarsePointer, isStackLayout } from './layout.js';
 import { modelCatalog } from './model_catalog_store.js';
-import { createModelList, modelSearchField } from './model_list.js';
+import { closeModelSheet, openModelSheet } from './model_sheet.js';
 import { sourceMark } from './model_source_mark.js';
+import {
+    offersUltrafast, receiptWords, resolvedTier, servedWords, tierExplanation, tierNamed, tierSupport, tierWord,
+} from './processing_choice.js';
 import { modelWaitReasonLabel, modelWaitRoleLabel } from './model_wait.js';
 import { controlIcon } from './page_icons.js';
 import { showToast } from './toast.js';
@@ -57,7 +61,7 @@ const REFUSAL_WORDS = Object.freeze({
     request_id_required: 'The request was incomplete. Try again.',
     task_not_live: 'This work has already ended.',
     presence_model_unsupported: 'A place\'s model is set in its place sheet.',
-    not_a_root_task: 'A subagent runs on the model its work gave it; change the model on the work\'s own card.',
+    not_a_root_task: 'A subagent keeps the model and tier it started with; a change on its work\'s card reaches only that work\'s next steps and its new subagents.',
     model_control_unavailable: 'This work has no saved record yet, so its model cannot be changed.',
     cancel_pending: 'This work is stopping; its model stays as it is.',
     model_action_state: 'This work is not running on a fallback now.',
@@ -65,10 +69,10 @@ const REFUSAL_WORDS = Object.freeze({
     model_queue_publish_failed: 'Your choice is saved, but the queue could not be updated yet.',
     model_wake_failed: 'Your choice is saved, but the work could not be told yet.',
 });
-// How many recent models the popover offers under Main.
+// How many recent models the sheet offers under Main and the pinned ones.
 const RECENT_ROWS = 3;
 let serial = 0;
-let openPopover = null;  // one popover in the window: opening another closes it
+let openPopover = null;  // one sheet in the window: opening another closes it
 
 /** Why a work left its primary, for the popover's first line: '' when the fact's own words already say it. */
 export function causeWords(cause) {
@@ -156,6 +160,11 @@ function buildFact(record, deps) {
     pending.dataset.i18nSkip = '';
     const pendingWords = nodeOf(doc, 'span', 'card-model-words');
     pending.append(pendingWords);
+    // The work's tier when it is not Standard, and what its newest call was served as when that differs.
+    const tier = nodeOf(doc, 'span', 'chat-live-meta-text card-model-tier');
+    tier.dataset.i18nSkip = '';
+    const tierWords = nodeOf(doc, 'span', 'card-model-words');
+    tier.append(tierWords);
     const sep = nodeOf(doc, 'span', 'chat-live-meta-sep');
     sep.innerHTML = '&nbsp;· ';
     // The rest of the line, as chat_activity.js writes it: its parts stay items of the line itself (style.css).
@@ -163,7 +172,7 @@ function buildFact(record, deps) {
     rest.append(...[...meta.children]);
     meta.append(part, rest);
     const state = { meta, part, fact: null, factGroup: null, mark: null, name: null, why, whyWords, pending,
-        pendingWords, sep, rest, doc, deps, view: null, input: null, markKey: null, pressable: null, watch: null };
+        pendingWords, tier, tierWords, sep, rest, doc, deps, view: null, input: null, markKey: null, pressable: null, watch: null };
     record.cardModel = state;
     record.metaEl = rest;
     // The separator is real text (a copied line keeps it), so it is shown only while something follows the fact.
@@ -179,7 +188,7 @@ function syncSeparator(state) {
     const alone = !state.rest.children.length;
     if (state.sep.hidden !== alone) state.sep.hidden = alone;
     // Like chat_activity's other meta parts, the dot stays with the last fact, never on a line of its own.
-    const last = !state.pending.hidden ? state.pending : !state.why.hidden ? state.why : state.factGroup;
+    const last = !state.tier.hidden ? state.tier : !state.pending.hidden ? state.pending : !state.why.hidden ? state.why : state.factGroup;
     if (state.sep.parentNode !== last) last.append(state.sep);
 }
 
@@ -218,7 +227,7 @@ function shapeFact(record, state, pressable) {
     factGroup.append(fact);
     state.fact?.remove();
     Object.assign(state, { fact, factGroup, mark, name, markKey: null });
-    state.part.replaceChildren(factGroup, state.why, state.pending);
+    state.part.replaceChildren(factGroup, state.why, state.pending, state.tier);
 }
 
 function removeFact(record) {
@@ -237,10 +246,22 @@ function removeFact(record) {
 }
 
 /**
- * Paints one card's model fact. `view` is `{ lead, target, main, queued, since }`: the published fact, the task id
- * the server's `model` control acts on ('' when it offers none), Main's route, whether the work has not started,
- * and the fact's `since` in the viewer's clock; null (or a fact without a model) takes the fact away. Returns
- * whether a fact stands on the card.
+ * The server's call resolver includes authored fallback tiers. Older bodies without that fact retain the
+ * primary's resolution: own choice, then Main's while following Main, else the default.
+ */
+export function workTier(view) {
+    if (typeof view?.processing?.resolved === 'string') return view.processing.resolved;
+    const own = String(view?.processing?.choice || '');
+    const follows = view?.said?.basis === 'main' || Boolean(view?.said?.fallback && view?.said?.leftMain);
+    return resolvedTier({ choice: own, follows, tiers: view?.tiers || null });
+}
+
+/**
+ * Paints one card's model fact. `view` is `{ lead, target, main, queued, since, processing, tiers }`: the published
+ * fact, the task id the server's `model` control acts on ('' when it offers none), Main's route, whether the work has
+ * not started, the fact's `since` in the viewer's clock, the work's tier fact (`works[].processing`) and the tiers
+ * Main and a lead take (`processing_tiers`); null (or a fact without a model) takes the fact away. Returns whether a
+ * fact stands on the card.
  */
 export function paintCardModel(record, view, deps = {}) {
     if (!record?.metaEl) return false;
@@ -248,10 +269,11 @@ export function paintCardModel(record, view, deps = {}) {
     if (!lead) { removeFact(record); return false; }
     const fresh = !record.cardModel;
     const state = record.cardModel || buildFact(record, { store: modelCatalog, act: taskModel, toast: showToast,
-        rerender: renderLiveCardMeta, coarse: isCoarsePointer,
+        rerender: renderLiveCardMeta, coarse: isCoarsePointer, stack: isStackLayout,
         place: (popup, anchor) => bindPopoverPosition(popup, { anchor, align: 'start' }), ...deps });
     const said = leadView(lead, { index: state.deps.store.index(), since: view.since || '', queued: Boolean(view.queued) });
     state.view = { ...view, lead, target: String(view.target || ''), main: normalizeRoute(view.main), said };
+    if (view.tiers) state.deps.store.adoptTiers?.(view.tiers);
     record.lead = lead;
     shapeFact(record, state, Boolean(state.view.target));
     const mark = `${said.said.lane}|${said.said.harness}|${said.said.kind}|${said.said.sourceLabel}`;
@@ -265,6 +287,17 @@ export function paintCardModel(record, view, deps = {}) {
     write(state.pendingWords, said.pending);
     state.why.hidden = !said.why;
     state.pending.hidden = !said.pending;
+    const tier = workTier(state.view);
+    const tierText = [tierNamed(tier) ? tierWord(tier) : '', servedWords(state.view.processing?.last)].filter(Boolean).join(' · ');
+    // After the words of why or what comes next, the tier follows a real separator (a copied line keeps it).
+    write(state.tierWords, tierText && (said.why || said.pending) ? `·\u00a0${tierText}` : tierText);
+    state.tier.hidden = !tierText;
+    // The receipt in full (asked, sent, served, a provider's own words) is the card's Details line, not the meta line's.
+    const receipt = receiptWords(state.view.processing?.last);
+    const detail = receipt ? fmt('{tier} · last call: {receipt}', { tier: state.view.processing?.choice ? tierWord(tier)
+        : fmt('Default · {tier}', { tier: tierWord(tier || 'standard') }), receipt }) : '';
+    const detailChanged = (record.processingDetail || '') !== detail;
+    record.processingDetail = detail;
     // Whose model this is rides the node as its look: the default is quiet, a choice stronger, a fallback amber.
     state.part.dataset.basis = said.fallback ? 'fallback' : said.basis === 'main' ? 'main' : 'own';
     state.fact.classList.toggle('model-fallback', said.fallback);
@@ -273,28 +306,62 @@ export function paintCardModel(record, view, deps = {}) {
             said.fallback ? said.name : basisWords(said.basis)].filter(Boolean).join(', '));
     }
     syncSeparator(state);
-    if (fresh) state.deps.rerender(record);  // the fact names the model now: the line no longer does
+    if (fresh || detailChanged) state.deps.rerender(record);  // the fact names the model now; Details say its last call
     if (openPopover?.record === record) openPopover.sync();
     return true;
 }
 
+const sameFact = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+const tierChoice = (processing) => [String(processing?.choice || ''), String(processing?.source || '')];
+
+/**
+ * An act's answer (`lead` for a model act, `processing` for a tier act) painted onto the card as it stands now, never
+ * over the view the act was pressed in (`before`): a body that arrived meanwhile keeps its model, receipt and control.
+ * An answer for a control the card no longer offers (withdrawn, or another work's) is dropped, and each part of it
+ * stands only where no body has said that part again since the press. Returns whether the card took it.
+ */
+function adoptAnswer(record, state, before, { lead = null, processing = null } = {}) {
+    const now = state.view;
+    if (record.cardModel !== state || !now?.target || now.target !== before.target) return false;
+    const next = { ...now };
+    let took = false;
+    if (normalizeRoute(lead) && sameFact(now.lead, before.lead)) {
+        Object.assign(next, { lead, since: lead.since === now.lead.since ? now.since : '' });
+        if (next.processing) {
+            next.processing = { ...next.processing };
+            delete next.processing.resolved; // the prior acting route's resolution is no longer this route's
+        }
+        took = true;
+    }
+    const sameResolution = sameFact(now.lead, before.lead) && now.processing?.resolved === before.processing?.resolved;
+    if (processing && typeof processing === 'object' && sameFact(tierChoice(now.processing), tierChoice(before.processing))
+        && (processing.choice || sameResolution)) {
+        // The receipt is the newest body's own: an answer says the work's tier, never what a call ran as.
+        const [choice, source] = tierChoice(processing);
+        next.processing = { choice, ...(source ? { source } : {}), ...(now.processing?.last ? { last: now.processing.last } : {}) };
+        // A concurrent body owns its resolved route; an act's resolution belongs only to the route it saw.
+        if (sameResolution && typeof processing.resolved === 'string') next.processing.resolved = processing.resolved;
+        took = true;
+    }
+    if (took) paintCardModel(record, next);
+    return took;
+}
+
 /* --- the popover: this work's acts, then the capsule's list of models --- */
 
-/** Opens the model popover of a card whose fact is pressable; null when the server offers no control for it. */
+/** Opens the Model sheet of a card whose fact is pressable; null when the server offers no control for it. */
 export function openCardModel(record) {
     const state = record?.cardModel;
     if (!state?.view?.target) return null;
     openPopover?.close({ focus: false });
     const { doc, deps } = state;
     const { store } = deps;
-    const id = `card-model-${++serial}`;
-    const popup = nodeOf(doc, 'div', 'ui-popup card-model-pop');
-    popup.setAttribute('role', 'dialog');
-    popup.setAttribute('aria-label', 'Model for this work');
+    // Above the field: whose model this is, a refusal said where it was pressed, and a fallback's own acts.
+    const head = nodeOf(doc, 'div', 'card-model-head');
     const title = nodeOf(doc, 'div', 'card-model-pop-title');
     title.dataset.i18nSkip = '';
     const acts = nodeOf(doc, 'div', 'card-model-acts');
-    // A refused act, said where it was pressed; `Retry` stands beside it only when the server saved the decision.
+    // `Retry` stands beside a refusal only when the server saved the decision.
     const refusal = nodeOf(doc, 'p', 'card-model-refusal');
     refusal.setAttribute('role', 'status');
     refusal.dataset.i18nSkip = '';
@@ -303,62 +370,73 @@ export function openCardModel(record) {
     const retry = nodeOf(doc, 'button', 'btn btn-sm btn-default card-model-retry', 'Retry');
     retry.setAttribute('type', 'button');
     refusal.append(refusalText, retry);
-    const { label, input } = modelSearchField(doc, `${id}-list`);
-    const list = nodeOf(doc, 'div', 'card-model-list');
-    list.id = `${id}-list`;
-    list.setAttribute('role', 'listbox');
-    list.setAttribute('aria-label', 'Models');
-    popup.append(title, refusal, acts, label, list);
+    // What this work's newest call was served as, beside its tier (the whole receipt is in Details): above the field,
+    // its line held while a receipt may come, so one arriving with the sheet open never moves the list or the strip.
+    const served = nodeOf(doc, 'p', 'card-model-served');
+    served.dataset.i18nSkip = '';
+    served.hidden = true;
+    head.append(title, served, refusal, acts);
     let busy = false;
     let closed = false;
     let actsKey = null;
     let headKey = null;
     let unwatchHead = () => {};
-    let position = null;
+    let sheet = null;
     let again = null;  // the refused request a 503 may send again, under its own id
     let unsubscribe = () => {};
     const view = () => state.view;
+    // An accepted act the running call has not reached yet (`lead.pending`) is this work's choice already.
+    const pending = () => normalizeRoute(view().lead.pending);
+    const follows = () => view().said.basis === 'main' && !pending();
 
-    async function run(action, route = null, requestId = globalThis.crypto?.randomUUID?.() || `card-model-${Date.now()}-${++serial}`) {
+    async function run(action, route = null, requestId = globalThis.crypto?.randomUUID?.() || `card-model-${Date.now()}-${++serial}`,
+        tier = undefined) {
         if (busy || closed) return;
         busy = true;
         again = null;
         refusal.hidden = true;
-        popup.setAttribute('aria-busy', 'true');
+        sheet?.el.setAttribute('aria-busy', 'true');
+        sheet?.paint();
         const before = view();
         try {
-            const reply = await deps.act(before.target, requestId,
-                { action, ...(route ? { model: route.model, use_local: route.use_local } : {}) });
+            const reply = await deps.act(before.target, requestId, { action,
+                ...(route ? { model: route.model, use_local: route.use_local } : {}),
+                ...(action === 'processing' ? { processing: tier } : {}) });
             const kept = before.said.said.short;
+            if (action === 'processing') {
+                const words = tier ? fmt('{tier} for this work.', { tier: tierWord(tier) }) : tr('model.tier.default_work', 'Default tier for this work.');
+                deps.toast(`${words} ${APPLIED_WORDS[reply?.applied] || ''}`.trim(), 'ok');
+                // The answer's own tier stands on the card until the next state body says it again.
+                adoptAnswer(record, state, before, { processing: reply?.processing });
+                return;
+            }
             deps.toast(action === 'wait' ? fmt('Waits for {model}: no paid calls until it answers.', { model: before.said.leftName || kept })
                 : action === 'keep' ? fmt('Stays on {model}: your choice from now on.', { model: kept })
                     : APPLIED_WORDS[reply?.applied] || 'The model was changed.', 'ok');
             // The answer's own fact stands on the card until the next state body says it again.
-            if (record.cardModel === state && normalizeRoute(reply?.lead)) {
-                paintCardModel(record, { ...before, lead: reply.lead, since: reply.lead.since === before.lead.since ? before.since : '' });
-            }
+            adoptAnswer(record, state, before, { lead: reply?.lead });
             void store.readRecents();  // the server wrote this act into the recent models
             close({ focus: true });
         } catch (error) {
             const said = refusalWords(error);
-            if (closed) deps.toast(said.words, 'error');  // its popover went while the answer was on its way
+            if (closed) deps.toast(said.words, 'error');  // its sheet went while the answer was on its way
             else {
-                again = said.retry ? { action, route, requestId } : null;
+                again = said.retry ? { action, route, requestId, tier } : null;
                 write(refusalText, said.words);
                 retry.hidden = !again;
                 refusal.hidden = false;
-                position?.reposition();
+                sheet?.reposition();
             }
         } finally {
             busy = false;
-            if (!closed) popup.removeAttribute('aria-busy');
+            if (!closed) { sheet?.el.removeAttribute('aria-busy'); sheet?.paint(); }
         }
     }
-    // A route Main is on follows Main (as its row in the capsule does); any other becomes this work's own.
+    // Main's row follows Main; any other row is that route, Main's model now included (a model row is always itself).
+    // The route still serving a pending switch is a choice again: it cancels the switch before the next step.
     const pick = (route) => {
-        const now = view();
-        const follows = now.said.basis === 'main' && !now.lead.pending;
-        if (sameRoute(route, now.main)) return follows ? close({ focus: true }) : run('follow');
+        if (!route) return follows() ? close({ focus: true }) : run('follow');
+        if (view().said.basis !== 'main' && !view().said.fallback && !pending() && sameRoute(route, view().said.said.route)) return close({ focus: true });
         return run('set', route);
     };
 
@@ -370,7 +448,7 @@ export function openCardModel(record) {
                 : said.leftName ? fmt(said.since ? 'Left {model} at {time}' : 'Left {model}', { model: said.leftName, time: said.since })
                     : said.name, said.cause].filter(Boolean).join(' · ')
             : [tr('model.popover.title', 'Model for this work'), said.why || basisWords(said.basis),
-                said.awaitingPrimary ? said.pending : ''].filter(Boolean).join(' · ');
+                said.pending].filter(Boolean).join(' · ');
         if (said.cited && said.primary) heading += ` · ${basisWords('owner_words')}`;
         const nextHead = JSON.stringify([heading, said.cited]);
         if (nextHead !== headKey) {
@@ -394,16 +472,20 @@ export function openCardModel(record) {
                     onDomWrite: (write) => {
                         const changed = write();
                         if (line.dataset.expanded !== '1') line.scrollTop = 0;
-                        position?.reposition();
+                        sheet?.reposition();
                         return changed;
                     },
                 });
                 unwatchHead = observeLayout(doc.defaultView, [line], () => {
                     if (line.dataset.expanded !== '1') toggle.hidden = !cut();
-                    position?.reposition();
+                    sheet?.reposition();
                 });
             }
         }
+        const last = servedWords(now.processing?.last);
+        write(served, last);
+        // Reserved (empty, one line high) while the work runs on a named tier: its receipt may arrive with the sheet open.
+        served.hidden = !last && !tierNamed(workTier(now));
         const mainName = now.main ? shortName(now.main) : '';
         // A fallback's three exits; any other work is moved from the list alone (its Main row follows Main).
         const offered = said.fallback ? [
@@ -425,91 +507,86 @@ export function openCardModel(record) {
         }));
         acts.hidden = !offered.length;
     }
-    const rows = createModelList({
-        el: list, input, id, store, main: () => view().main,
-        // The row that is this work's now: Main's while it follows Main, else its own.
-        current: () => (view().said.basis === 'main' ? view().main : view().said.said.route),
-        recents: () => store.recents().filter((route) => !sameRoute(route, view().main)).slice(0, RECENT_ROWS),
-        // The Main row is the way to follow Main: its facts say what a press does, or that the work already does.
-        mainFacts: () => (view().said.basis === 'main' && !view().lead.pending
-            ? tr('model.row.follows_main', 'this work follows Main') : tr('model.row.will_follow_main', 'this work will follow Main')),
-        rule: APPLIED_WORDS[view().queued ? 'at_start' : 'next_step'],
-        onRoute: pick,
-        onLeave: ({ focus }) => { if (focus) close({ focus: true }); },
-        onPaint: () => position?.reposition(),
-    });
+    // The strip's words: this work's own tier from its next call (`Applies when it starts.` for a queued one).
+    const tierView = () => {
+        const now = view();
+        const route = now.said.said.route;
+        const own = String(now.processing?.choice || '');
+        const tier = workTier(now);
+        const stated = own ? tierWord(own) : fmt('Default · {tier}', { tier: tierWord(tier || 'standard') });
+        // The tier this work runs on, its own or Default's (Main's included), reaches its new subagents without one.
+        const scope = now.queued ? tr('processing.scope.work_queued_helpers', 'for this work when it starts, and its new subagents without a tier of their own')
+            : tr('processing.scope.work_helpers', 'for this work from its next call and its new subagents without a tier of their own; the running call and started subagents keep theirs');
+        return {
+            choice: own, resolved: tier, busy,
+            ultrafast: offersUltrafast({ support: tierSupport(store.index(), route, 'ultrafast'), choice: own }),
+            scope: `${stated} · ${scope}`,
+            supportOf: (choice) => tierSupport(store.index(), route, choice),
+            explain: (choice) => tierExplanation(choice, { support: tierSupport(store.index(), route, choice), route,
+                sourceLabel: now.said.said.sourceLabel }),
+        };
+    };
 
     const onActs = (event) => {
         const made = event.target?.closest?.('.card-model-act');
         if (made) run(made.dataset.act);
     };
-    const onRetry = () => { if (again) run(again.action, again.route, again.requestId); };
-    const onKey = (event) => {
-        if (event.key !== 'Escape' || event.defaultPrevented) return;
-        event.preventDefault?.();
-        event.stopPropagation?.();
-        close({ focus: true });
-    };
-    // Escape closes it from wherever focus is: under a finger nothing in the popover holds it. Inside the popover
-    // the field's own Escape comes first (it clears what was typed).
-    const onPageKey = (event) => { if (!popup.contains(event.target)) onKey(event); };
-    const onOutside = (event) => {
-        if (!popup.contains(event.target) && !state.fact?.contains(event.target)) close({ focus: false });
-    };
-    // Focus that leaves the popover for the page closes it; a press inside that lands on nothing focusable does not.
-    const onFocusOut = (event) => {
-        const to = event.relatedTarget;
-        if (to && !popup.contains(to) && !state.fact?.contains(to)) close({ focus: false });
-    };
+    const onRetry = () => { if (again) run(again.action, again.route, again.requestId, again.tier); };
     function close({ focus = false } = {}) {
         if (closed) return;
         closed = true;
-        doc.removeEventListener('pointerdown', onOutside, true);
-        doc.removeEventListener('keydown', onPageKey, true);
-        popup.removeEventListener('keydown', onKey);
-        popup.removeEventListener('focusout', onFocusOut);
         acts.removeEventListener('click', onActs);
         retry.removeEventListener('click', onRetry);
         unsubscribe();
         unwatchHead();
-        position?.destroy();
-        rows.destroy();
-        popup.remove();
+        sheet?.close({ focus: false });
         if (openPopover === handle) openPopover = null;
         if (state.pressable) state.fact.setAttribute('aria-expanded', 'false');
         if (focus && state.pressable && state.fact.isConnected) state.fact.focus({ preventScroll: true });
     }
     const handle = {
-        record, popup, close,
-        // The work's fact changed under the open popover: its acts and its chosen row follow, or it closes with the control.
+        record, close,
+        get popup() { return sheet?.el || null; },
+        // The work's fact changed under the open sheet: its acts and its chosen row follow, or it closes with the control.
         sync() {
             if (closed) return;
             if (!state.view?.target || record.cardModel !== state) { close({ focus: false }); return; }
             paintHead();
-            rows.paint();
+            sheet?.paint();
         },
     };
-    doc.body.append(popup);
     paintHead();
+    sheet = openModelSheet({
+        anchor: state.fact, label: 'Model for this work', head, doc, place: deps.place,
+        stack: deps.stack || (() => false), coarse: deps.coarse, returnFocus: state.fact,
+        list: {
+            store, main: () => view().main, follows,
+            // The row that is this work's now: a pending switch's, else Main's while it follows Main, else its own.
+            current: () => pending() || (view().said.basis === 'main' ? view().main : view().said.said.route),
+            recents: () => store.recents().slice(0, RECENT_ROWS),
+            mainRow: 'follow',
+            tierOf: (_route, { main = false } = {}) => String(view().processing?.choice || '')
+                || resolvedTier({ follows: main, tiers: view().tiers || store.tiers?.() || null }),
+            // The Main row is the way to follow Main: its facts say what a press does, or that the work already does.
+            mainFacts: () => (follows() ? tr('model.row.follows_main', 'this work follows Main') : tr('model.row.will_follow_main', 'this work will follow Main')),
+            onRoute: pick,
+            onPin: (route, pinned) => store.setPinned(route, pinned).catch((error) => deps.toast(error?.message || 'Could not change the pinned models.', 'error')),
+        },
+        tier: { onChoose: (tier) => run('processing', null, undefined, tier), view: tierView },
+        onClose: () => { if (!closed) close({ focus: false }); },
+    });
     void store.read();
     void store.readRecents();
-    rows.paint();
-    position = deps.place(popup, state.fact);
-    unsubscribe = store.subscribe(() => { if (!closed) { paintHead(); rows.paint(); } });
-    doc.addEventListener('pointerdown', onOutside, true);
-    doc.addEventListener('keydown', onPageKey, true);
-    popup.addEventListener('keydown', onKey);
-    popup.addEventListener('focusout', onFocusOut);
+    unsubscribe = store.subscribe(() => { if (!closed) { paintHead(); sheet?.paint(); } });
     acts.addEventListener('click', onActs);
     retry.addEventListener('click', onRetry);
     state.fact.setAttribute('aria-expanded', 'true');
     openPopover = handle;
-    // A finger's press shows the acts and the list; the keyboard waits for a press on the field itself.
-    if (!deps.coarse()) input.focus({ preventScroll: true });
     return handle;
 }
 
-/** Closes the open popover, if any (a room that leaves the screen takes its popover with it). */
+/** Closes the open sheet, if any (a room that leaves the screen takes its sheet with it). */
 export function closeCardModel() {
     openPopover?.close({ focus: false });
+    closeModelSheet();
 }

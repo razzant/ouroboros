@@ -57,13 +57,15 @@ def _observe_context(page, rows: list) -> list:
     page.route(re.compile(r"/api/state(\?.*)?$"), handle)
     return rows
 EFFORT = "#page-chat .chat-effort-range"
+# ↓ latest is absolutely positioned in the reserved end pad on desktop and above the line on phones.
+# Measure the line's in-flow controls without it; the arrow also stays when a strip opens alone.
 ROW = """() => {
     const row = document.querySelector('#page-chat .chat-toolbar-row');
     const rect = (node) => node.getBoundingClientRect();
     const shown = (node) => Boolean(node) && getComputedStyle(node).display !== 'none';
     const ctx = row.querySelector('.chat-context-mode');
     const eff = row.querySelector('.chat-effort-range');
-    const kids = [...row.children].filter(shown);
+    const kids = [...row.children].filter((kid) => shown(kid) && !kid.matches('.chat-scroll-bottom-btn'));
     const tops = kids.map((kid) => rect(kid).top);
     const segs = [...ctx.querySelectorAll('.chat-seg')];
     const active = document.activeElement;
@@ -121,7 +123,7 @@ FRAMES = """async ({ sel, frames }) => {
         return word.width > 0 && word.left >= Math.max(s.left, b.left) - 0.5 && word.right <= Math.min(s.right, b.right) + 0.5;
     };
     const sample = () => {
-        const tops = [...row.children].filter(shown).map((kid) => kid.getBoundingClientRect().top);
+        const tops = [...row.children].filter((kid) => shown(kid) && !kid.matches('.chat-scroll-bottom-btn')).map((kid) => kid.getBoundingClientRect().top);
         return { spread: Math.max(...tops) - Math.min(...tops), height: row.getBoundingClientRect().height, width: el.getBoundingClientRect().width,
                  whole: whole(), compact: row.dataset.ownerCompact || '' };
     };
@@ -236,7 +238,8 @@ CAPPED = """() => {
     const r = row.getBoundingClientRect();
     const box = (node) => { const b = node.getBoundingClientRect(); return [b.left, b.right]; };
     const content = [r.left + parseFloat(rs.paddingLeft), r.right - parseFloat(rs.paddingRight)];
-    const kids = [...row.children].filter((kid) => getComputedStyle(kid).display !== 'none' && kid.getBoundingClientRect().width > 0);
+    const kids = [...row.children].filter((kid) => getComputedStyle(kid).display !== 'none' && kid.getBoundingClientRect().width > 0
+        && !kid.matches('.chat-scroll-bottom-btn'));
     return {
         contained: kids.every((kid) => { const [l, rr] = box(kid); return l >= content[0] - 1 && rr <= content[1] + 1; }),
         capsules: [...row.querySelectorAll('.chat-capsule')].map((el) => {
@@ -512,7 +515,7 @@ def test_closed_names_reduced_motion_and_a_resize_that_refits(direct_server_with
             page.wait_for_function("""sel => !document.querySelector(sel).style.getPropertyValue('--capsule-body-width')""", arg=EFFORT)
             named_width = page.evaluate("""() => {
                 const row = document.querySelector('#page-chat .chat-toolbar-row'), css = getComputedStyle(row);
-                const kids = [...row.children].filter(n => getComputedStyle(n).display !== 'none');
+                const kids = [...row.children].filter(n => getComputedStyle(n).display !== 'none' && !n.matches('.chat-scroll-bottom-btn'));
                 return Math.ceil(kids.reduce((sum, n) => sum + n.getBoundingClientRect().width, 0)
                     + parseFloat(css.columnGap) * (kids.length - 1) + parseFloat(css.paddingLeft) + parseFloat(css.paddingRight));
             }""")
@@ -922,7 +925,8 @@ MORPH_FRAMES = """async ({ sel, times }) => {
     const el = document.querySelector(sel);
     const head = el.querySelector('.chat-capsule-head');
     const rect = (node) => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, width: r.width }; };
-    const shownKids = () => [...row.children].filter((kid) => kid !== el && getComputedStyle(kid).display !== 'none');
+    const shownKids = () => [...row.children].filter((kid) => kid !== el && getComputedStyle(kid).display !== 'none'
+        && !kid.matches('.chat-scroll-bottom-btn'));
     const before = { capsule: rect(el), head: rect(head), kids: shownKids().map(rect), height: row.getBoundingClientRect().height };
     head.dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
     const animations = [el, ...row.children].flatMap((node) => node.getAnimations({ subtree: true }))
@@ -1011,7 +1015,8 @@ CTX_FACTS = """() => {
     const fact = hint.querySelector('.ui-hint-fact');
     const box = (node) => { const r = node.getBoundingClientRect(); return [r.left, r.top, r.right, r.bottom]; };
     const style = getComputedStyle(el);
-    const kids = [...row.children].filter((kid) => getComputedStyle(kid).display !== 'none' && kid.getBoundingClientRect().width > 0);
+    const kids = [...row.children].filter((kid) => getComputedStyle(kid).display !== 'none' && kid.getBoundingClientRect().width > 0
+        && !kid.matches('.chat-scroll-bottom-btn'));
     const tops = kids.map((kid) => kid.getBoundingClientRect().top);
     const probe = document.createElement('span');
     document.body.append(probe);

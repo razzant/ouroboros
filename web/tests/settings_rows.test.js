@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { bindSettingRows, commitSetting, forgetSettingRows, outcomeLine, readSettings, settingsRow, writeEntry } from '../modules/settings_controls.js';
-import { HAND_WRITTEN, ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
+import { setRowMeta } from '../modules/ui_primitives.js';
+import { HAND_WRITTEN, HOME_ROWS, ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 
 const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => structuredClone(data) });
@@ -520,6 +521,9 @@ test('the rows are data: they survive JSON, ids are unique, and every key has ex
     assert.deepEqual(rowsOf('dashboard:costs', { fold: true }).map((row) => row.id), ['OUROBOROS_MAX_ROUNDS', 'OUROBOROS_TASK_ABS_CEILING_SEC']);
     assert.equal(rowById('TOTAL_BUDGET').control.from, 'setup:totalBudget', 'the setup contract describes the budget fields');
     assert.equal(rowById('nope'), null);
+    assert.deepEqual(HOME_ROWS.filter((row) => ['dashboard:consciousness', 'dashboard:evolution', 'page:circles', 'dashboard:costs',
+        'page:skills', 'dashboard:updates', 'dashboard:storage'].includes(row.to)).map((row) => row.reads),
+    [undefined, undefined, undefined, undefined, undefined, undefined, undefined], 'doors leave Settings before their pages are shown');
 });
 
 test('a choices row is a radio group of options with their lines; a restart that waits marks the one in force and the chosen one', async (t) => {
@@ -583,4 +587,118 @@ test('the newest read and each landed write announce the document to the lists t
     await settle();
     assert.deepEqual(server.posts, [{ TOTAL_BUDGET: 250 }]);
     assert.equal(seen.at(-1), 250, 'a landed write announces the patched document, with no read after it');
+});
+
+test('a wide control is marked to go under its words sooner; a door, a switch, a key and a short number are not', () => {
+    const wide = (row) => / data-wide[ >]/.test(settingsRow(row, {}).split('>')[0] + '>');
+    for (const row of [STRIP, CHECKER, WAKE, testRow('T_LIST', { kind: 'select', options: [option('a', 'A')] }),
+        testRow('T_OWN', { kind: 'custom' }), testRow('T_BOUND', { kind: 'number', noLimit: true })]) assert.ok(wide(row), row.id);
+    for (const row of [SWITCH, SECRET, LADDER, testRow('T_DOOR', { kind: 'door', page: 'models' }), testRow('T_N', { kind: 'number' }),
+        testRow('T_DEVICE', { kind: 'custom', as: 'switch' })]) assert.ok(!wide(row), row.id);
+});
+
+test('a row says when its meta line has no words, drawn so and after every write: settings.css lays it on one line by it', () => {
+    forgetSettingRows();
+    const bare = testRow('T_BARE', { kind: 'switch' }, { keys: [], meta: '' });
+    const first = (row) => settingsRow(row).split('>')[0];
+    assert.deepEqual([/ data-no-meta$/.test(first(bare)), / data-no-meta/.test(first(SWITCH))], [true, false], 'the template says it as drawn');
+    const container = new NodeStub();
+    container.innerHTML = settingsRow(bare);
+    const bound = bindSettingRows(container, { rows: [bare] });
+    const row = container.querySelector('[data-setting-row]');
+    const said = () => [row.querySelector('[data-setting-meta]').textContent, row.hasAttribute('data-no-meta')];
+    assert.deepEqual(said(), ['', true]);
+    bare.meta = 'Words that came after the row was drawn';
+    bound.paint();
+    assert.deepEqual(said(), ['Words that came after the row was drawn', false], 'words written later take the flag away');
+    bare.meta = '';
+    bound.paint();
+    assert.deepEqual(said(), ['', true]);
+    // Another part of the same line (a Dashboard tab's caption) is written through the same writer and speaks for the row.
+    const caption = new NodeStub('span');
+    row.querySelector('.ui-row-meta').append(caption);
+    setRowMeta(caption, 'A caption');
+    assert.equal(row.hasAttribute('data-no-meta'), false);
+    setRowMeta(caption, '');
+    assert.equal(row.hasAttribute('data-no-meta'), true);
+    const loose = { textContent: '' };
+    setRowMeta(loose, 'A line outside any row');
+    setRowMeta(null, 'nowhere');
+    assert.equal(loose.textContent, 'A line outside any row', 'outside a row only the words are written');
+    bound.dispose();
+});
+
+test('a write that waits for a restart says why its line is yellow, with a receipt or without one', () => {
+    assert.deepEqual(outcomeLine(ACCESS, { state: 'saved', effect: 'restart' }), { text: 'Saved · applies after restart', tone: 'warn', undo: false, note: '', details: '' });
+    assert.deepEqual(outcomeLine(ACCESS, { state: 'saved', effect: 'restart', old: 'light' }).text, 'Saved · applies after restart');
+    assert.equal(outcomeLine(CHECKER, { state: 'saved', effect: 'next_call' }).text, 'Saved', 'a quiet effect without a receipt still says nothing more');
+});
+
+test('a row not read yet is no value: inert, its meta says Reading…; the read that lands paints it and lifts only its own lock', async (t) => {
+    forgetSettingRows();
+    const env = setup(t);
+    fakeServer(env.routes, { T_SWITCH: true });
+    const container = new NodeStub();
+    container.innerHTML = [SWITCH, STRIP].map((row) => settingsRow(row)).join('');
+    const option = (value) => container.querySelectorAll('[data-setting-value]').find((button) => button.dataset.settingValue === value);
+    // A control its own module keeps disabled (an option this host cannot take): the row helper never lifts that lock.
+    option('blocking').disabled = true;
+    const bound = bindSettingRows(container, { rows: TEST_ROWS });
+    t.after(() => bound.dispose());
+    const field = container.querySelector('#setting-T_SWITCH');
+    const meta = (row) => container.querySelector(`#setting-${row.id}-meta`).textContent;
+    assert.deepEqual([field.disabled, option('advisory').disabled, meta(SWITCH), meta(STRIP)], [true, true, 'Reading…', 'Reading…']);
+    await readSettings();  // made for another page: every row on screen is painted from it
+    assert.deepEqual([field.disabled, field.checked, option('advisory').disabled, option('advisory').getAttribute('aria-pressed'),
+        option('blocking').disabled, meta(SWITCH), meta(STRIP)], [false, true, false, 'true', true, 'T_SWITCH meta', 'T_REVIEW meta']);
+    // A lock its page sets after a read is the page's as well.
+    field.disabled = true;
+    await readSettings();
+    assert.equal(field.disabled, true);
+    // Drawn after a read, a row shows that read as it is bound.
+    const later = draw([STRIP]);
+    const chosen = later.container.querySelectorAll('[data-setting-value]').filter((button) => button.getAttribute('aria-pressed') === 'true');
+    assert.deepEqual([chosen.map((button) => button.dataset.settingValue), chosen[0].disabled, later.meta(STRIP)], [['advisory'], false, 'T_REVIEW meta']);
+    later.bound.dispose();
+});
+
+test('a first read that fails says so and keeps the rows inert until a read starts again; an older failure never stands over a newer read', async (t) => {
+    forgetSettingRows();
+    const env = setup(t);
+    fakeServer(env.routes, { T_SWITCH: true });
+    const answer = env.routes.get('/api/settings');
+    const gates = [];
+    env.routes.set('/api/settings', async (url, init = {}) => {
+        const gate = deferred();
+        gates.push(gate);
+        return (await gate.promise) === 200 ? answer(url, init) : response({ error: 'offline' }, 500);
+    });
+    const container = new NodeStub();
+    container.innerHTML = settingsRow(SWITCH);
+    const bound = bindSettingRows(container, { rows: TEST_ROWS });
+    t.after(() => bound.dispose());
+    const field = container.querySelector('#setting-T_SWITCH');
+    const said = () => [container.querySelector('#setting-T_SWITCH-meta').textContent, field.disabled];
+    const failed = readSettings().catch(() => 'failed');
+    await settle();
+    gates[0].resolve(500);
+    assert.equal(await failed, 'failed');
+    assert.deepEqual(said(), ['Could not be read', true]);
+    // Read again (the page shown again): an older read fails while the newer one runs, and the row still reads.
+    const older = readSettings().catch(() => 'failed');
+    const newer = readSettings();
+    assert.deepEqual(said(), ['Reading…', true]);
+    await settle();
+    gates[1].resolve(500);
+    await older;
+    assert.deepEqual(said(), ['Reading…', true], 'an older failure is not the answer of the read still running');
+    gates[2].resolve(200);
+    await newer;
+    assert.deepEqual([...said(), field.checked], ['T_SWITCH meta', false, true]);
+    // A row that has an answer keeps it when a later read fails.
+    const later = readSettings().catch(() => 'failed');
+    await settle();
+    gates[3].resolve(500);
+    await later;
+    assert.deepEqual([...said(), field.checked], ['T_SWITCH meta', false, true]);
 });

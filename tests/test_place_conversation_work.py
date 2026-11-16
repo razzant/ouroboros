@@ -77,7 +77,8 @@ def attention(world, source):
 
 @pytest.fixture
 def host(tmp_path, monkeypatch):
-    from tests.conversation_carrier_support import booted_host_lane
+    from ouroboros.presence_carrier import set_presence_runner
+    from tests.conversation_carrier_support import booted_host_lane, join_host_lane_carriers
     from tests.test_host_service_api import _seed_token
     from tests.test_presence_continuation_bootstrap import install_bootstrap_harness
     from tests.test_promote_chat_flow import _confirm_promote
@@ -129,7 +130,9 @@ def host(tmp_path, monkeypatch):
     yield start
     for client in clients:
         until(lambda: not client.app.state.host_service_context.presence_turns.live(), "every focus to end")
+        join_host_lane_carriers()  # this world's own WORKERS (``_install_queue``): its carriers' tails end here
         client.__exit__(None, None, None)
+    set_presence_runner(tmp_path / "data", None)  # the runner its Host registered for that root leaves with it
 
 
 def event_of(world, source, *, conversation="C1", thread="1.0", text="Please look into it", facts=("mention",)):
@@ -1379,7 +1382,7 @@ def test_a_promoted_root_in_a_spawned_worker_process_wakes_on_an_untagged_messag
     proc.start()
     events = world.data / "logs" / "events.jsonl"
     try:
-        until(lambda: events.exists() and any('"worker_ready"' in line and f'"pid": {proc.pid}' in line
+        until(lambda: events.exists() and any('"worker_ready"' in line and json.loads(line).get("pid") == proc.pid
                                               for line in events.read_text(encoding="utf-8").splitlines()),
               "the spawned worker's worker_ready row", 120)
         in_q.put(task)

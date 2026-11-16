@@ -196,6 +196,23 @@ def test_two_or_three_harnesses_keep_one_triad_seat_each(subtests):
             assert [seat["position"] for seat in preset.receipt["surfaces"]["triad"]] == list(range(1, len(connected) + 1))
 
 
+@pytest.mark.parametrize("settings, light", [
+    ({"USE_LOCAL_LIGHT": True}, "openai/main (local)"),   # its own box, ticked under a cloud Main: the local runtime
+    ({}, "openai/main"),                                  # unticked: Main's cloud route
+    ({"USE_LOCAL_MAIN": True}, "openai/main (local)"),    # a local Main: the empty slot follows it, box or no box
+    ({"USE_LOCAL_LIGHT": True, "OUROBOROS_MODEL_LIGHT": "openai/light"}, "openai/light (local)"),  # a set slot governs itself
+    ({"USE_LOCAL_MAIN": True, "OUROBOROS_MODEL_LIGHT": "openai/light"}, "openai/light"),
+])
+def test_the_light_binding_a_roster_compiles_from_is_the_one_rules(settings, light):
+    """A generated roster binds its Light rows to the route Light calls take (route_choice.following_route): an empty
+    Light is Main's model, on the local runtime when its own box is ticked under a cloud Main."""
+    from ouroboros.subscription_install_presets import role_route_binding
+
+    document = {"OPENROUTER_API_KEY": "configured", "OUROBOROS_MODEL": "openai/main", "LOCAL_MODEL_SOURCE": "org/model.gguf",
+                **settings}
+    assert role_route_binding(document, "light")["route"]["target_id"] == light
+
+
 def test_settings_keys_write_new_actor_ssot_and_receipt_not_legacy_singleton():
     from ouroboros.configured_subagents import SUBAGENTS_RECEIPT_KEY, SUBAGENTS_SETTING
 
@@ -534,9 +551,9 @@ def test_one_harness_plus_distinct_main_and_light_normally_yields_three_real_act
 
 
 def test_roster_cap_overflow_omits_the_seat_with_a_diagnostic():
-    """The 26-row cap leaves no room to mint: there is no inline lane to fall
+    """A full catalog (MAX_CONFIGURED_SUBAGENTS rows) leaves no room to mint: there is no inline lane to fall
     back to any more, so the seat is OMITTED and says so in diagnostics —
-    honest disclosure, never a silent drop (and never a 27th row)."""
+    honest disclosure, never a silent drop (and never a row past the cap)."""
     from ouroboros.configured_subagents import (
         MAX_CONFIGURED_SUBAGENTS,
         ROUTE_KIND_API_MODEL,

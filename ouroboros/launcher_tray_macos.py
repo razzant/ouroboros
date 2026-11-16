@@ -25,11 +25,18 @@ def _classes(base):
 
         class OuroborosAppDelegate(base):
             def applicationShouldHandleReopen_hasVisibleWindows_(self, sender, flag):
-                _shared["background"].show_window()
+                background = _shared["background"]
+                if background.window is None:  # a setup or startup window: AppKit's own reopen restores it
+                    return True
+                background.show_window()
                 return False
 
             def applicationShouldTerminate_(self, sender):
-                _shared["background"].quit.set()  # Cmd+Q, Dock Quit, logout: never cancelled, never asked
+                background = _shared["background"]
+                if background.window is None:  # a setup or startup window: pywebview's YES would exit before teardown
+                    background.quit_app()  # the owner's Quit; its closer's exit answers this terminate
+                    return AppKit.NSTerminateLater  # a logout waits for that exit, never cancelled
+                background.quit.set()  # Cmd+Q, Dock Quit, logout: never cancelled, never asked
                 reply = objc.super(OuroborosAppDelegate, self).applicationShouldTerminate_(sender)
                 # NO: the window kept its loop because the quit's closer owns the exit; a logout waits for it.
                 return reply if reply else AppKit.NSTerminateLater
@@ -68,6 +75,10 @@ class MacStatusItem(Indicator):
 
     def attach_native(self, window):
         """``before_show`` runs on the main thread after pywebview set its own delegate."""
+        self.attach_app()
+
+    def attach_app(self):
+        """The app's quit requests reach this launcher: the delegate only, no window's close policy."""
         import AppKit
 
         app = AppKit.NSApplication.sharedApplication()

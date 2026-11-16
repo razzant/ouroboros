@@ -158,20 +158,23 @@ def render_governance(governance: Tuple[Any, ...], addressed: Optional[Mapping[s
                  for part in governance)
 
 
-def _system_blocks(core: Any, governance: Tuple[Any, ...], story: str = "", room: str = "",
-                   mode: str = "", addressed: Optional[Mapping[str, str]] = None) -> List[Dict[str, Any]]:
+def _system_blocks(core: Any, governance: Tuple[Any, ...], story: str = "", room: str = "", mode: str = "",
+                   addressed: Optional[Mapping[str, str]] = None, story_whole: bool = True) -> List[Dict[str, Any]]:
     # All stable items precede C; D is its own block only for the full handbook: Max without it carries the
     # handbook's chapter map at the head of B, spending no breakpoint; a compact mode's D is a direct requirement
     # (A' keeps its map). The mode picks the connections map's form in B. Never create an empty cache boundary.
+    # B declares what of it other works share (``SHARED_HEAD_KEY``): its head, and its story when that is whole.
     addressed = addressed or {}
     common, *handbook = render_governance(governance, addressed)
     semi = render_sections(core.semi_stable_sections, core.semi_stable_text, addressed)
     dynamic = render_sections(core.dynamic_sections, core.dynamic_text, addressed)
     own_block = core.docs_need_development or core.development_required
-    stable = (common, *(handbook if own_block else ()), "\n\n".join(part for part in (
-        *(() if own_block else handbook), semi, core.connections[mode == "nano"], story) if part))
+    shared = "\n\n".join(part for part in (*(() if own_block else handbook), semi, core.connections[mode == "nano"]) if part)
+    stable = (common, *(handbook if own_block else ()), "\n\n".join(part for part in (shared, story) if part))
     head = render_sections(core.dynamic_head_sections, core.dynamic_head_text, addressed)
-    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}
-            for text in stable if text.strip()] + [
-        {"type": "text", "text": "\n\n".join(part for part in (head, room, dynamic) if part)},
-    ]
+    blocks = [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}} for text in stable if text.strip()]
+    if shared.strip() and story.strip():
+        from ouroboros.llm_messages import SHARED_HEAD_KEY  # here, as its sibling key is: no transport at import time
+
+        blocks[-1][SHARED_HEAD_KEY] = {"chars": len(shared) + 2, "story_whole": bool(story_whole)}
+    return blocks + [{"type": "text", "text": "\n\n".join(part for part in (head, room, dynamic) if part)}]

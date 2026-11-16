@@ -98,15 +98,14 @@ def test_missing_chapter_cannot_masquerade_as_a_complete_book(tmp_path):
     assert not any(book.book_id == "architecture" for book in core.reference_books)
 
 
-def test_worker_book_warm_reaches_normal_capture_and_restored_mtime_edit_is_fresh(tmp_path, monkeypatch):
+def test_a_later_capture_reuses_book_parses_and_restored_mtime_edit_is_fresh(tmp_path, monkeypatch):
     import os
     from ouroboros import reference_books as books
-    from supervisor.worker_process import _warm_context_sources
 
     env, _core, task = _capture(tmp_path)
     books._book_source.cache_clear()
-    _warm_context_sources(env)
     memory = Memory(drive_root=env.drive_root, repo_dir=env.repo_dir)
+    context._capture_context_core(env, memory, task, None, None)  # an earlier capture in this process parsed them
     cold_parse = books.parse_markdown_source
     parses = []
     monkeypatch.setattr(books, "parse_markdown_source", lambda *a: (parses.append(a[1]), cold_parse(*a))[1])

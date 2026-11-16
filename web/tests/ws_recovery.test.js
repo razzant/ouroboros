@@ -292,6 +292,31 @@ test('a disconnect clears the pending post-open retry', async () => {
     }
 });
 
+// What rooms read through room_retire.js: the `previouslyConnected` the next open carries, false until a socket of
+// this page opened (a failed attempt is none), then true across its drops.
+test('previouslyConnected() is false until a socket opened, then holds through a drop', async () => {
+    installEnv([{ body: { sha: 'abc' } }]);
+    const ws = new WS('ws://unused');
+    const opens = [];
+    ws.on('open', (msg) => opens.push(msg.previouslyConnected));
+    try {
+        assert.equal(ws.previouslyConnected(), false);
+        ws.connect();
+        FakeSocket.instances[0].onclose();  // the first attempt fails
+        assert.equal(ws.previouslyConnected(), false, 'a failed attempt is no connection');
+        ws.connect();
+        const socket = FakeSocket.instances[1];
+        socket.readyState = FakeSocket.OPEN;
+        socket.onopen();
+        socket.readyState = FakeSocket.CLOSED;
+        socket.onclose();
+        assert.equal(ws.previouslyConnected(), true, 'down after an open: the next open is a reconnect');
+        assert.deepEqual(opens, [false]);
+    } finally {
+        await teardown(ws);
+    }
+});
+
 // ---------------------------------------------------------------------------
 // _scheduleUiRecovery: probe decisions, fuse, race bail, queue survival.
 // ---------------------------------------------------------------------------
@@ -627,6 +652,28 @@ test('keep-recovery preserves the outbound queue and the reconnect flush deliver
         assert.equal(frame.text, 'hello');
         assert.deepEqual(outbound[0], ['queued', result.clientMessageId]);
         assert.deepEqual(outbound[1], ['sent', result.clientMessageId, true]);
+    } finally {
+        await teardown(ws);
+    }
+});
+
+test('a throwing open listener surfaces, and the version read and the queued frame still happen', async () => {
+    const env = installEnv([{ body: { sha: 'def' } }]);
+    const ws = new WS('ws://unused');
+    try {
+        ws._wasConnected = true;
+        ws._lastSha = 'abc';
+        ws.send({ type: 'chat', text: 'hello' });
+        ws._clearUiRecoveryTimer();
+        ws._clearReconnectTimer();
+        ws.on('open', () => { throw new Error('a view listener failed'); });
+        ws.connect();
+        const sock = ws.ws;
+        sock.readyState = FakeSocket.OPEN;
+        assert.throws(() => sock.onopen(), /a view listener failed/);
+        await waitFor(() => env.replaced.length === 1, 'the post-open read of a changed SHA');
+        assert.match(env.replaced[0], /_ouro_reason=sha-change/);
+        assert.equal(JSON.parse(sock.sent[0]).text, 'hello');
     } finally {
         await teardown(ws);
     }

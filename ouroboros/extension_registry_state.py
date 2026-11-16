@@ -396,16 +396,20 @@ def reviewed_declaration_locked(name: str, bundle: Optional[_ExtensionRegistrati
     """What ``bundle``'s reviewed manifest declares for tool surface ``name``, detached; the caller holds ``_lock``.
 
     ``tool`` is the manifest's unique ``tools:`` row for it (``{}`` when none or no bundle);
-    ``provides_place`` says whether that publication contributes a place."""
+    ``provides_place`` says whether that publication contributes a place; ``plugin_api`` is the PluginAPI
+    minimum the manifest declares (``1.3`` when it declares none), which a row's ``touches`` require."""
+    from ouroboros.contracts.plugin_api import api_generation
     from ouroboros.extension_surface_names import parse_extension_surface_name
 
     parsed = parse_extension_surface_name(name)
-    extra = getattr(getattr(getattr(bundle, "loaded_skill", None), "manifest", None), "raw_extra", None)
+    manifest = getattr(getattr(bundle, "loaded_skill", None), "manifest", None)
+    extra = getattr(manifest, "raw_extra", None)
     rows = extra.get("tools", []) if parsed and isinstance(extra, dict) else []
     matches = [row for row in rows if isinstance(row, dict) and row.get("name") == parsed[1]] if isinstance(rows, list) else []
     return {"tool": copy.deepcopy(matches[0]) if len(matches) == 1 else {},
             "provides_place": any(isinstance(entry, dict) and entry.get("provides") == "place"
-                                  for entry in (bundle.contributions if bundle is not None else ()))}
+                                  for entry in (bundle.contributions if bundle is not None else ())),
+            "plugin_api": api_generation(manifest) if manifest is not None else ""}
 
 
 def get_tool_with_generation(name: str) -> tuple[Optional[Dict[str, Any]], str]:

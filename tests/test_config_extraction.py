@@ -37,6 +37,10 @@ _ADDED_OWNERS = {
     "WORKER_READY_CEILING_SEC": runtime_limits,
     # A spawned direct-Restart successor's bounded wait for its exiting parent's data-root admission.
     "SERVER_ADMISSION_WAIT_SEC": runtime_limits,
+    # The server's interpreter switch interval (``server_entrypoint.shorten_switch_interval``).
+    "SERVER_SWITCH_INTERVAL_SEC": runtime_limits,
+    # The server's young-generation collection threshold (``server_entrypoint.raise_gc_threshold``).
+    "SERVER_GC_THRESHOLD0": runtime_limits,
     "STOP_ADMISSION_DRAIN_SEC": runtime_limits,
     "MACOS_HANDOFF_FULLSCREEN_WAIT_SEC": runtime_limits,
     # The supervisor loop's bounded events pass and the budget-projection retry interval.
@@ -107,6 +111,10 @@ _ADDED_OWNERS = {
     "task_processing_preference": model_slots,
     "normalize_processing_preference": model_slots,
     "resolve_processing_preference": model_slots,
+    # A call's tier (Settings' three and the runtime-only Ultrafast) and the tiers /api/state publishes.
+    "CALL_TIERS": model_slots,
+    "normalize_call_tier": model_slots,
+    "processing_tiers": model_slots,
     "MODEL_ROLE_SETTINGS": model_slots,
     "normalize_model_role_options": model_slots,
     "model_role_option": model_slots,

@@ -181,24 +181,46 @@ def test_a_warm_migration_cache_never_replays_another_connections_catalog(base, 
 
 # --- P3: Safety's lane is the one its resolved model names --------------------
 
-def test_a_leftover_local_light_flag_does_not_send_an_inherited_remote_main_to_the_local_lane(monkeypatch):
+def test_an_empty_light_sends_the_supervisor_where_its_own_local_box_says(monkeypatch):
+    """Owner, 15.11 (#3292): the box of an empty Light is the owner's choice for every Light call, the Supervisor
+    that inherits it included. Ticked under a cloud Main it is an explicit local route (a failing local runtime
+    holds); unticked, the Supervisor follows Main's lane, and a local Main it merely inherits tolerates an outage."""
     from ouroboros.model_slots import get_safety_model
     from ouroboros.safety import _resolve_safety_routing
+    from ouroboros.safety_config import safety_configuration
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
     monkeypatch.setenv("OUROBOROS_MODEL", "google/gemini-3.8-flash")
     for key in ("OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_SAFETY"):
         monkeypatch.setenv(key, "")
+    document = {"OUROBOROS_MODEL": "google/gemini-3.8-flash", "OUROBOROS_MODEL_LIGHT": "", "OUROBOROS_MODEL_SAFETY": "",
+                "USE_LOCAL_MAIN": False, "USE_LOCAL_LIGHT": True}
     monkeypatch.setenv("USE_LOCAL_MAIN", "false")
     monkeypatch.setenv("USE_LOCAL_LIGHT", "true")
-    assert get_safety_model() == "google/gemini-3.8-flash"  # blank Light follows Main and Main's lane
+    assert get_safety_model() == "google/gemini-3.8-flash (local)"
+    assert _resolve_safety_routing() == (True, False, None)
+    assert safety_configuration(document)[:2] == ("google/gemini-3.8-flash", True)  # the owner guard's snapshot agrees
+    # The still-working direction: unticked, the Supervisor stays on the cloud Main.
+    monkeypatch.setenv("USE_LOCAL_LIGHT", "false")
+    assert get_safety_model() == "google/gemini-3.8-flash"
     assert _resolve_safety_routing() == (False, False, None)
-    # A Light of its own on the local lane still checks locally; so does a local Main it inherits.
+    # A box is read as its reader's values come: a settings document by the loader's spellings (a hand-written
+    # "yes" is what the loader types as ticked), the live settings as the Safety routing reads them, so the rule and
+    # safety.py never name two lanes for one value.
+    for spelling in ("yes", "on"):
+        assert safety_configuration({**document, "USE_LOCAL_LIGHT": spelling})[:2] == ("google/gemini-3.8-flash", True)
+        monkeypatch.setenv("USE_LOCAL_LIGHT", spelling)  # untyped in the environment: not a tick for either reader
+        assert get_safety_model() == "google/gemini-3.8-flash"
+        assert _resolve_safety_routing() == (False, False, None)
+    assert safety_configuration({**document, "USE_LOCAL_LIGHT": False})[:2] == ("google/gemini-3.8-flash", False)
+    # A Light of its own on the local lane checks locally; so does a local Main an unticked Light inherits.
     monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "owner/light")
-    assert _resolve_safety_routing()[0] is True
+    monkeypatch.setenv("USE_LOCAL_LIGHT", "true")
+    assert _resolve_safety_routing() == (True, False, None)
     monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "")
+    monkeypatch.setenv("USE_LOCAL_LIGHT", "false")
     monkeypatch.setenv("USE_LOCAL_MAIN", "true")
-    assert _resolve_safety_routing()[0] is True
+    assert _resolve_safety_routing() == (True, True, None)
 
 
 # --- the loader every reader shares (startup, Settings GET, headless) ---------
@@ -276,7 +298,7 @@ def test_no_choice_is_asked_when_main_is_chosen_or_unambiguous(tmp_path, monkeyp
 
 
 def test_settings_names_what_the_limits_cannot_count(tmp_path, monkeypatch):
-    """`_meta.known_spend_gaps`, said under the limits on Dashboard › Costs (pricing.known_spend_gaps)."""
+    """`_meta.known_spend_gaps`, said under the limits on Dashboard › Costs (pricing.spend_coverage)."""
     direct = settings_read(tmp_path, monkeypatch, {"OPENAI_API_KEY": "k", "OUROBOROS_MODEL": "openai::gpt-5.6-sol"})
     assert direct["_meta"]["known_spend_gaps"][0] == "all model roles", "a direct key has no catalog price"
     routed = settings_read(tmp_path, monkeypatch, {"OPENROUTER_API_KEY": "k"})

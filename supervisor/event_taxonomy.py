@@ -169,6 +169,9 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
              "the live quiz_state frame is a separate transport discriminator"),
     "send_video": _handled(
         "supervisor.events_chat_delivery", "ouroboros/tools/core_artifacts.py"),
+    "mcp_configuration_changed": _handled(
+        "supervisor.events_worker_reports", "ouroboros/skill_mcp.py", "ouroboros/mcp_client.py",
+        note="content-free: the server lister re-reads settings and lists a changed or moved MCP server"),
     "skill_exec_failed": _handled(
         "supervisor.events_worker_reports", "ouroboros/tools/skill_exec.py"),
     "skill_exec_finished": _handled(
@@ -186,7 +189,7 @@ EVENT_DISPOSITIONS: Dict[str, EventDisposition] = {
         note="a carrier's start phase lands on its RUNNING row for the census"),
     "direct_turn_bound": _handled(
         "supervisor.conversation_lane", "supervisor/worker_chat_lane.py",
-        note="the Project basis the carrier bound lands on its RUNNING row (snapshot, park, restore)"),
+        note="the Project basis and admitted tier the carrier bound land on its RUNNING row (snapshot, park, restore)"),
     "task_named": _handled(
         "supervisor.conversation_lane", "supervisor/worker_chat_lane.py",
         note="a carrier coined a title: the bridge broadcasts it as the server's own namer did"),

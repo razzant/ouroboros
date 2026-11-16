@@ -100,26 +100,38 @@ def validate_workspace_root(
     return root
 
 
-def _refuse_protected_overlap(root: pathlib.Path, *, system_repo_dir: Any, drive_root: Any) -> None:
+def kept_path(path: pathlib.Path) -> pathlib.Path:
+    """``path`` (resolved) as its volume keeps it: on macOS its deepest existing folder's kept spelling
+    (``platform_darwin_abi.kept_spelling``) followed by the not-yet-existing rest as given. Elsewhere, or
+    where no folder answers, the resolved spelling stays: an error is never taken for a physical fact."""
+    from ouroboros.platform_darwin_abi import IS_DARWIN, kept_spelling
+
+    for depth, folder in enumerate((path, *path.parents) if IS_DARWIN else ()):
+        kept = kept_spelling(str(folder))
+        if kept:
+            return pathlib.Path(kept, *path.parts[len(path.parts) - depth:])
+    return path
+
+
+def protected_overlap(root: pathlib.Path, *, system_repo_dir: Any, drive_root: Any) -> str:
+    """Which of Ouroboros's own roots ``root`` (resolved) is inside or around, else ``""``: its system repo or
+    data drive, compared case-folded as tool access compares them, and as one physical folder however spelled
+    (``kept_path``: case, Unicode form, firmlink). Attach applies it before ``init_git`` writes anything."""
     from ouroboros.tool_access import paths_overlap_casefold
 
-    system_repo = pathlib.Path(system_repo_dir).resolve(strict=False)
-    drive = pathlib.Path(drive_root).resolve(strict=False)
-    for protected_root, label in ((system_repo, "Ouroboros system repo"), (drive, "Ouroboros data drive")):
-        overlaps = False
-        try:
-            root.relative_to(protected_root)
-            overlaps = True
-        except ValueError:
-            try:
-                protected_root.relative_to(root)
-                overlaps = True
-            except ValueError:
-                pass
-        if not overlaps and paths_overlap_casefold(root, protected_root):
-            overlaps = True
-        if overlaps:
-            raise WorkspaceRootError(f"workspace_root must not overlap the {label}")
+    kept = kept_path(root)
+    for value, label in ((system_repo_dir, "Ouroboros system repo"), (drive_root, "Ouroboros data drive")):
+        protected = pathlib.Path(value).resolve(strict=False)
+        guard = kept_path(protected)
+        if paths_overlap_casefold(root, protected) or kept.is_relative_to(guard) or guard.is_relative_to(kept):
+            return label
+    return ""
+
+
+def _refuse_protected_overlap(root: pathlib.Path, *, system_repo_dir: Any, drive_root: Any) -> None:
+    label = protected_overlap(root, system_repo_dir=system_repo_dir, drive_root=drive_root)
+    if label:
+        raise WorkspaceRootError(f"workspace_root must not overlap the {label}")
 
 
 def unavailable_workspace_address(value: Any, *, system_repo_dir: Any, drive_root: Any) -> str:

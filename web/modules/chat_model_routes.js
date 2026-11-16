@@ -4,7 +4,7 @@
 // lists stays a route of its own source, never dropped or rewritten. A route's identity is its whole string, source
 // included, so one model through two sources is two rows.
 import {
-    API_PROVIDER_ORDER, apiProviderLabel, composeModelSource, connectionParts, parseModelSource, priceWords,
+    API_PROVIDER_ORDER, apiProviderLabel, cacheWriteWords, composeModelSource, connectionParts, parseModelSource, modelPriceWords,
     unavailableConnectionState,
 } from './route_editor_primitives.js';
 import { harnessPresentation } from './harness_presentation.js';
@@ -90,9 +90,13 @@ export function compareNewerFirst(a, b) {
  * credential), and the local model when one is configured. One row per (source, model): a subscription model many
  * accounts list is one row, available when any of them can serve it, and it never names an account.
  * `connections` (`apiConnections()` of a settings read, when one was made) names an API source that cannot send.
- * @param {{catalog?: object, connections?: ?Array}} input
+ * A row keeps the catalog's own price (Standard's) and the processing tiers its accounts list (`modes`, null when
+ * none says); a source keeps the tiers its transport advertises (`transport`, null when unsaid): who shows a row
+ * decides what its context pays (`describeRoute`'s tier, processing_choice.js).
+ * `cacheTier` is the cache tier the settings name: a row's cache-write figure is said only for that tier.
+ * @param {{catalog?: object, connections?: ?Array, cacheTier?: ?string}} input
  */
-export function buildModelIndex({ catalog = {}, connections = null, tierPriced = false } = {}) {
+export function buildModelIndex({ catalog = {}, connections = null, cacheTier = null } = {}) {
     const sources = new Map();
     const rows = new Map();
     const descriptors = Array.isArray(catalog.model_sources) ? catalog.model_sources : [];
@@ -112,6 +116,8 @@ export function buildModelIndex({ catalog = {}, connections = null, tierPriced =
                     ? String(descriptor?.label || harnessPresentation(sub).label) : apiProviderLabel(id, {}, connections || []),
                 harness: lane === 'subscription' ? String(descriptor?.credentialHarness || sub) : '',
                 kind: lane === 'api' ? kind : '', named: lane === 'api' && Boolean(name),
+                transport: Array.isArray(descriptor?.processingPreferences)
+                    ? descriptor.processingPreferences.filter((tier) => typeof tier === 'string') : null,
             });
         }
         return Object.assign(sources.get(id), extra);
@@ -129,26 +135,37 @@ export function buildModelIndex({ catalog = {}, connections = null, tierPriced =
         if (own.named && item?.provider_label) own.label = String(item.provider_label);  // the connection's own name
         if (!rows.has(key)) {
             rows.set(key, { key, route, id: modelPart(route), name: String(item?.name || '') || modelPart(route),
-                source: own.id, lane: own.lane, window: 0, available: null, states: new Set(), prices: new Map() });
+                source: own.id, lane: own.lane, window: 0, available: null, states: new Set(), prices: new Map(),
+                conditions: new Set(), modes: null });
             own.count += 1;
         }
         const row = rows.get(key);
         row.window = Math.max(row.window, Number(item?.max_context_window) || Number(item?.context_window) || 0);
         if (typeof item?.availability === 'string') row.states.add(item.availability);
         row.prices.set(JSON.stringify(item?.price ?? null), item?.price ?? null);
+        row.conditions.add(String(item?.price_condition || ''));
+        // The tiers an account lists for this model: one that lists any makes the row's list known.
+        if (Array.isArray(item?.processing?.modes)) {
+            row.modes ||= new Set();
+            item.processing.modes.forEach((tier) => { if (typeof tier === 'string') row.modes.add(tier); });
+        }
     }
-    let priced = false;  // whether the catalog states any price: only then do the processing tiers change a word
+    let priced = false;  // whether the catalog states any price
+    let cacheFigures = false;  // whether any row states a cache-write figure: only the settings' cache tier says it
     for (const row of rows.values()) {
         // Any account that can serve it makes the row available; unavailable only when every account says so.
         row.available = row.states.has('available') ? true
             : row.states.size === 1 && row.states.has('unavailable') ? false : null;
         // The catalog's price, while every item of the row states that same one (only OpenRouter's rows state any);
-        // kept as the figures, so its words follow the language of each paint.
-        const price = row.prices.size === 1 ? [...row.prices.values()][0] : null;
-        priced ||= Boolean(price);
-        row.price = tierPriced ? null : price;
+        // kept as the figures, so its words follow the language of each paint. It is Standard's price.
+        row.price = row.prices.size === 1 ? [...row.prices.values()][0] : null;
+        priced ||= Boolean(row.price);
+        cacheFigures ||= Boolean(row.price?.cache_write_ttl);
+        // The condition a published entry prices it under (`price_condition`), on the same terms as the figures.
+        row.price_condition = row.conditions.size === 1 ? [...row.conditions][0] : '';
         delete row.states;
         delete row.prices;
+        delete row.conditions;
     }
     for (const error of errors) {
         const id = error?.source_id ? `${SUBSCRIPTION}${error.source_id}`
@@ -185,7 +202,7 @@ export function buildModelIndex({ catalog = {}, connections = null, tierPriced =
         firstOfKind.add(kindKey);
     }
     return {
-        problems, connections, priced,
+        problems, connections, priced, cacheFigures, cacheTier,
         sources: sorted,
         source: (id) => sources.get(id) || null,
         rows: ordered,
@@ -196,11 +213,12 @@ export function buildModelIndex({ catalog = {}, connections = null, tierPriced =
 
 /**
  * What a route is called wherever the capsule names it: its short name, its source by its own label and how that
- * source is paid, the catalog's price in words when it states one (`price`), its window when the catalog knows one.
- * A source that leads nothing keeps Settings' own words:
+ * source is paid, the catalog's price in words when it states one and the context pays it (`price`: `tier` is the
+ * processing tier this context's work would run on; a catalog price is Standard's, so Fast and Flex name none), its
+ * window when the catalog knows one. A source that leads nothing keeps Settings' own words:
  * "(no key)", "(off)" or "(removed)" for an API key that cannot send.
  */
-export function describeRoute(index, raw) {
+export function describeRoute(index, raw, { tier = '' } = {}) {
     const route = normalizeRoute(raw);
     if (!route) return null;
     const id = routeSource(route);
@@ -214,10 +232,16 @@ export function describeRoute(index, raw) {
         ? harnessPresentation(id.slice(SUBSCRIPTION.length)).label : apiProviderLabel(id, {}, index?.connections || []));
     const sourceLabel = cannotSend ? `${base} (${unavailableConnectionState(id, index.connections)})` : base;
     const window = windowWords(listed?.window);
-    const price = priceWords(listed?.price);
+    // A catalog figure is Standard's: a context on another tier is told neither its price, nor the condition its
+    // published entry prices it under, nor its cache write.
+    const tierPriced = tier === 'fast' || tier === 'economy' || tier === 'ultrafast';
+    const price = tierPriced ? '' : modelPriceWords(listed);
     return {
         route, key: routeKey(route), id: modelPart(route), short: shortName(route), source: id, lane,
-        sourceLabel, pay: PAY_WORDS[lane], price, window, listed: Boolean(listed),
+        // Said only while the settings name the cache tier the figure is of (`cacheTier`, model_catalog_store.js).
+        sourceLabel, pay: PAY_WORDS[lane], price,
+        cacheWrite: tierPriced ? '' : cacheWriteWords(listed?.price, index?.cacheTier),
+        window, listed: Boolean(listed),
         available: listed?.available ?? null,
         harness: own?.harness || (lane === 'subscription' ? id.slice(SUBSCRIPTION.length) : ''),
         kind: own?.kind || (lane === 'api' ? connectionParts(id).kind : ''),

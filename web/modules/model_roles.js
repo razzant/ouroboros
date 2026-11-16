@@ -6,7 +6,7 @@ import { SAFETY_MODEL_KEYS } from './consciousness_api.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { sourceMark } from './model_source_mark.js';
 import { MODEL_CATALOG_TIMEOUT_MS, catalogReadNote, mergeModelCatalog, refreshModelCatalog, watchAccountModelCatalog, withConnectionCatalogs } from './settings_catalog.js';
-import { CODECS, CONFIRMS, bindSettingRows, commitSetting, doorSign, outcomeLine, setButtonBusy, settingsRow, searchModelAfterSourceSwitch, searchModelForKey, syncSearchKey, webSearchPreviewWords } from './settings_controls.js';
+import { CODECS, CONFIRMS, bindSettingRows, commitSetting, doorSign, outcomeLine, setButtonBusy, settingsRow, searchModelAfterSourceSwitch, searchModelForKey, settingsReadMessage, settingsSnapshot, syncSearchKey, webSearchPreviewWords } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { HAND_WRITTEN, rowsOf } from './settings_rows.js';
 import { setResult } from './ui_primitives.js';
@@ -14,8 +14,10 @@ import { accountRows, bindStatusSurface, claudexorStatus } from './claudexor_sta
 import { parseModelSource, composeModelSource, apiConnections, configuredApiProviders, indexProfilesByHarness,
     profileOptionsFor, routeChoiceGroups, selectHtml, mintStableId, unavailableConnectionState, API_CHOICE_PREFIX,
     DEFAULT_API_PROVIDER, PROCESSING_PREFERENCE_KEY, MODEL_PROCESSING_PREFERENCES_KEY, PROCESSING_CHOICES,
-    processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, priceWords, tierPriced,
-    KEY_PROBLEM_WORDS, routeKeyProblem, keyProblemLine, apiProviderLabel } from './route_editor_primitives.js';
+    processingSelectHtml, processingIntentLabel, processingCapabilityNote, catalogModelOptions, modelPriceWords, withoutPrice, tierPriced,
+    KEY_PROBLEM_WORDS, PRICE_UNKNOWN, routeKeyProblem, keyProblemLine, apiProviderLabel } from './route_editor_primitives.js';
+import { windowWords } from './chat_model_routes.js';
+import { fmt, translateString } from './i18n.js';
 import { revealNewRow } from './ui_helpers.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { catalogPrograms } from './model_program.js';
@@ -171,7 +173,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
     function changed(slot = '') { onChange(collect(), { slot }); }
     function rowErrors(row) {
         const errors = [];
-        if (row.processing_preference && !PROCESSING_CHOICES.includes(row.processing_preference)) errors.push({ field: '[data-model-role-processing]', message: `${row.slot.label}: choose Standard, Fast, Economy or inherited processing.` });
+        if (row.processing_preference && !PROCESSING_CHOICES.includes(row.processing_preference)) errors.push({ field: '[data-model-role-processing]', message: `${row.slot.label}: choose Standard, Fast, Flex or inherited processing.` });
         if (['main', 'fallback'].includes(row.slot.slot) && !row.model.trim()) {
             errors.push({ field: '[data-model-role-model]', message: `${row.slot.label}: choose a model${row.slot.slot === 'fallback' ? ' or remove this fallback' : ''}.` });
         }
@@ -182,7 +184,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
         return errors;
     }
     function validateAll() { return [
-        ...(processingPreference && !PROCESSING_CHOICES.includes(processingPreference) ? ['Choose Standard, Fast, Economy or route defaults for Processing.'] : []),
+        ...(processingPreference && !PROCESSING_CHOICES.includes(processingPreference) ? ['Choose Standard, Fast, Flex or route defaults for Processing.'] : []),
         ...rows.flatMap((row) => rowErrors(row).map(({ message }) => message)),
     ]; }
     // The row an empty role resolves to, along its inherit chain (safety → light → main).
@@ -308,7 +310,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             element.innerHTML = slot?.managed ? fixedGroupHtml(slot) : row ? rowHtml(row, only.index || 0, 1) : '';
         } else element.innerHTML = (showContext ? `<section class="model-role-group"><label class="ui-field">Processing
             ${processingSelectHtml('data-global-processing aria-label="Global processing"', processingPreference, { global: true })}</label>
-            <p class="model-role-copy">Applies to new tasks. Fast permits accelerated paid service within existing limits. Economy may fall back to the ordinary rate. Model and reasoning effort stay the same.</p>
+            <p class="model-role-copy">Applies to new tasks. Fast permits accelerated paid service within existing limits. Flex may fall back to the ordinary rate. Model and reasoning effort stay the same.</p>
             <details class="model-role-details ui-disclosure"><summary>Details</summary><div class="ui-field-help">Keep route defaults preserves existing native choices. Explicit native service choices take precedence; the requested mode is not proof of the mode served.</div></details></section>` : '') + offeredSlots.map((slot) => {
             if (slot.managed) return fixedGroupHtml(slot);
             const matching = rows.filter((row) => row.slot.slot === slot.slot);
@@ -369,7 +371,8 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             const accountOptions = accountHtml.slice(accountHtml.indexOf('>') + 1, accountHtml.lastIndexOf('</select>'));
             if (account.innerHTML !== accountOptions) account.innerHTML = accountOptions;
             updateModelChooser(node.querySelector('[data-model-role-model]'), catalogModelOptions(itemsFor(row).map((item) => ({
-                ...item, value: parseModelSource(item.value || item.id).model, ...(tieredProcessing(row) ? { price: null } : {}),
+                ...withoutPrice(item, { tiered: tieredProcessing(row), media: row.slot.slot === 'vision' }),
+                value: parseModelSource(item.value || item.id).model,
             }))), row.local ? [] : catalogPrograms(catalogs.get(catalogKey(row)), {source: sourceId(row), profile: row.account, sources: catalog.model_sources}));
             if (showContext) node.querySelector('[data-model-context-note]').textContent = modelContextNote(row.windowPreview);
             if (showContext) node.querySelector('[data-processing-summary]').textContent = processingIntentLabel(row.processing_preference, processingPreference);
@@ -388,14 +391,25 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             status.classList.toggle('ui-status', choosing);
             if (choosing) status.dataset.tone = 'warn'; else delete status.dataset.tone;
             const price = local || keyNote(row) || note || !row.model || sourceId(row) || tieredProcessing(row) ? ''
-                : priceWords(currentItem(row)?.price, { unit: true });
-            status.textContent = local ? 'Uses the local runtime.'
+                : modelPriceWords(withoutPrice(currentItem(row), { media: row.slot.slot === 'vision' }), { unit: true });
+            const unlisted = rowCatalog?.read_state === 'ok' && !rowCatalog.items.length;
+            const plain = local ? 'Uses the local runtime.'
                 : keyNote(row) || note || (!row.model ? (row.slot.slot === 'main' ? 'Choose a model to continue.' : `Uses ${inheritName(row)}.`)
-                    : sourceId(row) ? (rowCatalog?.read_state === 'ok' && !rowCatalog.items.length
-                        ? 'No models were listed for this source. Your selection is kept.'
-                        : 'Uses your subscription. No API key required.') : price || 'Price unknown');
-            // The price is already composed through the translation seam: the overlay leaves it alone and reads the rest.
-            if (price) status.dataset.i18nFmt = 'model price'; else delete status.dataset.i18nFmt;
+                    : sourceId(row) ? (unlisted ? 'No models were listed for this source. Your selection is kept.'
+                        : 'Uses your subscription. No API key required.') : price || PRICE_UNKNOWN);
+            // The model's window beside how it is paid, in the model list's words (DESIGN "Onboarding density"): the
+            // window this route is sized with when the server knows one, else the one its catalog publishes; an
+            // unknown window is omitted. Where it comes from stays in the fold below.
+            const routed = !local && !keyNote(row) && !note && Boolean(row.model);  // the line is about the model's own route
+            // A local role may keep a cloud id in its slot: its window is the local model's own row, never that id's.
+            const listed = local ? catalog.items.find((item) => item.use_local) : currentItem(row);
+            const size = local || (routed && !(sourceId(row) && unlisted)) ? windowWords(row.windowPreview?.window?.tokens
+                || listed?.max_context_window || listed?.context_window) : '';
+            const sized = size && fmt('{window} window', { window: size });
+            status.textContent = !sized ? plain : routed && !sourceId(row) ? `${price || translateString(PRICE_UNKNOWN)} · ${sized}`
+                : `${translateString(plain)} ${sized}.`;
+            // A price or a window is composed through the translation seam: the overlay leaves such a line alone.
+            if (price || sized) status.dataset.i18nFmt = 'model price'; else delete status.dataset.i18nFmt;
             const errors = validationAttempted ? rowErrors(row) : [];
             const message = node.querySelector('[data-model-role-error]');
             Object.assign(message, { textContent: errors.map((error) => error.message).join(' '), hidden: !errors.length });
@@ -462,6 +476,7 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             if (!data.response_limit || !data.route) throw new Error('Max output tokens are not checked');
             row.windowPreview = data;
             node.querySelector('[data-model-context-note]').textContent = modelContextNote(data);
+            updateCatalogViews();  // the role line says this window
             node.querySelector('[data-window-clear]').hidden = !data.window_ack;
             let evidence = data.response_limit;
             if (apply) {
@@ -594,7 +609,12 @@ export function createModelRolesEditor({ hostId, store = claudexorStatus,
             if (fallback && !soleRow()) rows.push(Object.assign(rowState(fallback, '', rows.length), { account: '', context: 0, processing_preference: '' }));
             const at = kept ? rows.indexOf(soleRow()) : -1;
             if (at >= 0) rows[at] = Object.assign(kept, { slot: rows[at].slot });
-            loaded = true; render();
+            loaded = true;
+            // A kept draft includes the browser's unfinished number, selection and open Details, not just row values.
+            if (at >= 0 && host()?.querySelector(`[data-model-role="${kept.id}"]`)) {
+                updateCatalogViews();
+                void refreshRow(kept);
+            } else render();
         },
         mount() {
             getDoc()?.addEventListener?.('harness-maintenance:settled', onMaintenanceSettled);
@@ -774,8 +794,9 @@ function mountModels(container, { path, ctx }) {
         <section class="ui-card settings-card"><details class="ui-disclosure" data-settings-fold>
             <summary>More: processing, prompt cache, requests at once</summary>
             <div class="settings-rows" data-models-fold></div></details></section>`;
-    // The catalogue's own result (settings_catalog.js writes it by this id) stands in its row's meta line.
-    container.querySelector('[data-setting-row="models:catalogue"]')?.querySelector('.ui-row-meta')
+    // The catalogue's own result (settings_catalog.js writes it by this id) stands under its row's words and door, as
+    // every row's result does (settings.css "A row's result").
+    container.querySelector('[data-setting-row="models:catalogue"]')
         ?.appendChild(Object.assign(container.ownerDocument.createElement('span'), { id: 'settings-model-catalog-status', className: 'ui-result settings-row-result' }));
     const bound = bindSettingRows(container, { rows: doors, ask: ctx.ask, custom, openDoor: (row) => ctx.openSettings(row.control.to) });
     const foldHost = container.querySelector('[data-models-fold]');
@@ -822,7 +843,7 @@ function mountModels(container, { path, ctx }) {
             : keyWords(settings[slots.main?.settingKey], local('main'));
         // The answer is one row: the model, under it the source with its own mark (or what is wrong with its key), and
         // the chevron of a row that opens a level. The role's name is the object's title above.
-        container.querySelector('.models-main').innerHTML = `<button type="button" class="ui-row settings-row models-main-row" data-kind="door" data-entry-open>
+        container.querySelector('.models-main').innerHTML = `<button type="button" class="ui-row settings-row models-main-row" data-kind="door" data-entry-open${mainNote || main.source ? '' : ' data-no-meta'}>
             <span class="ui-row-title models-main-name">${escapeHtml(main.follows || labels.length ? 'Not chosen yet' : main.name)}</span>
             <span class="ui-row-meta models-main-meta"${mainNote ? ' data-tone="warn"' : ''}>${mainNote ? '' : routeMark(settings[slots.main?.settingKey], { local: local('main') })}<span>${escapeHtml(mainNote || main.source)}</span></span>
             <span class="ui-row-actions">${doorSign('models/role/main')}</span></button>`;
@@ -1002,6 +1023,14 @@ function mountWebSearch(container, { path, ctx }) {
     let searchKeys = {};  // the DeepSeek keys of Accounts the Key select offers
     let dirty = false;
     let previews = 0;
+    const save = container.querySelector('[data-editor-save]');
+    const discard = container.querySelector('[data-editor-discard]');
+    const formControls = [source, model, key, save, discard].filter(Boolean);
+    const paintReadState = (settings = null) => {
+        const unread = settings ? '' : settingsReadMessage();
+        formControls.forEach((control) => { control.disabled = Boolean(unread); });
+        if (unread && !dirty) preview.textContent = unread;
+    };
     // An edited native Anthropic id takes the routed spelling, so dispatch recognizes the new intent.
     const selection = () => {
         const text = model.value.trim();
@@ -1017,9 +1046,8 @@ function mountWebSearch(container, { path, ctx }) {
         } catch { if (mine === previews) preview.textContent = 'Search routes could not be checked. Your choices are kept.'; }
     };
     let asRead = null;  // the choice as read when the typing began (null before a read): a Save writes only what changed
-    const read = async () => {
-        let settings;
-        try { settings = await ctx.readSettings(); } catch { if (dirty) void showPreview(); return; }
+    const adopt = (settings) => {
+        if (!settings) { source.value = ''; paintReadState(); return; }
         // A typed choice stays, one begun while this read was pending too; the routes it would take and the keys of
         // Accounts (where the Key select's pointer leads) are read again for it. Only the first read fills the fields
         // under typing, so a Save never writes a Source the owner was not shown.
@@ -1032,7 +1060,13 @@ function mountWebSearch(container, { path, ctx }) {
         searchKeys = { connections: apiConnections(settings, profiles), providers: configuredApiProviders(settings, profiles),
             providerProfiles: profiles };
         syncSearchKey(source, model, key, searchKeys);
+        paintReadState(settings);
         void showPreview();
+    };
+    const read = async () => {
+        let settings;
+        try { settings = await ctx.readSettings(); } catch { settings = settingsSnapshot(); }
+        adopt(settings);
     };
     const say = (words) => setResult(container.querySelector('[data-editor-result]'), words);
     const edited = () => { dirty = true; syncSearchKey(source, model, key, searchKeys);
@@ -1061,6 +1095,7 @@ function mountWebSearch(container, { path, ctx }) {
     model.addEventListener('input', edited);
     container.addEventListener('click', onClick);
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
+    adopt(settingsSnapshot());
     void read();
     return { unsaved: () => dirty, unmount() { container.removeEventListener('click', onClick); globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown); } };
 }

@@ -130,7 +130,8 @@ def _record_source(repo: Path, destination: Path) -> str:
     return gap
 
 
-def main(root, repo, command, evidence_parent=None, keep=False, timeout=None, owner_data_root=None) -> int:
+def main(root, repo, command, evidence_parent=None, keep=False, timeout=None, owner_data_root=None,
+         node_data_root=None) -> int:
     root, repo = Path(root), Path(repo)
     evidence = None
     proc = None
@@ -157,6 +158,11 @@ def main(root, repo, command, evidence_parent=None, keep=False, timeout=None, ow
             report_diagnostic(f"SAFE_TEST_EVIDENCE_FALLBACK {fallback}: {evidence}")
         (root / EVIDENCE_POINTER).write_text(str(evidence), encoding="utf-8")
         env = {**os.environ, EVIDENCE_ENV: str(evidence)}
+        from ouroboros.node_runtime import carry_pinned_node
+
+        # The caller's pinned Node, one executable read by its record, when its environment carried none
+        # (a shell outside Ouroboros, with or without OUROBOROS_DATA_DIR): the scratch root prepared none.
+        carry_pinned_node(env, node_data_root or owner_data_root)
         from ouroboros.test_environment import retain_diagnostic_outputs
         retain_diagnostic_outputs(root, env, cwd=repo)
         # All ordinary UI producers already honour this explicit destination.

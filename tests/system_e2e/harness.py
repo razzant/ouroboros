@@ -152,6 +152,8 @@ SCENARIOS = {
     "S41": ("live skill-smoke adapter: ordinary author, one independent rebuttal, immutable payload, true/unknown criticism red, tool-policy and identity controls", LANE_MOCK),
     "S42": ("direct Project turn across an application stop: a WS turn in a Project room writes in the room, the tree is SIGTERMed while its next model round is held, the next boot restores the same id with its saved working state, one owner Resume over HTTP releases the stop hold and the Project verification, and a worker continues the saved loop to a completed result carrying the continuation's answer; in a folderless room the resumed write still lands in the turn's task drive after a sibling start_task gives the room its first folder (#2547)", LANE_MOCK),
     "S43": ("the production-shaped stand, real half (tests/_stand.py; its counted half: tests/test_stand_counts.py): a root restored with paused trees, pending rows, held runs, schedules, markers, rooms and a story; real tasks, owner turns and a Presence burst held at the model; no server stack runs cognition (E1), the door and the controls answer and Panic ends the whole tree under load (E5, E9), the owner is answered with no pool: a worker storm, a refused spawn, a marker window (E7), Stop finalizes then kills a carrier (E9); WAL and PERSIST (E10)", LANE_MOCK),
+    # #3396 in real processes: the launcher stops reading a running server's pipe.
+    "S44": ("a server in the launcher's shape whose output pipe, once it is ready, is full and unread: a task still completes through its worker and Quit over the stop pipe exits 0 inside the launcher's grace; the base tree stalls on the same pipe", LANE_MOCK),
 }
 
 MOCK_SLUG = "openai-compatible::mock-model"
@@ -216,6 +218,10 @@ MARKER_SOURCES = {
     PLAN_REVIEW_MARKER: "ouroboros/tools/plan_packet.py",
     NATIVE_EPISODE_MARKER: "ouroboros/review_native_episode.py",
 }
+# The finish door's two ways of naming the retained answer (``loop_delivery._delivery_control_prompt`` and
+# ``hold_completion_response``), read by ``retained_answer_selection``.
+RETAINED_ANSWER_MARKERS = ("The complete answer is retained as ", "Retained answer_sha256=")
+MARKER_SOURCES.update({marker: "ouroboros/loop_delivery.py" for marker in RETAINED_ANSWER_MARKERS})
 
 
 # ---------------------------------------------------------------------------
@@ -441,8 +447,38 @@ class ReviewScript:
         assert not leftover, f"ReviewScript verdicts never served: {leftover}"
 
 
+_RETAINED_ANSWER_RE = re.compile("(?:" + "|".join(map(re.escape, RETAINED_ANSWER_MARKERS)) + ")([0-9a-f]{64})")
+_TAIL_OWNER_SOURCE_RE = re.compile(r'"owner_source_sha256": "([0-9a-f]{64})"')
+
+
+def retained_answer_selection(body: dict) -> dict | None:
+    """The author's selection of its held answer, when the host has just returned a final at the finish door.
+
+    Since #3280 the one pre-delivery notice also fires on a turn whose only effect is a written file (a write no
+    longer counts as its own check), and the notice arms delivery control: the next tool-less answer is held
+    (``selection_required``) until the author selects complete bytes or the retained ``answer_sha256`` with
+    ``finish_task`` (``loop_delivery._resolve_delivery_control``). A scripted model that answers prose again is
+    returned forever. This is what a model obeying the control prompt does: it delivers the answer it already
+    gave. ``None`` unless the rows after the last assistant row name a retained answer and ``finish_task`` is
+    offered, so an ordinary round still reads its script."""
+    if not any((row.get("function") or {}).get("name") == "finish_task" for row in body.get("tools") or []
+               if isinstance(row, dict)):
+        return None
+    messages = [m for m in body.get("messages") or [] if isinstance(m, dict)]
+    last = max((i for i, m in enumerate(messages) if m.get("role") == "assistant"), default=-1)
+    tail = "\n".join(message_text(m) for m in messages[last + 1:])
+    retained = _RETAINED_ANSWER_RE.findall(tail)
+    if not retained:
+        return None
+    arguments = {"action": "finish", "answer_sha256": retained[-1]}
+    owner = _TAIL_OWNER_SOURCE_RE.findall(tail)
+    if owner:
+        arguments["acceptance_subject"] = {"owner_source_sha256": owner[-1]}
+    return {"tool": "finish_task", "arguments": arguments}
+
+
 def scripted_completion(body: dict, seq: int, script_next, final_answer: str,
-                        review_next=None) -> tuple[str, dict]:
+                        review_next=None, *, select_retained: bool = False) -> tuple[str, dict]:
     """The stub's whole decision function, pure so the default lane can pin it.
 
     ``script_next`` is a callable returning the next scripted tool step (or None when
@@ -454,7 +490,9 @@ def scripted_completion(body: dict, seq: int, script_next, final_answer: str,
     arguments). ``review_next(kind, body)`` (wave 3a, usually a ``ReviewScript``)
     may override the canned answer of a review-organ call; it is consulted ONLY for
     ``REVIEW_KINDS`` — the review-organ branch still sits BEFORE the finalization
-    check and review calls still never consume agent script steps. Returns
+    check and review calls still never consume agent script steps. With
+    ``select_retained`` a round the finish door returned selects the held answer
+    (``retained_answer_selection``) instead of consuming a step. Returns
     ``(kind, message)`` where message is the OpenAI-style assistant message.
     """
     kind = classify_call(body)
@@ -467,7 +505,9 @@ def scripted_completion(body: dict, seq: int, script_next, final_answer: str,
         return kind, canned
     if kind == "finalization":
         return kind, {"role": "assistant", "content": final_answer}
-    step = script_next(body) if body.get("tools") else None
+    step = (retained_answer_selection(body) if select_retained and body.get("tools") else None)
+    if step is None:
+        step = script_next(body) if body.get("tools") else None
     if callable(step):
         step = step(body)
     if step is None:
@@ -684,9 +724,14 @@ class ScriptedStubModel(LoopbackModelServer):
 
     def __init__(self, script=None, *, final_answer: str = "Final answer: scripted scenario complete.",
                  latency_sec: float = 0.0, review_script: "ReviewScript | None" = None,
-                 gate: "ModelGate | None" = None, model_ids=None) -> None:
+                 gate: "ModelGate | None" = None, model_ids=None,
+                 select_retained: bool = False) -> None:
         super().__init__(latency_sec=latency_sec, gate=gate)
         self.script = list(script or [])
+        # Opt-in: a scenario whose turn writes and then answers plainly meets the finish door's one
+        # notice (#3280); see ``retained_answer_selection``. Off by default so scripts that select
+        # their own completion keep consuming their scripted finish_task step.
+        self.select_retained = bool(select_retained)
         self.final_answer = final_answer
         self.review_script = review_script
         # As on ReplayModel: extra wire ids to advertise on /models, so the
@@ -708,7 +753,7 @@ class ScriptedStubModel(LoopbackModelServer):
 
     def _answer(self, body: dict, seq: int) -> tuple[str, dict]:
         return scripted_completion(body, seq, self._next_step, self.final_answer,
-                                   review_next=self.review_script)
+                                   review_next=self.review_script, select_retained=self.select_retained)
 
     def script_consumed(self) -> bool:
         with self._lock:

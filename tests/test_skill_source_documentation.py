@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize("path, facts, stale", [
     ("docs/architecture/13-external-skills-layer.md",
      ("github.com HTTPS without the configured GitHub token", "authentication refusals once with it alone",
-      "Other URLs use host credentials", "pre-update record restores an interrupted landing"),
+      "Other URLs use host credentials", "interrupted landings restore prior records"),
      "Git caches in `state/skill_sources/` use host credentials"),
     ("docs/CREATING_SKILLS.md",
      ("Private github.com HTTPS sources", "this computer's git credentials still apply) is refused for authentication",

@@ -55,6 +55,7 @@ export const isMadeHere = (skill) => !installFacts(skill) && ['external', 'self_
 // Host reasons that admit these bytes without a critic PASS (fixture parity tests pin this list).
 export const INSTALL_ACCEPTANCE_REASONS = ['trusted_source', 'owner_skip', 'owner_edit', 'self_check'];
 const acceptedAs = (skill) => String(skill?.review_gate?.blocking_reason || '');
+const RUNS_WITHOUT_PASS = new Set(['blockers_allowed_by_advisory_enforcement', 'author_accepted_advisory', 'cyber_authority']);
 
 // The files differ from the installed release (UX §5.3: a neutral fact). Who changed
 // them is known only when the owner's edit is recorded for these exact bytes.
@@ -151,7 +152,10 @@ const LIFECYCLE_PENDING_LABELS = {
     review: 'Reviewing…',
     deps: 'Installing packages…',
     delete: 'Deleting…',
+    connect_mcp: 'Connecting tools…',
 };
+// A job kind that is not the owner's word for its action.
+const LIFECYCLE_ACTION_NAMES = { connect_mcp: 'Connect tools' };
 
 function lifecyclePendingLabel(kind) {
     return LIFECYCLE_PENDING_LABELS[String(kind || '')] || 'Working…';
@@ -160,7 +164,7 @@ function lifecyclePendingLabel(kind) {
 function lifecycleFailedLabel(kind) {
     const base = String(kind || '').trim();
     if (!base) return 'Didn’t finish';
-    return `${base.charAt(0).toUpperCase()}${base.slice(1)} failed`;
+    return `${LIFECYCLE_ACTION_NAMES[base] || `${base.charAt(0).toUpperCase()}${base.slice(1)}`} failed`;
 }
 
 /** The review job now running or last ended for these bytes, as recorded. */
@@ -280,6 +284,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     const trays = [];
     let chip = '';
     let needs = false;
+    let jobFailed = false;
     let lockReason = '';
     const pageTray = (kind, page) => kind === 'fault'
         ? trayHtml({ tone: 'warn', sentence: `Its page module stopped in this window: ${escapeHtml(boundedText(page.reason || 'unknown error', 240))}.`,
@@ -300,7 +305,9 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
         chip = chipHtml(message || lifecyclePendingLabel(skill.lifecycle_kind), 'neutral', { work: true });
     } else if (skill.lifecycle_status === 'failed') {
         chip = chipHtml(lifecycleFailedLabel(skill.lifecycle_kind), 'danger');
-        needs = true;
+        // The failed job asks for the owner, but it is no readiness fact: what the owner can do next,
+        // including the failed action's own retry, comes from the listing below.
+        jobFailed = true;
         if (skill.lifecycle_virtual) {
             trays.push(trayHtml({ tone: 'danger', sentence: escapeHtml(skill.lifecycle_error || 'It didn’t finish.'),
                 note: 'Nothing was installed.', actions: smallButton('Find in Browse', name, 'find_in_browse') }));
@@ -309,7 +316,7 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     if (repairing) chip = chipHtml('Asking Ouroboros…', 'neutral', { work: true });
 
     if (skill.lifecycle_virtual) {
-        return { chip, trays, overflow: [], needs, update: false, withdrawn: false, lockReason: '', sourceName, modified, install };
+        return { chip, trays, overflow: [], needs: jobFailed, update: false, withdrawn: false, lockReason: '', sourceName, modified, install };
     }
 
     if (untrusted(skill)) {
@@ -397,6 +404,28 @@ export function installedSkillModel(skill, { reviewing = false, repairing = fals
     const secrets = secretConfigTray(skill);
     if (secrets.tray) trays.push(secrets.tray);
     if (secrets.needs) needs = true;
+
+    // Declared MCP servers: Connect is the owner's continuation once the skill itself is ready (DESIGN §4). A running
+    // review or a pending update names the state above ahead of the current bytes' gate, access and start facts.
+    const servers = Array.isArray(skill.mcp_servers) ? skill.mcp_servers : [];
+    const runnable = reviewReady(skill) && !preflightFailed(skill) && grantReady(skill) && !skill.load_error && !conflict;
+    if (skill.enabled && !needs && !skill.lifecycle_pending && !untrusted(skill) && runnable && servers.length) {
+        const blocked = servers.find((server) => server.conflict);
+        const failed = servers.find((server) => server.configured && server.error);
+        if (blocked) {
+            trays.push(trayHtml({ sentence: `Settings already has an MCP server named ${escapeHtml(blocked.id)} that isn’t this skill’s, so its tools can’t be connected.`,
+                note: 'Remove or rename that server in Settings → Tools → MCP servers.' }));
+        } else if (servers.some((server) => !server.configured)) {
+            trays.push(trayHtml({ sentence: servers.every((server) => server.bound)
+                ? 'Its tools are off. Connect them to turn them on.'
+                : 'It brings tools that tasks can use. Connect them to turn them on.',
+                actions: smallButton('Connect tools', name, 'connect_tools') }));
+        } else if (failed) {
+            // The host's refusal is a diagnostic (codes, ids, readiness tokens): it stays in Details.
+            trays.push(trayHtml({ tone: 'danger', sentence: 'Its tools are configured but can’t be used now.', note: 'Details say why.' }));
+        }
+    }
+    if (jobFailed) needs = true;
 
     const updateAction = update && !install?.pending_update && offersChanges(skill)
         ? smallButton(modified || install?.base_known === false ? 'Update…' : 'Update', name, 'update') : '';
@@ -580,6 +609,14 @@ function reviewHistory(skill) {
         ${rows ? `<details class="ui-disclosure skills-review-history ui-rich-content"><summary>Review history (${historyLabel})</summary><ol>${rows}</ol></details>` : ''}`;
 }
 
+// What a ready skill runs over when no review passed its current files (twin of `skill_review_status.runs_over`):
+// 'review_problems' (current blocker findings), 'no_review_verdict', or '' when a review passed or another basis runs it.
+function runsOver(skill) {
+    const current = !skill.review_stale;
+    if (!reviewReady(skill) || !RUNS_WITHOUT_PASS.has(acceptedAs(skill)) || (current && ['clean', 'warnings'].includes(skill.review_status))) return '';
+    return current && skill.review_status === 'blockers' ? 'review_problems' : 'no_review_verdict';
+}
+
 /** Exactly one sentence of review evidence for the current bytes (UX §3.4). */
 export function reviewSentence(skill) {
     const install = installFacts(skill);
@@ -599,6 +636,10 @@ export function reviewSentence(skill) {
         return `Ouroboros read it before accepting it and recorded why: “${boundedText(notes, 240)}”.`;
     }
     if (ready && skill.review_profile === 'native_seed') return 'Comes with the app; it runs without a separate review.';
+    // Allowed to run is not a passed review: the gate's own reasons to run a payload over findings, on its author's
+    // acceptance or on Cyber Pro's judgment never read as "passed".
+    const over = runsOver(skill);
+    if (over) return over === 'review_problems' ? 'Review found problems; it may still run.' : 'No review passed its current files; it may still run.';
     // A passed review stays the evidence while a newer round of the same files has no verdict yet.
     const job = ready && reviewJob(skill);
     const again = job && (reviewRunningNow(skill, false) || reviewRunOutcome(job).label === 'pending')
@@ -619,6 +660,20 @@ function accessRows(skill) {
     const status = grants.unsupported_for_skill_type ? 'This skill type cannot receive keys or host permissions.'
         : missing.length ? `Not allowed yet: ${missing.join(', ')}.` : 'Access granted.';
     return detailRow('Access', `Asks for ${escapeHtml(requested.join(', '))}${granted.length ? ` · granted ${escapeHtml(granted.join(', '))}` : ''}. ${escapeHtml(status)}`);
+}
+
+function toolsRow(skill) {
+    const servers = Array.isArray(skill.mcp_servers) ? skill.mcp_servers : [];
+    const line = (server) => `${escapeHtml(server.title || server.id)}: ${!server.configured ? (server.bound ? 'off' : 'not connected')
+        : server.error ? 'configured · unavailable now' : server.listed ? `configured · ${escapeHtml(plural(server.tool_count, 'tool'))} listed`
+            : 'configured · listing its tools'}`;
+    const why = servers.filter((server) => server.configured && server.error).map((server) =>
+        `${servers.length > 1 ? `${escapeHtml(server.title || server.id)}: ` : ''}${escapeHtml(server.error)}`);
+    const notes = servers.filter((server) => server.notes).map((server) =>
+        `${servers.length > 1 ? `${escapeHtml(server.title || server.id)}: ` : ''}${escapeHtml(server.notes)}`);
+    return servers.length ? detailRow('Tools', `${servers.map(line).join('; ')}. The skill’s own instructions say what else its tools need.`)
+        + (why.length ? detailRow('Why unavailable', why.join(' ')) : '')
+        + (notes.length ? detailRow('Catalog notes', notes.join(' ')) : '') : '';
 }
 
 function detailRow(label, valueHtml) {
@@ -817,13 +872,14 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
     // Details: two fact groups the listing re-reads in place and the review block (kept while its key holds).
     const details = `<details class="ui-disclosure skills-details"><summary>Details</summary>
         <div class="skills-details-body">
-            <div class="skills-details-facts" data-skill-detail-review>${detailRow('Review', `${escapeHtml(reviewSentence(skill))} ${statusBadge(skill.review_status, skill.review_gate, skill.review_profile)}`)}</div>
+            <div class="skills-details-facts" data-skill-detail-review>${detailRow('Review', `${escapeHtml(reviewSentence(skill))} ${statusBadge(runsOver(skill) === 'no_review_verdict' ? '' : skill.review_status, skill.review_gate, skill.review_profile)}`)}</div>
             <div class="skills-review-block" data-review-key="${escapeHtml(reviewBlockKey(skill))}">${reviewHistory(skill)}${reviewFindings(skill)}</div>
             <div class="skills-details-overflow" data-skill-detail-overflow>${(model.overflow || []).join('')}</div>
             ${contributionVisibilityHtml(skill, options)}
             <div class="skills-details-facts" data-skill-detail-facts>
                 ${detailRow('Can use', escapeHtml(permissionWords(skill.permissions).join(' · ') || 'Nothing beyond its own folder'))}
                 ${accessRows(skill)}
+                ${toolsRow(skill)}
                 ${detailRow(tr('skills.id', 'ID'), `<code data-i18n-authored>${escapeHtml(skill.name)}</code>`)}
                 ${installRecordRows(skill)}
                 ${liveRow(skill, live)}

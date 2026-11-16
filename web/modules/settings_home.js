@@ -13,15 +13,16 @@
 import { apiClient, fetchJson } from './api_client.js';
 import { confirmAndSendRestart, headerBudgetPresentation } from './chat_activity.js';
 import { routeSource, shortName } from './chat_model_routes.js';
-import { accountName, accountRows, claudexorStatus, familyLabel, READ_OK } from './claudexor_status_store.js';
+import { accountName, accountRows, claudexorStatus, facetReadState, familyLabel, READ_OK } from './claudexor_status_store.js';
 import { openConfirmDialog } from './confirm_dialog.js';
-import { normalizeConsciousness, parseRoster } from './consciousness_api.js';
+import { PLACES_CHANGED_EVENT, normalizeConsciousness, parseRoster } from './consciousness_api.js';
 import { headlineView } from './consciousness_dashboard.js';
 import { consciousnessMark } from './consciousness_words.js';
+import { getContributions } from './contributions.js';
 import { refreshActionKind, verificationBadge } from './harness_accounts.js';
 import { harnessPresentation } from './harness_presentation.js';
-import { bootPhase, startingStatus, supervisorReady } from './host_starting_status.js';
-import { fmt, translateString } from './i18n.js';
+import { START_FAILED_LEAD, bootPhase, createHostStart, startingStatus, supervisorReady } from './host_starting_status.js';
+import { fmt, tr, translateString } from './i18n.js';
 import { readNotifyPrefs } from './notifications.js';
 import { PAGE_ICONS, SHELL_ICONS, controlIcon, fluentIcon } from './page_icons.js';
 import { readSkills, skillForms } from './settings_extension_forms.js';
@@ -66,7 +67,13 @@ const toolNeedsSignIn = (server) => server?.enabled !== false && Boolean(server?
  */
 export function needRows(facts = {}) {
     const rows = [];
-    const { accounts, tools, settings } = facts;
+    const { accounts, tools, settings, state } = facts;
+    // A failed start is the card's first line, its cause beside it (the room's list says the same, with Restart).
+    const start = supervisorReady(state) === false ? startingStatus(bootPhase(state)) : null;
+    if (start?.kind === 'failed') {
+        rows.push({ kind: 'start', id: 'start', owner: true, action: 'Restart', run: 'restart',
+            text: tr('room_work.failed.lead', START_FAILED_LEAD), note: start.detail });
+    }
     // Only what needs the owner stands here: a fact that was not read, or whose read failed, is said by the row it
     // concerns (its answer on the home or its page), never as a line of the card with a Check.
     if (accounts?.read === READ_OK) {
@@ -100,12 +107,15 @@ export function needRows(facts = {}) {
     return rows;
 }
 
-/** Ouroboros's state for its card: `{ text, tone }`, from the socket and the last state snapshot. */
-export function beingState({ connected = true, state = null } = {}) {
+/** Ouroboros's state for its card: `{ text, tone }`, from the socket and what the page's state bodies stated, as the
+ * header's own reducer keeps it (`createHostStart`, host_starting_status.js): `ready`, and the boot phases. */
+export function beingState({ connected = true, ready = false, boot = null } = {}) {
     if (!connected) return { text: fmt('Reconnecting…'), tone: 'muted' };
-    if (supervisorReady(state) === false) {
-        const starting = startingStatus(bootPhase(state));
-        return { text: starting.text, tone: starting.kind === 'failed' ? 'danger' : 'muted' };
+    // Only a body that said ready ends Starting…: none read yet, or one forgotten at a disconnect, is no Online.
+    if (ready !== true) {  // the card has the room the bar lacks: the word with its step
+        const starting = startingStatus(boot);
+        return starting.kind === 'failed' ? { text: starting.text, tone: 'danger' }
+            : { text: [starting.text, starting.step].filter(Boolean).join(' · '), tone: 'muted' };
     }
     return { text: fmt('Online'), tone: 'ok' };
 }
@@ -151,7 +161,11 @@ function toolsWords(tools) {
 function updateWords(update) {
     const verdict = updateVerdict(update);
     const words = { unchecked: NOT_CHECKED, check_failed: 'Could not check', unmanaged: 'Managed updates unavailable' }[verdict.state];
-    return { text: words ? fmt(words) : String(verdict.headline || '').replace(/\.$/, ''), owner: ['available', 'available_unsafe'].includes(verdict.state) };
+    const waits = ['available', 'available_unsafe'].includes(verdict.state);
+    // An update that waits says what it brings (`163 new changes`, `7.10.2 → 7.11.0`): the row's name says Updates and
+    // its mark that it waits, so a list's one line keeps the number whole.
+    const headline = String(verdict.headline || '').replace(/\.$/, '');
+    return { text: words ? fmt(words) : waits ? headline.replace(/^Update available:\s*/, '') : headline, owner: waits };
 }
 
 const START_WORDS = { on: 'Starts at sign-in', off: 'Starts by hand', other_copy: 'Another copy starts at sign-in', disabled_by_os: 'Start at sign-in is off in the system' };
@@ -167,7 +181,9 @@ function computerWords(autostart, settings) {
 /**
  * The current answer of every home row, keyed by what the row opens: `{ text, owner }`, `owner` when the next move
  * is the owner's (a stop by the spending limit, a held consciousness, an update that waits, a sign-in). A row whose fact is not
- * read yet has no entry and keeps what it shows; one whose read failed says "Not checked".
+ * read yet has no entry and keeps what it shows; one whose read failed says "Not checked". The Accounts row counts only
+ * what was read: over an accounts roster that was not read, or whose read failed, it says its API keys alone, and it
+ * has no entry when the settings document does not list them either.
  */
 // Main's answer on the home: its model, or what keeps it from sending (a key choice it waits for, a key that cannot
 // send), in the owner's colour.
@@ -309,7 +325,7 @@ function liveGlyphs({ settings, device = {} } = {}) {
 }
 
 function doorHtml({ to, name, glyph, answer = '', result = '' }) {
-    return `<button type="button" class="settings-door section-row" data-settings-open="${escapeHtml(to)}"${isDoorId(to) ? ' data-settings-door-out data-section-out' : ''}${result ? ` data-settings-result="${escapeHtml(result)}"` : ''}>`
+    return `<button type="button" class="settings-door section-row" data-settings-open="${escapeHtml(to)}"${isDoorId(to) ? ' data-section-out' : ''}${result ? ` data-settings-result="${escapeHtml(result)}"` : ''}>`
         + `<span class="settings-door-glyph section-row-glyph" aria-hidden="true" data-settings-glyph>${glyphHtml(glyph)}</span>`
         + `<span class="settings-door-words section-row-words"><span class="settings-door-title section-row-title">${escapeHtml(name)}</span>`
         + `<span class="settings-door-answer section-row-answer" data-settings-answer${result ? '' : ' data-i18n-fmt="settings.answer"'}>${escapeHtml(answer)}</span></span>`
@@ -327,7 +343,7 @@ export function homeGroupsHtml(rows = HOME_ROWS) {
 /** Search results as rows, then the line that asks Ouroboros with the words. */
 export function resultsHtml(query, found) {
     const hits = found.map((entry) => doorHtml({ to: entry.to, name: entry.name, glyph: entry.glyph, answer: entry.where, result: entry.id })).join('');
-    const ask = `<button type="button" class="settings-door section-row" data-settings-ask data-settings-door-out data-section-out><span class="settings-door-glyph section-row-glyph" aria-hidden="true">${glyphHtml('chat')}</span>`
+    const ask = `<button type="button" class="settings-door section-row" data-settings-ask data-section-out><span class="settings-door-glyph section-row-glyph" aria-hidden="true">${glyphHtml('chat')}</span>`
         + `<span class="settings-door-words section-row-words"><span class="settings-door-title section-row-title" data-i18n-fmt="settings.ask">${escapeHtml(fmt('Ask Ouroboros: “{words}”', { words: query.trim() }))}</span>`
         + `<span class="settings-door-answer section-row-answer">The words wait in Main as a draft you send.</span></span><span class="settings-door-end section-row-end" aria-hidden="true">${OUT_ICON}</span></button>`;
     return `${hits ? groupHtml('Settings', hits) : '<p class="settings-search-empty">No setting has these words.</p>'}${groupHtml('', ask)}`;
@@ -351,9 +367,10 @@ export const homeFactsSeen = () => seenFacts || {};
 /**
  * Draw the home into `root` and take its presses. `open(path, { row, opener })` opens a row's page or door; `ctx`
  * is the shell's (`ws`, `showPage`, `readSettings`, `stateSnapshots`). Answers `{ mark(path), search(words), refresh(),
- * dispose() }`: `mark` names the row whose page is shown beside the home; `search` puts words into the search field and
- * shows their results, until the first press on them (words the owner typed stay); `refresh` reads the facts again
- * and repaints.
+ * hide(), stateApplied(data), dispose() }`: `mark` names the row whose page is shown beside the home; `search` puts words
+ * into the search field and shows their results, until the first press on them (words the owner typed stay);
+ * `refresh(names)` says the home is on screen, reads those sources (all of them when it comes on screen) and repaints;
+ * `hide` says it is not; `stateApplied` takes each snapshot the page's sequencer applied.
  */
 export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatus, ask = openConfirmDialog } = {}) {
     root.innerHTML = `<div class="settings-column settings-home-column">
@@ -376,7 +393,7 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     </div>`;
     const find = (selector) => root.querySelector(selector);
     // The card and the search field keep their own references: the shell may move them (the field into the header,
-    // the card into the Ouroboros pane of landing A), and they work wherever they stand.
+    // the card into the Ouroboros pane that two panes show), and they work wherever they stand.
     const cardEl = find('[data-settings-card]');
     const [needsEl, listEl, searchEl, countEl] = [find('[data-being-needs]'), find('[data-settings-list]'), find('#settings-search'), find('[data-being-count]')];
     const [stateEl, sepEl, overviewAnswer] = [find('[data-being-state]'), find('.settings-being-sep'), find('[data-overview-answer]')];
@@ -386,20 +403,37 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     let needs = [];
     let shownQuery = '';
     let handed = '';  // the words `search` put into the field, until the owner types there
-    let serial = 0;
     let busy = '';
     let needsHtml = '';
+    let hidden = true;          // off screen until the shell shows it (`refresh`); off screen it starts no read
+    const flights = new Map();  // a source -> its read in flight: `{ controller, again }`
 
-    function paintCard() {
-        const being = beingState({ connected: ctx.ws?.isConnected?.() !== false, state: facts.state });
-        stateEl.textContent = being.text;
-        stateEl.dataset.tone = being.tone;
-        needs = needRows(facts);
+    // The card's readiness, by the header's own reducer: a body that states nothing (or a failed read) keeps what the
+    // last one said. The socket's close forgets it, and so does a reconnect, as the header's does (chat.js): a poll
+    // read while the socket was down may be the server's from before a restart, so only a body read after the
+    // reconnect proves readiness again; the socket's first open keeps what the page's boot read stated. Bodies are the
+    // page's sequencer's newest, which a reconnect retires; the home's own copy (`facts.state`) answers rows, never
+    // readiness, where there is a sequencer. Every applied body repaints (`watch`), so a text is written only when it
+    // changes.
+    const hostStart = createHostStart();
+    const put = (el, text) => { if (el.textContent !== text) el.textContent = text; };
+    // `read: false` paints without taking a body: the close and a reconnect, which forget, take none, so whichever
+    // handler runs first (app.js's retires the sequencer), a body from before the reconnect is never read back.
+    function paintCard({ read = true } = {}) {
+        const body = !read ? null : ctx.stateSnapshots ? ctx.stateSnapshots.latest?.() : facts.state;
+        if (body) hostStart.read(body);
+        const being = beingState({ connected: ctx.ws?.isConnected?.() !== false, ready: hostStart.ready(),
+            boot: hostStart.status().bootPhase });
+        put(stateEl, being.text);
+        if (stateEl.dataset.tone !== being.tone) stateEl.dataset.tone = being.tone;
+        // The start's row reads the readiness the word reads, never the home's copy, so the two never disagree: a
+        // failure forgotten at a close drops its Restart with the word, and a body that states nothing keeps both.
+        needs = needRows({ ...facts, state: { supervisor_ready: hostStart.ready(), boot: hostStart.status().bootPhase } });
         const waiting = needs.filter((row) => row.owner).length;
-        countEl.textContent = waiting ? count(waiting, 'One thing needs you', '{n} things need you') : '';
+        put(countEl, waiting ? count(waiting, 'One thing needs you', '{n} things need you') : '');
         // The list's own Ouroboros row (two panes from the first showing, settings.js): its state, and how many
         // things need the owner when any do.
-        if (overviewAnswer) overviewAnswer.textContent = waiting ? `${being.text} · ${countEl.textContent}` : being.text;
+        if (overviewAnswer) put(overviewAnswer, waiting ? `${being.text} · ${countEl.textContent}` : being.text);
         countEl.hidden = !waiting;
         sepEl.hidden = !waiting;
         const html = needs.map(needRowHtml).join('') + (needs.length > 2
@@ -447,50 +481,82 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
     }
     const paint = () => { paintCard(); paintList(); };
 
-    // The accounts store as it stands: this subscriber is never a visible surface, so it arms no poll and reads nothing.
+    // The accounts store as it stands: this subscriber is never a visible surface, so it arms no poll and asks it nothing.
+    // Until a page has read the accounts there, the home's own passive roster says them (`roster`), so the Accounts row
+    // and the card say the same beside every page.
+    const storeRead = () => store.reads?.accounts === READ_OK;
     const readAccounts = (view = { reads: store.reads, snapshot: store.snapshot, everSettled: store.everSettled }) => {
-        facts.accounts = { read: view.reads?.accounts, snapshot: view.snapshot, rows: accountRows(view.snapshot),
-            kind: view.everSettled ? refreshActionKind(view.snapshot) : 'refresh' };
+        const own = view.reads?.accounts !== READ_OK && facts.roster;
+        facts.accounts = own ? { read: facetReadState(facts.roster, 'accounts'), snapshot: facts.roster, rows: accountRows(facts.roster), kind: 'refresh' }
+            : { read: view.reads?.accounts, snapshot: view.snapshot, rows: accountRows(view.snapshot),
+                kind: view.everSettled ? refreshActionKind(view.snapshot) : 'refresh' };
     };
     const READS = {
         settings: () => ctx.readSettings(),
-        tools: () => fetchJson('/api/mcp/status', { cache: 'no-store' }),
-        skills: () => readSkills(),
-        places: () => fetchJson('/api/places', { cache: 'no-store' }),
-        update: () => apiClient.updateStatus(),
-        storage: () => fetchJson('/api/storage', { cache: 'no-store' }),
-        autostart: () => apiClient.desktopAutostart(),
-    };
-    async function read(name, run) {
-        try { facts[name] = (await READS[name]()) ?? null; } catch { facts[name] = null; }
-        if (run === serial) paint();
-    }
-    async function readState(run) {
-        const snapshots = ctx.stateSnapshots;
-        if (!snapshots?.latest?.() && snapshots?.gate) {
-            const request = await snapshots.gate(false);
+        tools: (signal) => fetchJson('/api/mcp/status', { cache: 'no-store', signal }),
+        skills: (signal) => readSkills({ signal }),
+        places: (signal) => fetchJson('/api/places', { cache: 'no-store', signal }),
+        update: (signal) => apiClient.updateStatus({ signal }),
+        storage: (signal) => fetchJson('/api/storage', { cache: 'no-store', signal }),
+        autostart: (signal) => apiClient.desktopAutostart({ signal }),
+        // The roster and the windows the engine last observed, as Costs reads them: it starts and refreshes nothing.
+        roster: async (signal) => (storeRead() ? facts.roster : fetchJson('/api/claudexor/status?view=quota', { cache: 'no-store', signal })),
+        // The app's state snapshot, through the page's one sequencer: a read in flight is waited for, not doubled, and
+        // its order keeps an older body from replacing a newer one.
+        state: async () => {
+            const snapshots = ctx.stateSnapshots;
+            const request = await snapshots?.gate?.(false);
             if (request) await readStateSnapshot(snapshots, request);
-        }
-        facts.state = snapshots?.latest?.() ?? null;
-        if (run === serial) paint();
+            return snapshots?.latest?.();
+        },
+    };
+    // One read of a source at a time: asked again while it runs, it runs once more after it. Its answer is painted
+    // unless its own request was dropped (the list left the screen, or is gone).
+    function read(name) {
+        const flight = flights.get(name);
+        if (flight) { flight.again = true; return flight.done; }
+        const mine = { controller: new AbortController(), again: false };
+        flights.set(name, mine);
+        mine.done = (async () => {
+            let fact;
+            try { fact = (await READS[name](mine.controller.signal)) ?? null; } catch { fact = null; }
+            if (flights.get(name) === mine) flights.delete(name);
+            if (mine.controller.signal.aborted) return;
+            facts[name] = fact;
+            if (name === 'roster') readAccounts();
+            paint();
+            if (mine.again) await read(name);
+        })();
+        return mine.done;
     }
-    function refresh() {
-        const run = ++serial;
-        const storage = globalThis.localStorage;
-        facts.device = { theme: globalThis.window?.ouroTheme?.choice, notify: readNotifyPrefs(storage), dictation: dictationWord() };
+    const readDevice = () => {
+        facts.device = { theme: globalThis.window?.ouroTheme?.choice, notify: readNotifyPrefs(globalThis.localStorage), dictation: dictationWord() };
+    };
+    // The list on screen reads `names` (every source when it comes on screen) and repaints what the window knows.
+    function refresh(names = Object.keys(READS)) {
+        hidden = false;
+        readDevice();
         facts.state = ctx.stateSnapshots?.latest?.() || facts.state;
         readAccounts();
         paint();
-        void readState(run);
-        return Promise.all(Object.keys(READS).map((name) => read(name, run)));
+        return Promise.all(names.map(read));
     }
+    // Off screen: the reads in flight are dropped and free their connections; none starts until it is shown again.
+    function hide() {
+        hidden = true;
+        flights.forEach((flight) => flight.controller.abort());
+        flights.clear();
+    }
+    // A page left, a save, a change the shell announces: while the list is on screen, the sources they concern.
+    const renew = (names) => { if (!hidden && root.getClientRects?.().length) void refresh([...new Set(names)]); };
+    const rowAt = (where) => HOME_ROWS.find((row) => row.to === String(where || '').split('/')[0]);
 
     async function runNeed(row) {
         busy = `${row.kind}:${row.id}`;
         paintCard();
         try {
             if (row.run === 'restart') await confirmAndSendRestart({ openConfirmDialog: ask, ws: ctx.ws });
-            else if (row.run) await read(row.run, serial);
+            else if (row.run) await read(row.run);
         } finally {
             busy = '';
             paint();
@@ -531,17 +597,62 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
         spend();
     };
     const onType = () => { handed = ''; paintList(); };
-    // A setting saved while the home is on screen may start or end a wait for a restart: the document is read again.
-    const onSaved = () => { if (root.getClientRects?.().length) void read('settings', serial); };
+    // A setting saved while the home is on screen may start or end a wait for a restart: the document is read again,
+    // with the other sources of its page's row (an entry's write names its row, not its page).
+    const onSaved = (event) => {
+        const { page, row } = event.detail || {};
+        renew(['settings', ...(rowAt(page ?? [...ROWS, ...HAND_WRITTEN].find((each) => each.id === row)?.page)?.reads || [])]);
+    };
+    // Where the owner is in Settings. A door leaves Settings before its destination is shown, so its source is not
+    // read from here; the destination owns its own read.
+    let at = '';
+    const onWhere = (event) => {
+        const where = String(event.detail?.path || '').split('/')[0];
+        const left = where === at ? null : rowAt(at);
+        at = where;
+        if (left) renew(left.reads);
+    };
+    const onPlaces = () => renew(['places']);
+    const onTools = (event) => {
+        if (hidden || !root.getClientRects?.().length) return;
+        facts.tools = event.detail;
+        paint();
+    };
+    // A choice of this device made on a page beside the list (the theme's strip, a notification switch) is the list's
+    // answer at once. Their own modules store it from the document's handlers (theme.js, notifications.js); the window
+    // hears the same press after the document, so the choice is stored by then.
+    const DEVICE_CONTROLS = '[data-theme-control], [data-notify-pref]';
+    const onDevice = (event) => {
+        if (!event.target?.closest?.(DEVICE_CONTROLS)) return;
+        readDevice();
+        paintRows();
+    };
     const offStore = store.subscribe((view) => { readAccounts(view); paintCard(); paintRows(); }, { visible: () => false });
+    // A skill's lifecycle and an update's status, as the shell hears them. The socket's state is the card's first word:
+    // its open and close repaint the card, reading nothing (a reconnect's read is settings.js's); the close and a
+    // reconnect (on the page's own socket, which never hears a room's `resumed` return) forget the readiness the bodies
+    // stated; each change of the page's newest state body, whoever read it, repaints it again.
+    const forget = () => { hostStart.forget(); paintCard({ read: false }); };
+    const offs = [getContributions().onLifecycle(() => renew(['skills'])),
+        ...['update_status_ready', 'update_progress_changed'].map((type) => ctx.ws?.on?.(type, () => renew(['update']))),
+        ctx.ws?.on?.('open', (event) => (event?.previouslyConnected ? forget() : paintCard())),
+        ctx.ws?.on?.('close', forget),
+        ctx.stateSnapshots?.watch?.(() => paintCard())];
     root.addEventListener('click', onClick);
     cardEl?.addEventListener('click', onClick);
     searchEl.addEventListener('input', onType);
     globalThis.window?.addEventListener?.('ouro:settings-updated', onSaved);
+    globalThis.window?.addEventListener?.(PLACES_CHANGED_EVENT, onPlaces);
+    globalThis.window?.addEventListener?.('ouro:mcp-status-updated', onTools);
+    globalThis.window?.addEventListener?.('ouro:settings-page-shown', onWhere);
+    const DEVICE_EVENTS = ['click', 'keydown', 'change'];
+    DEVICE_EVENTS.forEach((type) => globalThis.window?.addEventListener?.(type, onDevice));
     paint();
     return {
-        mark(path) {
-            current = String(path || '').split('/')[0];
+        // The row of the page that is open: of the open levels (top first), the first whose page the list has a row for.
+        mark(paths) {
+            const heads = [paths].flat().map((path) => String(path || '').split('/')[0]);
+            current = heads.find((head) => HOME_ROWS.some((row) => row.to === head)) ?? heads[0] ?? '';
             paintRows();
         },
         search(words) {
@@ -550,13 +661,26 @@ export function mountSettingsHome(root, { open, ctx = {}, store = claudexorStatu
             searchEl.parentElement?.scrollIntoView?.({ block: 'start' });
         },
         refresh,
+        hide,
+        // The page's newest state snapshot (app.js applies every one; the sequencer's `latest()` then holds it): the
+        // card's readiness reads it at once, and on screen the card's start says what runs now.
+        stateApplied(data) {
+            facts.state = data;
+            if (data) hostStart.read(data);
+            if (!hidden) paintCard({ read: false });
+        },
         dispose() {
-            serial += 1;
+            hide();
             offStore();
+            offs.forEach((off) => off?.());
             root.removeEventListener('click', onClick);
             cardEl?.removeEventListener('click', onClick);
             searchEl.removeEventListener('input', onType);
             globalThis.window?.removeEventListener?.('ouro:settings-updated', onSaved);
+            globalThis.window?.removeEventListener?.(PLACES_CHANGED_EVENT, onPlaces);
+            globalThis.window?.removeEventListener?.('ouro:mcp-status-updated', onTools);
+            globalThis.window?.removeEventListener?.('ouro:settings-page-shown', onWhere);
+            DEVICE_EVENTS.forEach((type) => globalThis.window?.removeEventListener?.(type, onDevice));
         },
     };
 }

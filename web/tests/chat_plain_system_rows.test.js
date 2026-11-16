@@ -733,18 +733,21 @@ test('render arm order and enhancement guard are pinned in source', () => {
         bubbleSource.indexOf("const rendered = role === 'user'"),
         bubbleSource.indexOf('const timeFmt =', bubbleSource.indexOf("const rendered = role === 'user'")),
     );
-    assert.match(ternary, /renderSkillReviewDisclosure\(text, opts\.skillReview \|\| null\)/);
+    assert.match(ternary, /renderSkillReviewDisclosure\(text, review \|\| null\)/);
     assert.match(ternary, /role === 'system' && markdown !== true\n\s+\? escapeHtml\(painted\)/);
     assert.match(bubbleSource, /: renderChatMarkdown\(painted\);/);
-    // `painted` is render-only (host_notice_text.js); Copy keeps the pre-cleanup `shown`.
-    assert.match(bubbleSource, /const painted = hostRowDisplayText\(\{ text: stored, role, system_type: systemType, narration: opts\.narration \}, text\);/);
+    // `painted` is render-only (host_notice_text.js); Copy keeps the pre-cleanup `shown`. The words are `bubbleWords`'s,
+    // which the bubble and the room's search (chat_search_words.js) share.
+    assert.match(bubbleSource, /const painted = hostRowDisplayText\(\{ text: stored, role, system_type: systemType, narration \}, text\);/);
+    assert.match(bubbleSource, /= bubbleWords\(text, role, \{ markdown, systemType, source,\n\s+attachments, narration: opts\.narration, textPlaceholder: opts\.textPlaceholder, skillReview: opts\.skillReview \}\);/);
     assert.match(bubbleSource, /chatMedia\.attachCopyControl\(bubble, String\(shown\)\)/);
     // The enhancement pass skips exactly the plain-system case: the bubble says whether its words are rich, and
     // the room enhances only those once mounted.
     assert.match(
         bubbleSource,
-        /const richMarkdown = role !== 'user' && !skillReview && \(role !== 'system' \|\| markdown === true\);/,
+        /const rich = role !== 'user' && !skillReview && \(role !== 'system' \|\| markdown === true\);/,
     );
+    assert.match(bubbleSource, /const \{ rendered, rich: richMarkdown, shown, skillReview \} = bubbleWords\(/);
     assert.match(bubbleSource, /return \{ bubble, rich: richMarkdown \};/);
     const chatSource = readFileSync(new URL('../modules/chat.js', import.meta.url), 'utf8').replace(/\r\n?/g, '\n');
     assert.match(chatSource, /const \{ bubble, rich \} = drawTextBubble\(/);

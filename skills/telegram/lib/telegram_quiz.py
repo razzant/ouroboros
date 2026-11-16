@@ -46,7 +46,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Tupl
 
 from .telegram_api import _TELEGRAM_TEXT_LIMIT, _u16len
 from .telegram_i18n import Index
-from .telegram_state import _message_ref, _read_json_file, _state_file
+from .telegram_state import _data_dir, _message_ref, _read_json_file, _state_file
 
 _QUIZ_STATE_FILE = "quiz_state.json"
 _MAX_REMEMBERED = 50
@@ -102,6 +102,8 @@ _LIFECYCLE_RANK = {"open": 0, "expired_terminal": 1, "superseded": 2, "answered"
 _FINAL_STATES = ("answered", "closed")
 # The host's facts about an answer that a card remembers beside its state.
 _ANSWER_FACTS = ("answered_index", "comment", "question_delivery")
+# Every host fact a settled card's edit shows: a card sent again for its question gets the same edit.
+_SETTLED_FACTS = (*_ANSWER_FACTS, "closed_reason")
 _TOAST_MAX = 200  # Telegram's callback answer limit
 
 # The host publishes ``chat.quiz`` and ``chat.quiz_state`` as independent
@@ -266,13 +268,30 @@ def _bot_cards(data: Dict[str, Any], bot: str) -> Tuple[Dict[str, Any], str]:
     return (data["bots"], f"{bot}:") if bot else (data["quizzes"], "")
 
 
+def _forward_only(held: Any, record: Dict[str, Any]) -> Dict[str, Any]:
+    """``record`` as stored over ``held``, the card's remembered record: nothing stored rolls a
+    settled state back, so a card sent again for its question (the outbox repeating its handler
+    after an edit that had to wait, or the question published again) keeps it and its facts."""
+    if not isinstance(held, dict):
+        return dict(record)
+    record = dict(record)
+    if held.get("message_id") == record.get("message_id") and held.get("creation_edits"):
+        record.setdefault("creation_edits", held["creation_edits"])
+    was, state = str(held.get("state") or "open"), str(record.get("state") or "open")
+    rank, held_rank = _LIFECYCLE_RANK.get(state, 0), _LIFECYCLE_RANK.get(was, 0)
+    if rank > held_rank or (rank == held_rank and (was not in _FINAL_STATES or state == was)):
+        return dict(record)
+    kept = {key: value for key, value in record.items() if key != "state" and key not in _SETTLED_FACTS}
+    return {**kept, "state": was, **{key: held[key] for key in _SETTLED_FACTS if key in held}}
+
+
 def remember_quiz(api, bot: str, token: str, record: Dict[str, Any]) -> None:
-    """Bounded token → card mapping: the newest ``_MAX_REMEMBERED`` cards (``_bot_cards``)."""
+    """Bounded token → card mapping: the newest ``_MAX_REMEMBERED`` cards (``_bot_cards``),
+    whose lifecycle only moves forward (``_forward_only``)."""
     data = _load(api)
     quizzes, prefix = _bot_cards(data, bot)
     key = f"{prefix}{token}"
-    quizzes.pop(key, None)
-    quizzes[key] = dict(record)
+    quizzes[key] = _forward_only(quizzes.pop(key, None), record)
     for stale in list(quizzes)[:-_MAX_REMEMBERED]:
         quizzes.pop(stale, None)
     path = _state_file(api, _QUIZ_STATE_FILE)
@@ -300,10 +319,11 @@ def _tapped_card(api, bot: str, token: str) -> Optional[Dict[str, Any]]:
 def remember_state(api, bot: str, token: str, record: Dict[str, Any], state: str,
                    facts: Optional[Dict[str, Any]] = None) -> None:
     """Persist a settled lifecycle state on the card: the no-rollback evidence. An answer
-    also keeps the host's recorded facts (``merge_answer_facts``) for later partial facts."""
+    also keeps the host's recorded facts (``merge_answer_facts``) for later partial facts,
+    and a closure its stated reason; given ``facts`` replace the earlier ones (``_SETTLED_FACTS``)."""
     if not _LIFECYCLE_RANK.get(state, 0):
         return
-    updated = {key: value for key, value in record.items() if facts is None or key not in _ANSWER_FACTS}
+    updated = {key: value for key, value in record.items() if facts is None or key not in _SETTLED_FACTS}
     updated.update(state=state, **(facts or {}))
     if updated != record:
         remember_quiz(api, bot, token, updated)
@@ -504,8 +524,13 @@ def lifecycle_target(
     edit = lifecycle_edit(record, event, lang) if record and message_id else None
     if record is None or edit is None:
         return None
-    state = str(event.get("state") or "")
-    remember_state(api, bot, token, record, state, merge_answer_facts(record, event) if state == "answered" else None)
+    state, facts = str(event.get("state") or ""), None
+    if state == "answered":
+        facts = merge_answer_facts(record, event)
+    elif state == "closed":  # its stated reason too: a card sent again is closed in the same words
+        reason = str(event.get("closed_reason") or "").strip()
+        facts = {"closed_reason": reason} if reason else {}
+    remember_state(api, bot, token, record, state, facts)
     return int(record.get("chat_id") or 0), message_id, edit[0], edit[1]
 
 
@@ -536,14 +561,39 @@ def _retain_fact(token: str, event: Dict[str, Any]) -> None:
         _RETAINED_FACTS.pop(stale, None)
 
 
-async def _apply_fact(api, token: str, event: Dict[str, Any], lang: str, client_factory) -> None:
-    client = client_factory()  # only this client's own card can be edited; another bot's waits for its bot
-    if quiz_for_token(api, client.bot_id, token) is None:
+def _any_card(api, token: str) -> bool:
+    data = _load(api)
+    return token in data["quizzes"] or any(key.endswith(f":{token}") for key in data["bots"])
+
+
+def card_follows(api, event: Dict[str, Any]) -> bool:
+    """Whether a ``chat.quiz_state`` fact has a remembered card to follow (its outbox filter). A fact for a card
+    not remembered yet is kept for that card's creation (``apply_retained_fact``, which reads the host's record
+    too), so it never waits in the outbox, for a bot token or for a day."""
+    task_id, quiz_id = str(event.get("task_id") or "").strip(), str(event.get("quiz_id") or "").strip()
+    token = mint_token(task_id, quiz_id) if task_id and quiz_id else ""
+    if not token or _any_card(api, token):
+        return bool(token)
+    _retain_fact(token, event)
+    return False
+
+
+async def _apply_fact(api, token: str, event: Dict[str, Any], lang: str, client_factory, *, creation=False) -> None:
+    # Only this client's own card can be edited; another bot's waits for its bot. No card at all needs no client
+    # (nor a bot token): its creation applies the fact, and reads the host's record too.
+    client = client_factory() if _any_card(api, token) else None
+    if client is None or quiz_for_token(api, client.bot_id, token) is None:
         _retain_fact(token, event)  # the card's send may still be in flight
         return
     target = lifecycle_target(api, client.bot_id, event, lang)
     if target is None:
         return
+    if creation:
+        record = quiz_for_token(api, client.bot_id, token)
+        edits = record.get("creation_edits") or []
+        if edits and edits[-1] == list(target):
+            return  # the journal already replayed this exact presentation
+        remember_quiz(api, client.bot_id, token, {**record, "creation_edits": [*edits, list(target)]})
     if not await client.edit_message_text_with_inline_keyboard(*target, parse_mode=""):
         api.log("warning", f"Telegram quiz card edit failed ({event.get('state')}).")  # never retried
 
@@ -559,19 +609,59 @@ async def follow_lifecycle(api, event: Dict[str, Any], lang: str, *, client_fact
         await _apply_fact(api, token, event, lang, client_factory)
 
 
+def _settled_fact(record: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The settled state a remembered card holds, as the host fact that settled it (``_SETTLED_FACTS``)."""
+    state = str((record or {}).get("state") or "")
+    if not _LIFECYCLE_RANK.get(state, 0):
+        return None
+    return {"task_id": record.get("task_id"), "quiz_id": record.get("quiz_id"), "state": state,
+            **{key: record[key] for key in _SETTLED_FACTS if key in record}}
+
+
+def _host_fact(data_dir: Any, published: Mapping[str, Any]) -> Dict[str, Any]:
+    """The host's own record of the question (``owner_quiz``, written before any fact about it is published) as the
+    fact a card created now applies: an answer with its winner and delivery, a closure with its reason, a finished
+    task's expiry, or a wait that ended after the card was published waiting. ``{}`` when it is open or unreadable
+    (unknown, never taken for open)."""
+    from ouroboros.owner_quiz import question_delivery_projection, quiz_states
+
+    task_id, quiz_id = str(published.get("task_id") or ""), str(published.get("quiz_id") or "")
+    block = quiz_states(data_dir, task_id).get(quiz_id) if task_id and quiz_id else None
+    state = str((block or {}).get("state") or "")
+    fact: Dict[str, Any] = {"task_id": task_id, "quiz_id": quiz_id, "state": state}
+    if state == "answered":
+        fact.update(_winner(block))
+        if delivery := question_delivery_projection(block):
+            fact["question_delivery"] = delivery
+    elif state == "closed" and str(block.get("closed_reason") or "").strip():
+        fact["closed_reason"] = str(block["closed_reason"])
+    elif state == "open" and block.get("wait_ended_at") and published.get("wait_for_answer") is True:
+        fact["wait_for_answer"] = False
+    elif state not in _LIFECYCLE_RANK or state == "open":
+        return {}
+    return fact
+
+
 async def apply_retained_fact(api, token: str, lang: str, *, client_factory, published=None) -> None:
-    """Right after ``remember_quiz``, under the same lock: the fact that outran creation,
-    or the settled state the ``chat.quiz`` event itself carries (a queued ask can land
-    after its question was answered or closed); the higher-ranked of the two applies,
-    and the facts that outran creation count as the newer ones."""
+    """After creation, replay its exact edits before reading newer facts. The bounded card record keeps those
+    presentations for this message id, not another owner-quiz truth. The outbox replays confirmed/unknown parts
+    without sending, and retries only known-unsent ones, even after a reload or another host answer. A newer
+    fact appends an edit, never changes a pending part's fingerprint. A newly sent card starts its own sequence.
+    Host state remains authoritative; unreadable leaves the facts known here."""
+    client = client_factory()
+    record = quiz_for_token(api, client.bot_id, token)
+    for target in (record or {}).get("creation_edits") or []:
+        await client.edit_message_text_with_inline_keyboard(*target, parse_mode="")
     outran = _RETAINED_FACTS.pop(token, None)
-    if published and str(published.get("state") or "open") != "open":
-        _retain_fact(token, published)
-    if outran is not None:
-        _retain_fact(token, outran)
+    held = _settled_fact(record)
+    asked = published if published and str(published.get("state") or "open") != "open" else None
+    host = await asyncio.to_thread(_host_fact, _data_dir(api), published) if published else {}
+    for fact in (held, asked, outran, host):
+        if fact:
+            _retain_fact(token, fact)
     event = _RETAINED_FACTS.pop(token, None)
     if event is not None:
-        await _apply_fact(api, token, event, lang, client_factory)
+        await _apply_fact(api, token, event, lang, client_factory, creation=True)
 
 
 def _outcome(status: int, payload: Mapping[str, Any], attempted: Mapping[str, Any]) -> str:

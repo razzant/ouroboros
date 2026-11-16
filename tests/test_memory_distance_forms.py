@@ -9,6 +9,8 @@ from tests import _memory_view_synthetic as syn
 
 
 def test_remote_work_ranges_stay_in_their_source_rooms_and_read_those_replies(tmp_path):
+    import re
+    from dataclasses import replace
     from ouroboros import chat_chain, dialogue_store as ds
     from ouroboros import memory_view_conversation_forms as conv
     from tests import _memory_inventory_shared as shared
@@ -23,9 +25,20 @@ def test_remote_work_ranges_stay_in_their_source_rooms_and_read_those_replies(tm
         rows.append(row)
     ds.append(tmp_path, "chat", _event_row("harbor", "second", 4, direction="system", type="task_summary",
               task_id="range001", wake_summary="The shared finding. Extra detail.", status="completed"))
-    group = _event_group(view(tmp_path))
+    captured = view(tmp_path)
+    group = _event_group(captured)
     address = lambda row: chat_chain.format_address(chat_chain.row_address(row))
     expected = [work.row_range(address(rows[0]), address(rows[2])), address(rows[1])]
+    # The gist line's Holding units read each range in the room showing it, one reader per room, and only its rows.
+    held = forms.holding_room(replace(captured, story=[], room=None, conversations=[group]),
+                              mv.FloorLevel((("F6g", (group["key"],)),)))
+    units = sorted((dict(re.findall(r"(\w+)='([^']*)'", text.split(": memory_read(", 1)[1]))
+                    for _n, text in held["largest"] if text.startswith("work gists,")), key=lambda args: args["from"])
+    assert units == sorted(({"room_id": str(first["chat_id"]), "from": address(first), "to": address(last)}
+                            for first, last in ((rows[0], rows[2]), (rows[1], rows[1]))), key=lambda args: args["from"])
+    for args in units:
+        text = _memory_read(_ctx(tmp_path, "root0001"), rows=True, **args)
+        assert [row["text"] in text for row in rows] == [str(row["chat_id"]) == args["room_id"] for row in rows]
     # Membership in another room must not change the address's room or add another range.
     original = next(w for r in group["rooms"] for w in r["words"] if w["address"] == address(rows[0]))
     other = next(r for r in group["rooms"] if r["room_id"] != str(rows[0]["chat_id"]))
@@ -201,24 +214,36 @@ def test_a_told_word_yielding_under_its_task_line_is_counted_as_my_telling():
     assert "task gists" not in counts["retold"] and counts["retold"]["work gists"] == {"lines": 1, "sources": 1}
 
 
+@pytest.mark.parametrize("held", [True, False])
 @pytest.mark.parametrize("replies", [False, True])
-def test_remote_gist_addresses_its_replies_here_or_its_telling_when_none(replies):
+def test_remote_gist_addresses_its_replies_here_or_its_telling_when_none(replies, held):
+    """A telling no room of this conversation holds (``held`` False: told in Main, where its address was written)
+    stands with that room's reader wherever its own address stands: the line forms without replies here, and the
+    whole form once its words yield and no task line here carries it. A real capture executes that reader
+    (tests/test_memory_view_room.py, a telling another room holds)."""
     from ouroboros import memory_view_conversation_forms as conv
     snap, gist = completed_room()
     group = snap.conversations[0]
     remote = group["rooms"][0]
-    words = remote["words"]
-    address = work.row_range(words[0]["address"], words[-1]["address"]) if replies else gist["address"]
+    if not held:
+        gist = dict(gist, room_id="1")
+        work.bind(None, [group], {"done": gist})
+    words, first, own = remote["words"], work.first_sentence(gist["summary"]), gist["address"]
+    told = own if held else f"memory_read(room_id='1', rows=true, from='{own}', to='{own}')"
+    address = work.row_range(words[0]["address"], words[-1]["address"]) if replies else told
     if not replies:
         remote["words"] = []
     for form in (1, 2, 3):
         text = conv.render_group(group, set(), set(), form)
-        assert f"[{address}] «{work.first_sentence(gist['summary'])}»" in text
+        assert f"[{address}] «{first}»" in text
         if replies:
             assert gist["address"] not in text
     whole = conv.render_group(group, set(), set(), 0)
     assert remote["tasks"][0]["line"] in whole
     assert all(word["line"] in whole for word in remote["words"])
+    if replies:  # its words yield and no task line here carries the telling: the whole form's own gist line
+        alone = {**group, "rooms": [{**remote, "tasks": []}]}
+        assert f"[{told}] «{first}»" in conv.render_group(alone, {word["id"] for word in words}, set(), 0)
     # A relay's telling belongs to the delivery mark, never to its sender's terminal.
     word = dict(words[0], relay_summary="I sent the public outcome.")
     remote.update(words=[word], tasks=[])
@@ -574,7 +599,7 @@ def test_holding_note_keeps_unit_readers_only_above_the_physical_floor(mode, phy
     assert any("tokens, " in line and "memory_read(" in line for line in holding) is not compact
     assert ("(" in holding[0].removeprefix("Holding the room (tokens):")) is not compact
     if mode == "nano":
-        assert "memory_read is reachable through enable_tools" in note
+        assert "(enable_tools loads memory_read if permitted)" in note
 
 
 def test_holding_records_have_one_kind_and_one_reader_even_when_present_in_both_blocks():
@@ -852,6 +877,9 @@ def test_report_counts_a_work_telling_and_fold_read_once_in_each_visible_form():
         assert view_counts(snap, level)['retellings'] == {'task summary': 1, 'works': 1, 'fold_read': 1}
     counted = mv.FloorLevel((('F6a', (snap.conversations[0]['key'],)),))
     assert view_counts(snap, counted)['retellings'] == {'task summary': 1}
+    task_count = mf.level_with(snap, mv.FULL_VIEW, ['F1:' + snap.room['lane2'][0]['first']])  # the gist line stays
+    assert view_counts(snap, task_count)['retellings'] == {'task summary': 2, 'fold_read': 1}
+    assert view_counts(snap, task_count)['host_facts'] == {'earlier tasks': 1}
 
 
 @pytest.mark.parametrize("form", [1, 2, 3])
@@ -935,8 +963,9 @@ def test_compact_source_heads_read_the_named_rows_and_introduce_the_reader_once(
     assert found == ([expected[0]] if len(expected) == 1 else [expected[0], expected[-1]])
     assert all(line.count(parse_address(address)["ts"]) == 1 for address in found)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="reader", current_chat_id=1)
-    read = _memory_read(ctx, room_id=str(parse_address(found[0])["chat_id"]), rows=True,
-                        **{"from": found[0], "to": found[-1]})
+    showing = snap.room["room_id"] if kind == "work" else group["rooms"][0]["room_id"]  # the room that shows them
+    assert showing == str(parse_address(found[0])["chat_id"])  # written there too: neither reading differs here
+    read = _memory_read(ctx, room_id=showing, rows=True, **{"from": found[0], "to": found[-1]})
     assert "complete: no further rows" in read
     assert re.findall(r"row:\d+@[^\s;'\])]+#[a-f0-9]+", "\n".join(read.splitlines()[2:])) == expected
 
@@ -953,26 +982,43 @@ def test_work_range_stands_at_the_last_reply_without_repeating_its_time():
     assert line.count(rows[0]["ts"]) == line.count(rows[-1]["ts"]) == 1
 
 
-def test_task_gist_reader_uses_the_source_room_when_its_terminal_is_elsewhere(tmp_path):
+def test_task_gist_reader_names_the_room_that_shows_its_telling_when_that_is_another(tmp_path):
+    """A task line's telling another room shows carries that room's own reader -- the projection the capture read it
+    in -- while the task-facts header names this room for its own addresses. The chat inside a ``row:`` address is
+    where the row was written: a work bound to Alpha keeps ``row:1@…``, which Alpha shows and Main no longer does.
+    Each printed reader, executed literally, returns exactly that row; the chat in the address says it did not."""
+    import re
+
     from ouroboros.chat_chain import format_address, row_address
     from ouroboros.tools.chronicle import _memory_read
     from ouroboros.tools.registry import ToolContext
     from tests import _memory_inventory_shared as shared
 
-    shared.world(tmp_path)
+    rooms = shared.world(tmp_path)  # binds task "bound" to Alpha after its reply was written in Main
+    alpha = str(rooms['alpha'])
     terminal = shared.msg('2026-10-20T02:00:00+00:00', 'Terminal in another room.', chat_id=777,
                           direction='system', task_id='done', type='task_summary',
                           summary_kind='terminal_root_projection', wake_summary='A completed result.')
     shared.append(tmp_path / 'logs/chat.jsonl', terminal)
-    snap, _gist = completed_room()
-    address = format_address(row_address(terminal))
-    work.bind(snap.room, [], {'done': dict(summary=terminal['wake_summary'], address=address, room_id='777')})
-    text = mv._room_text(snap.room, {'F1': {snap.room['lane2'][0]['first']}})
-    assert f'[{address}; task done]' in text
-    assert 'memory_read(room_id=<room from address>, rows=true, from=<address>, to=<address>)' in text
+    bound = format_address(row_address(shared.msg('2026-09-02T00:00:00+00:00', 'bound work', direction='out',
+                                                  task_id='bound')))  # as ``shared.chat`` wrote it, in Main
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id='reader', current_chat_id=1)
-    read = _memory_read(ctx, room_id='777', rows=True, **{'from': address, 'to': address})
-    assert terminal['text'] in read and 'complete: no further rows' in read
+    for address, room, text in ((format_address(row_address(terminal)), '777', terminal['text']),
+                                (bound, alpha, 'bound work')):
+        snap, _gist = completed_room()
+        work.bind(snap.room, [], {'done': dict(summary='A completed result.', address=address, room_id=room)})
+        lines = mv._room_text(snap.room, {'F1': {snap.room['lane2'][0]['first']}})
+        assert ("### Task facts of this conversation (host; one line per task; a row:… address reads with "
+                "memory_read(room_id='1', rows=true, from=<address>, to=<address>))") in lines
+        reader = f"memory_read(room_id='{room}', rows=true, from='{address}', to='{address}')"
+        assert f"[{reader}; task done] — summary: «A completed result.»" in lines
+        args = dict(zip(('room_id', 'from', 'to'), re.fullmatch(
+            r"memory_read\(room_id='(.+)', rows=true, from='(.+)', to='(.+)'\)", reader).groups()))
+        read = _memory_read(ctx, rows=True, **args)
+        assert read.split('\n')[2].endswith(f"{address}] {text}") and 'complete: no further rows' in read
+    elsewhere = _memory_read(ctx, room_id='1', rows=True, **{'from': bound, 'to': bound})  # the chat in the address
+    assert elsewhere.split('\n')[0].endswith('this reading of room 1 did not return that row') and len(
+        elsewhere.split('\n')) == 2
 
 
 def test_holding_formats_only_the_three_units_it_shows(monkeypatch):

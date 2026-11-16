@@ -24,7 +24,7 @@ from ouroboros.context_fit import seal_task_transcript
 from ouroboros.context_source_view import _obsolete_host_rows
 from ouroboros.llm import LLMClient
 from ouroboros.llm_claudexor import _request as claudexor_request
-from ouroboros.llm_messages import STABLE_PREFIX_BLOCKS_KEY
+from ouroboros.llm_messages import SHARED_HEAD_KEY, STABLE_PREFIX_BLOCKS_KEY
 from ouroboros.loop_messages import CONTEXT_FACTS_NAME
 from ouroboros.send_clock import CLOCK_ROW_NAME
 from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY, make_tool_result_record, read_tool_result_record
@@ -51,14 +51,23 @@ _EXPECTED = (1, 5, 11, 15, 17, 20, 24, 30)
 _MARKED = ("anthropic", "openrouter-anthropic", "openrouter-openai")
 _PLAIN = ("openrouter-grok", "openai", "claudexor", "local", "gigachat")
 _OPENROUTER = {"openrouter-anthropic": "anthropic/claude-fable-5", "openrouter-openai": "openai/gpt-6.1-sol",
-               "openrouter-grok": "x-ai/grok-4.7"}
+               "openrouter-grok": "x-ai/grok-4.7", "openrouter-gemini": "google/gemini-3.5-flash"}
+_DIRECT = {"openai": {"provider": "openai", "resolved_model": "gpt-5.5", "usage_model": "openai/gpt-5.5",
+                      "supports_openrouter_extensions": False},
+           "openai-compatible": {"provider": "openai-compatible", "resolved_model": "kimi-k3",
+                                 "usage_model": "openai-compatible/kimi-k3", "base_url": "https://gateway.example/v1",
+                                 "supports_openrouter_extensions": False, "supports_generation_cost": False}}
 
 
-def _system(book: bool) -> dict:
+def _system(book: bool, whole_story: bool | None = None) -> dict:
+    """``whole_story`` given: resident memory declares its shared head, "identity and ", as the context builder does."""
     stable = ["governance " * 900, *(["## DEVELOPMENT.md\nrules"] if book else []), "identity and story"]
-    return {"role": "system", STABLE_PREFIX_BLOCKS_KEY: len(stable), "content": [
+    system = {"role": "system", STABLE_PREFIX_BLOCKS_KEY: len(stable), "content": [
         *({"type": "text", "text": text, "cache_control": {"type": "ephemeral"}} for text in stable),
         {"type": "text", "text": "runtime facts"}]}
+    if whole_story is not None:
+        system["content"][-2][SHARED_HEAD_KEY] = {"chars": len("identity and "), "story_whole": whole_story}
+    return system
 
 
 def _rounds(book: bool):
@@ -108,9 +117,7 @@ def _payload(lane: str, messages: list, monkeypatch) -> dict:
         return client._build_local_candidate(messages, _TOOLS, 512, "auto")[1]
     if lane == "gigachat":
         return {"messages": LLMClient._gigachat_messages(messages)}
-    target = (_openrouter_target(_OPENROUTER[lane]) if lane in _OPENROUTER else
-              {"provider": "openai", "resolved_model": "gpt-5.5", "usage_model": "openai/gpt-5.5",
-               "supports_openrouter_extensions": False})
+    target = _openrouter_target(_OPENROUTER[lane]) if lane in _OPENROUTER else copy.deepcopy(_DIRECT[lane])
     payload = client._build_remote_kwargs(target, messages, "high", 512, "auto", None, _TOOLS,
                                           skip_capability_fetch=True)
     client._normalize_payload_cache_ttl(target, payload)
@@ -299,18 +306,22 @@ def test_user_send_copy_block_shapes_survive_boundary_moves_without_changing_cal
 
 @pytest.mark.parametrize("lane", ["anthropic", "openrouter-anthropic"])
 @pytest.mark.parametrize("shape,expected", [
-    ("spare", True), ("handbook", False), ("unsealed", False),
-    ("empty-tail", False), ("undeclared", False), ("all-stable", False),
+    ("spare", True), ("head", True), ("whole-story", True), ("handbook", False), ("handbook-head", False),
+    ("unsealed", False), ("unsealed-head", False), ("empty-tail", False), ("undeclared", False), ("all-stable", False),
 ])
 def test_system_context_endpoint_respects_declared_budget_and_uncached_inputs(monkeypatch, lane, shape, expected):
-    messages = [_system(shape == "handbook"), {"role": "user", "content": "task"}]
+    """The allocator changes cache metadata and never the input's bytes. Where C takes the spare breakpoint and
+    resident memory declares its shared head, that block goes as its head and its story and keeps its one breakpoint
+    where another work still agrees with it: the head's end for a narrowed story, its own end for a whole one."""
+    declares = {"head": False, "whole-story": True, "handbook-head": False, "unsealed-head": False}.get(shape)
+    messages = [_system(shape.startswith("handbook"), declares), {"role": "user", "content": "task"}]
     if shape == "empty-tail":
         messages[0]["content"][-1]["text"] = ""
     if shape == "undeclared":
         messages[0].pop(STABLE_PREFIX_BLOCKS_KEY)
     if shape == "all-stable":
         messages[0][STABLE_PREFIX_BLOCKS_KEY] = len(messages[0]["content"])
-    if shape != "unsealed":
+    if not shape.startswith("unsealed"):
         seal_task_transcript(messages)
     original = copy.deepcopy(messages)
     actual = _payload(lane, messages, monkeypatch)
@@ -323,9 +334,23 @@ def test_system_context_endpoint_respects_declared_budget_and_uncached_inputs(mo
             return {k: strip_marks(v) for k, v in value.items() if k != "cache_control"}
         return [strip_marks(v) for v in value] if isinstance(value, list) else value
 
-    assert strip_marks(actual) == strip_marks(before), "only cache metadata changes, never input or routing"
+    def as_input(payload):  # the request less its cache metadata; the system's text as one run of bytes
+        payload = strip_marks(payload)
+        blocks = payload.get("system", payload["messages"][0].get("content"))
+        blocks[:] = ["".join(block["text"] for block in blocks)]
+        return payload
+
+    assert as_input(actual) == as_input(before), "only cache metadata changes, never input bytes or routing"
     assert messages == original, "canonical messages and their declarations stay intact"
+    leaked = SHARED_HEAD_KEY in json.dumps(actual)  # a bare bool: a failure must not draw the whole payload
+    assert not leaked, "the declaration is the host's own"
     system = actual.get("system", actual["messages"][0].get("content"))
+    if shape in {"head", "whole-story"}:
+        assert [block["text"] for block in system] == ["governance " * 900, "identity and ", "story", "runtime facts"]
+        assert ["cache_control" in block for block in system] == [True, shape == "head", shape == "whole-story", True]
+        assert len(LLMClient._payload_cache_breakpoints(actual)) == LLMClient._MAX_CACHE_BREAKPOINTS
+    else:
+        assert strip_marks(actual) == strip_marks(before), "and every block boundary stays where it was"
     tail = next((b for b in system if b.get("text") == "runtime facts"), {})
     assert ("cache_control" in tail) == expected
     assert len(LLMClient._payload_cache_breakpoints(actual)) <= LLMClient._MAX_CACHE_BREAKPOINTS
@@ -354,7 +379,8 @@ def test_compaction_preserves_a_written_endpoint_for_the_whole_system(monkeypatc
     assert messages == original
 
 
-@pytest.mark.parametrize("lane", ["openrouter-openai", "openrouter-grok", "openai", "claudexor", "local", "gigachat"])
+@pytest.mark.parametrize("lane", ["openrouter-openai", "openrouter-grok", "openrouter-gemini", "openai",
+                                  "openai-compatible", "claudexor", "local", "gigachat"])
 def test_other_lanes_never_reallocate_system_context_cache_markers(monkeypatch, lane):
     messages = [_system(False), {"role": "user", "content": "task"}]
     seal_task_transcript(messages)
@@ -363,3 +389,6 @@ def test_other_lanes_never_reallocate_system_context_cache_markers(monkeypatch, 
         raise AssertionError("Anthropic-only cache projection reached another route")
     monkeypatch.setattr(LLMClient, "_cache_declared_system_context", forbidden)
     assert _payload(lane, messages, monkeypatch) == before
+    declared = [_system(False, whole_story=False), {"role": "user", "content": "task"}]
+    seal_task_transcript(declared)
+    assert _payload(lane, declared, monkeypatch) == before, "resident memory's declaration reaches no other wire"

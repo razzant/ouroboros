@@ -190,6 +190,43 @@ def lead_fields(fact: Any = None, task: Mapping | None = None, *, queued: bool =
     return {"lead": lead} if lead else {}
 
 
+def processing_fact(metadata: Any, last: Any = None) -> dict:
+    """The work's own tier as its card says it: the choice and who made it (``""``: the default resolution),
+    and the newest receipt of its own calls when this host saw one, so a choice never reads as what ran."""
+    carrier = route_choice.processing_snapshot(metadata.get(route_choice.PROCESSING_KEY)) if isinstance(metadata, Mapping) else None
+    fact: dict = {"choice": carrier["tier"], "source": carrier["source"]} if carrier and carrier.get("tier") else {"choice": ""}
+    if isinstance(last, Mapping) and last.get("observed"):
+        fact["last"] = {key: last.get(key) for key in RECEIPT_FIELDS if key in last}
+    return fact
+
+
+# What a call's processing receipt keeps for the card: what was asked, sent and seen, natively too (an older Codex
+# may report a native mode the vocabulary folds into another one).
+RECEIPT_FIELDS = ("requested", "submitted", "submittedNative", "observed", "observedNative", "reason")
+
+
+def processing_fields(task: Mapping | None, lead: Mapping | None = None) -> dict:
+    """The card's tier fact of a root (``/api/state`` only: the model's routing context does not carry it)."""
+    task = task if isinstance(task, Mapping) else {}
+    from ouroboros.model_slots import task_processing_preference
+
+    task = dict(task)
+    lead = lead or task.get("lead") or {}
+    control = task.get("owner_model") or {}
+    changing = control.get("request_id") and control["request_id"] != task.get("_lead_request_id")
+    role = str(lead.get("role") or "") if lead.get("basis") == "fallback" and not changing else ""
+    fact = processing_fact(task.get("metadata"), task.get("processing_last"))
+    fact["resolved"] = task_processing_preference(task, model_role=role)
+    return {"processing": fact}
+
+
+def lead_processing_fields(fact: Any = None, task: Mapping | None = None, *, queued: bool = False) -> dict:
+    """A census row's lead and, beside it, its tier: the card names a tier only beside its model, as ``works[]``
+    publishes it; a row without a lead carries neither."""
+    lead = lead_fields(fact, task, queued=queued)
+    return {**lead, **processing_fields(task, lead["lead"])} if lead else {}
+
+
 def chooser_words(basis: str, carrier: Any = None) -> str:
     words = {"room": "set by my human for this chat", "owner": "set by my human for this work",
             "owner_words": "set by my human's words", "place": "set for this place",

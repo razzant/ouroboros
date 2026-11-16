@@ -474,6 +474,8 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         return _pool()._reject_promoted_after_attachment_stage(
             workspace_outcome, attachment_manifest,
         )
+    # The receipt's one note (routing detail, durable promotion_admission) also names an unrecorded folder.
+    source_note = "; ".join(note for note in (source_note, task.pop("_room_folder_note", "")) if note)
     if not _pool()._relocate_promoted_attachments(task, tid, attachment_manifest):
         return _pool()._reject_promoted_after_attachment_stage({
             "status": "needs_manual_target",
@@ -632,7 +634,9 @@ def _admit_promoted_workspace(evt: dict, ctx: Any, task: dict, *, pid: str, tid:
     # STRICTLY empty-only: a NON-EMPTY working_dir — valid or broken — is never
     # blind-ensured over (a broken one must LOUD-FAIL through resolve_room_workspace,
     # the v6.58.0 invariant, not be papered over with a fresh empty repo). The
-    # workspace="none" sentinel still opts out entirely. Docs are NOT part of this
+    # workspace="none" sentinel still opts out entirely, and so does the room's own
+    # recorded No folder (``no_folder``): that room keeps none until a
+    # folder is chosen for it, and this task works in its own scratch. Docs are NOT part of this
     # decision: since D-ARCH (2026-08-08) the doc matrix keys on project membership
     # and the owner mode, so binding a workspace here never drags ARCHITECTURE.md
     # out of a max context.
@@ -644,6 +648,7 @@ def _admit_promoted_workspace(evt: dict, ctx: Any, task: dict, *, pid: str, tid:
         provisioned_now = ""
         basis = task.get("_project_admission") or {}
         if not str((basis.get("project") or {}).get("working_dir") or "").strip():
+            chosen = None
             try:
                 from ouroboros.projects_registry import ensure_project_workspace, project_admission_basis
 
@@ -654,7 +659,7 @@ def _admit_promoted_workspace(evt: dict, ctx: Any, task: dict, *, pid: str, tid:
                     task["_project_admission"] = project_admission_basis(pid, chosen)
             except Exception:
                 log.warning("promote: workspace auto-provisioning raised for %s", pid, exc_info=True)
-            if not provisioned_now:
+            if not provisioned_now and not (chosen or {}).get("no_folder"):  # a recorded No folder is no failure
                 # Bind-or-fail (v6.58.0): falling through to a workspace-less
                 # self_modification-profile task over the system repo is exactly
                 # the silent degradation the admission SSOT exists to kill.
@@ -667,7 +672,8 @@ def _admit_promoted_workspace(evt: dict, ctx: Any, task: dict, *, pid: str, tid:
                         "one failed; see the supervisor log (ensure_project_workspace)",
                     ),
                 }
-            task.setdefault("metadata", {})["workspace_autoprovisioned"] = True
+            if provisioned_now:
+                task.setdefault("metadata", {})["workspace_autoprovisioned"] = True
 
     resolved_ws, ws_error = resolve_room_workspace(
         drive_root=_pool().DRIVE_ROOT,
@@ -708,6 +714,8 @@ def _admit_promoted_workspace(evt: dict, ctx: Any, task: dict, *, pid: str, tid:
             # only while `working_dir` is still empty (compare-and-set under the
             # registry lock), so a set value is never overwritten and the room's
             # later direct turns are not blind to where the work went.
+            from ouroboros.project_sources import TemporaryCopyRefused
+
             try:
                 from ouroboros.projects_registry import update_project, project_admission_basis
 
@@ -718,6 +726,12 @@ def _admit_promoted_workspace(evt: dict, ctx: Any, task: dict, *, pid: str, tid:
                     only_if_empty=("working_dir",), admission_basis={**task["_project_admission"], "frozen": False})
                 if chosen:
                     task["_project_admission"] = project_admission_basis(pid, chosen, frozen=True)
+                    if chosen.get("no_folder"):  # a task's own folder never ends the room's recorded choice
+                        task["_room_folder_note"] = ("the Project keeps No folder by its recorded choice: "
+                                                     "this folder serves this task only")
+            except TemporaryCopyRefused as exc:
+                # Only the lasting binding is refused (a copy, or a status unknown): the receipt says so.
+                task["_room_folder_note"] = f"the task's workspace stays; the Project's folder stays unset: {exc}"
             except Exception:
                 log.warning("promote: could not record working_dir for project %s", pid, exc_info=True)
         # The lease lane keys off task["project_id"]: for a project room it is already

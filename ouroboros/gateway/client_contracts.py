@@ -424,6 +424,23 @@ class OwnerChatModelResponse(TypedDict):
     window_reset: NotRequired[bool]
 
 
+class OwnerChatProcessingRequest(TypedDict):
+    """A room's processing tier for new owner work, or Main's own without project_id; ``""`` is Default. Ultrafast is a room's only."""
+
+    processing: Literal["", "standard", "fast", "economy", "ultrafast"]
+    project_id: NotRequired[str]
+
+
+class OwnerChatProcessingResponse(TypedDict):
+    ok: bool
+    project_id: str
+    processing_choice: NotRequired[Literal["", "standard", "fast", "economy", "ultrafast"]]  # Project response
+    previous_processing_choice: NotRequired[Literal["", "standard", "fast", "economy", "ultrafast"]]
+    main_processing: NotRequired[Literal["", "standard", "fast", "economy"]]  # Main response: Main's own tier (a Settings value)
+    previous_main_processing: NotRequired[Literal["", "standard", "fast", "economy"]]
+    processing_default: NotRequired[Literal["", "standard", "fast", "economy"]]  # what Default resolves to
+
+
 class OwnerSafetyModeRequest(TypedDict):
     kind: NotRequired[Literal["your_work", "consciousness"]]
     mode: Literal["full", "light", "off"]
@@ -584,10 +601,11 @@ class PlaceReadiness(TypedDict):
 
 
 class PlaceModelRoute(TypedDict):
-    """The model a place thinks with now, and the scope that chose it."""
+    """The model a place thinks with now, the scope that chose it, and whether that route is the local runtime."""
 
     value: str
     layer: Literal["place", "circle", "consciousness"]
+    local: bool
 
 
 class PlaceSummary(TypedDict):
@@ -967,7 +985,7 @@ __all__ = [
     "SettingsDeploymentPolicy", "SettingsWriteRefusal",
     "AuthLoginRequest", "AuthLoginResponse",
     "ContractBody", "ContractHttpEntry", "ContractWsEntry", "ContractWs", "GatewayContractResponse",
-    "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerChatModelRequest", "ChatModelChoice", "ChatModelRoute", "OwnerChatModelResponse", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",
+    "OwnerRuntimeModeRequest", "OwnerContextModeRequest", "OwnerEffortRangeRequest", "OwnerSubagentsModeRequest", "OwnerChatModelRequest", "ChatModelChoice", "ChatModelRoute", "OwnerChatModelResponse", "OwnerChatProcessingRequest", "OwnerChatProcessingResponse", "OwnerSafetyModeRequest", "OwnerSafetyRulesRequest", "OwnerSafetyRulesResponse", "OwnerSafetyModelRequest", "OwnerSafetyModelResponse", "OwnerEnabledRequest",
     "RecentWake", "RecentWakeCheck", "RecentWakesView",
     "PlaceConnectRequest", "PlaceIcon", "PlaceReadiness", "PlaceModelRoute", "PlaceSummary", "PlaceDisconnectRequest",
     "PlaceOwnerAccountRequest", "PlaceUpdateRequest", "PlaceCircleChoice", "PlaceDescription",

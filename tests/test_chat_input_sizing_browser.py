@@ -507,7 +507,7 @@ def _placeholder(run, field, row):
 
 
 def _project(run, data_project):
-    """A Project draft is restored while its panel is still hidden and sized once shown."""
+    """A Project keeps its field and draft while away, and fits again on its return (DESIGN: Moving between places)."""
     page, mode = run.page, run.mode
     nav = page.locator(f'.nav-project-row[data-project-id="{data_project}"]')
     panel_field = page.locator("#project-panel textarea.chat-input")
@@ -522,22 +522,24 @@ def _project(run, data_project):
     page.keyboard.press("Shift+Enter")
     page.keyboard.type("Draft line three")
     _assert_fits(run.geometry(panel_field, "project-typed"), mode, "project-typed", rows=3)
-    # Close (a pressed row only opens, #1998): the instance is destroyed, its draft kept.
+    # Close (a pressed row only opens, #1998): the room stays whole and quiet until its return.
+    panel_field.evaluate("el => { window.__keptField = el; }")
     close = page.locator("#project-panel-close")
     close.evaluate("el => el.click()")
-    page.wait_for_function("() => !document.querySelector('#project-panel textarea.chat-input')")
     page.wait_for_function("() => document.getElementById('project-panel').hidden")
     nav.evaluate("el => el.click()")
     panel_field.wait_for(state="visible")
     g = run.geometry(panel_field, "project-reopened")
+    assert panel_field.evaluate("el => el === window.__keptField")
     assert panel_field.input_value() == "Draft line one\nDraft line two\nDraft line three"
     _assert_fits(g, mode, "project-reopened", rows=3)
     run.shoot(panel_row, "project-reopened")
-    # A destroyed instance writes nothing afterwards.
-    panel_field.evaluate("el => { window.__closedField = el; }")
-    panel_field.evaluate(_WATCH_WRITES)
+    # A room away is still connected but writes no sizing while hidden, including across a window resize.
     close.evaluate("el => el.click()")
-    page.wait_for_function("() => !window.__closedField.isConnected")
+    page.wait_for_function("() => document.getElementById('project-panel').hidden")
+    run.settle()
+    assert panel_field.evaluate("el => el === window.__keptField && el.isConnected")
+    panel_field.evaluate(_WATCH_WRITES)
     page.set_viewport_size({"width": 900, "height": 800})
     run.settle()
     page.set_viewport_size({"width": 1240, "height": 800})

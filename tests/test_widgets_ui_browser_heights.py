@@ -825,8 +825,10 @@ def test_a_press_on_a_head_or_grip_ends_where_it_is_released_even_over_its_own_f
                 during = lifted()
                 page.mouse.up()
                 heard = inner.evaluate("() => window.__heard")
-                # The place's outline goes with the next layout, an animation frame after the release.
-                page.wait_for_timeout(150)
+                # The place's outline goes with the next layout, an animation frame after the release (masonry.js lays out
+                # in one requestAnimationFrame): read the board after two frames, not after a wall-clock pause that a
+                # runner whose frames come slower than it would report as a card still moving.
+                page.evaluate("() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))")
                 released = board_state()
                 page.wait_for_timeout(250)
                 placed = {"stored": stored_order(page), "shown": visual_order(page)}
@@ -1103,7 +1105,10 @@ _CANVAS = """(() => {
     fit();
 })();
 """
-_TAIL = '<button id="tail" style="position:absolute;bottom:0;height:20px">Bottom control</button>'
+# Its words fit its 20 px in every engine's fonts: with the default button font, Linux WebKit's text stands 3 px below
+# the box, and that overflow is the document's real end (the frame then follows 503, not the 500 the tests mean).
+_TAIL = ('<button id="tail" type="button" style="position:absolute;bottom:0;height:20px;box-sizing:border-box;padding:0 6px;'
+         'font:12px/14px sans-serif">Bottom control</button>')
 # Grows to exactly its frame's height when the test asks (8 px default body margins).
 _GROWS = ("const root = document.getElementById('root');"
           "root.style.cssText = 'height:200px;position:relative';"
@@ -1120,7 +1125,7 @@ _ANCHORED = ("document.head.insertAdjacentHTML('beforeend', '<style>body{height:
 # Four documents laid out against their own window: the default body margins (or a body holding 900 px of its own) leave
 # their bottom control below every frame they are given, by a flex footer or an absolutely placed control.
 _BOTTOM_CONTROL = '<button id="tail" type="button" style="height:20px">Bottom control</button>'
-_PLACED_CONTROL = '<button id="tail" type="button" style="position:absolute;bottom:0;height:20px">Bottom control</button>'
+_PLACED_CONTROL = _TAIL  # These 20px controls need the same contained text as the anchored and paragraph fixtures.
 _TAIL_COUNTS = "document.getElementById('tail').addEventListener('click', () => { window.__tailClicks = (window.__tailClicks || 0) + 1; });\n"
 _FOLLOWERS = {
     "flex_bottom": ("document.head.insertAdjacentHTML('beforeend', '<style>body{min-height:100vh;display:flex;"
@@ -1455,8 +1460,7 @@ _GROWTH = {
     # A control placed in an authored 500 px body, moved later: no extent of the document changes, only what it holds.
     "placed_moves": ("document.head.insertAdjacentHTML('beforeend', '<style>body{height:500px;position:relative;margin:0}"
                      "#root{height:20px}</style>');\n"
-                     "document.getElementById('root').innerHTML = 'Start <button id=\"tail\" type=\"button\" "
-                     "style=\"position:absolute;top:80px;height:20px\">Move</button>';\n"
+                     f"document.getElementById('root').innerHTML = 'Start {_TAIL.replace('bottom:0', 'top:80px').replace('Bottom control', 'Move')}';\n"
                      "window.place = (top) => { document.getElementById('tail').style.top = `${top}px`; };\n"),
     # A menu that :hover or :focus-within shows below a 30 px root: only the pointer moves, the document stays as it was.
     "hover_menu": ("document.head.insertAdjacentHTML('beforeend', '<style>body{margin:0}#root{height:30px;position:relative}"

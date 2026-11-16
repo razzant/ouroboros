@@ -44,6 +44,10 @@ test('connection discovery replaces only the exact source and preserves general 
     const { items: _items, ...provenance } = composed;
     const { items: _generalItems, ...originalProvenance } = general;
     assert.deepEqual(provenance, originalProvenance);
+    // A general catalog nobody has read stays unread under a connection's own list: its rows are not a whole read,
+    // so a role line says the catalog's note and never "Price unknown".
+    assert.equal(withConnectionCatalogs({}, connections).read_state, 'not_read');
+    assert.equal(catalogReadState({ items: withConnectionCatalogs({}, connections).items }), 'ok', 'the rows alone would read as a whole catalog');
     for (const incoming of [
         { read_state: 'transport', errors: [{ error: 'offline' }] },
         { items: [], model_sources: [], errors: [{ error: 'source failed' }] },

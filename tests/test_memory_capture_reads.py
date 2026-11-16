@@ -193,7 +193,7 @@ def test_working_notes_projection_follows_real_fold_publication_and_exact_reader
     from types import SimpleNamespace
     from ouroboros.main_context_authority import publish_working_notes, retained_reader
     from ouroboros.task_results import write_task_result, load_working_note_results
-    from tests.test_context_renewal import NOTE, _noted
+    from tests._noted_transcript_fixture import NOTE, _noted
 
     made = shape.open_rows(tmp_path, 0, rooms=1)
     task = "folded-root"
@@ -233,6 +233,21 @@ def test_working_notes_projection_keeps_missing_refused_and_unavailable_distinct
     assert "absent" not in result and "../bad" not in result
     assert result["good"] == {"task_id": "good", "status": "running", "working_notes": None}
     assert all(isinstance(result[task]["_refused"], ValueError) for task in ("wrong", "status", "broken", "array", "missingbody"))
+    seed_result(tmp_path, "nonfinite", {"status": "completed", "working_notes": {"path": "context/notes.json"}})
+    with task_store.open_store(tmp_path, write=True) as txn:  # machine_json writes NaN/Infinity (allow_nan)
+        txn.conn.execute("UPDATE task_bodies SET body=replace(body, '\"status\"', '\"cost\":NaN,\"rate\":-Infinity,"
+                         "\"status\"') WHERE task_id='nonfinite'")
+    full = task_results.load_task_results(tmp_path, ["nonfinite"])["nonfinite"]
+    assert task_results.load_working_note_results(tmp_path, ["nonfinite"])["nonfinite"] == {
+        key: full[key] for key in ("task_id", "status", "working_notes")} and full["rate"] == float("-inf")
+    # The projection reads its keys from the raw body; the full reader lays the handoff rows and the card row over
+    # it (task_store._documents). They agree only while no projected key is row- or card-backed.
+    from ouroboros import store, store_task_cards
+    backed = set(task_store._NOTE_KEYS) & {*store.ROW_BACKED_FIELDS, *store_task_cards.FIELDS}
+    assert not backed, f"projected keys the full reader overlays: {sorted(backed)}"
+    # An undecodable neighbour refuses only its own entry, where the full reader's whole batch is unavailable.
+    assert set(task_results.load_task_results(tmp_path, ["nonfinite", "broken"])) == {"_unavailable"}
+    assert set(mv._working_notes(tmp_path, ["nonfinite", "broken"])) == {"nonfinite"}
     unavailable_store(monkeypatch)
     assert set(task_results.load_working_note_results(tmp_path, ["good"])) == {"_unavailable"}
 

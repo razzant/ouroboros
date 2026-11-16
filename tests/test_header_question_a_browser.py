@@ -316,7 +316,7 @@ BAR = """name => {
     const box = el => { const r = el.getBoundingClientRect(); return {x: r.x, y: r.y, h: r.height, bottom: r.bottom, cy: r.y + r.height / 2}; };
     const page = document.querySelector('#page-' + name), header = page.querySelector('.app-page-header');
     const lead = header.querySelector('.app-page-lead');
-    const items = [...header.querySelectorAll('.app-page-lead [role=tab], .app-page-lead .files-crumb, .app-page-toolbar button')]
+    const items = [...header.querySelectorAll('.app-page-lead [role=tab], .app-page-lead .files-crumb, .app-page-lead-title, .app-page-toolbar button')]
         .filter(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
     const hb = box(header);
     const hit = document.elementFromPoint(hb.x + header.clientWidth / 2, hb.bottom + 8);
@@ -338,7 +338,7 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
     page = _open(engine_ui, 956, 801)
     try:
         bars = {}
-        for name in ('dashboard', 'skills', 'files'):
+        for name in ('skills', 'files'):
             _goto(page, name)
             bars[name] = page.evaluate(BAR, name)
             bar = bars[name]
@@ -349,13 +349,17 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
             # The strip lends its shadows room below the bar but never takes a press meant for the page.
             assert bar['hitsPage'], (name, bar)
             setup_browser.capture(page, f'bar-a-{name}-{engine}-956')
-        # Settings keeps no navigation in its bar: Back is the first row of each page, so its header stays empty.
+        # Settings keeps its search and the open page's title in the band's lead.
         _goto(page, 'settings')
-        assert 'data-empty' in page.evaluate(BAR, 'settings')['attrs']
+        settings_bar = page.evaluate(BAR, 'settings')
+        assert settings_bar['lead'] and 'data-lead' in settings_bar['attrs'] and 'data-empty' not in settings_bar['attrs']
+        assert settings_bar['height'] == 50, settings_bar
         # The macOS window: the bar is the band, its controls centred on it; an empty header (Widgets) is only the
         # window's handle over the page, and the page's first card sits one inset (not two) under the band.
         _band(page)
+        page.set_viewport_size({'width': 1280, 'height': 801})
         _goto(page, 'dashboard')
+        page.locator('#page-dashboard [data-dashboard-tab="costs"]').click()
         dashboard_band = page.evaluate(BAR, 'dashboard')
         assert dashboard_band['height'] == 52 and abs(dashboard_band['centres'][0] - 26) <= 1, dashboard_band
         _goto(page, 'widgets')
@@ -367,20 +371,31 @@ def test_page_bars_hold_their_navigation_on_a_desk_and_keep_it_under_the_row_on_
         assert widgets['empty'] and widgets['bar'] == 52 and widgets['margin'] == '0px', widgets
         assert abs(widgets['card'] - (52 + 16)) <= 1, widgets
         setup_browser.capture(page, f'bar-a-widgets-band-{engine}-956')
-        # A phone: the same nodes go back under the row, focus and identity kept; the desk takes them back.
+        # The Dashboard's vertical list keeps its nodes and focus through a resize. On a phone a row opens a
+        # page level; its header's Back returns to that same row. On a desk the list stands beside the page.
         _goto(page, 'dashboard')
-        page.evaluate("window.__strip = document.querySelector('#page-dashboard .app-tab-strip')")
+        page.evaluate("window.__strip = document.querySelector('#page-dashboard [role=tablist]')")
+        assert page.locator('#page-dashboard [role=tablist]').get_attribute('aria-orientation') == 'vertical'
+        assert page.locator('#page-dashboard [data-dashboard-tab]').count() == 7
         page.locator('#page-dashboard [data-dashboard-tab="costs"]').focus()
         page.set_viewport_size({'width': 390, 'height': 844})
         page.wait_for_function("document.documentElement.dataset.layout === 'stack'")
         phone = page.evaluate(BAR, 'dashboard')
-        assert phone['under'] and not phone['lead'] and 'data-lead' not in phone['attrs'] and phone['height'] <= 56, phone
-        assert page.evaluate("""() => document.querySelector('#page-dashboard .app-page-tabs .app-tab-strip') === window.__strip
+        assert not phone['under'] and phone['height'] <= 56, phone
+        assert page.evaluate("""() => document.querySelector('#page-dashboard .dashboard-rail [role=tablist]') === window.__strip
             && document.activeElement?.dataset.dashboardTab === 'costs'""")
+        page.locator('#page-dashboard [data-dashboard-tab="costs"]').click()
+        page.locator('#page-costs').wait_for(state='visible')
+        assert page.locator('#page-dashboard .app-page-header [data-dashboard-lead-name]').inner_text() == 'Costs'
+        assert page.evaluate(BAR, 'dashboard')['height'] <= 56
+        page.locator('#page-dashboard .app-page-header [data-dashboard-list-back]').click()
+        assert page.evaluate("document.activeElement?.dataset.dashboardTab === 'costs'")
         setup_browser.capture(page, f'bar-a-dashboard-{engine}-390')
-        page.set_viewport_size({'width': 956, 'height': 801})
+        page.set_viewport_size({'width': 1280, 'height': 801})
         page.wait_for_function("document.documentElement.dataset.layout === 'docked'")
-        assert page.evaluate("document.querySelector('#page-dashboard .app-page-lead .app-tab-strip') === window.__strip")
+        assert page.evaluate("document.querySelector('#page-dashboard .dashboard-rail [role=tablist]') === window.__strip")
+        assert page.locator('#page-costs').is_visible()
+        assert page.locator('#page-dashboard [role=tablist]').is_visible()
     finally:
         page.close()
 
@@ -584,30 +599,32 @@ def test_files_location_keeps_every_folder_reachable_in_the_bar(engine_ui, width
 
 @pytest.mark.parametrize('theme', ['light', 'dark'])
 def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme):
-    """A docked 720px window can leave only 160px for Files; use its real resize handle."""
+    """A docked 720px window keeps Files' 320px floor; use its real resize handle."""
     page = _open(engine_ui, 720, 801)
     engine = engine_ui['engine']
     try:
-        page.evaluate("""theme => { document.documentElement.dataset.theme = theme;
-            document.documentElement.style.setProperty('--sidebar-width', '180px'); }""", theme)
+        page.evaluate("theme => { document.documentElement.dataset.theme = theme; }", theme)
         _goto(page, 'files')
         _location(page, DEEP)
         page.evaluate("""() => { window.__filesNodes = ['files-breadcrumb', 'files-new-file', 'files-new-dir']
             .map(id => document.getElementById(id)); document.getElementById('files-new-file').focus(); }""")
         handle = page.locator('#primary-sidebar > .resize-handle').bounding_box()
         start_x = handle['x'] + handle['width'] / 2
+        # Owner 14.11; DESIGN "Resizing": drag from the shown box, within the sidebar and room's bounds
+        # (8f5ea4856). Probe just above the room's floor during the drag, then overshoot the sidebar's cap.
+        start_width = page.locator('#primary-sidebar').bounding_box()['width']
         page.mouse.move(start_x, handle['y'] + handle['height'] / 2)
         page.mouse.down()
         # Check during the drag as well as after release, without a window resize event.
-        page.mouse.move(start_x + 545 - 180, handle['y'] + handle['height'] / 2, steps=12)
-        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 175")
+        page.mouse.move(start_x + 385 - start_width, handle['y'] + handle['height'] / 2, steps=12)
+        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 335")
         page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
         setup_browser.capture(page, f'files-sidebar-drag-{engine}-{theme}')
         assert page.locator('#files-breadcrumb').evaluate("el => el.closest('.files-browser-header') !== null")
         assert page.evaluate("document.activeElement === window.__filesNodes[1]")
-        page.mouse.move(start_x + 560 - 180, handle['y'] + handle['height'] / 2)
+        page.mouse.move(start_x + 560 - start_width, handle['y'] + handle['height'] / 2)
         page.mouse.up()
-        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 160")
+        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 320")
         # Reveal Paste through the real file menu, making the action group wider than the available column.
         page.locator('#files-list .files-entry').filter(has_text='notes.md').click(button='right')
         page.locator('#files-context-menu [data-action="copy"]').click()
@@ -621,7 +638,7 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
                 return r.width > 0 && r.left >= content.left && r.right <= content.right + 1 && (hit === el || el.contains(hit)); }""")
             control.click(trial=True)
             measured.append({'name': control.inner_text(), 'box': control.bounding_box()})
-        print(json.dumps({'files_narrow_controls': measured, 'engine': engine, 'theme': theme, 'content_width': 160}))
+        print(json.dumps({'files_narrow_controls': measured, 'engine': engine, 'theme': theme, 'content_width': 320}))
         assert page.evaluate('document.scrollingElement.scrollWidth <= innerWidth')
         assert page.locator('#page-files .app-page-header').get_by_role('heading', name='Files', exact=True).count() == 1
         page.locator('#files-new-file').scroll_into_view_if_needed()

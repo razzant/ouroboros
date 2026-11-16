@@ -321,7 +321,8 @@ def test_every_published_and_owned_shape_has_one_field_identical_browser_twin():
         "ouroboros.gateway.management_contracts", "ouroboros.gateway.history_contracts"))
 
 
-@pytest.mark.parametrize("name", ["WorkLead", "WorkPrimaryRoute", "CitedModelWords"])
+@pytest.mark.parametrize("name", ["WorkLead", "WorkPrimaryRoute", "CitedModelWords", "WorkProcessing", "ProcessingReceipt",
+                                  "ProcessingTiers"])
 def test_nested_lead_provenance_has_a_field_identical_browser_twin(name):
     # Inline schemas do not appear in the published document's top-level name list.
     text = (REPO / "web" / "modules" / "work_types.js").read_text(encoding="utf-8")
@@ -475,7 +476,7 @@ def test_place_request_shapes_cover_the_owner_journey(client, monkeypatch):
     place = connected.json()["place"]
     assert place["label"] == "Test chat · Room" and place["state"] == "silent"
     assert not validate_ingress(place, contract_typed_dict("PlaceSummary"))
-    assert place["model_route"] == {"value": "circle/model", "layer": "circle"}
+    assert place["model_route"] == {"value": "circle/model", "layer": "circle", "local": False}
     assert set(place["model_route"]) == _declared("PlaceModelRoute")
     assert validate_ingress({**place, "model_route": {"value": "x", "layer": "unknown"}}, contract_typed_dict("PlaceSummary"))
     assert set(place) <= _declared("PlaceSummary") and "connector_label" not in place

@@ -58,8 +58,11 @@ function costsPage(t, values = {}, meta = {}) {
     };
 }
 
-test('the limits card is the data module\'s Costs rows, each with its name, its meta and the notes that describe it', (t) => {
+test('the limits card is the data module\'s Costs rows, each with its name, its meta and the notes that describe it', async (t) => {
     const page = costsPage(t);
+    // Drawn before any read, a limit is no value yet: its meta line says so until the tab's read answers.
+    assert.deepEqual([page.mount.querySelector('#setting-TOTAL_BUDGET-meta').textContent, page.field('TOTAL_BUDGET').disabled], ['Reading…', true]);
+    await page.refresh();
     const ids = page.card.querySelectorAll('[data-setting-row]').map((row) => row.dataset.settingRow);
     assert.deepEqual(ids, rowsOf('dashboard:costs').map((row) => row.id));
     assert.deepEqual(rowsOf('dashboard:costs', { fold: true }).map((row) => row.id), ['OUROBOROS_MAX_ROUNDS', 'OUROBOROS_TASK_ABS_CEILING_SEC']);
@@ -180,4 +183,34 @@ test('under the limits one line names what they cannot count, in the page langua
     const priced = costsPage(t);
     await priced.refresh();
     assert.equal(priced.card.querySelector('#costs-gaps').hidden, true, 'every route has a price: the line is not drawn');
+    // One line still: what is counted only under a condition follows what is not counted at all.
+    const partly = costsPage(t, {}, { known_spend_gaps: ['Light'], partly_counted_spend: [
+        { name: 'Main', condition: 'off_peak_usd' }, { name: 'Agents', condition: 'off_peak_usd' },
+        { name: 'Web search', condition: 'usd' }, { name: 'Vision', condition: 'surge' }] });
+    await partly.refresh();
+    assert.equal(partly.card.querySelector('#costs-gaps').textContent, 'Not counted: Light, Vision (price unknown). '
+        + 'Partly counted: Main, Agents (text only, off-peak, USD only); Web search (USD only).');
+    const conditional = costsPage(t, {}, { known_spend_gaps: [], partly_counted_spend: [{ name: 'all model roles', condition: 'off_peak_usd' }] });
+    await conditional.refresh();
+    const only = conditional.card.querySelector('#costs-gaps');
+    assert.equal(only.hidden, false);
+    assert.equal(only.textContent, 'Partly counted: all model roles (text only, off-peak, USD only).');
+});
+
+test('the limits line and a conditional price register their closed words as misses in another language', async () => {
+    const { applyPayload, pendingMisses, setMissTransport } = await import('../modules/i18n.js');
+    const { modelPriceWords, spendGapsWords } = await import('../modules/route_editor_primitives.js');
+    setMissTransport(() => Promise.resolve(null));
+    // Their hosts carry data-i18n-fmt, which the page walker skips: only the formatter can ask for the words.
+    const language = (payload) => { const kept = globalThis.document; globalThis.document = undefined; try { applyPayload(payload); } finally { globalThis.document = kept; } };
+    language({ language: 'ru', english: false, revision: 71, entries: {} });
+    try {
+        spendGapsWords(['all model roles'], [{ name: 'Agents', condition: 'off_peak_usd' }, { name: 'Web search', condition: 'usd' }]);
+        modelPriceWords({ price_condition: 'off_peak_usd' });
+        const asked = pendingMisses();
+        for (const words of ['all model roles', 'Agents', 'Web search', 'text only, off-peak, USD only', 'USD only',
+            'Estimated for text, off-peak · USD only']) assert.ok(asked.includes(words), words);
+    } finally {
+        language({ language: '', english: true, revision: 72, entries: {} });
+    }
 });

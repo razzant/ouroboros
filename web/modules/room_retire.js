@@ -224,7 +224,8 @@ const CUSTODY = {
 
 /** A Project room's own view of the page's one socket (app.js). Away (`pause`), its subscriptions are released but for
  * its sends' custody; back (`resume`), they are taken again and, with the socket open, the room hears `open` as after a
- * reconnect (`previouslyConnected`): it reads the history and state it missed through its existing reconnect path. */
+ * reconnect (`previouslyConnected`), marked `resumed` so the return's paint request can share its catch-up read. A
+ * real socket reconnect has no such mark and still owes a read newer than one it interrupted. */
 export function roomSocket(ws) {
     const subscriptions = new Set();
     let paused = false;
@@ -242,6 +243,7 @@ export function roomSocket(ws) {
         send: (...args) => ws.send(...args),
         isConnected: () => !paused && ws.isConnected?.() !== false,
         serverAnswersWhileDown: () => !paused && ws.serverAnswersWhileDown?.() === true,
+        previouslyConnected: () => ws.previouslyConnected?.() === true,  // the page's history, never paused
         on(event, fn) {
             const sub = { event, fn, off: null };
             subscriptions.add(sub);
@@ -258,7 +260,7 @@ export function roomSocket(ws) {
             paused = false;
             reattach();
             if (ws.isConnected?.() === false) return;
-            for (const sub of [...subscriptions]) if (sub.event === 'open') sub.fn({ previouslyConnected: true });
+            for (const sub of [...subscriptions]) if (sub.event === 'open') sub.fn({ previouslyConnected: true, resumed: true });
         },
     };
 }

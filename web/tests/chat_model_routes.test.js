@@ -147,3 +147,33 @@ test('models read newer first by the version their names state; a name that stat
     assert.deepEqual(order(['sonnet', 'opus-5.5', 'opus-5']), ['opus-5.5', 'opus-5', 'sonnet']);
     assert.deepEqual(order(['b-2', 'a-1']), ['a-1', 'b-2'], 'families follow each other by name');
 });
+
+test('a row keeps the catalog\'s own price and the tiers its accounts list; a source keeps the tiers its transport advertises', () => {
+    const PRICED = api('openrouter', 'anthropic/claude-opus-5.5', { price: { input: 4, output: 20 } });
+    const index = buildModelIndex({ catalog: {
+        model_sources: [{ id: 'codex', label: 'Codex', credentialHarness: 'codex', processingPreferences: ['standard', 'fast', 7] },
+            { id: 'claude', label: 'Claude', credentialHarness: 'claude' }],
+        items: [codex('gpt-6-astra', 'work', { processing: { modes: ['standard'] } }), codex('gpt-6-astra', 'home', { processing: { modes: ['fast', null] } }),
+            codex('gpt-6.1-sol', 'home', { processing: { modes: [] } }), codex('gpt-5-old', 'home'), PRICED, api('openrouter', 'z-ai/glm-5.3')],
+    } });
+    assert.deepEqual([...index.row({ model: ASTRA }).modes].sort(), ['fast', 'standard'], 'every account\'s list, once');
+    assert.deepEqual([...index.row({ model: SOL }).modes], [], 'an account that lists none makes the list known, and empty');
+    assert.equal(index.row({ model: 'claudexor::codex=gpt-5-old' }).modes, null, 'no account says: unknown');
+    assert.deepEqual(index.source('subscription:codex').transport, ['standard', 'fast']);
+    assert.equal(index.source('subscription:claude').transport, null, 'a source that does not say');
+    assert.equal(index.source('openrouter').transport, null);
+    assert.deepEqual(index.row({ model: PRICED.value }).price, { input: 4, output: 20 }, 'Standard\'s price, kept as the figures');
+    assert.equal(index.row({ model: 'z-ai/glm-5.3' }).price, null);
+    assert.equal(index.priced, true);
+    assert.equal(buildModelIndex({ catalog: { items: [api('openrouter', 'z-ai/glm-5.3')] } }).priced, false);
+});
+
+test('a route names the catalog\'s price only where its context pays it: Flex, Fast and Ultrafast are priced by their own endpoint', () => {
+    const index = buildModelIndex({ catalog: { items: [api('openrouter', 'anthropic/claude-opus-5.5', { price: { input: 4, output: 20 } })] } });
+    const said = (...options) => describeRoute(index, { model: 'anthropic/claude-opus-5.5' }, ...options);
+    assert.deepEqual([said().price, said().facts], ['$4 in / $20 out', 'OpenRouter · $4 in / $20 out'], 'no tier said: the catalog\'s');
+    assert.deepEqual([said({ tier: 'standard' }).price, said({ tier: '' }).price], ['$4 in / $20 out', '$4 in / $20 out']);
+    for (const tier of ['fast', 'economy', 'ultrafast']) {
+        assert.deepEqual([said({ tier }).price, said({ tier }).facts], ['', 'OpenRouter · paid by key'], tier);
+    }
+});

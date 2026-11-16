@@ -504,7 +504,8 @@ def _run_authored_context_view(messages, ctx, pending, selected_names):
         try:
             if plan is None or not observed_core or plan.core_sha256 != observed_core:
                 raise ValueError("memory snapshot changed; inspect the current view")
-            memory_plan = select_view(plan, mode, addresses, owner_note=bool(proposal.get("working_note", "").strip()))
+            memory_plan = select_view(plan, mode, addresses, owner_note=bool(proposal.get("working_note", "").strip()),
+                                      tool_names=[schema["function"]["name"] for schema in schemas])
         except ValueError as exc:
             tool_ctx._pending_compaction = None
             tool_ctx._context_view_receipt = {"status": "selection_failed", "reason": str(exc)}

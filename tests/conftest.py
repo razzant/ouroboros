@@ -887,13 +887,15 @@ def _launcher_no_real_network(request):
 @pytest.fixture(autouse=True)
 def _isolate_restart_generation(monkeypatch):
     """Panic and parent observation belong to one process generation, not later tests;
-    so do a returning stop's named queue and the launch/schedule process memory."""
-    from ouroboros import delegate_recovery, launcher_bootstrap, server_control
+    so do a returning stop's named queue, the launch/schedule process memory and a launcher's Quit."""
+    from ouroboros import delegate_recovery, launcher_bootstrap, launcher_server_reaper, server_control
     from supervisor import dispatch_choice, pool_admission, queue, schedule_occurrence, worker_assignment
 
     monkeypatch.setattr(server_control, "_restart_successors", [])
     monkeypatch.setattr(server_control, "_restart_stop_requested", False)
     monkeypatch.setattr(launcher_bootstrap, "source_handoff", launcher_bootstrap._SourceHandoff())
+    if (launcher := sys.modules.get("launcher")) is not None:
+        monkeypatch.setattr(launcher, "_quit", launcher_server_reaper.QuitEngineStop())
     monkeypatch.setattr(delegate_recovery, "_restart_parent", None)
     monkeypatch.setattr(queue, "RETURNS_NAMED", {})
     monkeypatch.setattr(schedule_occurrence, "_DEFERRED", {})
@@ -1013,6 +1015,20 @@ def _act_as_the_installs_a_browser_or_e2e_test_launched(request, monkeypatch, tm
 
     monkeypatch.setattr(install_identity, "_ownership", as_its_launcher)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _keep_the_pytest_interpreter_tuning():
+    """``server.main()`` run in this process sets the server's interpreter switch interval and garbage-collector
+    threshold (``server_entrypoint``); the pytest process keeps its own for the next test."""
+    import gc
+    import sys
+
+    interval, thresholds = sys.getswitchinterval(), gc.get_threshold()
+    set_interval, set_threshold = sys.setswitchinterval, gc.set_threshold  # a test may patch either; restore through these
+    yield
+    set_interval(interval)
+    set_threshold(*thresholds)
 
 
 @pytest.fixture(autouse=True)
@@ -1437,6 +1453,48 @@ def _isolate_workspace_executor_globals():
                 svc._panic_requested = saved_svc_panic
                 svc._SERVICES.clear()
                 svc._SERVICES.update(saved_svc_services)
+
+
+@pytest.fixture
+def pinned_path_node(monkeypatch, tmp_path):
+    """Opt-in, for a test that runs a real node skill: Ouroboros's own Node consumers wait for the pin's Node (owner,
+    14 Nov 2026), which no default-lane run prepares. The PATH Node becomes the exact bundle of an isolated pin that
+    names its measured version, so the strict path runs a real Node; this proves the skill, never the shipped pin's
+    security qualification. Skips without a runnable PATH Node. Yields that Node's version."""
+    from types import SimpleNamespace
+
+    from ouroboros import claudexor_runtime, node_runtime, platform_layer
+
+    found = shutil.which("node")
+    version = node_runtime.probe_node_version(found) if found else ""
+    if not version:
+        pytest.skip("no runnable node on PATH")
+    base = tmp_path / "pinned-path-node"
+    staged = platform_layer.embedded_node_candidates(base)[0]
+    staged.parent.mkdir(parents=True)
+    try:
+        staged.symlink_to(os.path.realpath(found))
+    except OSError:  # Windows without symlink rights
+        shutil.copy2(found, staged)
+
+    class _IsolatedPin:  # nothing prepared, no archive: only the exact bundle serves
+        pin, pin_error = SimpleNamespace(node_version=version), ""
+
+        def reviewed_node(self, **_kwargs):
+            raise claudexor_runtime.ClaudexorRuntimeError("runtime_node_unavailable", "fixture: nothing prepared")
+
+        @staticmethod
+        def planned_node(_pin):
+            return ""
+
+    bases = platform_layer.bundled_resource_bases
+    monkeypatch.setattr(platform_layer, "bundled_resource_bases", lambda: [base, *bases()])
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", _IsolatedPin)
+    try:
+        yield version
+    finally:
+        for key in [key for key in node_runtime._NODE_HEALTH_MEMO if key[0].startswith(str(base))]:
+            node_runtime._NODE_HEALTH_MEMO.pop(key, None)
 
 
 @pytest.fixture(autouse=True)

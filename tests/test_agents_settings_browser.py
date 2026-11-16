@@ -18,6 +18,7 @@ import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
 from tests.settings_browser_helpers import go_back, open_entry, open_settings, press_editor_save, settings_page, top_path
+from tests.settings_section_helpers import lead_name
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
@@ -132,10 +133,17 @@ def _switch(level, agent_id):
 
 
 def _leave_and_return(page):
-    """Go to Dashboard and come back to Settings by the app's own navigation (the drawer on a phone)."""
+    """Go to Dashboard and come back to Settings by the app's own navigation (the drawer on a phone). A phone's page
+    has one leading control, its Back (docs/DESIGN.md "Page header"): Back to the section's list, whose leading
+    control opens the drawer."""
     for here, target in (("settings", "dashboard"), ("dashboard", "settings")):
         if page.locator("html").get_attribute("data-layout") == "stack":
-            page.locator(f"#page-{here} [data-mobile-nav-toggle]").first.click()
+            header = page.locator(f"#page-{here} > .app-page-header")
+            toggle = header.locator("[data-mobile-nav-toggle]")
+            if not toggle.is_visible():
+                header.locator(".shell-back:visible").first.click()
+                toggle.wait_for(state="visible")
+            toggle.click()
         page.locator(f'#primary-sidebar [data-nav-page="{target}"]').click()
         page.locator(f"#page-{target}").wait_for(state="visible")
         page.locator(f"#page-{here}").wait_for(state="hidden")
@@ -284,9 +292,10 @@ def test_the_list_and_an_agents_page_keep_their_shape(subscription_ui, width, he
     _no_sideways_scroll(page, "agents")
     setup_browser.capture(page, name.format("list-fold"))
 
-    # An agent's page: its name is the title, then In use, what it is good at, how it runs with Save, and its removal.
+    # An agent's page: its name is the title (in the section's header), then In use, what it is good at, how it runs with Save, and its removal.
     editor = open_entry(page, "a05")
-    assert editor.locator(".settings-page-title").inner_text().strip() == "deepseek-v5"
+    editor.wait_for(state="visible")
+    assert lead_name(page) == "deepseek-v5"
     # The shell shows the level before the editor's body has drawn; read the cards once its Save stands.
     editor.locator("[data-editor-save]").wait_for(state="visible")
     assert [title.inner_text().strip() for title in editor.locator(".agents-card-title").all()] == [

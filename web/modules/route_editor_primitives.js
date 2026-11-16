@@ -7,7 +7,7 @@ import { accountRows, accountName, accountModelUnsupported } from './claudexor_s
 import { formatRelativeAge } from './ui_helpers.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
-import { fmt, tr } from './i18n.js';
+import { fmt, tr, translateString, tx } from './i18n.js';
 import { modelChooserHtml, updateModelChooserOptions } from './model_chooser.js';
 
 export const ROUTE_KIND_API_MODEL = 'api_model';
@@ -20,31 +20,35 @@ export const DEFAULT_API_PROVIDER = 'openrouter';
 export const EFFORT_CHOICES = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 export const PROCESSING_PREFERENCE_KEY = 'OUROBOROS_PROCESSING_PREFERENCE';
 export const MODEL_PROCESSING_PREFERENCES_KEY = 'OUROBOROS_MODEL_PROCESSING_PREFERENCES';
-export const PROCESSING_CHOICES = ['standard', 'fast', 'economy'];
-/** Fast and Economy send another processing tier, which its own endpoint prices: a catalog's row is not that call's price. */
-export const tierPriced = (preference) => preference === 'fast' || preference === 'economy';
+export const PROCESSING_CHOICES = ['standard', 'fast', 'economy'];  // Settings never hold Ultrafast (an older reader refuses it)
+/** Fast, Ultrafast and Flex (`economy`) send another processing tier, which its own endpoint prices: a catalog's row is not that call's price. */
+export const tierPriced = (preference) => preference === 'fast' || preference === 'economy' || preference === 'ultrafast';
 
 export function processingLabel(value) {
-    return { standard: 'Standard', fast: 'Fast', economy: 'Economy', mixed: 'Mixed', unknown: 'Unknown' }[value] || 'Route default';
+    return { standard: 'Standard', fast: 'Fast', ultrafast: 'Ultrafast', economy: 'Flex', mixed: 'Mixed', unknown: 'Unknown' }[value] || 'Route default';
 }
 
-export function processingIntentLabel(value, inherited = '') {
-    return value ? `${processingLabel(value)} (override)`
-        : inherited ? `${processingLabel(inherited)} (from Models)` : 'Route default (inherited)';
+/** A row's tier as its summary says it. `helper`: an Agents row, whose new helper without a tier of its own takes the
+ *  tier of the work that starts it, the global one otherwise (a review seat on it). */
+export function processingIntentLabel(value, inherited = '', { helper = false } = {}) {
+    if (value) return `${processingLabel(value)} (override)`;
+    const global = inherited ? `${processingLabel(inherited)} (from Models)` : 'Route default (inherited)';
+    return helper ? `The work's tier, else ${global}` : global;
 }
 
-export function processingSelectHtml(attrs, selected, { global = false } = {}) {
+export function processingSelectHtml(attrs, selected, { global = false, helper = false } = {}) {
     return selectHtml(attrs, [{ options: [
-        { value: '', label: global ? 'Keep route defaults' : 'Use global setting' },
+        { value: '', label: global ? 'Keep route defaults' : helper ? 'The work\'s tier, else the global setting' : 'Use global setting' },
         ...PROCESSING_CHOICES.map((value) => ({ value, label: processingLabel(value) })),
     ] }], selected || '');
 }
 
 /** Intent controls never change model/effort or claim the route served this mode. */
-export function processingDetailsHtml(attrs, selected, inherited = '') {
-    return `<details class="model-role-details ui-disclosure" data-processing-details><summary><span>Processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(selected, inherited))}</span></span></summary>
-        <label class="ui-field">Processing ${processingSelectHtml(attrs, selected)}</label>
-        <div class="ui-field-help">Uses the same model and reasoning effort. An explicit native service choice takes precedence.</div></details>`;
+export function processingDetailsHtml(attrs, selected, inherited = '', { helper = false } = {}) {
+    return `<details class="model-role-details ui-disclosure" data-processing-details><summary><span>Processing · <span data-processing-summary>${escapeHtml(processingIntentLabel(selected, inherited, { helper }))}</span></span></summary>
+        <label class="ui-field">Processing ${processingSelectHtml(attrs, selected, { helper })}</label>
+        <div class="ui-field-help">Uses the same model and reasoning effort. An explicit native service choice takes precedence.${helper
+            ? ' Without one of its own, a new subagent takes the tier of the work that starts it; a review seat takes the global setting.' : ''}</div></details>`;
 }
 
 export function processingCapabilityNote(preference, capability, transportPreferences) {
@@ -338,10 +342,65 @@ function routeCatalogItems(route, items = []) {
         && (!pin || !item?.credential_profile_id || item.credential_profile_id === pin));
 }
 
+/** Said where a route paid by key has no published price that it pays (docs/DESIGN.md "Onboarding density"). */
+export const PRICE_UNKNOWN = 'Price unknown';
+
+// The conditions a published entry prices a call under (`pricing.price_source`): in the limits line, then under a role.
+// `off_peak_usd` prices text input alone: a call carrying an image stays unknown.
+const PRICE_CONDITIONS = { off_peak_usd: 'text only, off-peak, USD only', usd: 'USD only' };
+const ROLE_CONDITIONS = { off_peak_usd: 'Estimated for text, off-peak · USD only' };
+
+/** What the limits cannot count, in the one line said under them (Dashboard › Costs, and the setup wizard's limits
+ *  step for its draft), from `pricing.spend_coverage`: the names with no known price (`known_spend_gaps`), then
+ *  those counted only under a condition (`partly_counted_spend`); a condition this client does not know is said
+ *  as not counted. '' when neither names any. */
+export function spendGapsWords(gaps, partial = []) {
+    const unknown = (Array.isArray(gaps) ? gaps : []).map((name) => tx(String(name)));
+    const byCondition = new Map();
+    for (const entry of Array.isArray(partial) ? partial : []) {
+        const name = tx(String(entry?.name || ''));
+        const condition = PRICE_CONDITIONS[entry?.condition];
+        if (!condition) unknown.push(name);
+        else byCondition.set(condition, [...(byCondition.get(condition) || []), name]);
+    }
+    const groups = [...byCondition].map(([condition, names]) => `${names.join(', ')} (${tx(condition)})`);
+    return [unknown.length ? fmt('Not counted: {roles} (price unknown).', { roles: unknown.join(', ') }) : '',
+        groups.length ? fmt('Partly counted: {groups}.', { groups: groups.join('; ') }) : ''].filter(Boolean).join(' ');
+}
+
+/** A model's price in a list's or a role line's words: its catalog's published figures (`priceWords`), else the
+ *  condition its published entry prices it under (`ModelCatalogItem.price_condition`: `Estimated for text, off-peak ·
+ *  USD only`, never a figure, since the rate depends on the hour); '' with neither. */
+export function modelPriceWords(item, options = {}) {
+    const condition = ROLE_CONDITIONS[item?.price_condition];
+    return priceWords(item?.price, options) || (condition ? tx(condition) : '');
+}
+
+/** A catalog item as a route that does not pay its stated price sees it: on a Fast or Flex tier (`tiered`) neither
+ *  its figures nor its condition; for a role whose every call carries an image (`media`: Vision), no text-only
+ *  condition. Any other item is returned as it is. */
+export function withoutPrice(item, { tiered = false, media = false } = {}) {
+    if (!item || !(tiered || (media && item.price_condition))) return item;
+    return { ...item, ...(tiered ? { price: null } : {}), price_condition: '' };
+}
+
 // A dollar figure as the catalog states it, to four decimals and in cents at least: $4, $2.50, $0.075.
 function usd(value) {
     const [whole, fraction = ''] = String(Math.round(value * 1e4) / 1e4).split('.');
     return `$${whole}${fraction ? `.${fraction.padEnd(2, '0')}` : ''}`;
+}
+
+/** What writing 1M tokens to the prompt cache costs on the install's cache tier, as the catalog states it
+ *  (`ModelPrice.cache_write`): `Cache write: $16 per 1M tokens.`; '' when it states none, when the figure would print
+ *  as zero, or when `tier` (the settings' `OUROBOROS_PROMPT_CACHE_TTL`) is not the tier the figure is of
+ *  (`ModelPrice.cache_write_ttl`): however late, or from whichever reader, a catalog came, another tier's figure is
+ *  never said. Words only, never a forecast: how much a call writes is not known before it is sent. */
+export function cacheWriteWords(price, tier) {
+    const figure = price?.cache_write;
+    const named = typeof tier === 'string' && tier.trim().toLowerCase();
+    if (!named || price?.cache_write_ttl !== named) return '';
+    if (!Number.isFinite(figure) || figure <= 0 || usd(figure) === '$0') return '';
+    return fmt('Cache write: {price} per 1M tokens.', { price: usd(figure) });
 }
 
 /**
@@ -385,7 +444,7 @@ export function catalogModelOptions(items = []) {
         if (item?.origin !== 'hint') current.live = true;
         const resolved = item?.resolved_model;
         if (typeof resolved === 'string' && resolved && resolved !== value) current.resolved.add(resolved);
-        current.prices.add(priceWords(item?.price));
+        current.prices.add(modelPriceWords(item));
     }
     return [...values.values()].map(({ value, label, live, resolved, prices }) => {
         const named = resolved.size === 1 ? `${value} → ${[...resolved][0]}` : label;

@@ -4,10 +4,13 @@ and opens its page at that row, the Ask line leaves the words in Main as a draft
 Skills page leads back there."""
 from __future__ import annotations
 
+from urllib.parse import urlsplit
+
 import pytest
 
 from tests import test_subscription_setup_browser as setup_browser
 from tests.settings_browser_helpers import HOME, home_answer, needs, open_settings, search_settings, settings_page, top_path
+from tests.settings_section_helpers import header_back, lead_name, show_card, show_page
 
 subscription_ui = setup_browser.subscription_ui
 pytestmark = [pytest.mark.ui_browser]
@@ -21,6 +24,24 @@ def _paths(ui):
     return [url.split("?")[0].split("://", 1)[1].split("/", 1)[1] for url in ui["reads"]]
 
 
+# The list's own read of the roster (settings_home.js READS.roster): the engine's passive view, the one Costs reads,
+# which starts and refreshes nothing. Any other read of the status is an explicit check, one with more or other
+# words in its query too.
+PASSIVE_ROSTER = "/api/claudexor/status?view=quota"
+
+
+def _passive_roster(url):
+    """That exact request: its path and its whole query."""
+    parts = urlsplit(url)
+    return f"{parts.path}?{parts.query}" == PASSIVE_ROSTER
+
+
+def _starts(ui):
+    """The reads that start or refresh something (a daemon, a catalogue, a poll): every STARTS read but the passive roster."""
+    return [url for url in ui["reads"] if not _passive_roster(url)
+            and any(("/" + url.split("?")[0].split("://", 1)[1].split("/", 1)[1]).startswith(start) for start in STARTS)]
+
+
 @pytest.mark.parametrize("width,height", [(1087, 740), (320, 640)])
 def test_the_home_answers_from_passive_reads_and_the_card_lists_what_waits(subscription_ui, width, height):
     ui = subscription_ui
@@ -29,32 +50,33 @@ def test_the_home_answers_from_passive_reads_and_the_card_lists_what_waits(subsc
     page = ui["new_page"](viewport={"width": width, "height": height}, has_touch=width < 720)
     ui["reads"].clear()
     page.goto(ui["url"] + "/#settings")
-    page.locator(f"{HOME} [data-settings-card]").wait_for(state="visible")
-    page.wait_for_function("() => document.querySelector('#page-settings [data-settings-open=rules] [data-settings-answer]').textContent")
+    card = show_card(page)
+    for row in ("rules", "accounts"):  # each answers once its read has come back
+        page.wait_for_function("(row) => document.querySelector(`#page-settings [data-settings-open=${row}] [data-settings-answer]`)"
+                               "?.textContent", arg=row)
 
-    # One fact per row, from what was read; nothing the home shows started a daemon, a catalogue or a poll.
+    # One fact per row, from what was read; nothing the home shows started a daemon, a catalogue or a poll. The
+    # accounts are counted from the engine's passive roster (PR #3393), the read Costs makes, which starts nothing.
     assert home_answer(page, "models") == "gpt-test"
     assert home_answer(page, "rules") == "Written"
     assert home_answer(page, "agents") == "1 of 1 on"
-    assert home_answer(page, "accounts").startswith("Accounts not checked")
+    assert home_answer(page, "accounts").startswith("2 accounts")
     assert home_answer(page, "dashboard:storage") == "Not measured"
-    seen = _paths(ui)
-    assert not [path for path in seen if any(("/" + path).startswith(start) for start in STARTS)], seen
+    assert [url for url in ui["reads"] if _passive_roster(url)], "the list asks the engine's passive roster"
+    assert not _starts(ui), ui["reads"]
 
-    # The card: who it is, its state, and what waits. The accounts were not read, so that row is neutral with Check.
-    card = page.locator(f"{HOME} [data-settings-card]")
+    # The card: who it is, its state, and what waits for the owner. A fact nobody read is said by its own row, never
+    # as a line of the card (docs/DESIGN.md "Settings"; the approved shell, PR #3369, took the card's Check away).
     assert card.locator(".settings-being-name").inner_text().strip() == "Ouroboros"
-    assert card.locator("[data-being-state]").inner_text().strip() == "Online"
-    assert needs(page) == ["unread:accounts", "restart:restart"]
+    # The socket may open after the home's reads; its open repaints the card (settings_home.js), with no new read.
+    page.wait_for_function("() => document.querySelector('#page-settings [data-being-state]')?.textContent.trim() === 'Online'",
+                           timeout=10_000)
+    assert needs(page) == ["restart:restart"]
     assert card.locator("[data-being-count]").inner_text().strip() == "One thing needs you"
     assert "nothing" not in card.inner_text().lower()
     setup_browser.capture(page, f"settings-home-card-{width}x{height}")
 
-    # Check is the owner's press: one read of the accounts. They are all signed in, so the row leaves.
-    card.locator('[data-needs="unread"] [data-need-action]').click()
-    page.wait_for_function("() => !document.querySelector('#page-settings [data-needs=unread]')")
-    assert "api/claudexor/status" in _paths(ui) and "api/claudexor/wake" not in _paths(ui)
-    assert home_answer(page, "accounts").startswith("2 accounts")
+    assert "api/claudexor/wake" not in _paths(ui)
 
     # Restart asks first, in the shared confirmation; the row stays until the server says nothing waits.
     restart = card.locator('[data-needs="restart"]')
@@ -66,8 +88,15 @@ def test_the_home_answers_from_passive_reads_and_the_card_lists_what_waits(subsc
     dialog.wait_for(state="detached")
     assert "restart:restart" in needs(page)
     ui["settings"]["_meta"]["restart_state"] = {**WAITING, "restart_required": False, "restart_keys": []}
-    page.evaluate("() => window.__ouroSettings.open('')")
+    # The list reads its answers when it comes on screen (settings.js look, #3470), not at a press beside it: Settings
+    # shown again after another page reads what waits again.
+    show_page(page, "skills")
+    ui["reads"].clear()
+    show_page(page, "settings")
     page.wait_for_function("() => !document.querySelector('#page-settings [data-needs=restart]')")
+    # That read is the list's own again: the engine's passive roster, asked exactly, and nothing that starts or refreshes.
+    assert [url for url in ui["reads"] if _passive_roster(url)], ("the list asks the engine's passive roster again", ui["reads"])
+    assert not _starts(ui), ui["reads"]
     assert not card.locator("[data-being-count]").is_visible(), "nothing waits: the card says who it is and its state"
     page.close()
 
@@ -87,7 +116,7 @@ def test_search_opens_a_row_where_it_lives_and_the_ask_line_leaves_a_draft(subsc
     level = settings_page(page, "skill-sources")
     level.wait_for(state="visible")
     page.wait_for_function("() => document.activeElement?.id === 'setting-OUROBOROS_CLAWHUB_REGISTRY_URL'")
-    assert level.locator(".settings-page-title").inner_text().strip() == "Skill sources"
+    assert lead_name(page) == "Skill sources"
 
     # Words no setting has: the list says so, and the last line hands them to Ouroboros.
     open_settings(page, "")
@@ -137,10 +166,12 @@ def test_a_skill_form_opened_from_skills_leads_back_to_skills(subscription_ui):
     level = settings_page(page, "skill/gate_skill_7")
     level.wait_for(state="visible")
     level.locator("[data-extension-settings-form]").wait_for(state="visible")
-    back = level.locator("[data-settings-back]")
-    assert back.inner_text().strip() == "Skills" and back.get_attribute("aria-label") == "Back to Skills"
-    assert level.locator(".settings-page-title").inner_text().strip() == "Gate skill settings"
-    assert page.locator("#page-settings .app-page-header [data-mobile-nav-toggle]").is_visible()
+    # On a phone the page's one leading control is its Back, in the header before the page's name: the places
+    # control gives way to it (docs/DESIGN.md "Page header").
+    back = header_back(page)
+    assert back.is_visible() and back.get_attribute("aria-label") == "Back to Skills"
+    assert lead_name(page) == "Gate skill settings"
+    assert page.locator("#page-settings .app-page-header [data-mobile-nav-toggle]").is_hidden()
     assert page.locator("#extension-settings-sections").count() == 1
     # Only the opened skill's route was read for values.
     assert [path for path in _paths(ui) if path.startswith("api/extensions/")] == ["api/extensions/gate_skill_7/settings"]
@@ -149,9 +180,9 @@ def test_a_skill_form_opened_from_skills_leads_back_to_skills(subscription_ui):
     page.locator("#page-skills").wait_for(state="visible")
     assert top_path(page) == ""
     assert page.evaluate("() => document.querySelector('#page-skills .skills-scroll').scrollTop") == kept
-    # The first row's Back does the same.
+    # The header's Back does the same.
     open_form()
     level.wait_for(state="visible")
-    level.locator("[data-settings-back]").click()
+    header_back(page).click()
     page.locator("#page-skills").wait_for(state="visible")
     page.close()

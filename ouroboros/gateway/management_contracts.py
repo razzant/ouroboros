@@ -19,6 +19,20 @@ except ImportError:  # pragma: no cover - CI supports Python 3.10.
 
 # --- Skills and extensions ---------------------------------------------------------------------
 
+class SkillMcpServerFact(TypedDict):
+    """One declared server's passive state in an installed skill's ``mcp_servers`` list."""
+
+    id: str
+    title: str
+    conflict: bool
+    bound: bool  # the saved row belongs to this skill, even when off
+    configured: bool  # bound and both the row and MCP are on
+    tool_count: int
+    listed: bool
+    error: str  # skill refusal or failed listing
+    notes: str  # diagnostics from a successful listing
+
+
 class InstalledSkill(TypedDict, total=False):
     """One ``GET /api/extensions`` ``skills`` row, sorted by name; a name two skills claim gives one
     not-live row each (``identity_collision``). ``live_reason`` says why a skill is or is not live."""
@@ -62,6 +76,7 @@ class InstalledSkill(TypedDict, total=False):
     # {fields: [{id, key, state: configured | missing | unknown}]}; null for a skill that declares none.
     secret_config: Optional[Dict[str, List[Dict[str, str]]]]
     grants: Dict[str, Any]  # requested/granted/missing keys and permissions, all_granted, usable
+    mcp_servers: List[SkillMcpServerFact]  # absent on identity-collision rows
     published: Optional[Dict[str, Any]]
     published_malformed: bool
     presence_runtime: Dict[str, Any]  # a reviewed presence profile's runtime choice
@@ -772,14 +787,25 @@ class ClaudexorQuotaRefreshRequest(TypedDict, total=False):
     target: ClaudexorAccountTarget
 
 
+class ClaudexorRefreshAttempt(TypedDict):
+    """Host transport attempt dates, not provider observation dates. ``reused``
+    marks an identical attempt joined in flight; its dates stay original."""
+
+    started_at: str
+    completed_at: str
+    reused: bool
+
+
 class ClaudexorAccountResources(TypedDict, total=False):
-    """Engine ControlAccountResourcesResponse (or the older ControlQuotaResponse), passed through."""
+    """Engine ControlAccountResourcesResponse (or the older ControlQuotaResponse),
+    passed through with optional host refresh provenance. Provider dates are unchanged."""
 
     snapshots: Required[List[Dict[str, Any]]]
     absences: List[Dict[str, Any]]
     refreshed_at: str
     refresh_skipped: Any
     resources: List[Dict[str, Any]]
+    refresh_attempt: ClaudexorRefreshAttempt
 
 
 class ClaudexorAccountResetRequest(TypedDict):
@@ -859,11 +885,15 @@ class ModelPriceTier(TypedDict):
 
 
 class ModelPrice(TypedDict, total=False):
-    """A catalog's published token price, USD per 1M tokens; ``tiers`` only when input length changes it."""
+    """A catalog's published token price, USD per 1M tokens; ``tiers`` only when input length changes it;
+    ``cache_write`` only where the record states the prompt-cache write figure of the tier this install sends, with
+    ``cache_write_ttl`` naming that tier (the resolved ``OUROBOROS_PROMPT_CACHE_TTL`` the catalog was read under)."""
 
     input: Required[float]
     output: Required[float]
     tiers: List[ModelPriceTier]
+    cache_write: float
+    cache_write_ttl: str
 
 
 class ModelCatalogItem(TypedDict, total=False):
@@ -899,6 +929,7 @@ class ModelCatalogItem(TypedDict, total=False):
     processing: Any
     use_local: bool
     price: ModelPrice  # OpenRouter rows only, when the catalog states a whole token price (llm_pricing.openrouter_catalog_price)
+    price_condition: str  # DeepSeek rows whose published entry prices them only off-peak in USD: ``off_peak_usd``
 
 
 class ModelCatalogResponse(TypedDict, total=False):
@@ -1018,6 +1049,8 @@ class McpServerStatus(TypedDict, total=False):
     schemas_at_start: bool  # the owner's pin: call schemas in every request from task start
     task_session: bool  # stdio: one task loop's calls share one session (listings stay per call)
     browser_policy: bool  # that session's process may ask the host's browser policy per request
+    skill: str  # owning skill name, or "" for a server configured directly
+    skill_error: str  # why the skill-owned server is unavailable, or ""
     instructions: str  # the server's own usage text from initialize, untrusted
     map_tokens: int  # this server's part of the connections map (Main, Low/Max)
     schema_tokens: int  # all its call schemas, loaded or not
@@ -1339,7 +1372,7 @@ class CostBreakdownResponse(TypedDict, total=False):
 
 
 __all__ = [
-    "InstalledSkill", "ExtensionsIndexResponse", "ExtensionManifestResponse", "ExtensionSettingsSectionResponse",
+    "SkillMcpServerFact", "InstalledSkill", "ExtensionsIndexResponse", "ExtensionManifestResponse", "ExtensionSettingsSectionResponse",
     "SkillToggleRequest", "SkillRevisionRequest", "SkillReviewRequest", "SkillGrantRequest", "SkillDeleteRequest",
     "SkillToggleResponse", "SkillActionRefusal", "SkillDaemonsResponse", "SkillLifecycleJob",
     "SkillLifecycleQueueResponse",
@@ -1353,7 +1386,7 @@ __all__ = [
     "ClaudexorRestartRun", "ClaudexorRestartRuns", "ClaudexorRestartWarning", "ClaudexorRestartPreview",
     "ClaudexorRestartRequest", "ClaudexorRestartReceipt", "ClaudexorRestartResponse", "ClaudexorRestartProblem",
     "ClaudexorMaintenanceRequest", "ClaudexorMaintenanceOperation", "ClaudexorMaintenanceInventory",
-    "ClaudexorQuotaRefreshRequest", "ClaudexorAccountResources", "ClaudexorAccountResetRequest",
+    "ClaudexorQuotaRefreshRequest", "ClaudexorRefreshAttempt", "ClaudexorAccountResources", "ClaudexorAccountResetRequest",
     "ClaudexorAccountResetReceipt", "ClaudexorLoginRequest", "ClaudexorLoginInputRequest",
     "ClaudexorProfileEnabledResponse", "ReviewPoolResponse",
     "ModelPriceTier", "ModelPrice",

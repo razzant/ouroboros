@@ -24,6 +24,7 @@ from ouroboros.loop_llm_call import classify_llm_exception, is_rate_limit_text
 from ouroboros.pricing import emit_llm_usage_event, normalize_usage_cost, infer_provider_from_model
 from ouroboros.utils import sanitize_tool_result_for_log, utc_now_iso
 from ouroboros.config import runtime_setting
+from ouroboros.settings_integrity import SettingsDocumentUnknown, runtime_catalog_settings
 from ouroboros.deployment_policy import (
     RELEASE_AFTER_DANGEROUS, RELEASE_UNJUDGED, REPEAT_AFTER_DANGEROUS, checker, organization_rules, safety_exit_open,
 )
@@ -192,6 +193,8 @@ TOOL_POLICY: Dict[str, str] = {
     "set_next_wakeup": POLICY_SKIP,
     "place_reply": POLICY_CHECK,
 }
+# A read-mostly tool's named actions that change something: checked whatever the tool's own policy says.
+CHECKED_ACTIONS = {"manage_schedules": ("create", "update", "restore"), "manage_project_folder": ("clear", "choose")}
 
 
 # run_command safe-subject whitelist.
@@ -587,23 +590,53 @@ def _exact_call(tool_name, arguments):
     return f"{tool_name} {json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str)}"
 
 
+def _address(account, conversation, thread=""):
+    """One exact address as my human's card names it: its conversation, then its thread and account where set."""
+    return " · ".join(filter(None, (conversation, thread and f"thread {thread}", account and f"account {account}")))
+
+
 def _exit_subject(ctx, tool_name, arguments, effect, ext_tool=None):
-    """What my human's card must hold, as ``(words, destinations, exact, labels)``: declared words with each place's
-    label and every recipient outside a place's own conversation (one place never covers another recipient), else the
-    exact call (``_exact_call``): any other call, or words or recipients the host cannot tell."""
+    """What my human's card must hold, as ``(words, destinations, exact, speech)``: declared words with every place and
+    address the call changes, else the exact call (``_exact_call``): any other call, or words or recipients the host
+    cannot tell. The card names each place the declared target reaches by its label, and by its exact address too
+    where another place the call changes shares that label; every recipient outside such a place's own conversation;
+    and every group address with its effect: one label or place never covers another address. ``speech`` is where the
+    words are spoken, all ``_words_key`` holds them to: the labels of the places they land in, else their recipients
+    (a grouped row's audience), as before groups; a group's write or read beside them (a folder, a draft) is no part
+    of it, nor the account a grouped row naming no conversation acts in. Words with no such address keep the exact
+    call, never a card approving them for less than the whole call; so does a rich call declaring no words."""
     from ouroboros.place_guard import call_place_facts
     from ouroboros.tool_effects import argument_value, target_values
 
     if _declared_speech(tool_name, effect):
         words = argument_value(arguments, effect.text or "text")
         facts = call_place_facts(ctx, tool_name, arguments, ext_tool=ext_tool) or {}
-        rows = [row for row in facts.get("places") or [] if row.get("place_label")]
-        labels, own = list(dict.fromkeys(row["place_label"] for row in rows)), {row.get("conversation_id") for row in rows}
+        operation = facts.get("effect") or "message"
+        rows = [row for row in facts.get("places") or [] if set(row.get("effects") or (operation,)) - {"read"}]
+        lands = [row for row in rows if row.get("place_label") and operation in (row.get("effects") or (operation,))]
+        heard = {row.get("place_id") for row in facts.get("touches") or () if row.get("effect") == operation}
+        spoken = [row for row in lands if "target" in (row.get("via") or ("target",)) or row["place_id"] in heard]
+        aimed = [row for row in lands if {"target", "account"} & set(row.get("via") or ("target",))]
+        def where(row):  # One place can be reached through several accounts; none overwrites another.
+            return _address(row.get("account_id", ""), row.get("conversation_id", ""),
+                            row.get("thread_id", "")) or row["place_id"]
+        shared: dict = {}
+        for row in rows:
+            shared.setdefault(row.get("place_label"), set()).add(where(row))
+        labels, own = list(dict.fromkeys(row["place_label"] for row in aimed)), {row.get("conversation_id") for row in aimed}
+        twins = [where(row) for row in aimed if len(shared[row["place_label"]]) > 1]
         targets = facts.get("targets") or target_values(effect, arguments)
-        destinations = list(dict.fromkeys(labels + [value for key, values in targets.items() for value in values
-                                                    if key not in {"account_id", "thread_id", effect.thread} and value not in own]))
-        if isinstance(words, str) and words.strip() and destinations:
-            return words, destinations, False, labels
+        recipients = list(dict.fromkeys(value for key, values in targets.items() for value in values
+                                        if key not in {"account_id", "thread_id", effect.thread} and value not in own))
+        grouped = [row for row in facts.get("touches") or () if row.get("effect") != "read"]  # a read changes nothing
+        writes = [f"{row['effect']}: {_address(row.get('account', ''), row['conversation'], row.get('thread', ''))}"
+                  for row in grouped]
+        destinations = list(dict.fromkeys(labels + twins + recipients + writes))
+        voiced = {row.get("conversation_id") for row in spoken}
+        speech = list(dict.fromkeys(row["place_label"] for row in spoken)) or list(dict.fromkeys(recipients + [
+            row["conversation"] for row in grouped if row["effect"] == operation and row["conversation"] not in voiced]))
+        if isinstance(words, str) and words.strip() and speech:  # a card always names where words are spoken
+            return words, destinations, False, speech
     return _exact_call(tool_name, arguments), [tool_name], True, []
 
 
@@ -786,8 +819,8 @@ def _resolve_safety_routing() -> Tuple[bool, bool, Optional[str]]:
     selected = get_safety_model()
     explicit = bool(str(runtime_setting("OUROBOROS_MODEL_SAFETY", "") or "").strip())
     local_light = str(runtime_setting("USE_LOCAL_LIGHT", "") or "").lower() in ("true", "1")
-    # The lane is the one the resolved model names (``get_safety_model`` labels it): a blank Light follows
-    # Main and Main's lane, so a leftover USE_LOCAL_LIGHT never sends an inherited remote Main locally (#2969).
+    # The lane is the one the resolved model names (``get_safety_model`` labels it): an empty Light follows
+    # route_choice's rule, so its own ticked local box means the local runtime (owner 2026-11-15, #3292).
     if selected.endswith(" (local)"):
         inherited_main = not explicit and not local_light and not str(runtime_setting("OUROBOROS_MODEL_LIGHT", "") or "").strip()
         return True, inherited_main, None
@@ -1303,9 +1336,10 @@ def _run_llm_check(
     if result["status"] != "SAFE" and managed is None:  # a deployment's Supervisor decides alone
         from ouroboros.configured_subagents import normalize_configured_subagents
         try:
-            catalog, _ = normalize_configured_subagents(runtime_setting("OUROBOROS_SUBAGENTS", "") or {"enabled": False, "items": []})
+            raw = runtime_catalog_settings().get("OUROBOROS_SUBAGENTS")
+            catalog, _ = normalize_configured_subagents(raw or {"enabled": False, "items": []})
             row = next((r for r in catalog.items if r.rechecks_flags and r.enabled), None) if catalog.enabled else None
-        except ValueError as exc:
+        except (ValueError, SettingsDocumentUnknown) as exc:
             failure = f"its roster is unreadable: {sanitize_tool_result_for_log(str(exc))}"
     if row is not None:
         second_prompt = ("You review a flag a first checker raised; overturning it needs a reason.\n"
@@ -1402,7 +1436,7 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
     is_mcp = tool_name.startswith("mcp_")
     effect = effect_of(tool_name, ext_tool=ext_tool, ctx=ctx, is_mcp=is_mcp, args=arguments)
     speech = _declared_speech(tool_name, effect)  # an unread MCP call waits too
-    if tool_name == "manage_schedules" and arguments.get("action") in {"create", "update", "restore"}:
+    if arguments.get("action") in CHECKED_ACTIONS.get(tool_name, ()):
         policy = POLICY_CHECK
     if effect.declared and effect.effect == "read":
         _emit_durable_safety_event(ctx, {"type": "safety_declared_read_skip", "tool": tool_name, "source": effect.source,

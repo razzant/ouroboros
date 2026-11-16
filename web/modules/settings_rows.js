@@ -85,7 +85,7 @@ export const ROWS = [
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'permissions:reviewers', keys: [], page: 'permissions', fold: false,
         name: 'Reviewers', meta: 'The agents that read finished work.', more: '',
-        control: { kind: 'door', to: 'agents' }, aliases: ['review pool'], writer: '', codec: '', confirm: '', hiddenWhen: '' },
+        control: { kind: 'door', to: 'agents', view: 'reviewers' }, aliases: ['review pool'], writer: '', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_REVIEW_MAX_CYCLES', keys: ['OUROBOROS_REVIEW_MAX_CYCLES'], page: 'permissions', fold: true,
         name: 'Paid review rounds for one change', meta: 'After the last one it may still correct its work.',
         more: 'Counts paid review waves, a failed one included: result review and commit review per task, skill review per task or snapshot. '
@@ -367,10 +367,10 @@ export const ROWS = [
         writer: '', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_PROCESSING_PREFERENCE', keys: ['OUROBOROS_PROCESSING_PREFERENCE'], page: 'models', fold: true,
         name: 'Processing', meta: 'Fast costs more where a provider offers it. The model and its effort stay.',
-        more: 'Fast permits accelerated paid service within existing limits. Economy may fall back to the ordinary rate. Route defaults keeps what each route already chose; a role’s own choice comes first, and the mode asked for is not proof of the mode served.',
+        more: 'Fast permits accelerated paid service within existing limits. Flex may fall back to the ordinary rate. Route defaults keeps what each route already chose; a role’s own choice comes first, and the mode asked for is not proof of the mode served.',
         control: { kind: 'select', options: [{ value: '', label: 'Route defaults' }, { value: 'standard', label: 'Standard' },
-            { value: 'fast', label: 'Fast' }, { value: 'economy', label: 'Economy' }] },
-        aliases: ['Global processing', 'Fast', 'Economy', 'Priority'],
+            { value: 'fast', label: 'Fast' }, { value: 'economy', label: 'Flex' }] },
+        aliases: ['Global processing', 'Fast', 'Flex', 'Economy', 'Priority'],
         writer: 'generic', codec: '', confirm: '', hiddenWhen: '' },
     { id: 'OUROBOROS_PROMPT_CACHE_TTL', keys: ['OUROBOROS_PROMPT_CACHE_TTL'], page: 'models', fold: true,
         name: 'Prompt cache kept for', meta: 'On Anthropic routes, between calls.',
@@ -515,25 +515,26 @@ export const HAND_WRITTEN = [
 
 // The home of Settings (settings_home.js): its six groups in this order, each row a door to a Settings page or out of
 // Settings (`to`: a path or a door id). `glyph` names its picture; the tabs Settings had are aliases, so search still
-// finds them.
+// finds them. `reads` names the sources its answer comes from, read again when its page is left or saved (the home's
+// READS; a row of this device's choices reads none, the device is asked at every repaint).
 export const HOME_ROWS = [
-    { id: 'home:models', group: 'Mind', name: 'Models', to: 'models', glyph: 'cube', aliases: ['Model', 'Main model'] },
-    { id: 'home:agents', group: 'Mind', name: 'Agents', to: 'agents', glyph: 'agents', aliases: ['Subagents', 'Helpers'] },
+    { id: 'home:models', group: 'Mind', name: 'Models', to: 'models', glyph: 'cube', aliases: ['Model', 'Main model'], reads: ['settings'] },
+    { id: 'home:agents', group: 'Mind', name: 'Agents', to: 'agents', glyph: 'agents', aliases: ['Subagents', 'Helpers'], reads: ['settings'] },
     { id: 'home:consciousness', group: 'Life', name: 'Consciousness', to: 'dashboard:consciousness', glyph: 'brain', aliases: ['Background consciousness'] },
     { id: 'home:evolution', group: 'Life', name: 'Evolution', to: 'dashboard:evolution', glyph: 'growth', aliases: ['Self-evolution', 'Post-Task Self-Evolution'] },
     { id: 'home:circles', group: 'Life', name: 'Circles', to: 'page:circles', glyph: 'circles', aliases: ['Places'] },
-    { id: 'home:rules', group: 'Limits', name: 'Your rules', to: 'rules', glyph: 'rules', aliases: ['Rules', 'Safety rules'] },
-    { id: 'home:permissions', group: 'Limits', name: 'Permissions and checks', to: 'permissions', glyph: 'shield', aliases: ['Behavior', 'Access', 'Safety', 'Review'] },
+    { id: 'home:rules', group: 'Limits', name: 'Your rules', to: 'rules', glyph: 'rules', aliases: ['Rules', 'Safety rules'], reads: ['settings'] },
+    { id: 'home:permissions', group: 'Limits', name: 'Permissions and checks', to: 'permissions', glyph: 'shield', aliases: ['Behavior', 'Access', 'Safety', 'Review'], reads: ['settings'] },
     { id: 'home:costs', group: 'Limits', name: 'Costs', to: 'dashboard:costs', glyph: 'wallet', aliases: ['Budget', 'Spending'] },
-    { id: 'home:accounts', group: 'Connections', name: 'Accounts and keys', to: 'accounts', glyph: 'key', aliases: ['Providers', 'Accounts', 'Secrets', 'API keys'] },
-    { id: 'home:tools', group: 'Connections', name: 'Tools', to: 'tools', glyph: 'plug', aliases: ['MCP servers', 'Tool servers'] },
+    { id: 'home:accounts', group: 'Connections', name: 'Accounts and keys', to: 'accounts', glyph: 'key', aliases: ['Providers', 'Accounts', 'Secrets', 'API keys'], reads: ['settings'] },
+    { id: 'home:tools', group: 'Connections', name: 'Tools', to: 'tools', glyph: 'plug', aliases: ['MCP servers', 'Tool servers'], reads: ['settings', 'tools'] },
     { id: 'home:skills', group: 'Connections', name: 'Skills', to: 'page:skills', glyph: 'skills', aliases: ['Extensions'] },
-    { id: 'home:appearance', group: 'Interface', name: 'Appearance', to: 'appearance', glyph: 'moon', aliases: ['Theme', 'Language', 'Interface size'] },
-    { id: 'home:notifications', group: 'Interface', name: 'Notifications', to: 'notifications', glyph: 'bell', aliases: ['Sound'] },
-    { id: 'home:voice', group: 'Interface', name: 'Voice and calls', to: 'voice', glyph: 'mic', aliases: ['Calls', 'Dictation'] },
+    { id: 'home:appearance', group: 'Interface', name: 'Appearance', to: 'appearance', glyph: 'moon', aliases: ['Theme', 'Language', 'Interface size'], reads: [] },
+    { id: 'home:notifications', group: 'Interface', name: 'Notifications', to: 'notifications', glyph: 'bell', aliases: ['Sound'], reads: [] },
+    { id: 'home:voice', group: 'Interface', name: 'Voice and calls', to: 'voice', glyph: 'mic', aliases: ['Calls', 'Dictation'], reads: [] },
     { id: 'home:updates', group: 'System', name: 'Updates', to: 'dashboard:updates', glyph: 'refresh', aliases: ['Update channel'] },
     { id: 'home:storage', group: 'System', name: 'Storage', to: 'dashboard:storage', glyph: 'drive', aliases: ['Cleanup', 'GC Retention'] },
-    { id: 'home:computer', group: 'System', name: 'This computer', to: 'computer', glyph: 'monitor', aliases: ['Advanced', 'About', 'Network', 'Startup'] },
+    { id: 'home:computer', group: 'System', name: 'This computer', to: 'computer', glyph: 'monitor', aliases: ['Advanced', 'About', 'Network', 'Startup'], reads: ['settings', 'autostart'] },
 ];
 
 // Doors search offers to pages of Settings that no home row opens (settings_home.js searchEntries): the list of the

@@ -201,3 +201,55 @@ test('Settings says under Main, before Save, what a new Main does to running wor
     assert.equal(html.split('data-main-follow-note').length, 2, 'one note, under Main and not under Fallback');
     assert.ok(!rendered(false).includes('data-main-follow-note'), 'the wizard and the wait card never show it');
 });
+
+test('a kept fallback preserves its unfinished field while source choices follow a new settings read', async (t) => {
+    const { Stub, world, settle } = await import('./helpers/settings_dom.js');
+    const { env } = world(t);
+    const host = new Stub(); host.id = 'roles'; env.document.body.append(host);
+    const editor = createModelRolesEditor({ hostId: 'roles', doc: env.document,
+        only: { slot: 'fallback', index: 2 }, store: { snapshot: {}, accountsKnown: true } });
+    const settings = { OUROBOROS_MODEL: 'owner/main', OPENROUTER_API_KEY: 'key',
+        OUROBOROS_MODEL_FALLBACKS: 'owner/first, owner/second, owner/third',
+        OUROBOROS_MODEL_CONTEXT_WINDOWS: { fallback: [0, 0, 0] } };
+    try {
+        editor.load(settings, contract);
+        const field = host.querySelector('[data-model-role-context]');
+        const details = host.querySelector('.model-role-details'); details.open = true;
+        field.value = ''; field.validity = { badInput: true };  // the native number field holding "1e"
+        await field.fire('input', { target: field });
+        const choices = () => host.querySelector('[data-model-role-source]').querySelectorAll('option').map(node => node.getAttribute('value'));
+        assert.ok(!choices().includes('api:openai'));
+        editor.load({ ...settings, OPENAI_API_KEY: 'new key', OUROBOROS_MODEL: 'owner/new-main' }, contract, { keep: true });
+        assert.equal(host.querySelector('[data-model-role-context]'), field, 'the browser keeps the unfinished field itself');
+        assert.equal(host.querySelector('.model-role-details'), details);
+        assert.equal(details.open, true);
+        assert.equal(field.validity.badInput, true);
+        assert.equal(editor.entry().value, 'owner/third');
+        assert.match(editor.entry().errors[0], /context window must be a positive whole number/);
+        assert.ok(choices().includes('api:openai'), 'the newly added account still reaches the kept form');
+        assert.equal(editor.collect().OUROBOROS_MODEL, 'owner/new-main');
+        // Discarding the draft still takes the stored field anew, including a new numeric value.
+        editor.load({ ...settings, OUROBOROS_MODEL_CONTEXT_WINDOWS: { fallback: [0, 0, 32768] } }, contract);
+        assert.notEqual(host.querySelector('[data-model-role-context]'), field);
+        assert.equal(editor.entry().context, 32768);
+        assert.deepEqual(editor.entry().errors, []);
+        await settle();
+    } finally { editor.destroy(); }
+});
+
+
+test('a clean fallback refresh takes a new saved context window', async (t) => {
+    const { Stub, world, settle } = await import('./helpers/settings_dom.js');
+    const { env } = world(t);
+    const host = new Stub(); host.id = 'roles'; env.document.body.append(host);
+    const editor = createModelRolesEditor({ hostId: 'roles', doc: env.document,
+        only: { slot: 'fallback', index: 0 }, store: { snapshot: {}, accountsKnown: true } });
+    const settings = { OUROBOROS_MODEL_FALLBACKS: 'owner/first', OPENROUTER_API_KEY: 'key' };
+    try {
+        editor.load(settings, contract);
+        editor.load({ ...settings, OUROBOROS_MODEL_CONTEXT_WINDOWS: { fallback: [32768] } }, contract);
+        assert.equal(editor.entry().context, 32768);
+        assert.deepEqual(editor.entry().errors, []);
+        await settle();
+    } finally { editor.destroy(); }
+});

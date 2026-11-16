@@ -55,7 +55,7 @@ def _operator_fixture(tmp_path: Path, monkeypatch, order: list | None = None, *,
     monkeypatch.setattr(module, "REPO", repo)
     monkeypatch.setattr(module, "_load_settings_into_env", lambda: None)
     monkeypatch.setattr(module, "_resolved_review_config",
-                        lambda *, profile="production_commit_gate": json.loads(json.dumps(shared.GOLDEN_CONFIG)))
+                        lambda *, profile="production_commit_gate", catalog=None, view=None: json.loads(json.dumps(shared.GOLDEN_CONFIG)))
     monkeypatch.setattr(module, "_select_healthy_openrouter_key", lambda **_kwargs: False)
     # The gate's panel is the review pool; ``api-scout`` is the unmarked row the
     # ``--preflight-reviewer`` lane names (``tests.test_git_review_preflight_gate._roster``).

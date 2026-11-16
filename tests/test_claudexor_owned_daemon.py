@@ -269,6 +269,26 @@ def test_zero_readable_manifests_is_a_read_failure_not_an_empty_filter():
     ]) == set()
 
 
+def test_a_catalog_is_login_evidence_only_when_every_row_is_current():
+    """The catalog answers login eligibility only when every row is null or a
+    known mode; any gap (an empty list, a legacy row, a duplicate or missing
+    id, a row that is not an object) answers None, so the caller reads the
+    manifests instead of trusting a partial list (review, 2026-11-15)."""
+    from ouroboros.gateway.claudexor_accounts import _catalog_login_capable_harness_ids as login_set
+
+    current = [{"id": "codex", "setupLogin": {"mode": "in_app"}},
+               {"id": "cursor", "setupLogin": {"mode": "external_terminal"}},
+               {"id": "openrouter", "setupLogin": None}]
+    assert login_set({"harnesses": current}) == {"codex", "cursor"}
+    assert login_set({"harnesses": [{"id": "openrouter", "setupLogin": None}]}) == set()
+    for gaps in ([], current + [{"id": "codex", "setupLogin": {"mode": "in_app"}}],
+                 current + [{"id": "", "setupLogin": {"mode": "in_app"}}],
+                 current + [{"setupLogin": {"mode": "in_app"}}], current + ["not-a-row"],
+                 current + [{"id": "agy"}], current + [{"id": "agy", "setupLogin": "in_app"}]):
+        assert login_set({"harnesses": gaps}) is None, gaps
+    assert login_set({}) is None and login_set(None) is None
+
+
 def test_status_payload_filters_api_key_only_adapters(monkeypatch, tmp_path):
     """The catalog projection AND named profile wrappers are filtered to
     login-capable harnesses; a transient manifest-read failure fails OPEN. An
@@ -333,6 +353,7 @@ def test_status_payload_filters_api_key_only_adapters(monkeypatch, tmp_path):
 
     payload = _status_payload(include_models=False)
     assert [h["id"] for h in payload["harnesses"]] == ["codex"]
+    assert payload["profiles"]["login_capable_harnesses"] == ["codex"]
     assert [w["profile"]["profile_id"] for w in payload["profiles"]["profiles"]] == ["koshak"]
     assert payload["profiles"]["harnessAccounts"] == [{"harness_id": "openrouter", "native_login_detected": True}]
 
@@ -345,6 +366,64 @@ def test_status_payload_filters_api_key_only_adapters(monkeypatch, tmp_path):
     # Fail-open: a blip in the manifest read must not blank the panel.
     assert [h["id"] for h in payload["harnesses"]] == ["codex", "openrouter"]
     assert len(payload["profiles"]["profiles"]) == 2
+    assert payload["profiles"]["login_capable_harnesses"] is None
+
+    # A current catalog carries eligibility itself: `setupLogin` an object is a
+    # sign-in on this host, null is none, so the read never waits for the
+    # manifest sweep (`/v2/harnesses`, a doctor run of every harness).
+    manifest_reads = []
+
+    class CurrentGateway(FakeGateway):
+        def agent_capabilities(self):
+            return {"harnesses": [
+                {"id": "codex", "displayName": "Codex CLI", "status": "ok", "enabled": True,
+                 "setupLogin": {"mode": "in_app"}},
+                {"id": "cursor", "displayName": "Cursor", "status": "ok", "enabled": True,
+                 "setupLogin": {"mode": "external_terminal"}},
+                {"id": "claude", "displayName": "Claude Code", "status": "unavailable", "enabled": True,
+                 "setupLogin": {"mode": "in_app"}},
+                {"id": "openrouter", "displayName": "Raw API (openai)", "status": "degraded", "enabled": True,
+                 "setupLogin": None},
+            ]}
+
+        def harnesses(self):
+            manifest_reads.append(1)
+            return super().harnesses()
+
+    monkeypatch.setattr(gw, "ClaudexorGateway", CurrentGateway)
+    payload = _status_payload(include_models=False)
+    assert manifest_reads == [], "a current catalog answers eligibility without the manifest sweep"
+    assert [h["id"] for h in payload["harnesses"]] == ["codex", "cursor", "claude"]
+    assert payload["profiles"]["login_capable_harnesses"] == ["claude", "codex", "cursor"]
+    assert [w["profile"]["profile_id"] for w in payload["profiles"]["profiles"]] == ["koshak"]
+
+    # No row offers a sign-in: an authoritative empty set, never fail-open.
+    class NoLoginGateway(CurrentGateway):
+        def agent_capabilities(self):
+            return {"harnesses": [{**row, "setupLogin": None}
+                                  for row in super().agent_capabilities()["harnesses"]]}
+
+    monkeypatch.setattr(gw, "ClaudexorGateway", NoLoginGateway)
+    payload = _status_payload(include_models=False)
+    assert manifest_reads == [] and payload["harnesses"] == [] and payload["profiles"]["profiles"] == []
+    assert payload["profiles"]["login_capable_harnesses"] == []
+
+    # A row that is not current evidence (an unknown mode, or a legacy row
+    # without the key among current ones) leaves the decision to the
+    # manifests, read once, exactly as before.
+    for gap in ({"setupLogin": {"mode": "future"}}, {}):
+        class GapGateway(CurrentGateway):
+            def agent_capabilities(self, gap=gap):
+                rows = super().agent_capabilities()["harnesses"]
+                rows[1] = {**{k: v for k, v in rows[1].items() if k != "setupLogin"}, **gap}
+                return {"harnesses": rows}
+
+        manifest_reads.clear()
+        monkeypatch.setattr(gw, "ClaudexorGateway", GapGateway)
+        payload = _status_payload(include_models=False)
+        assert manifest_reads == [1], gap
+        assert [h["id"] for h in payload["harnesses"]] == ["codex"]
+        assert payload["profiles"]["login_capable_harnesses"] == ["codex"]
 
 
 def test_a_legacy_native_login_vouches_no_harness_past_a_readable_manifest(monkeypatch, tmp_path):
@@ -2924,13 +3003,16 @@ def test_spawn_env_never_leaves_an_empty_path_component(monkeypatch, tmp_path):
 
 
 def test_status_payload_fans_out_the_independent_daemon_reads(monkeypatch, tmp_path):
-    """The four catalog/manifest/profile/quota GETs run CONCURRENTLY.
+    """The catalog, profile and quota GETs run CONCURRENTLY, and a current
+    catalog spares the read the manifest sweep altogether.
 
-    Each costs seconds daemon-side (it re-probes the coding-agent CLIs on every
-    read), so serialized they made the Providers panel wait for their SUM — ~23s
-    on a warm daemon, with nothing on screen (owner report, 2026-08-08).
+    Each can cost seconds daemon-side, so serialized they made the Providers
+    panel wait for their SUM — ~23s on a warm daemon, with nothing on screen
+    (owner report, 2026-08-08). The manifest read (`/v2/harnesses`) is a doctor
+    sweep of every harness, 2-4 s on a busy host, and the catalog's `setupLogin`
+    already answers login eligibility (2026-11-15).
 
-    The pin is a rendezvous, not a stopwatch: all four reads must meet at one
+    The pin is a rendezvous, not a stopwatch: the three reads must meet at one
     barrier before any returns, which only a genuine fan-out can do. Serialized
     code times out at the barrier instead of failing on a wall-clock margin no
     loaded CI machine can honor (review lens, 2026-08-08).
@@ -2940,7 +3022,8 @@ def test_status_payload_fans_out_the_independent_daemon_reads(monkeypatch, tmp_p
     from ouroboros.gateway.claudexor_accounts import _status_payload
     from ouroboros.gateways import claudexor as gw
 
-    rendezvous = threading.Barrier(4, timeout=10)
+    rendezvous = threading.Barrier(3, timeout=10)
+    manifest_reads = []
 
     class FakeDaemon:
         def status_dict(self):
@@ -2964,10 +3047,11 @@ def test_status_payload_fans_out_the_independent_daemon_reads(monkeypatch, tmp_p
         def agent_capabilities(self):
             rendezvous.wait()
             return {"harnesses": [{"id": "codex", "displayName": "Codex CLI",
-                                   "status": "ok", "enabled": True}]}
+                                   "status": "ok", "enabled": True,
+                                   "setupLogin": {"mode": "in_app"}}]}
 
         def harnesses(self):
-            rendezvous.wait()
+            manifest_reads.append(1)
             return [{"id": "codex", "manifest": {"capability_profile": {"auth": {
                 "supported_sources": ["native_session"]}}}}]
 
@@ -2989,7 +3073,11 @@ def test_status_payload_fans_out_the_independent_daemon_reads(monkeypatch, tmp_p
     payload = _status_payload(include_models=False)
 
     assert [h["id"] for h in payload["harnesses"]] == ["codex"]
-    assert payload["quota"] and payload["profiles"] == {"profiles": [], "harnessAccounts": [], "accountPools": []}
+    assert payload["quota"] and payload["profiles"] == {
+        "profiles": [], "harnessAccounts": [], "accountPools": [],
+        "login_capable_harnesses": ["codex"],
+    }
+    assert manifest_reads == [], "the status read never waited for the manifest sweep"
 
 
 def test_status_payload_keeps_a_typed_facet_failure_when_a_fanned_out_read_refuses(monkeypatch, tmp_path):
@@ -3023,6 +3111,7 @@ def test_status_payload_keeps_a_typed_facet_failure_when_a_fanned_out_read_refus
             raise ClaudexorUnavailable("daemon_unreachable", "gone mid-read")
 
         def harnesses(self):
+            manifest_reads.append(1)
             return []
 
         def credential_profiles(self):
@@ -3036,10 +3125,12 @@ def test_status_payload_keeps_a_typed_facet_failure_when_a_fanned_out_read_refus
     monkeypatch.setattr(gw, "discover_daemon_at", lambda _path: object())
     monkeypatch.setattr(gw, "ClaudexorGateway", FakeGateway)
 
+    manifest_reads = []
     payload = _status_payload(include_models=False)
     assert (payload["daemon"]["state"], payload["reads"]["catalog"]) == ("running", "failed")
     assert payload["facets"]["catalog"] == {"observed_at": None, "stale": False, "error": "daemon_unreachable"}
     assert payload["harnesses"] == []
+    assert manifest_reads == [1], "a refused catalog leaves eligibility to one manifest read"
 
 
 def _reads_probe(monkeypatch, tmp_path, daemon_state, failing_facet="", malformed=None):
@@ -3156,22 +3247,48 @@ def test_status_payload_marks_facets_ok_when_the_daemon_answered(monkeypatch, tm
     assert [h["id"] for h in payload["harnesses"]] == ["codex"]
 
 
-def test_status_payload_discloses_a_refused_per_harness_model_read(monkeypatch, tmp_path):
-    """`include=models` asks the daemon for each harness's model list separately,
-    and one of those reads can refuse while the catalog itself landed. The row
-    carries `models_error` so the UI can say "not checked" instead of calling a
-    saved model undiscovered — a verdict about a search nobody ran. Nothing
-    pinned the field's emission, so dropping it left every suite green."""
+@pytest.mark.parametrize("route", ["accounts", "legacy"])
+def test_status_payload_asks_model_catalogs_together_and_discloses_a_refusal(monkeypatch, tmp_path, route):
+    """`include=models` asks each visible harness's model list in its own request,
+    and asks them together: a busy daemon answers every request late, so asked one
+    after another the read paid that wait once per harness. The pin is a
+    rendezvous, as in the fan-out test: the three reads must meet at one barrier,
+    which reads asked one after another never do. They are then released in
+    reverse catalog order, so rows filled by completion would usually come out
+    crossed; the barrier, not this order, is the guarantee. The hidden harness is
+    never asked. One read refuses while the catalog itself landed: its
+    row carries `models_error` so the UI can say "not checked" instead of calling
+    a saved model undiscovered, a verdict about a search nobody ran, and its
+    siblings keep their lists. Both the negotiated accounts view and the legacy
+    list take this path."""
+    import threading
+
     from ouroboros.gateway.claudexor_accounts import _status_payload
     from ouroboros.gateways import claudexor as gw
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    visible = ["codex", "claude", "cursor"]
+    rendezvous = threading.Barrier(len(visible), timeout=10)
+    finished = {harness: threading.Event() for harness in visible}
+    asked = []
+
+    def answer(harness_id):
+        asked.append(harness_id)
+        rendezvous.wait()
+        try:
+            for later in visible[visible.index(harness_id) + 1:]:
+                assert finished[later].wait(10)
+            if harness_id == "claude":
+                raise ClaudexorUnavailable("daemon_unreachable", "model read refused")
+        finally:
+            finished[harness_id].set()
 
     class FakeDaemon:
         def status_dict(self):
             return {"state": "running"}
 
     class FakeGateway:
-        engine_version = "3.3.13"
+        engine_version = "6.1.2"
 
         def __init__(self, endpoint):
             pass
@@ -3185,16 +3302,18 @@ def test_status_payload_discloses_a_refused_per_harness_model_read(monkeypatch, 
         def handshake(self, **_kw):
             return {}
 
+        def operations(self):
+            if route == "legacy":
+                return []
+            return [{"method": "GET", "path": "/v2/harnesses/:id/models",
+                     "parameters": [{"name": "view", "location": "query", "enum": ["accounts"]}]}]
+
         def agent_capabilities(self):
-            return {"harnesses": [{"id": "codex", "displayName": "Codex CLI",
-                                   "status": "ok", "enabled": True}]}
-
-        def harnesses(self):
-            return [{"id": "codex", "manifest": {"capability_profile": {"auth": {
-                "supported_sources": ["native_session"]}}}}]
-
-        def harness_models(self, harness_id):
-            raise ClaudexorUnavailable("daemon_unreachable", "model read refused")
+            row = {"status": "ok", "enabled": True, "setupLogin": {"mode": "in_app"}}
+            return {"harnesses": [{**row, "id": "codex", "displayName": "Codex CLI"},
+                                  {**row, "id": "openrouter", "displayName": "OpenRouter", "setupLogin": None},
+                                  {**row, "id": "claude", "displayName": "Claude Code"},
+                                  {**row, "id": "cursor", "displayName": "Cursor"}]}
 
         def credential_profiles(self):
             return {"profiles": [], "harnessAccounts": [], "accountPools": []}
@@ -3202,20 +3321,43 @@ def test_status_payload_discloses_a_refused_per_harness_model_read(monkeypatch, 
         def quota_snapshots(self):
             return []
 
+        def harness_model_catalog(self, harness_id, *, view=None, credential_profile_id=None):
+            assert view == "accounts"
+            answer(harness_id)
+            return {"accounts": [{"credentialProfileId": f"{harness_id}-1", "availability": "available",
+                                  "catalog": {"source": "live", "models": [{"id": f"{harness_id}-model"}]}}]}
+
+        def harness_models(self, harness_id):
+            answer(harness_id)
+            return [{"id": f"{harness_id}-model"}]
+
     monkeypatch.setattr(owned, "get_owned_daemon", lambda: FakeDaemon())
     monkeypatch.setattr(owned, "owned_config_dir", lambda: tmp_path / "cfg")
     monkeypatch.setattr(gw, "discover_daemon_at", lambda _path: object())
     monkeypatch.setattr(gw, "ClaudexorGateway", FakeGateway)
 
+    # Asked one after another, the first read waits for siblings that never
+    # start: the barrier breaks and the status read raises.
     payload = _status_payload(include_models=True)
 
-    row = payload["harnesses"][0]
-    assert row["models"] == []
-    assert row["models_error"] == "daemon_unreachable", (
+    assert sorted(asked) == sorted(visible), "the hidden harness is never asked"
+    assert [row["id"] for row in payload["harnesses"]] == visible
+    codex, claude, cursor = payload["harnesses"]
+    for row in (codex, cursor):
+        assert [model["id"] for model in row["models"]] == [f"{row['id']}-model"]
+        assert "models_error" not in row
+    if route == "accounts":
+        assert [model["credential_profile_id"] for model in codex["models"]] == ["codex-1"]
+        assert cursor["model_catalog"]["accounts"][0]["credentialProfileId"] == "cursor-1"
+    else:
+        assert "model_catalog" not in codex and "model_catalog" not in cursor
+    assert claude["models"] == []
+    assert claude["models_error"] == "daemon_unreachable", (
         "a refused model read is indistinguishable from a harness with no models"
     )
+    assert "model_catalog" not in claude
     # The CATALOG itself answered, so its facet stays authoritative.
-    assert payload["reads"]["catalog"] == "ok"
+    assert payload["reads"]["catalog"] == "ok" and payload["daemon"]["state"] == "running"
 
 
 @pytest.mark.parametrize("half", ["accounts_half_named", "accounts_half_native"])

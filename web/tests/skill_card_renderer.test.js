@@ -207,7 +207,21 @@ test('a passed review stays the evidence while a newer round has no verdict: one
     assert.doesNotMatch(detailsReview(renderInstalledSkillCard(waiting)), /ui-chip/, 'no verdict yet is no chip, never a green pending');
     // Without a newer round the passed review is said alone, beside its verdict.
     assert.equal(reviewSentence(skill()), 'Reviewed on this computer · passed.');
+    // Allowed to run is not passed: findings, an author's acceptance and Cyber Pro's judgment each say what they are.
+    const runs = (reason, facts = {}) => reviewSentence(skill({ review_gate: { executable_review: true, blocking_reason: reason }, ...facts }));
+    assert.equal(runs('blockers_allowed_by_advisory_enforcement', { review_status: 'blockers' }), 'Review found problems; it may still run.');
+    for (const [reason, facts] of [['cyber_authority', { review_status: 'pending' }], ['cyber_authority', { review_status: 'blockers', review_stale: true }],
+        ['author_accepted_advisory', { review_status: 'clean', review_stale: true }], ['author_accepted_advisory', { review_status: 'pending' }]]) {
+        assert.equal(runs(reason, facts), 'No review passed its current files; it may still run.', `${reason} ${JSON.stringify(facts)}`);
+    }
+    assert.equal(runs('cyber_authority', { review_status: 'blockers' }), 'Review found problems; it may still run.');
+    assert.equal(runs('cyber_authority'), 'Reviewed on this computer · passed.', 'a current clean verdict passed, whoever admits it');
+    assert.equal(runs('author_accepted_advisory', { review_status: 'warnings' }), 'Reviewed on this computer · passed with notes.');
     assert.match(detailsReview(renderInstalledSkillCard(skill())), /data-tone="ok"[^>]*>clean</);
+    // The word of a review of earlier files never stands beside "No review passed its current files"; current findings keep theirs.
+    const gate = { executable_review: true, blocking_reason: 'author_accepted_advisory' };
+    assert.doesNotMatch(detailsReview(renderInstalledSkillCard(skill({ review_gate: gate, review_status: 'clean', review_stale: true }))), /ui-chip/);
+    assert.match(detailsReview(renderInstalledSkillCard(skill({ review_gate: gate, review_status: 'blockers' }))), /data-tone="danger"[^>]*>blockers</);
 });
 
 test('per-release withdrawal names the withdrawn version supplied by the host', () => {
@@ -478,4 +492,60 @@ test('a grant left behind by a byte change is named as the earlier version’s g
     // Never granted: the tray asks, and says nothing about an earlier version.
     const fresh = traysOf(renderInstalledSkillCard(skill({ enabled: true, grants: { all_granted: false, missing_keys: ['GOOGLE_OAUTH_CLIENT_ID'] } })));
     assert.doesNotMatch(fresh, /earlier version|skills-tray-note/);
+});
+
+test('declared MCP servers: Connect tools once the skill is ready, then the configured and listed facts', () => {
+    const server = { id: 'chrome_browser', title: 'Chrome (shared tab)', conflict: false, configured: false, tool_count: 0, listed: false, error: '' };
+    const ready = skill({ type: 'script', enabled: true, mcp_servers: [server] });
+    assert.match(traysOf(renderInstalledSkillCard(ready)), /data-skill-action="connect_tools"[^>]*>Connect tools</);
+    assert.match(renderInstalledSkillCard(ready), /Chrome \(shared tab\): not connected/);
+    for (const blocked of [skill({ type: 'script', enabled: false, mcp_servers: [server] }),
+        skill({ type: 'script', enabled: true, grants: { all_granted: false, missing_permissions: ['net'] }, mcp_servers: [server] })]) {
+        assert.doesNotMatch(renderInstalledSkillCard(blocked), /connect_tools/);
+    }
+    const pending = renderInstalledSkillCard(skill({ ...ready, mcp_servers: [{ ...server, configured: true }] }));
+    assert.match(pending, /Chrome \(shared tab\): configured · listing its tools\. The skill’s own instructions say what else its tools need\./);
+    assert.doesNotMatch(pending, /…\./);
+    const listed = renderInstalledSkillCard(skill({ type: 'script', enabled: true, mcp_servers: [{ ...server, configured: true, listed: true, tool_count: 25 }] }));
+    assert.doesNotMatch(traysOf(listed), /connect_tools/);
+    assert.match(listed, /Chrome \(shared tab\): configured · 25 tools listed\. The skill’s own instructions say what else its tools need\./);
+    // The tray says the outcome in words; the host's refusal (code, ids, readiness tokens) is a Details fact, escaped.
+    const refusal = 'MCP_SKILL_UNAVAILABLE: server \'chrome_browser\' runs from skill \'demo\', which cannot run it now (review_stale). <b>x</b>';
+    const failedCard = renderInstalledSkillCard(skill({ type: 'script', enabled: true, mcp_servers: [{ ...server, configured: true, error: refusal }] }));
+    const failed = traysOf(failedCard);
+    assert.match(failed, /data-tone="danger"/);
+    assert.match(failed, /Its tools are configured but can’t be used now\.<div class="skills-tray-note">Details say why\.<\/div>/);
+    assert.doesNotMatch(failed, /MCP_SKILL_UNAVAILABLE|review_stale|chrome_browser/);
+    assert.match(failedCard, /<span class="skills-detail-label">Why unavailable<\/span><span class="skills-detail-value">MCP_SKILL_UNAVAILABLE: server &#39;chrome_browser&#39;[^<]*\(review_stale\)\. &lt;b&gt;x&lt;\/b&gt;<\/span>/);
+    const pair = renderInstalledSkillCard(skill({ type: 'script', enabled: true, mcp_servers: [{ ...server, configured: true, listed: true, tool_count: 25, error: 'x' },
+        { ...server, id: 'second', title: 'Second', configured: true, listed: true, tool_count: 2 }] }));
+    assert.match(pair, /Chrome \(shared tab\): configured · unavailable now; Second: configured · 2 tools listed\./);
+    assert.match(pair, /Why unavailable<\/span><span class="skills-detail-value">Chrome \(shared tab\): x<\/span>/);
+    const longReason = 'diagnostic '.repeat(100) + 'last detail';
+    assert.ok(renderInstalledSkillCard(skill({ type: 'script', enabled: true,
+        mcp_servers: [{ ...server, configured: true, error: longReason }] })).includes(longReason));
+    assert.doesNotMatch(renderInstalledSkillCard(ready), /Why unavailable/);
+    const conflict = traysOf(renderInstalledSkillCard(skill({ type: 'script', enabled: true, mcp_servers: [{ ...server, conflict: true }] })));
+    assert.match(conflict, /already has an MCP server named chrome_browser that isn’t this skill’s/);
+    assert.doesNotMatch(conflict, /connect_tools/);
+});
+
+
+test('declared MCP catalog notes and off binding stay independent from failures', () => {
+    const server = { id: 'chrome_browser', title: 'Chrome', bound: true, configured: true,
+        listed: true, tool_count: 1, error: '', notes: 'Some tools omitted <detail>' };
+    const render = (...servers) => renderInstalledSkillCard(skill({ type: 'script', enabled: true, mcp_servers: servers }));
+    const partial = render(server);
+    assert.match(partial, /configured · 1 tool listed/);
+    assert.match(partial, /Catalog notes<\/span><span class="skills-detail-value">Some tools omitted &lt;detail&gt;/);
+    assert.doesNotMatch(partial, /configured · unavailable|can’t be used|connect_tools/);
+    const off = render({ ...server, configured: false });
+    assert.match(off, /Chrome: off/);
+    assert.match(off, /Its tools are off/);
+    assert.match(off, /data-skill-action="connect_tools"/);
+    assert.doesNotMatch(off, /not connected/);
+    const failed = render({ ...server, error: 'Latest listing failed' });
+    assert.match(failed, /configured · unavailable now/);
+    assert.match(failed, /Latest listing failed/);
+    assert.match(failed, /can’t be used/);
 });

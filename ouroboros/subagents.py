@@ -494,8 +494,18 @@ def resolve_subagent_lane(
     else:
         resolved_from, provenance = intended_lane(requested, parent_lane), "inherited"
     effective = resolved_from
-    model = _lane_model(effective)
-    if lane_ran_on_main(effective, model):
+    if effective == "light":
+        from ouroboros.route_choice import following_route
+
+        # The Light slot's one rule: an empty slot is Main's route unless its own box, checked under a
+        # cloud Main, sends it to the local runtime. That box's lane is Light's own, never recorded as Main.
+        model, use_local = following_route("light")
+        on_main = lane_ran_on_main(effective, model) and use_local == _use_local_for_lane("main", model)
+    else:
+        model = _lane_model(effective)
+        on_main = lane_ran_on_main(effective, model)
+        use_local = _use_local_for_lane("main" if on_main else effective, model)
+    if on_main:
         # Report the slot the model ACTUALLY came from. Asking for Heavy on an
         # install with no Heavy slot gets the Main model, and calling that
         # `effective_lane="heavy"` made the record claim a strength nobody
@@ -505,7 +515,7 @@ def resolve_subagent_lane(
         requested_lane=requested,
         effective_lane=effective,
         model=model,
-        use_local_model=_use_local_for_lane(effective, model),
+        use_local_model=use_local,
         resolved_from=resolved_from,
         provenance=provenance,
     )

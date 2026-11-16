@@ -131,9 +131,22 @@ test('only the client facts overlay the room, each with its mark: socket closed,
     assert.deepEqual(roomStatusView({ room: room('idle', { turn: [{ kind: 'open_question', task_id: 't', quiz_id: 'q' }] }) }),
         { kind: 'online', text: 'Online', tone: 'online', mark: 'none', owner: true, amber: 'unanswered' });
     assert.deepEqual(roomStatusView(idle, { ready: false }),
-        { kind: 'starting', text: 'Starting…', tone: 'starting', mark: 'none', owner: false, amber: '', title: '' });
+        { kind: 'starting', text: 'Starting…', tone: 'starting', mark: 'none', owner: false, amber: '', step: '', title: '', detail: '' });
+    // The start lies over the room's word, never over its owner's turn: an open question stays amber while the host
+    // starts (as while it catches up), whether the start goes on or failed.
+    const asked = { room: room('idle', { turn: [{ kind: 'open_question', task_id: 't', quiz_id: 'q' }] }) };
+    const askedStart = roomStatusView(asked, { ready: false, boot: { phase: 'serving', dialogue_ready: true,
+        steps: [{ name: 'extensions', state: 'running' }] } });
+    assert.deepEqual(['kind', 'text', 'step', 'mark', 'owner', 'amber'].map((key) => askedStart[key]),
+        ['starting', 'Chat ready', 'loading extensions', 'none', true, 'unanswered']);
+    assert.deepEqual(markView(askedStart), { shape: 'dot', hue: 'owner' });
+    const askedFailed = roomStatusView(asked, { ready: false, boot: { phase: 'failed', error: 'Supervisor init failed: x', steps: [] } });
+    assert.deepEqual([askedFailed.text, askedFailed.tone, askedFailed.owner, askedFailed.amber], ['Start failed', 'failed', true, 'unanswered']);
     // The owner's own unconfirmed send outranks a quiet room, never work the room already does; it moves.
     const said = (state, overlay) => ['text', 'mark', 'owner'].map((key) => roomStatusView(state, overlay)[key]);
+    // Work the room does keeps its own word and the owner's move while the host starts.
+    assert.deepEqual(said(working, { ready: false }), said(working));
+    assert.deepEqual(said(stateOf('spending_limit'), { ready: false }), said(stateOf('spending_limit')));
     assert.deepEqual(said(idle, { sending: true }), ['Sending', 'moving', false]);
     assert.deepEqual(said(stateOf('paused_by_owner'), { sending: true }), ['Sending', 'moving', false]);
     assert.deepEqual(said(stateOf('spending_limit'), { sending: true }), ['Sending', 'moving', true],

@@ -44,10 +44,17 @@ from ouroboros.utils import append_jsonl, truncate_for_log
 CALL_STARTED = "tool_call_started"
 CALL_SETTLED = "tool_call"
 CALL_WAIT_ENDED = "tool_call_timeout"
-# What the host settles when the handler returned nothing: its own failure (``host_error``), or
-# a control that ended the call (Pause, Cancel, a deadline), named in the row's ``control_reason``.
+# What the host settles when the handler returned nothing (``host_settlement``): its own failure (``host_error``), or
+# a control that ended the call (Pause, Cancel, a deadline, the spend rail), named in the row's ``control_reason``.
 HOST_INTERRUPTED = "interrupted"
 HOST_SETTLED_STATUSES = frozenset({"host_error", HOST_INTERRUPTED})
+# Words the interruption types also carry when the host itself failed and no control of the work ended the call: an
+# authority the send needs could not be read (the owner-Pause fence, the model-sleep authority, the launch lock) or the
+# accounting wait outlived the turn's window. The loop ends or parks such work on its technical rails
+# (``loop_round_limits._handle_model_wait_control``), and ``tool_result.launch_refusal_result`` reads the same
+# authority words as an authority it could not read.
+_HOST_FAILURE_WORDS = frozenset({"accounting_wait_expired", "owner_pause_authority_unreadable",
+                                 "model_sleep_authority_unreadable", "owner_launch_authority_unavailable"})
 _FROZEN_KEYS = ("invocation_id", "tool_call_id", "task_attempt", "execution_id", "round_id", "llm_call_id", "args_source_ref", "args_source_status", "chronicle_lead_rule")
 _ACTIVE_CALL = ContextVar("active_tool_call", default=None)
 
@@ -209,6 +216,20 @@ def start_log_field(invocation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return {"start_log": outcome} if append_failed(outcome) else {}
 
 
+def host_settlement(exc: BaseException) -> Dict[str, str]:
+    """A call's settlement when its handler raised ``exc``: ``interrupted`` naming the control that ended it (the
+    exception's ``control_reason``; ``pausing`` for a send fenced by a pause being written; ``spend_limit_<scope>``
+    when the owner's spend rail refused the tool's own model send), else the host's own failure. The exception and its
+    word travel on unchanged; the row's preview keeps the word."""
+    from ouroboros.usage_accounting import BudgetExceeded
+
+    scope = exc.limit_scope if isinstance(exc, BudgetExceeded) else ""
+    reason = str(getattr(exc, "control_reason", "") or (scope if scope == "pausing" else f"spend_limit_{scope}" if scope else ""))
+    if not reason or reason.partition(":")[0] in _HOST_FAILURE_WORDS:  # the loop's ``<word>:<cause>`` keeps its word
+        return {"status": "host_error"}
+    return {"status": HOST_INTERRUPTED, "control_reason": reason}
+
+
 def claim_settlement(invocation: Optional[Dict[str, Any]]) -> bool:
     """Claim operation settlement once. A wait end never owns this fact."""
     if invocation is None:
@@ -295,8 +316,10 @@ def replay_evidence(drive_root: pathlib.Path, task_id: str, want: int = 200, *, 
             if row is not None:
                 observations.append({**base, "fact": fact, "live": False,
                     "receipt": base["receipt"] or row.get("completion_control") is True,
-                    "status": ("held" if row.get("status") in SAFETY_HELD_STATUSES else "error" if row.get("is_error")
-                               else "ok") if slot == "settled" else "unknown",  # the live step row's reading
+                    # the live step row's reading; a call a control ended is no failure of the call (#3211)
+                    "status": ("held" if row.get("status") in SAFETY_HELD_STATUSES else row["status"]
+                               if row.get("status") == HOST_INTERRUPTED else "error" if row.get("is_error")
+                               else "ok") if slot == "settled" else "unknown",
                     "hostError": row.get("status") == "host_error",
                     # The row's own recorded host time, as written; a row without one stays without
                     # (never reconstructed), so a reader can order a call by its first observation.

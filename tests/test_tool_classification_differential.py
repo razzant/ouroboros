@@ -366,6 +366,9 @@ def _golden() -> dict[str, dict]:
 # unavailable. Keep the historical corpus intact and assert the new observed
 # outcome explicitly rather than manufacture old evidence (04-AGENCY S1/S3).
 CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's size notice rides a successful update_world
+    # workpad_write: a blind overwrite of a version this task did not write landed; its receipt rides LEGACY_WARNING (ok,
+    # not OK), so a finishing turn reads it (memory_texts.write_text).
+    "BLIND_OVERWRITE": (False, "ok"),
     # check_safety: a flagged call returns before any effect with its own status (no failure of the tool); a call let
     # through without a new reading trails the tool's own result with a note, so the note alone reads ok.
     "SAFETY_RETURNED": (True, "safety_returned"),
@@ -655,6 +658,36 @@ CURRENT_PRODUCER_CONTRACTS = {"WORLD_SIZE_NOTICE": (False, "ok"),  # the map's s
     # control_runtime `_update_scratchpad`: the canonical blocks hold the change and only the markdown
     # projection is stale, so the warning trails a SUCCESSFUL write (status ok, code OK).
     "SCRATCHPAD_PROJECTION_STALE": (False, "ok"),
+    # #3054 deployment policy: a repo mutation of the serving checkout or a write into an extension the
+    # administrator requires is refused before any effect (registry_core.py publishes status blocked, code
+    # MANAGED_BY_DEPLOYMENT; integrate_delegated_patch carries the same text in its string ABI). The code's own
+    # spec (tool_result.py) is the protected bucket CORE_PROTECTION_BLOCKED already reads as, in both forms.
+    "MANAGED_BY_DEPLOYMENT": (True, "protected_blocked"),
+    "native:MANAGED_BY_DEPLOYMENT:MANAGED_BY_DEPLOYMENT": (True, "protected_blocked"),
+    # #3054 services `_stop_kept_service`: only a root task stops a service another task kept; refused before
+    # any signal (native ACCESS_BLOCKED, completed_no_effect), the `_BLOCKED` family answer in both forms.
+    "SERVICE_STOP_BLOCKED": (True, "blocked"),
+    "native:ACCESS_BLOCKED:SERVICE_STOP_BLOCKED": (True, "blocked"),
+    # The same stop's receipt refused (TOOL_ARG_ERROR) or naming no such service (LEGACY_UNAVAILABLE), both
+    # completed_no_effect. The bare warnings name no suffix the retired chain keyed on, so they read the generic
+    # ok its other `_REFUSED`/`_NOT_FOUND` rows gave (SERVICE_NOT_FOUND); only the typed result carries the refusal.
+    "SERVICE_STOP_REFUSED": (False, "ok"),
+    "native:TOOL_ARG_ERROR:SERVICE_STOP_REFUSED": (True, "argument_error"),
+    "SERVICE_STOP_NOT_FOUND": (False, "ok"),
+    "native:LEGACY_UNAVAILABLE:SERVICE_STOP_NOT_FOUND": (True, "unavailable"),
+    # #3054 query_code over a work folder whose process the container did not confirm ended (WorkDomainUnsettled):
+    # native TOOL_ERROR, backend_settled false; the first native publication, with its recorded text row's answer.
+    "QUERY_CODE_ERROR": (True, "error"),
+    "native:TOOL_ERROR:QUERY_CODE_ERROR": (True, "error"),
+    # #3061 services `_stop_kept_service`: the kept service ended but its declared outputs are not all captured; the
+    # first native publication of this identifier, with the same answer its recorded text row has.
+    "ARTIFACT_OUTPUT_ERROR": (True, "artifact_output_error"),
+    "native:ARTIFACT_OUTPUT_ERROR:ARTIFACT_OUTPUT_ERROR": (True, "artifact_output_error"),
+    # #3032 review collection (#2779): the shared review-state lock refused a collection before it settled its wave;
+    # nothing staged, the record kept, the same reference collects later. Both producers (review_change,
+    # review_collection) publish native LEGACY_UNAVAILABLE; the bare `_BUSY` warning is the retired chain's ok.
+    "REVIEW_STATE_BUSY": (False, "ok"),
+    "native:LEGACY_UNAVAILABLE:REVIEW_STATE_BUSY": (True, "unavailable"),
 }
 
 

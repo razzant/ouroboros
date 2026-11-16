@@ -3,7 +3,8 @@
 The receipt proves the complete request never reached the provider and generation never started ($0, released
 custody). It takes the ordinary same-request bound that already repeats an overloaded route (``max_retries``
 attempts, pauses 4 s then 8 s) before the configured-route walk and the free wait; never a cooldown, never a
-second burst inside an open wait episode. Typed Claudexor daemon-hop prepare failures share this bound.
+second burst inside an open wait episode. Typed Claudexor daemon-hop prepare failures share this bound, then wait
+on their model instead of walking (``test_claudexor_engine_wait_first``).
 Direct-API connects, undated pool refusals, local slot refusals and held paid repeats keep one attempt.
 """
 
@@ -189,6 +190,9 @@ def loop_env(monkeypatch, slept):
                         lambda sec, _wake: (episode_sleeps.append(sec), False)[1])
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
     monkeypatch.delenv("USE_LOCAL_FALLBACK", raising=False)
+    # No configured route unless a test sets one: bare pytest keeps an inherited owner value (conftest), and a spent
+    # live-engine burst would then walk a real chain instead of entering the episode these tests measure.
+    monkeypatch.delenv("OUROBOROS_MODEL_FALLBACKS", raising=False)
     fallback_cooldown.reset_for_tests()
     yield episode_sleeps
     fallback_cooldown.reset_for_tests()
@@ -208,9 +212,11 @@ def test_a_recovered_repeat_never_dials_the_configured_route(tmp_path, monkeypat
     assert _read_network_wait_events(tmp_path) == []
 
 
-@pytest.mark.parametrize("failure", [_receipt, _prepare_failure])
+@pytest.mark.parametrize("failure", [_receipt])
 def test_a_spent_burst_walks_the_configured_route(tmp_path, monkeypatch, loop_env, slept, failure):
     # No cooldown follows: `transport_unavailable` stays outside `_COOLDOWN_ERROR_KINDS` (test_loop_transport_wait).
+    # The engine's receipt proves it alive. A spent daemon prepare burst (`_prepare_failure`) walked here too until
+    # the owner's wait-first (13.11): it now waits on its model (test_claudexor_engine_wait_first).
     chain, chain_calls = _counting_chain(answer_on=1)
     monkeypatch.setattr(loop_mod, "_run_cross_model_fallback_chain", chain)
     monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "other/model")

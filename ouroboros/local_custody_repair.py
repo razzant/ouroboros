@@ -53,6 +53,7 @@ changes money, outcome or late-receipt rights, or lifts a Stop or Panic.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import pathlib
@@ -378,10 +379,32 @@ def repair_ended_local_custody(root: Any, task_ids: Iterable[str], *, root_task_
         return (holder in members and str(facts.get("root_task_id") or "") == str(root_task_id)
                 if holder else str(facts.get("task_id") or "") in members)
     repaired, done = _discharge_witnesses(root, addressed), set()
-    for holder in sorted(members):
+    try:  # stripped as the holder's own strict read (``validate_task_id``) would take each id
+        holders = _claimed_holders(root, {member.strip() for member in members})
+    except Exception:  # unreadable authority: nothing is retired on a guess
+        log.warning("Claimed launch holders of %s unreadable; their claims stay held", root_task_id, exc_info=True)
+        holders = []
+    for holder in holders:
         repaired.extend(_repair_holder_claims(root, holder, done))
     repaired.extend(_repair_absent_receivers(root, members, str(root_task_id)))
     return repaired
+
+
+def _claimed_holders(root: Any, members: Optional[set] = None) -> List[str]:
+    """The tasks holding a ``claimed`` launch row, by the rows' typed ``state`` (``Txn.put_handoff``): the only
+    rows ``_repair_holder_claims`` judges (it retires their owners' processes), so a member without one is never
+    read. ``members`` narrows the open set to an addressed tree (a seek per member, no body decoded); ``None`` is
+    every task."""
+    from ouroboros.store import open_store
+
+    if members is not None and not members:
+        return []
+    where, params = "kind='launch_handoffs' AND state='claimed'", ()
+    if members is not None:
+        where, params = f"task_id IN (SELECT value FROM json_each(?)) AND {where}", (json.dumps(sorted(members)),)
+    with open_store(pathlib.Path(root), write=False) as txn:
+        rows = txn.conn.execute(f"SELECT DISTINCT task_id FROM task_handoffs WHERE {where}", params).fetchall()
+    return sorted({str(row[0]) for row in rows})
 
 
 def reconcile_open_local_custody(root: Any) -> List[Dict[str, Any]]:
@@ -390,12 +413,8 @@ def reconcile_open_local_custody(root: Any) -> List[Dict[str, Any]]:
     The open set only (claimed rows, open receivers, legacy witnesses), never
     task history; a live or unprovable owner stays held and is shown as such.
     """
-    from ouroboros.store import open_store
-
     repaired = _discharge_witnesses(root, lambda _facts: True)
-    with open_store(pathlib.Path(root), write=False) as txn:
-        holders = sorted({str(row[0]) for row in txn.conn.execute(
-            "SELECT DISTINCT task_id FROM task_handoffs WHERE kind='launch_handoffs' AND state='claimed'")})
+    holders = _claimed_holders(root)
     done: set = set()
     for holder in holders:
         repaired.extend(_repair_holder_claims(root, holder, done))

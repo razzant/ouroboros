@@ -23,6 +23,27 @@ pytestmark = [pytest.mark.ui_browser]
 WEB = Path(__file__).resolve().parents[1] / "web"
 
 
+def passive_status(status):
+    """The host's `GET /api/claudexor/status?view=quota` envelope (gateway/claudexor_passive.py) for a full answer."""
+    reads = status.get("reads") or {}
+    accounts, quota = reads.get("accounts", "ok"), reads.get("quota", "ok")
+    body = {"view": "quota", "profiles": status.get("profiles") or {}, "quota": status.get("quota") or [],
+            "quota_absences": status.get("quota_absences") or [], "unified_accounts": accounts == "ok",
+            "reads": {"catalog": "not_read", "accounts": accounts, "quota": quota},
+            "read_errors": {facet: {"code": (status.get("facets") or {}).get(facet, {}).get("error")}
+                            for facet in ("accounts", "quota") if reads.get(facet, "ok") != "ok"
+                            and (status.get("facets") or {}).get(facet, {}).get("error")},
+            "timings_ms": {}}
+    body.update({key: status[key] for key in ("resources", "availability_scope") if key in status})
+    return body
+
+
+def status_answer(route, status):
+    """Fulfill a Claudexor status route like the host: full, or the passive `?view=quota` envelope."""
+    passive = parse_qs(urlparse(route.request.url).query).get("view") == ["quota"]
+    route.fulfill(json=passive_status(status) if passive else status)
+
+
 @pytest.fixture
 def subscription_ui():
     if os.environ.get("OUROBOROS_RUN_UI_SMOKE") != "1":
@@ -96,7 +117,8 @@ def subscription_ui():
         path = urlparse(request.url).path
         reads.append(request.url)
         body = {}
-        if request.method == "POST":
+        draft_catalog = path == "/api/onboarding/model-catalog"  # the wizard's catalog read: a POST answered below, as a GET's
+        if request.method == "POST" and not draft_catalog:
             payload = request.post_data_json or {}
             posts.append((path, payload))
             if path == "/api/onboarding/subagents/preview":
@@ -153,6 +175,8 @@ def subscription_ui():
                 body = {"ok": True}
         elif path == "/api/claudexor/status":
             body = fixture["status"]
+            if parse_qs(urlparse(request.url).query).get("view") == ["quota"]:
+                body = passive_status(body)
         elif path == "/api/settings":
             query = parse_qs(urlparse(request.url).query)
             if query.get("response_limit_preview") == ["1"] and backend.get("response_preview"):
@@ -169,8 +193,13 @@ def subscription_ui():
         elif path == "/api/review-pool":
             body = backend.get("review_pool", {"pool": [], "excluded": [], "last_executions": {},
                                                "row_costs": {}, "config_error": "", "migration": None})
-        elif path == "/api/model-catalog":
-            body = copy.deepcopy(backend.get("catalog_response", fixture["catalog"]))
+        elif path == "/api/model-catalog" or draft_catalog:
+            # The wizard reads the catalog of its draft's access (POST); Settings reads the saved one (GET). A fresh
+            # install has no engine rows before an account is connected, so a draft with none lists none of the
+            # fixture's subscription models (a provisioned engine would still answer its rows).
+            unconnected = draft_catalog and not fixture["status"]["profiles"]["profiles"]
+            body = copy.deepcopy(backend.get("catalog_response", {"items": [], "model_sources": [], "errors": []}
+                                             if unconnected else fixture["catalog"]))
             if backend.get("catalog_status"):
                 route.fulfill(status=backend["catalog_status"], content_type="application/json", body=json.dumps(body))
                 return
@@ -333,7 +362,7 @@ def test_quick_start_requires_a_model_source_for_the_connected_harness(subscript
     ui["fixture"]["catalog"]["model_sources"] = [
         {"id": "opaque-source", "label": "Managed models", "credentialHarness": credential_harness},
     ]
-    with page.expect_response("**/api/model-catalog"):
+    with page.expect_response("**/api/onboarding/model-catalog"):
         page.goto(ui["url"] + "/onboarding")
     page.wait_for_function(
         "expected => document.querySelector('#quick-start-btn').hidden !== expected", arg=expected)
@@ -555,7 +584,7 @@ def test_an_agent_only_subscription_reads_what_it_runs_and_retry_stays_wherever_
     page.wait_for_function("() => document.querySelector('#onboarding-access-note').textContent.includes('Raw model service unavailable')")
     assert retry.is_visible() and reason.inner_text().startswith('Claude Code can run agents;')
     ui['backend'].pop('catalog_status'), ui['backend'].pop('catalog_response')
-    with page.expect_response('**/api/model-catalog'):
+    with page.expect_response('**/api/onboarding/model-catalog'):
         retry.click()
     page.wait_for_function("() => document.querySelector('#onboarding-access-retry').hidden")
     # A key is another way to Main: Continue opens, and the button is the catalog's manual refresh again.
@@ -735,7 +764,7 @@ def test_late_catalog_does_not_restore_access_after_the_account_disconnects(subs
     ui, page = subscription_ui, subscription_ui['page']
     ui['backend']['preview_error'] = 'Agent inventory unavailable.'
     held = []
-    page.route('**/api/model-catalog', lambda route: held.append(route))
+    page.route('**/api/onboarding/model-catalog', lambda route: held.append(route))
     page.goto(ui['url'] + '/onboarding')
     page.wait_for_function("() => document.querySelector('#onboarding-access-note').textContent.includes('Checking model sources')")
     assert held
@@ -744,7 +773,7 @@ def test_late_catalog_does_not_restore_access_after_the_account_disconnects(subs
     page.wait_for_function("() => !document.querySelector('[data-agent-family=codex]').textContent.includes('Signed in')")
     for route in held:
         route.fulfill(content_type='application/json', body=json.dumps(ui['fixture']['catalog']))
-    page.unroute('**/api/model-catalog')
+    page.unroute('**/api/onboarding/model-catalog')
     assert page.locator('#next-btn').is_disabled()
     assert page.locator('#quick-start-btn').is_hidden()
 

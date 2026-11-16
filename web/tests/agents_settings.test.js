@@ -7,7 +7,7 @@ import test from 'node:test';
 import { APP_SETTINGS_ORIGIN } from '../modules/api_client.js';
 import { forgetSettingRows, readSettings } from '../modules/settings_controls.js';
 import { settingsPageFor } from '../modules/settings_pages.js';
-import { HAND_WRITTEN, ROWS, rowsOf } from '../modules/settings_rows.js';
+import { HAND_WRITTEN, ROWS, rowById, rowsOf } from '../modules/settings_rows.js';
 import { agentName, rosterResult } from '../modules/subagents_settings.js';
 import { recheckDraft, recheckSaved } from '../modules/safety_recheck.js';
 import { SAFETY_MODEL_KEYS } from '../modules/consciousness_api.js';
@@ -104,7 +104,7 @@ async function open(t, path = 'agents', options = {}) {
     const opened = [];
     const ctx = { readSettings, openSettings: (to) => { opened.push(to); return true; },
         ask: async (question) => { asked.push(question); return answers.length ? answers.shift() : true; } };
-    const handle = settingsPageFor(path).mount(container, { path, row: '', ctx });
+    const handle = settingsPageFor(path).mount(container, { path, row: '', view: options.view || '', ctx });
     await settle();
     const head = (id) => container.querySelector(`[data-entry-id="${id}"]`);
     return { env, server, container, asked, opened, handle, head,
@@ -164,6 +164,19 @@ test('the list draws one head per agent with its switch, and the roster\'s own s
     await page.head('scout').querySelector('[data-subagent-field="open"]').fire('click', {});
     await page.container.querySelector('[data-subagent-add]').fire('click', {});
     assert.deepEqual(page.opened, ['agents/scout', 'agents/new']);
+});
+
+test('a door\'s view is the list\'s first filter: Reviewers opens the list on its reviewers, any other on all', async (t) => {
+    const chosen = (page) => page.container.querySelectorAll('[data-agents-filter]').filter((chip) => chip.getAttribute('aria-pressed') === 'true')
+        .map((chip) => chip.dataset.agentsFilter);
+    const reviewers = await open(t, 'agents', { view: 'reviewers' });
+    assert.deepEqual(chosen(reviewers), ['reviewers']);
+    assert.deepEqual(reviewers.heads(), ['reviewer'], 'only the agents that read finished work');
+    assert.equal(ROWS.find((row) => row.id === 'permissions:reviewers').control.view, 'reviewers', 'the door names its view');
+    reviewers.handle.unmount();
+    const plain = await open(t, 'agents', { view: 'nothing-such' });
+    assert.deepEqual(chosen(plain), ['all']);
+    assert.deepEqual(plain.heads(), ['reviewer', 'recheck', 'scout']);
 });
 
 test('a plain row\'s switch writes that one entry at once through the checker\'s endpoint, with the read\'s token', async (t) => {
@@ -376,6 +389,51 @@ test('a new agent is an unsaved form whose on/off is a field of it; its Save add
     assert.deepEqual(page.opened, ['agents']);
 });
 
+test('a list of 50, switched-off agents included, holds Add and Duplicate, and their one hint says why; at 49 both act', async (t) => {
+    const said = ['The list holds at most 50 agents, including those switched off.', 'Remove one to add another.'];
+    const items = Array.from({ length: 50 }, (_, index) => api(`a${index}`, `openai/model-${index}`, index % 3 ? {} : { enabled: false }));
+    // A held control: reachable (not disabled), described by its own hint, which a mouse, a finger or the keyboard shows.
+    const heldWithHint = async (control) => {
+        const host = control.closest('[data-full-hint]');
+        const hint = host.querySelector('.ui-hint');
+        assert.deepEqual([control.disabled, control.getAttribute('aria-disabled'), control.getAttribute('aria-describedby')], [false, 'true', hint.id]);
+        assert.deepEqual([hint.hidden, hint.querySelector('.ui-hint-text').textContent, hint.querySelector('.ui-hint-rule').textContent], [true, ...said]);
+        for (const [show, hide] of [['pointerenter', 'pointerleave'], ['focusin', 'focusout'], ['click', 'focusout']]) {
+            await host.fire(show, {});
+            assert.equal(hint.hidden, false, `${show} shows why`);
+            await host.fire(hide, {});
+            assert.equal(hint.hidden, true, `${hide} hides it`);
+        }
+    };
+    const list = await open(t, 'agents', { items });
+    const add = list.container.querySelector('[data-subagent-add]');
+    assert.equal(list.heads().length, 50);
+    await heldWithHint(add);
+    assert.equal(list.container.querySelectorAll('.ui-hint').length, 1, 'one fact, in the hint of Add only');
+    assert.equal(list.container.textContent.split('holds at most').length, 2, 'said once: in that hint, by no line of the page');
+    await add.fire('click', { target: add });
+    assert.deepEqual(list.opened, [], 'a held Add opens no new agent');
+    list.handle.unmount();
+    const full = await open(t, 'agents/a49', { env: list.env, server: list.server });
+    const duplicate = full.container.querySelector('[data-subagent-duplicate]');
+    await heldWithHint(duplicate);
+    assert.equal(full.container.querySelectorAll('.ui-hint').length, 1, 'the page holds Duplicate only');
+    await duplicate.fire('click', { target: duplicate });
+    assert.deepEqual(full.opened, [], 'a full list opens no copy');
+    full.handle.unmount();
+    list.server.roster.items.pop();
+    const room = await open(t, 'agents/a0', { env: list.env, server: list.server });
+    const copy = room.container.querySelector('[data-subagent-duplicate]');
+    assert.deepEqual([copy.getAttribute('aria-disabled'), room.container.querySelector('.ui-hint')], [null, null]);
+    await copy.fire('click', { target: copy });
+    assert.deepEqual(room.opened, ['agents/new'], 'the 50th agent is a copy away');
+    room.handle.unmount();
+    const fewer = await open(t, 'agents', { env: list.env, server: list.server });
+    const free = fewer.container.querySelector('[data-subagent-add]');
+    assert.deepEqual([free.disabled, free.getAttribute('aria-disabled'), fewer.container.querySelector('.ui-hint')], [false, null, null]);
+    assert.equal(list.server.posts.length, 0, 'looking writes nothing');
+});
+
 test('Subagents may change files is a strip over the stored spelling: Auto is the unset value, and a receipt reads back in its words', async (t) => {
     const page = await open(t);
     const fold = page.container.querySelector('[data-agents-fold]');
@@ -408,4 +466,76 @@ test('a roster write says Saved with when it applies, a refusal with the server\
     assert.equal(rosterResult({ state: 'refused', effect: 'next_task', message: TWINS }).text, `Not saved. ${TWINS}`);
     assert.equal(rosterResult({ state: 'unknown', effect: 'next_task', message: 'timeout' }).text, 'Not confirmed yet');
     assert.deepEqual(rosterResult({ state: 'unchanged' }), {});
+});
+
+test('the roster\'s switch is never off before a read: inert and reading, then the stored value; opened again, the last read at once', async (t) => {
+    const first = await open(t);  // the fixture, the server and the status reads answered by themselves, as for every page here
+    first.handle.unmount();
+    forgetSettingRows();
+    const answer = first.env.routes.get('/api/settings');
+    let gate = null;
+    first.env.routes.set('/api/settings', async (url, init = {}) => { if (init.method !== 'POST') await gate.promise; return answer(url, init); });
+    const hold = () => { let resolve; gate = { promise: new Promise((done) => { resolve = done; }) }; gate.resolve = resolve; };
+    const mount = () => {
+        const container = new NodeStub();
+        first.env.mount.appendChild(container);
+        const handle = settingsPageFor('agents').mount(container, { path: 'agents', row: '', view: '', ctx: { readSettings, openSettings: () => true, ask: async () => true } });
+        t.after(() => handle.unmount());
+        return container;
+    };
+    const facts = (container) => {
+        const row = container.querySelector(`[data-setting-row="${KEY}"]`);
+        const control = row.querySelector('[data-setting-control]');
+        return [control.disabled, isOn(control), row.querySelector('[data-setting-meta]').textContent, container.querySelectorAll('[data-entry-id]').length];
+    };
+    hold();
+    const cold = mount();
+    assert.deepEqual(facts(cold), [true, false, 'Reading…', 0], 'nothing read: the switch says so, and no list stands');
+    gate.resolve();
+    await settle();
+    assert.deepEqual(facts(cold), [false, true, rowById(KEY).meta, 3]);
+    hold();
+    const warm = mount();
+    assert.deepEqual(facts(warm), [false, true, rowById(KEY).meta, 3], 'the last read, before this page\'s own read answers');
+    gate.resolve();
+    await settle();
+    assert.deepEqual(facts(warm), [false, true, rowById(KEY).meta, 3]);
+});
+
+test('the roster\'s switch follows the reads made anywhere: its own fails while a newer one runs, then what that one and the next find', async (t) => {
+    const first = await open(t);
+    first.handle.unmount();
+    forgetSettingRows();
+    const answer = first.env.routes.get('/api/settings');
+    const gates = [];
+    first.env.routes.set('/api/settings', async (url, init = {}) => {
+        if (init.method === 'POST') return answer(url, init);
+        const gate = {};
+        gate.promise = new Promise((done) => { gate.resolve = done; });
+        gates.push(gate);
+        return (await gate.promise) === 200 ? answer(url, init) : response({ error: 'offline' }, 500);
+    });
+    const container = new NodeStub();
+    first.env.mount.appendChild(container);
+    const handle = settingsPageFor('agents').mount(container, { path: 'agents', row: '', view: '', ctx: { readSettings, openSettings: () => true, ask: async () => true } });
+    t.after(() => handle.unmount());
+    const facts = () => {
+        const row = container.querySelector(`[data-setting-row="${KEY}"]`);
+        const control = row.querySelector('[data-setting-control]');
+        return [control.disabled, isOn(control), row.querySelector('[data-setting-meta]').textContent, container.querySelectorAll('[data-entry-id]').length];
+    };
+    const newer = readSettings().catch(() => 'failed');
+    await settle();
+    gates[0].resolve(500);
+    await settle();
+    assert.deepEqual(facts(), [true, false, 'Reading…', 0], 'its own read failed, a newer one still runs');
+    gates[1].resolve(500);
+    await newer;
+    assert.deepEqual(facts(), [true, false, 'Could not be read', 0]);
+    assert.match(container.textContent, /could not be loaded/, 'the editor keeps its own words for a failed read');
+    const elsewhere = readSettings();
+    await settle();
+    gates[2].resolve(200);
+    await elsewhere;
+    assert.deepEqual(facts(), [false, true, rowById(KEY).meta, 3], 'the read that lands is the page\'s too');
 });

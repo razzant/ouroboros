@@ -59,7 +59,7 @@ fact** on any inequality (§3.2 — a fact, not a refusal).
 
 The pre-dispatch gate compares exact raw/context identities without repeating token, clock or image measurement. Claudexor uploads those validated canonical bytes with their measured hash and length; the defensive send copy remains, and mutation after measurement refuses dispatch. Claudexor acceptance merges the operation identity and capture facts into its existing operational request manifest without rereading or serializing the payload. Raw/projection references and prior metadata survive; the separate pre-dispatch physical manifest and send seal remain immutable.
 
-A released Claudexor prepare failure repeats on the primary within `max_retries` (three sends, 4 s then 8 s) only with `ClaudexorModelNotDispatched`, provider `claudexor`, an empty operation ID and gateway code `daemon_unreachable`, `daemon_not_answering`, `daemon_starting` or `daemon_descriptor_changed`. The configured-route walk follows a spent bound. An open transport wait or held unknown-repeat record still prevents a new burst. Direct-API connect failures, undated credential-pool refusals and local slot refusals retain one attempt; a lost create reply remains unknown and rejoins the same invocation.
+A released Claudexor prepare failure repeats on the primary within `max_retries` (three sends, 4 s then 8 s) only with `ClaudexorModelNotDispatched`, provider `claudexor`, an empty operation ID and gateway code `daemon_unreachable`, `daemon_not_answering`, `daemon_starting` or `daemon_descriptor_changed` (`llm_claudexor.daemon_not_delivered`). A spent bound walks no configured route: the own daemon is no model failure, so the round's wait episode redials the same model (owner wait-first). An open transport wait or held unknown-repeat record still prevents a new burst. Direct-API connect failures, undated credential-pool refusals and local slot refusals retain one attempt; a lost create reply remains unknown and rejoins the same invocation.
 
 ## 3. The contract
 
@@ -258,7 +258,16 @@ A provider keeps one cache per model and reads it in the wire order tools, syste
 blocks, messages. A cache mark closes a reuse scope: the shared blocks (tool schemas,
 governance A′, the handbook D, resident memory B) are reused across captures and so
 are bytes of their sources alone; the changing context C and the transcript are
-reused within one captured view (DEVELOPMENT "Cache-friendliness invariant"). Before
+reused within one captured view (DEVELOPMENT "Cache-friendliness invariant"). Resident
+memory is two scopes: its head (identity, the catalogue, the maps) follows the state of
+memory, the mode and the forms the host gave its sections, while my story after it is one
+text only until a work has it narrowed for its window. On Anthropic routes, where the
+transport gives the changing context the spare mark
+(`llm_messages._cache_declared_system_context`), the block goes as those two texts and its
+mark ends the story while that is whole, the head once it was narrowed
+(`llm_messages.SHARED_HEAD_KEY`), so a new work reads another work's start through the
+head. The cut is the transport's: the canonical messages, and with them the prefix fact
+below, do not see it. Before
 a Main candidate is dispatched, the host compares it with
 the last ANSWERED request of the same route in this task and writes the result on
 the attempt's ledger row (`transcript_prefix.attempt_prefix_fact` →
@@ -329,6 +338,13 @@ tokens were written at, by the provider's split when it accounts for every write
 at the model's base price.
 Delegated subscription sessions and unmetered dispatches carry no reservation time
 and are not in a period.
+A consciousness wake reads the 24-hour view once and carries its cache writes as one
+fact row of its message (`consciousness_view.cache_writes_text`): the calls that wrote,
+their tokens, the writes' share of recorded cost and every class in this view's order,
+without its detail. Dollars appear where the install holds a price list for the call's
+route (`pricing.display_tariffs`); any other call is counted as unsplit, and a route
+that reports no write count leaves no row. It is a fact for the mind's own judgment;
+nothing decides by it.
 The tariff is read without a fetch: what the process holds, else the install's
 dated catalogue record (`state/openrouter_models.json`), whose date the view
 names. Cache writes are listed by `prefix_class`. Nothing is stored and no

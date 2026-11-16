@@ -833,9 +833,15 @@ def test_a_presence_seed_stays_unmarked():
     assert "_project_scope_none" not in task
 
 
-def test_a_direct_turn_bound_frame_replaces_stale_absence_with_the_true_basis():
+def test_a_direct_turn_bound_frame_replaces_stale_absence_with_the_true_basis(monkeypatch):
+    from supervisor import queue_publication
     from supervisor.conversation_lane import handle_direct_turn_bound
 
+    # Each landed frame marks the queue changed. With no tick publisher a real mark writes this worker's queue
+    # documents into the worker-shared pytest data root (conftest's ``queue.init``), where later tests read them
+    # (#3342); the mark is recorded at its owner instead.
+    marks = []
+    monkeypatch.setattr(queue_publication, "persist_queue_snapshot", lambda reason="": marks.append(reason))
     basis = {"project_id": "room", "project": None, "frozen": True}
     task = {"id": "t", "_project_scope_none": True}
     running = {"t": {"task": task, "attempt": 1}}
@@ -845,6 +851,7 @@ def test_a_direct_turn_bound_frame_replaces_stale_absence_with_the_true_basis():
     handle_direct_turn_bound({"task_id": "t", "task_attempt": 1, "facts": {"_project_admission": basis, "project_id": "room"}},
                              SimpleNamespace(RUNNING=running))
     assert task["_project_admission"] == basis and task["project_id"] == "room" and "_project_scope_none" not in task
+    assert marks == ["conversation_turn_bound"] * 2
 
 
 def _aborted(system, root, turn=None):
@@ -1485,7 +1492,10 @@ def test_a_room_turn_stopped_before_its_bound_frame_returns_on_the_basis_its_res
     turn = _owner_turn(system, tmp_path, monkeypatch, chat_id=room["chat_id"], bound=False)
     stored = load_task_result(tmp_path, turn.id)
     row = system.workers.RUNNING[turn.id]["task"]
-    assert [frame["type"] for frame in turn.frames] == ["direct_turn_bound"] and "_project_admission" not in row
+    # The basis frame, and the admitted tier's beside it (the decided Default here), neither folded into the row.
+    assert [(frame["type"], sorted(frame["facts"])) for frame in turn.frames] == [
+        ("direct_turn_bound", ["_project_admission", "project_id"]), ("direct_turn_bound", ["processing"])]
+    assert "_project_admission" not in row
     assert (stored["task_attempt"], stored["execution_owner"]["kind"], row["project_id"]) == (0, "direct", "room")
     _save_work(tmp_path, turn)
     _door(system, monkeypatch, tmp_path, door)

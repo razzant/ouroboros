@@ -65,7 +65,7 @@ jobs:
       issues: read
     # Above the sum of the step ceilings below: a step ceiling fails its step and
     # the evidence steps still run, while the job ceiling cancels them.
-    timeout-minutes: 170
+    timeout-minutes: 195
     strategy:
       fail-fast: false
       matrix:
@@ -127,16 +127,29 @@ jobs:
           tar -xzf "$ARCHIVE" -C "$TOOL_DIR" caddy
           "$TOOL_DIR/caddy" version | grep -F "v$CADDY_VERSION "
           echo "path=$TOOL_DIR/caddy" >> "$GITHUB_OUTPUT"
-      # Playwright's packages, browsers and the browser tools' pinned Chromium. Every download has a
-      # ten-minute attempt and one retry; dpkg installs once from the fetched archives and is never
-      # stopped there (#2895). The two download stages take at most 41 minutes of this step's ceiling.
+      # The reviewed Node, Playwright's packages, browsers and the browser tools' pinned Chromium. Every
+      # download has a ten-minute attempt and one retry; dpkg installs once from the fetched archives and is
+      # never stopped there (#2895). The three download stages take at most 62 minutes of this step's ceiling.
       - name: Install UI smoke Chromium and WebKit
         id: install_browsers
         if: ${{ !cancelled() && steps.setup_python.outcome == 'success' }}
-        timeout-minutes: 45
+        timeout-minutes: 70
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
-        run: python -I -S scripts/ci_browser_install.py --pinned-chromium chromium webkit
+        run: python -I -S scripts/ci_browser_install.py --pinned-node --pinned-chromium chromium webkit
+      # Ubuntu 23.10+ runners restrict unprivileged user namespaces through AppArmor, so the pinned
+      # Chrome for Testing shell cannot start its sandbox there ("No usable sandbox!"). Allow them for
+      # this host before the lane, whose observer views drive the built-in browser in Chromium
+      # (tests/test_observer_view_browser.py), so the lane and the tools smoke after it prove Chromium
+      # with its sandbox on (#2735); a host that keeps the restriction gets the typed refusal the
+      # product discloses, as the Docker lane checks.
+      - name: Let Chromium's sandbox start on this runner
+        id: chromium_sandbox
+        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' }}
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       # `--session-timeout` stops the session BETWEEN tests, so a slow shard still
       # ends through its session finish: the guard names the nodes it did not run
       # and the evidence is exported. The per-test timeout (SIGALRM on this Linux
@@ -156,6 +169,8 @@ jobs:
           OUROBOROS_RUN_UI_SMOKE: "1"
           OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          # The reviewed Node the install step staged (scripts/ci_browser_install.py --pinned-node).
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
           SEPARATE_UI_CADDY: ${{ steps.install_caddy.outputs.path }}
         run: >-
           xvfb-run -a python -I -S scripts/ci_retry.py --evidence-dir "${{ runner.temp }}/ci-evidence/ui/host" --accepted tests/accepted_failures.json --
@@ -164,16 +179,6 @@ jobs:
           --ui-browser-shard=${{ matrix.shard }}/9 --session-timeout=4500
           --junitxml="${{ runner.temp }}/ci-private/ui/host.xml"
           --ci-evidence-dir="${{ runner.temp }}/ci-evidence/ui/host"
-      # Ubuntu 23.10+ runners restrict unprivileged user namespaces through AppArmor, so the pinned
-      # Chrome for Testing shell cannot start its sandbox there ("No usable sandbox!"). Allow them for
-      # this host so the smoke proves Chromium with its sandbox on (#2735); a host that keeps the
-      # restriction gets the typed refusal the product discloses, as the Docker lane checks.
-      - name: Let Chromium's sandbox start on this runner
-        if: ${{ !cancelled() && steps.install_browsers.outcome == 'success' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')) && matrix.shard == 1 }}
-        run: |
-          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          fi
       - name: Run browser tools Chromium/WebKit smoke
         id: browser_tools
         timeout-minutes: 20
@@ -181,6 +186,7 @@ jobs:
         env:
           OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
           PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ui-browsers
+          PLAYWRIGHT_NODEJS_PATH: ${{ github.workspace }}/node-standalone/bin/node
         run: >-
           python -I -S scripts/safe_test.py --evidence-dir "${{ runner.temp }}/ci-raw/ui/tools"
           -- python -m pytest tests/test_browser_tools_smoke.py -m browser -q --tb=short

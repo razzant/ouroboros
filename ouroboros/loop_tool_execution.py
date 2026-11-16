@@ -26,8 +26,8 @@ from ouroboros.deadline_utils import deadline_clamped_timeout_sec
 from ouroboros.late_tool_results import late_watch_fields, record_call_id
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_call_log import (
-    CALL_STARTED, CALL_SETTLED, CALL_WAIT_ENDED, HOST_INTERRUPTED, append_call_row, append_failed, claim_settlement,
-    elapsed_ms, invocation_fields, new_invocation, start_log_field, persist_dispatch_source, worker_phrase,
+    CALL_STARTED, CALL_SETTLED, CALL_WAIT_ENDED, append_call_row, append_failed, claim_settlement, elapsed_ms,
+    host_settlement, invocation_fields, new_invocation, start_log_field, persist_dispatch_source, worker_phrase,
     worker_position,
 )
 from ouroboros.tool_capabilities import (
@@ -116,19 +116,15 @@ def _publish_settlement(tools, drive_logs, row):
 
 
 def _settle_host_error(tools, drive_logs, live, invocation, outcome):
-    """Record a submission failure or a failed future through one settlement guard.
-
-    A control that ended the call (Pause, Cancel, a deadline: the exception carries its ``control_reason``;
-    a send fenced by a pause being written names it as ``pausing``) settles as ``interrupted``, never as a host failure."""
+    """Record a submission failure or a failed future through one settlement guard: ``interrupted`` when a control
+    ended the call, else the host's own failure (``tool_call_log.host_settlement``)."""
     try:
         exc = outcome if isinstance(outcome, BaseException) else outcome.exception()
     except BaseException as failure:
         exc = failure
     if exc is not None and claim_settlement(invocation):
-        reason = str(getattr(exc, "control_reason", "") or ("pausing" if getattr(exc, "limit_scope", "") == "pausing" else ""))
         _publish_settlement(tools, drive_logs, {
-            **live, "ts": utc_now_iso(), "type": CALL_SETTLED, "is_error": True,
-            **({"status": HOST_INTERRUPTED, "control_reason": reason} if reason else {"status": "host_error"}),
+            **live, "ts": utc_now_iso(), "type": CALL_SETTLED, "is_error": True, **host_settlement(exc),
             "elapsed_ms": elapsed_ms(invocation),
             "result_preview": f"{type(exc).__name__}: {sanitize_tool_result_for_log(str(exc))[:500]}",
             **start_log_field(invocation),
@@ -258,7 +254,7 @@ def _tc_args(tc: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(raw, str) and raw.strip():
             parsed = json.loads(raw)
             return parsed if isinstance(parsed, dict) else {}
-    except (ValueError, TypeError, AttributeError):
+    except (ValueError, TypeError, AttributeError, RecursionError):
         pass
     return {}
 
@@ -602,7 +598,7 @@ def _execute_single_tool(
 
     try:
         args = json.loads(tc["function"]["arguments"] or "{}")
-    except (json.JSONDecodeError, ValueError) as e:
+    except (json.JSONDecodeError, ValueError, RecursionError) as e:
         result = f"⚠️ TOOL_ARG_ERROR: Could not parse arguments for '{requested_fn_name}': {e}"
         tool_result = ToolResult(status="error", code="TOOL_ARG_ERROR", text=result)
         result_meta = _typed_result_metadata(fn_name, result, True, tool_result)
@@ -656,7 +652,7 @@ def _execute_single_tool(
 
     consume_last_process_facts()
 
-    tool_ok = True
+    tool_ok, ran_with = True, None
     try:
         from ouroboros.delegate_output import staged_read_delivery_scope
 
@@ -666,7 +662,11 @@ def _execute_single_tool(
             from ouroboros.tools.tool_discovery import with_gateway_schema
             tool_result = with_gateway_schema(tools, fn_name, tool_result)
         from ouroboros.place_guard import with_destination_facts  # a send into another place: its notes beside the act
-        tool_result = tool_result if host_refusal else with_destination_facts(getattr(tools, "_ctx", None), fn_name, args, tool_result)
+        from ouroboros.tools.extension_dispatch import dispatched_descriptor  # read with the publication it ran
+        tool_ctx = getattr(tools, "_ctx", None)
+        ran_with = dispatched_descriptor(tool_ctx, fn_name)
+        tool_result = tool_result if host_refusal else with_destination_facts(
+            tool_ctx, fn_name, args, tool_result, ext_tool=ran_with)
         result = tool_result.text
     except (UsageAccountingError, ModelWaitInterrupted):
         raise
@@ -685,6 +685,9 @@ def _execute_single_tool(
     # the loop holds the dispatcher's typed result and reads it directly).
     is_error = _typed_execution_failure(tool_ok, tool_result)
     result_meta = _typed_result_metadata(fn_name, result, is_error, tool_result)
+    from ouroboros.tool_effects import RETAINED_DECLARATION, retained_declaration
+    if (kept := retained_declaration(ran_with)) is not None:  # readers after the call judge what it ran with
+        result_meta[RETAINED_DECLARATION] = kept
     # R5 (node-runtime sprint): merge the handler's TYPED process facts into
     # the call's result_meta. When a typed publication exists it owns the WHOLE
     # fact family — including the ABSENCE of a member (a typed publication
@@ -748,7 +751,6 @@ def _execute_single_tool(
         # provenance facts — the ABI-9 extension_generation digest included —
         # survive even when persist_call fails.
         "tool_result_meta": result_meta.get("tool_result_meta") or {},
-        "args_ref": (trace_ref.get("manifest_ref") or {}).get("path") if trace_ref else None,
         "result_ref": trace_ref.get("manifest_ref") if trace_ref else None,
     }, correlation, tool_call_id=tool_call_id)
     _publish_settlement(tools, drive_logs, settled_row)
@@ -768,7 +770,7 @@ def _execute_single_tool(
 
 
 class StatefulToolExecutor:
-    """Thread-sticky executor for Playwright/greenlet stateful tools."""
+    """One sticky worker that serializes a task's browser calls in their caller context."""
     def __init__(self):
         self._executor: Optional[ThreadPoolExecutor] = None
 
@@ -1001,7 +1003,7 @@ def _execute_with_timeout(
     invocation["chronicle_lead_rule"] = (view or {}).get("chronicle_lead_rule")
     try:
         arguments = json.loads(tc.get("function", {}).get("arguments") or "{}")
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         arguments = {"raw_arguments": tc.get("function", {}).get("arguments")}
     persist_dispatch_source(_tool_task_metadata(tools), drive_logs, task_id, invocation, fn_name, arguments)
     args_for_log = sanitize_tool_args_for_log(fn_name, _tc_args(tc))
@@ -1108,18 +1110,13 @@ def _retire_stateful_tool(stateful_executor, tool_ctx, future):
             cleanup_browser_handles,
         )
 
-        # CROSS-THREAD INVARIANT (#409): Playwright objects are bound
-        # to the worker thread that created them. This main-thread
-        # path may only DETACH (retire) the generation — never call
-        # close()/stop() here (a cross-thread stop() kills the driver
-        # under the hung worker and turns its dispatcher wait into a
-        # CPU busy-loop). The close is QUEUED on the retiring
-        # executor behind the hung call, so it runs on the owning
-        # worker thread whenever that call settles — including the
-        # already-settled race, where the queued task runs at once on
-        # that same thread (a done-callback would have run HERE, on
-        # the main thread, exactly the cross-thread close this path
-        # exists to prevent).
+        # SETTLEMENT ORDER (#409): this path only DETACHES (retires)
+        # the generation — it never closes here, so a timeout never
+        # preempts the call. The close is QUEUED on the retiring
+        # executor behind the hung call and runs once that call
+        # settles (at once in the already-settled race); it closes on
+        # the generation's own event loop, from whichever thread runs
+        # it. The task's end closes what a call never settled.
         retired_generation, _fresh = _detach_browser(tool_ctx)
         try:
             settlement_target = stateful_executor.submit(

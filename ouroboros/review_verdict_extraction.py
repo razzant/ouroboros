@@ -222,21 +222,23 @@ def _extract_verdict_via_light_model(
     array_validator: Optional[Callable[[list], bool]] = None,
 ) -> tuple[Optional[str], Dict[str, Any]]:
     """One bounded light-model call canonicalizing narrative to the contract."""
-    from ouroboros.config import get_light_model
+    from ouroboros.model_slots import local_lane_label
+    from ouroboros.route_choice import following_route
     from ouroboros.usage_accounting import physical_attempt_limit
 
     if not str(raw_text or "").strip():
         return None, {}
-    model = get_light_model()
+    model, use_local = following_route("light")
+    named = local_lane_label(model, use_local)  # the route as evidence and the transport timeout read it
     if owner_deadline_exhausted(deadline_at=deadline_at, reserve_sec=get_finalization_grace_sec()):
-        return None, {"model": model, "reason_code": "deadline_exhausted", "dispatch": "not_dispatched"}
+        return None, {"model": named, "reason_code": "deadline_exhausted", "dispatch": "not_dispatched"}
     from ouroboros.budget_pause import dispatch_fenced
     from ouroboros.usage_accounting import current_usage_scope as _scope_now
 
     if dispatch_fenced(getattr(_scope_now(), "task_id", "")):
         # Observation-only while the owning task pauses (#1196): the raw
         # answer is kept verbatim; no Light call canonicalizes it on the way out.
-        return None, {"model": model, "reason_code": "budget_pausing_no_extraction", "dispatch": "not_dispatched"}
+        return None, {"model": named, "reason_code": "budget_pausing_no_extraction", "dispatch": "not_dispatched"}
     template = _SESSION_EXTRACT_OBJECT_PROMPT if shape == "two_part" else _SESSION_EXTRACT_PROMPT
     prompt = template.format(
         contract=contract or default_output_contract(shape),
@@ -246,7 +248,7 @@ def _extract_verdict_via_light_model(
     # the physical light-model boundary rather than letting an expired owner
     # window reach the transport helper's positive floor.
     if owner_deadline_exhausted(deadline_at=deadline_at, reserve_sec=get_finalization_grace_sec()):
-        return None, {"model": model, "reason_code": "deadline_exhausted", "dispatch": "not_dispatched"}
+        return None, {"model": named, "reason_code": "deadline_exhausted", "dispatch": "not_dispatched"}
     try:
         if llm is None:
             from ouroboros.llm import LLMClient
@@ -265,10 +267,10 @@ def _extract_verdict_via_light_model(
         _scope = _replace(current_usage_scope() or UsageScope(), source="review_substrate.extraction")
         chat_kwargs = dict(
             messages=[{"role": "user", "content": prompt}], model=model,
-            model_role="light",
+            model_role="light", use_local=use_local,
             max_tokens=8192, reasoning_effort="low", no_proxy=True,
         )
-        transport = review_transport_timeout(model, transport_timeout_sec, deadline_at)
+        transport = review_transport_timeout(named, transport_timeout_sec, deadline_at)
         if transport is not None:
             chat_kwargs["timeout"] = transport
         # The same deadline − grace window also bounds the send after preparation (#572).
@@ -282,7 +284,7 @@ def _extract_verdict_via_light_model(
         if refused_by_own_window(exc, own_window_spent=owner_deadline_exhausted(
                 deadline_at=deadline_at, reserve_sec=get_finalization_grace_sec())):
             # Unsent once its own window ended while it prepared: its result before admission, not a task control.
-            return None, {"model": model, "reason_code": "deadline_exhausted", "dispatch": "not_dispatched"}
+            return None, {"model": named, "reason_code": "deadline_exhausted", "dispatch": "not_dispatched"}
         propagate_model_error(exc)
         log.warning("Review session verdict extraction failed: %s", exc)
         return None, {}
@@ -291,7 +293,7 @@ def _extract_verdict_via_light_model(
         content = " ".join(str(b.get("text", "")) for b in content if isinstance(b, dict))
     body = str(content or "").strip()
     usage = dict(usage or {})
-    usage["model"] = model
+    usage["model"] = named
     if not body or _UNEXTRACTABLE in body.upper()[:80]:
         return None, usage
     if shape == "two_part":

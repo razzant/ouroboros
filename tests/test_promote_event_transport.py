@@ -163,7 +163,7 @@ def test_single_slot_respawn_starts_child_without_queue_lock(monkeypatch, tmp_pa
     fake_ctx.Process.return_value = ProbeProcess()
     old = workers.Worker(
         wid=0,
-        proc=MagicMock(pid=111),
+        proc=MagicMock(pid=111, is_alive=MagicMock(return_value=False)),
         in_q=MagicMock(),
         busy_task_id=None,
         reaping=True,

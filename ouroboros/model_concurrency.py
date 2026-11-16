@@ -196,10 +196,10 @@ class _Waiter:
             from ouroboros.owner_pause import RAIL_OWNER_PAUSE, scope_fence
             from ouroboros.llm_attempt import _PhysicalSendNotStarted
 
-            # Accounting's executor handoff precedes this queue. A queued waiter
-            # has not started provider work, so Pause still cancels admission.
-            if self.path is not None and scope_fence():
-                raise _PhysicalSendNotStarted(RAIL_OWNER_PAUSE)
+            # Accounting's executor handoff precedes this queue. A queued waiter has not started provider
+            # work, so Pause still cancels admission; an unreadable fence is no Pause and names its gap.
+            if self.path is not None and (fence := scope_fence()):
+                raise _PhysicalSendNotStarted(fence["reason"] if fence.get("state") == "unknown" else RAIL_OWNER_PAUSE)
         if self.until is None:
             return math.inf
         remaining = self.until - time.monotonic()

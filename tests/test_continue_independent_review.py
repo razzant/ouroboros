@@ -1,5 +1,6 @@
 """#1572: the owner's Continue is not held by an independent review that cannot
-apply to the candidate; every other census consumer keeps the whole observation.
+apply to the candidate, and an exact Resume does not wait for one; every other
+census consumer keeps the whole observation.
 
 Real custody rows (``delegate_custody``), the real observer (``budget_pause.
 observe_task_runs``), the real writer census (``conflicting_writers``) and
@@ -369,3 +370,38 @@ def test_a_started_review_row_without_its_recorded_shape_holds_continue(tmp_path
         source="review_substrate", review_slot_id=SLOT, ledger_root=str(tmp_path)))
     dc._CUSTODY.clear()
     assert _delegated(conflicting_writers(queue, PRED, purpose=CONTINUE_PURPOSE)) == ["run-review-shapeless"]
+
+
+@pytest.mark.parametrize("reason", ["sleep", "budget"])
+def test_an_exact_resume_waits_for_writers_never_for_an_independent_review(tmp_path, monkeypatch, reason):
+    """The Resume door reads the same observation: a review that cannot apply to the work, started
+    or an unbound start, does not hold it under a sleep or a money pause; an ordinary run, an
+    ordinary unbound start and a review row that could still apply keep holding, the last one
+    only until an owner Pause's closed fence overlays the row."""
+    from ouroboros import artifacts
+    from ouroboros.budget_pause import observe_task_runs
+    from supervisor.budget_resume import _resume_custody_refusal
+
+    monkeypatch.setattr(artifacts, "read_actor_source_bytes", lambda *_a, **_k: b"{}")
+    pause = {"reason": reason, "source_ref": {"path": "x"}, "pause_id": "p", "state": "paused"}
+
+    def refusal():
+        observed = observe_task_runs(tmp_path, PRED, reason="budget_resume_uncovered_cost", request_stop=False)
+        return observed, _resume_custody_refusal(tmp_path, PRED, pause, observed)
+
+    _rows(tmp_path, leaf=False, review_investigation=True, pending_review=True)
+    observed, refused = refusal()
+    assert len(observed["runs"]) == 3 and all(run["independent_review"] is True for run in observed["runs"])
+    assert refused is None
+
+    _rows(tmp_path, review_with_snapshot=True, review_investigation=True, pending_review=True)
+    _pending(tmp_path, "inv-helper", source="delegated_subagent")
+    dc._CUSTODY.clear()
+    observed, refused = refusal()
+    assert len(observed["runs"]) == 6, "the observation itself is never filtered"
+    assert refused["error"] == "external_runs_unsettled"
+    assert sorted(run["run_id"] for run in refused["runs"]) == ["", "run-leaf", "run-review-snapshot"]
+    # An owner Pause's closed fence over this saved row leaves a started panel's run to its panel, as under the
+    # Pause's own row; the work's own run and its own unbound start hold either way.
+    fenced = _resume_custody_refusal(tmp_path, PRED, pause, observed, True)
+    assert sorted(run["run_id"] for run in fenced["runs"]) == ["", "run-leaf"]

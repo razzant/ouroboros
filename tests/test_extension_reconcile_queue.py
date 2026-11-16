@@ -27,6 +27,7 @@ from ouroboros.skill_loader import save_enabled
 
 from tests._extension_loader_shared import (
     _prepare_extension,
+    extension_tool_answer,
 )
 from tests._extension_loader_shared import (  # noqa: F401  (autouse fixture applies on import)
     _clear_loader_state,
@@ -299,3 +300,208 @@ def test_a_failing_skill_counts_its_attempts_on_one_marker_and_records_the_termi
     events = [json.loads(line) for line in (drive_root / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [(row["type"], row["skill"], row["attempts"]) for row in events] == [
         ("extension_reconcile_failed", "broken", MAX_ATTEMPTS)]
+
+
+_DRIVER_PLUGIN = (
+    "import os\n"
+    "from playwright._impl._driver import compute_driver_executable\n\n"
+    "def register(api):\n"
+    "    node, _cli = compute_driver_executable()  # the SDK's own resolution, as a real in-process launch does\n"
+    "    if not os.path.isfile(node):\n"
+    "        raise RuntimeError('Playwright driver Node missing: ' + node)\n"
+    "    api.register_tool('driver', lambda ctx: node, description='driver node', schema={})\n"
+)
+
+
+def test_an_in_process_extension_failing_only_while_node_prepares_recovers_once_it_is_ready(tmp_path, monkeypatch):
+    """Astra R2: the boot prepared Node but never selected it into the server's environment, so an in-process
+    extension's Playwright ran the SDK's own Node. The step now selects locally before extensions load; when the pin's
+    Node still has to be downloaded, such an extension fails on the planned path (never the SDK's Node) and recovers
+    through the server's reconcile queue once the boot's preparation publishes exactly that path."""
+    import os
+
+    from playwright._impl._driver import compute_driver_executable
+
+    from ouroboros import claudexor_runtime as runtime, node_runtime, server_boot
+    from ouroboros.extension_registry_state import _load_failures
+    from tests.test_claudexor_node_generations import _fixture
+
+    original = os.environ.get("OUROBOROS_SERVER_PROCESS_PID")
+    init_server_process_pid(os.getpid())
+    try:
+        for key in (node_runtime.PLAYWRIGHT_NODE_ENV, node_runtime.SELECTED_DRIVER_NODE_ENV):
+            monkeypatch.delenv(key, raising=False)
+        pin, fetches = _fixture(tmp_path, monkeypatch)
+        manager = runtime.ClaudexorRuntimeManager(pin)
+        monkeypatch.setattr(runtime, "get_runtime_manager", lambda: manager)
+        sdk_own = compute_driver_executable()[0]
+        assert sdk_own.endswith(("driver/node", "driver\\node.exe"))  # what an unselected server would launch
+        fixture_fetch = runtime.fetch_node_archive
+        monkeypatch.setattr(runtime, "fetch_node_archive", lambda *_a: (_ for _ in ()).throw(
+            runtime.ClaudexorRuntimeError("runtime_node_download_failed", "offline")))
+        loaded, repo_root, drive_root = _prepare_extension(tmp_path, "pwdriver", _DRIVER_PLUGIN, permissions=["tool"])
+        # Still loading when the preparation reads (its failure would be recorded only after): enabled, not live.
+        late = _prepare_extension(tmp_path, "pwlate", _DRIVER_PLUGIN, permissions=["tool"])[0]
+        save_enabled(drive_root, _prepare_extension(tmp_path, "pwoff", _DRIVER_PLUGIN, permissions=["tool"])[0].name,
+                     False)  # an owner's OFF is never asked again
+        monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(repo_root))  # the server's own skills checkout
+
+        assert server_boot.prepare_pinned_node(drive_root) is None  # local only under pytest
+        planned = runtime.ClaudexorRuntimeManager.planned_node(pin)
+        assert compute_driver_executable()[0] == planned != sdk_own and not os.path.exists(planned)
+        cold = extension_loader.reconcile_extension(loaded.name, drive_root, lambda: {}, repo_path=str(repo_root))
+        assert cold["reason"] == "load_error" and planned in cold["load_error"] and loaded.name in _load_failures
+        assert server_boot.finish_pinned_node(drive_root) == ""  # offline: logged, nothing published or asked
+        assert list_extension_reconcile_requests(drive_root) == []
+
+        monkeypatch.setattr(runtime, "fetch_node_archive", fixture_fetch)
+        assert server_boot.finish_pinned_node(drive_root) == planned  # the path the extension was given
+        assert sorted(row["skill"] for row in list_extension_reconcile_requests(drive_root)) == [loaded.name, late.name]
+        processed = process_extension_reconcile_requests(drive_root, lambda: {}, repo_path=str(repo_root))
+        assert [row["action"] for row in processed] == ["extension_loaded"] * 2 and loaded.name not in _load_failures
+        assert extension_tool_answer(drive_root, loaded.name, "driver") == planned
+        assert fetches and not runtime.managed_runtime_dir(pin).exists()  # Node only, never the engine
+    finally:
+        init_server_process_pid(int(original) if original else -1)
+        if original is None:
+            os.environ.pop("OUROBOROS_SERVER_PROCESS_PID", None)
+
+
+def test_an_acting_consumer_recovers_the_pinned_node_after_a_failed_boot_preparation(tmp_path, monkeypatch):
+    """R5 (Opus, Fable, Astra): after a failed boot preparation only a browser call or the next boot tried again, so
+    skills, companions and the attach role waited until a restart. Now an acting consumer that finds the pin
+    unprepared asks once (``server_boot.request_pinned_node``, single-flight, no timer): the network back, that one
+    request prepares Node only and asks the reconcile queue again for every enabled extension that is not live; a
+    disabled one is never asked and the queue's pass leaves it off. A lookup, an availability or list read, or an
+    environment never asks."""
+    import os
+    import threading
+
+    from ouroboros import claudexor_runtime as runtime
+    from ouroboros import node_runtime, server_boot
+    from ouroboros.tools import skill_exec
+    from tests.test_claudexor_node_generations import _fixture
+
+    original = os.environ.get("OUROBOROS_SERVER_PROCESS_PID")
+    init_server_process_pid(os.getpid())
+    try:
+        for key in (node_runtime.PLAYWRIGHT_NODE_ENV, node_runtime.SELECTED_DRIVER_NODE_ENV,
+                    node_runtime.CARRIED_NODE_ENV):
+            monkeypatch.delenv(key, raising=False)
+        pin, fetches = _fixture(tmp_path, monkeypatch)
+        manager = runtime.ClaudexorRuntimeManager(pin)
+        monkeypatch.setattr(runtime, "get_runtime_manager", lambda: manager)
+        monkeypatch.setattr("ouroboros.platform_layer.bundled_resource_bases", lambda: [])  # no shipped copy here
+        fixture_fetch = runtime.fetch_node_archive
+        monkeypatch.setattr(runtime, "fetch_node_archive", lambda *_a: (_ for _ in ()).throw(
+            runtime.ClaudexorRuntimeError("runtime_node_download_failed", "offline")))
+        loaded, repo_root, drive_root = _prepare_extension(tmp_path, "pwdriver", _DRIVER_PLUGIN, permissions=["tool"])
+        off = _prepare_extension(tmp_path, "pwoff", _DRIVER_PLUGIN, permissions=["tool"])[0]
+        save_enabled(drive_root, off.name, False)
+        monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(repo_root))
+        planned = runtime.ClaudexorRuntimeManager.planned_node(pin)
+        assert server_boot.finish_pinned_node(drive_root) == ""  # the boot's preparation failed offline
+        assert fetches == [] and not os.path.exists(planned)
+
+        # Passive work never asks: lookups, child environments, the selector itself.
+        asked = []
+        real_request = server_boot.request_pinned_node
+        monkeypatch.setattr(server_boot, "request_pinned_node", lambda root=None: asked.append(root))
+        node_runtime.forward_playwright_node({})
+        assert node_runtime.discovered_host_node() is None and node_runtime.pinned_node_wait() == (True, planned)
+        selected, reason = node_runtime.select_skill_node_runtime()
+        assert selected == "" and "pinned:" in reason and asked == []
+        assert skill_exec._resolve_runtime_binary("node") == (None, reason) and asked == []  # a lookup never asks
+        # R7 (Opus): that lookup is also the availability every context build and list_skills reads; a passive read of
+        # an enabled, reviewed node script skill asked for a preparation each time. Only its permitted run asks.
+        from ouroboros.skill_loader import discover_skills, summarize_skills
+        from ouroboros.tools.registry import ToolContext
+        from tests.test_skill_exec import _build_skill, _mark_reviewed_and_enabled, _valid_script_manifest
+
+        script = _build_skill(repo_root, "nodescript", manifest=_valid_script_manifest("nodescript", runtime="node"))
+        _mark_reviewed_and_enabled(drive_root, script, "nodescript")
+        monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+        listed = next(skill for skill in discover_skills(drive_root) if skill.name == "nodescript")
+        assert listed.enabled and not listed.available_for_execution  # waiting, honestly unavailable
+        assert "nodescript" in json.dumps(summarize_skills(drive_root)) and asked == []
+        (tmp_path / "repo").mkdir()
+        ran = skill_exec._handle_skill_exec(ToolContext(repo_dir=tmp_path / "repo", drive_root=drive_root),
+                                            skill="nodescript", script="scripts/hello.py")
+        assert "SKILL_EXEC_ERROR" in ran and "pinned:" in ran and asked == [None], ran  # the run asks, once
+        monkeypatch.setattr(server_boot, "request_pinned_node", real_request)
+
+        monkeypatch.setattr(runtime, "fetch_node_archive", fixture_fetch)  # the network is back
+        monkeypatch.delenv("OUROBOROS_PYTEST_ACTIVE")  # this test runs the real request
+        gate = threading.Event()
+        finish = server_boot.finish_pinned_node
+        outcomes = []
+        monkeypatch.setattr(server_boot, "finish_pinned_node", lambda root: gate.wait(30) and outcomes.append(
+            (root, finish(root))))
+        first = server_boot.request_pinned_node(drive_root)  # a consumer's request names this process's data root
+        assert first is not None and server_boot.request_pinned_node(drive_root) is None  # single-flight while it runs
+        gate.set()
+        first.join(60)
+        assert not first.is_alive() and outcomes == [(drive_root, planned)], outcomes
+        assert os.path.isfile(planned) and len(fetches) == 1
+        assert sorted(row["skill"] for row in list_extension_reconcile_requests(drive_root)) == [loaded.name]
+        processed = process_extension_reconcile_requests(drive_root, lambda: {}, repo_path=str(repo_root))
+        assert [row["action"] for row in processed] == ["extension_loaded"]
+        assert extension_tool_answer(drive_root, loaded.name, "driver") == planned
+        monkeypatch.setattr(node_runtime, "_probe_node_version_outcome", lambda path, timeout_sec=10: (
+            (pin.node_version, "") if path == planned else ("", "exit:1")))  # the fixture archive's Node "runs"
+        assert node_runtime.select_skill_node_runtime() == (planned, "bundled")  # the waiting skill runs now
+        assert not runtime.managed_runtime_dir(pin).exists()  # Node only, never the engine
+    finally:
+        init_server_process_pid(int(original) if original else -1)
+        if original is None:
+            os.environ.pop("OUROBOROS_SERVER_PROCESS_PID", None)
+
+
+def test_only_a_skill_exec_call_that_would_run_asks_for_the_pinned_node(tmp_path, monkeypatch):
+    """R8 (the nanny's reading of the R7 fix): the run site asked for the pin's Node before its own declared-script,
+    argument and grant checks, so an undeclared script, malformed args or a missing grant also started a preparation.
+    Those refusals, and the earlier ones (disabled, edited since review), ask nothing; a call that would run asks once
+    and keeps the reason it waits. Without a pin, or with an unreadable one, nothing is asked."""
+    from ouroboros import node_runtime, platform_layer, server_boot
+    from ouroboros.skill_loader import save_enabled
+    from ouroboros.tools import skill_exec
+    from tests.test_skill_exec import _build_skill, _make_ctx, _mark_reviewed_and_enabled, _valid_script_manifest
+
+    skills_root = tmp_path / "skills"
+    ctx = _make_ctx(tmp_path)
+    for name, extra in (("nodescript", ""), ("nodegrant", "permissions: [inject_chat]\n"), ("nodestale", "")):
+        manifest = _valid_script_manifest(name, runtime="node").replace("scripts:\n", extra + "scripts:\n", 1)
+        _mark_reviewed_and_enabled(ctx.drive_root, _build_skill(skills_root, name, manifest=manifest), name)
+    (skills_root / "nodestale" / "scripts" / "hello.py").write_text("print('edited after review')\n", encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    reason = "pinned:24.22.3:not_prepared (planned /planned/node)"
+    monkeypatch.setattr(platform_layer, "select_skill_node_runtime", lambda timeout_sec=10: ("", reason))
+    monkeypatch.setattr(node_runtime, "pinned_node_wait", lambda: (True, "/planned/node"))
+    asked = []
+    monkeypatch.setattr(server_boot, "request_pinned_node", lambda root=None: asked.append(root))
+
+    def run(skill="nodescript", script="scripts/hello.py", **kwargs):
+        return skill_exec._handle_skill_exec(ctx, skill=skill, script=script, **kwargs)
+
+    refusals = {
+        "undeclared script": (run(script="scripts/other.py"), "is not a declared script"),
+        "args as one string": (run(args="alpha"), "not a single string"),
+        "a non-scalar arg": (run(args=[{"x": 1}]), "is not allowed"),
+        "missing grant": (run(skill="nodegrant"), "SKILL_EXEC_GRANT_REQUIRED"),
+        "edited since review": (run(skill="nodestale"), "was edited since the last review"),
+    }
+    save_enabled(ctx.drive_root, "nodescript", False)
+    refusals["disabled"] = (run(), "is disabled")
+    save_enabled(ctx.drive_root, "nodescript", True)
+    for case, (answer, expected) in refusals.items():
+        assert expected in answer and "declared runtime" not in answer, (case, answer)
+    assert asked == []  # no refused call asked for the pin's Node
+
+    waiting = run(args=["alpha", 2])  # a call that would run: it waits, naming why, and asks once
+    assert waiting == ("⚠️ SKILL_EXEC_ERROR: skill 'nodescript' declared runtime 'node' has no available binary "
+                       f"on PATH. ({reason})")
+    assert asked == [None]
+    for pin in ((False, ""), (True, "")):  # no pin, or no archive for this host; an unreadable pin
+        monkeypatch.setattr(node_runtime, "pinned_node_wait", lambda pin=pin: pin)
+        assert "declared runtime 'node' has no available binary" in run() and asked == [None]

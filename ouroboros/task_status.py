@@ -229,7 +229,8 @@ def queue_snapshot_observation(snapshot: Dict[str, Any], *, boot: bool = False) 
     """Date the existing queue observation, without asserting current capacity.
 
     Context, scheduling receipts and cancellation observations share the same
-    freshness bound as live ownership. Counts belong to the captured snapshot;
+    freshness bound as live ownership. Row counts belong to the captured snapshot,
+    the pool's counts to the certificate this stamp dates (``load_queue_document``);
     even a fresh observation is not a reservation or a continuously live view.
     """
     stamp = queue_stamp(snapshot, boot=boot)
@@ -693,6 +694,8 @@ def stored_list_order_is_final(result: Dict[str, Any]) -> bool:
     Retry and replica reads, workspace finalization and every nonterminal/unknown
     status still need the ordinary effective reader. A later body write rederives
     the fact; a pre-projection writer leaves NULL. No external state is consulted.
+    The task list and ``body_candidate._recorded_terminal`` answer from the column, so a
+    change to this predicate must leave stored rows to be derived again.
     """
     status = result.get("status")
     ts = result.get("ts")
@@ -1090,7 +1093,7 @@ def effective_task_result(
         child_overlay = project_replica_task_result_fields(result, child_result)
         for key, value in child_overlay.items():
             if key in {"task_id", "parent_task_id", "root_task_id", "session_id", "actor_id", "delegation_role"}:
-                continue
+                continue  # never from a replica: ``task_store.stated_roots`` relies on the stated root
             if key in parent_authoritative_fields:
                 continue
             if key == "artifacts":
@@ -1338,16 +1341,24 @@ def find_child_tasks(
     exclude_task_id: str = "",
     scope: str = "subtree",
     materialize_artifacts: bool = True,
+    settled: Iterable[str] = (),
 ) -> List[Dict[str, Any]]:
     """Project matching subagents, including retry lineage and live queue rows.
 
     Subtree includes direct children OR members of the named root; direct scope
     includes only children of parent_task_id. A leaf must not absorb siblings.
+    ``settled`` names tasks the caller needs no row of (a sleeper's readiness check: its cursor holds their
+    ends): a lineage row of one that no retry or supersession pointer redirects (its effective row is its own) and
+    that no queued row names is not fetched, and comes back as ``{"task_id": id}`` alone unless another row projects
+    that id; unread, its role and parent are unproven (only its own row is that proof). Every other row is
+    projected as without ``settled``.
     """
     parent = str(parent_task_id or "").strip()
     root = str(root_task_id or "").strip()
     excluded = str(exclude_task_id or "").strip()
     direct_only = str(scope or "subtree").strip().lower() == "direct"
+    unread = {str(task_id) for task_id in settled if str(task_id or "")}
+    skipped: set = set()
 
     # One queue read serves the overlay below and seeds the store's lineage closure: a queued item
     # naming the parent or root may carry its parent/role only in the queue. The store returns this
@@ -1357,11 +1368,13 @@ def find_child_tasks(
     queued = [(status, item, item["task"] if isinstance(item.get("task"), dict) else {})
               for group, status in (("pending", STATUS_SCHEDULED), ("running", STATUS_RUNNING))
               for item in snapshot.get(group) or [] if isinstance(item, dict)]
+    unread -= {str(item.get("id") or task.get("id") or "") for _status, item, task in queued}  # read as ever
     members = {identity for _status, item, task in queued
                if (parent and str(task.get("parent_task_id") or "").strip() == parent)
                or (not direct_only and root and str(task.get("root_task_id") or "").strip() == root)
                for identity in (item.get("id") or item.get("task_id"), item.get("id") or task.get("id"))}
-    selected = select_lineage(pathlib.Path(drive_root), parent, root, direct_only=direct_only, queue_members=members)
+    selected = select_lineage(pathlib.Path(drive_root), parent, root, direct_only=direct_only, queue_members=members,
+                              **({"unread": unread, "skipped": skipped} if unread else {}))
     events_index = _EventsTailIndex(pathlib.Path(drive_root))
     rows: Dict[str, Dict[str, Any]] = {}
     for row in (
@@ -1413,6 +1426,8 @@ def find_child_tasks(
             elif not combined.get(key) and value:
                 combined[key] = value
         rows[tid] = combined
+    for tid in skipped - {excluded}:
+        rows.setdefault(tid, {"task_id": tid})
     return sorted(rows.values(), key=lambda item: (str(item.get("ts") or ""), str(item.get("task_id") or "")))
 
 

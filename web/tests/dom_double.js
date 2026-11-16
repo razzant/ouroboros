@@ -89,7 +89,14 @@ class Node extends Events {
     set tabIndex(value) { this.attrs.set('tabindex', String(value)); }
     get textContent() { return this._text + this.children.map((child) => child.textContent).join(''); }
     set textContent(value) { this.children = []; this._text = String(value ?? ''); }
-    set innerHTML(value) { this.children = []; this._text = ''; this.html = String(value); }
+    set innerHTML(value) {
+        // A document made with `parseHtml` builds the markup into nodes, as a browser would (appendHtml below).
+        if (this.ownerDocument?.parseHtml) for (const child of [...this.children]) this.removeChild(child);
+        this.children = [];
+        this._text = '';
+        this.html = String(value);
+        if (this.ownerDocument?.parseHtml) appendHtml(this, this.html);
+    }
     get innerHTML() { return this.html || ''; }
     setAttribute(key, value) { this.attrs.set(key, String(value)); }
     getAttribute(key) {
@@ -101,7 +108,11 @@ class Node extends Events {
         return this.attrs.get(key) ?? null;
     }
     hasAttribute(key) { return this.getAttribute(key) !== null; }
-    removeAttribute(key) { this.attrs.delete(key); }
+    removeAttribute(key) {  // a `data-*` drawn from markup lives in the dataset: it goes with the attribute, as in a browser
+        this.attrs.delete(key);
+        if (key.startsWith('data-')) delete this.dataset[key.slice(5).replace(/-([a-z])/g, (_all, c) => c.toUpperCase())];
+    }
+    toggleAttribute(key, force = !this.hasAttribute(key)) { if (force) this.attrs.set(key, ''); else this.removeAttribute(key); return force; }
     matchesCompound(c) {
         if (c.tag && c.tag !== this.tagName.toLowerCase()) return false;
         if (c.disabled && !this.disabled) return false;
@@ -171,13 +182,17 @@ class Node extends Events {
     get offsetWidth() { return this.rect?.width ?? 0; }
     get offsetHeight() { return this.rect?.height ?? 0; }
     focus() { if (this.isConnected) this.ownerDocument.activeElement = this; }
+    select() { this.selected = true; }
     click() { if (!this.disabled) this.emit('click', { target: this }); }
     dispatchEvent(event) { return !this.emit(event.type, { native: event }).defaultPrevented; }
 }
 
-/** A document with a body, focus, selection, capture listeners and a window for popup geometry. */
-export function domDouble() {
+/** A document with a body, focus, selection, capture listeners and a window for popup geometry. With `parseHtml` an
+ *  `innerHTML` assignment builds its markup into nodes (appendHtml), for a module that queries what it wrote (a grid's
+ *  cells, a strip's segments); without it the markup is only kept as the string, as before. */
+export function domDouble({ parseHtml = false } = {}) {
     const doc = new Events();
+    doc.parseHtml = parseHtml;
     doc.captures = new Map();
     const bubble = doc.addEventListener.bind(doc);
     doc.addEventListener = (type, listener, options) => {
@@ -200,6 +215,8 @@ export function domDouble() {
     doc.createElement = (tag) => new Node(doc, tag);
     doc.body = new Node(doc, 'body');
     doc.getElementById = (id) => doc.body.descendants().find((node) => node.id === id) || null;
+    doc.querySelectorAll = (selector) => doc.body.querySelectorAll(selector);
+    doc.createTextNode = (text) => Object.assign(new Node(doc, '#text'), { textContent: text });
     doc.activeElement = doc.body;
     return { doc, el: (tag = 'div', { className = '', attrs = {}, dataset = {}, text = '' } = {}, ...children) => {
         const node = new Node(doc, tag, attrs);

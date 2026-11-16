@@ -53,6 +53,117 @@ def test_physical_headroom_parent_slots_and_other_runs_cap_the_same_budget(monke
     assert budget.admission(requested, env=env) == budget.Admission(expected, host or budget.HostRuns())
 
 
+def _lock_is_free(ledger: Path) -> bool:
+    """Whether another holder could take the ledger's lock now (a second descriptor: the lock is per descriptor)."""
+    descriptor = os.open(ledger / "ledger.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        pl.file_lock_exclusive_nb(descriptor)
+    except OSError:
+        return False
+    else:
+        pl.file_unlock(descriptor)
+        return True
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.parametrize("clearing, workers, how", [
+    (False, 4, "not_critical"), (None, 4, "pressure_unknown"), ("no reading", 1, "memory_unknown")],
+    ids=["not-critical", "unread-verdict", "no-reading"])
+def test_critical_pressure_holds_a_new_run_with_no_lock_row_or_census_until_a_reading_clears(
+        tmp_path, monkeypatch, clearing, workers, how):
+    """Owner choice, 2026-11-14: no new run starts while the macOS kernel confirms critical pressure. ``reserve``
+    releases the ledger's lock without a row, says the wait and its end with each reading's date, re-reads only the
+    machine at the sample interval (no census, no ledger read: other runs' reservations go on meanwhile), then
+    reserves as usual at the first reading that is not critical, unknown included (it admits as before, said as
+    unknown, never as normal); its admission carries the wait and how it ended."""
+    ledger, me = tmp_path / "slots", os.getpid()
+    monkeypatch.setattr(budget, "_ledger_dir", lambda: ledger)
+    monkeypatch.delenv(budget.NESTED_WORKERS_ENV, raising=False)
+    monkeypatch.delenv(budget.WORKERS_ENV, raising=False)  # the operator's own request cap is not this test's subject
+    monkeypatch.setattr(config, "TEST_PROCESS_SAMPLE_SEC", 0.01)
+    censuses, seen, said = [], [], []
+    monkeypatch.setattr(budget, "_process_table", lambda: censuses.append(len(seen)) or ([], ""))
+    verdicts = [True, True, True, clearing, clearing]  # the first and the last readings: the admissions under the lock
+
+    def physical_memory():
+        seen.append((_lock_is_free(ledger), sorted(path.name for path in ledger.glob("*.json"))))
+        verdict = verdicts.pop(0)
+        return None if verdict == "no reading" else host_memory.MemorySnapshot(2 ** 40, 2 ** 40, verdict)
+
+    monkeypatch.setattr(budget, "physical_memory", physical_memory)
+    told = []
+    admitted, lease = budget.reserve("run_tests.py focused", 4, say=said.append, tell=told.append)
+    try:
+        assert seen == [(False, []), (True, []), (True, []), (True, []), (False, [])], "no lock, no row while it waits"
+        assert censuses == [1, 5], "one census an admission, none while it waits"
+        since, cleared, ended = admitted.waited
+        assert (admitted.workers, admitted.critical_at, since <= cleared, ended) == (workers, "", True, how)
+        unknown = "critical memory pressure no longer confirmed: the {} is unreadable (read {}), an unknown that admits as before"
+        assert said == [
+            f"waiting to start: the kernel reports critical memory pressure (read {since}); work already running "
+            "continues; this run starts when a reading is no longer critical; Ctrl-C or Stop ends the wait",
+            {"not_critical": f"memory pressure no longer critical (read {cleared})",
+             "pressure_unknown": unknown.format("kernel's level", cleared),
+             "memory_unknown": unknown.format("machine's memory", cleared)}[how]
+            + f"; starting after waiting since {since}"], "an unknown is said as unknown, never as no longer critical"
+        assert told == [budget.OWNER_WAIT["waiting"], budget.OWNER_WAIT[how]], "the owner's words: no date, no Ctrl-C"
+        assert json.loads((ledger / f"{me}.json").read_text(encoding="utf-8"))["workers"] == workers == lease.workers
+    finally:
+        lease.close()
+
+
+def test_a_stop_reader_is_read_only_while_a_run_waits_and_only_true_ends_the_wait(tmp_path, monkeypatch):
+    """Opus, panel on PR3479: an in-process turn's Stop kills no process, so its wait reads a ``stop`` reader once a
+    sample. An unknown (None) or False answer stops nothing; True ends the wait with ``WaitStopped``, said on the
+    run's stderr, with no lock or row held; a run that does not wait never reads it."""
+    ledger = tmp_path / "slots"
+    monkeypatch.setattr(budget, "_ledger_dir", lambda: ledger)
+    monkeypatch.delenv(budget.NESTED_WORKERS_ENV, raising=False)
+    monkeypatch.setattr(budget, "_process_table", lambda: ([], ""))
+    monkeypatch.setattr(config, "TEST_PROCESS_SAMPLE_SEC", 0.01)
+    monkeypatch.setattr(budget, "physical_memory", lambda: host_memory.MemorySnapshot(2 ** 40, 2 ** 40, True))
+    answers, said, told = [None, False, True], [], []
+
+    def stop():
+        assert _lock_is_free(ledger) and not list(ledger.glob("*.json")), "a stop is read with nothing held"
+        return answers.pop(0)
+
+    with pytest.raises(budget.WaitStopped):
+        budget.reserve("hermetic gate", say=said.append, tell=told.append, stop=stop)
+    assert not answers and _lock_is_free(ledger) and not list(ledger.glob("*.json"))
+    assert said[-1].startswith("a stop of this work ended the wait for memory (read ")
+    assert said[-1].endswith("); nothing started")
+    assert told == [budget.OWNER_WAIT["waiting"]]
+    monkeypatch.setattr(budget, "physical_memory", lambda: host_memory.MemorySnapshot(2 ** 40, 2 ** 40, False))
+    admitted, lease = budget.reserve("hermetic gate", say=said.append, stop=lambda: pytest.fail("read outside a wait"))
+    lease.close()
+    assert admitted.waited == ()
+
+
+@pytest.mark.parametrize("reading, nested", [
+    (host_memory.MemorySnapshot(2 ** 40, 2 ** 40, False), False),  # normal or warn: warn refuses nothing
+    (host_memory.MemorySnapshot(2 ** 40, 2 ** 40, None), False),   # an unread verdict is unknown, never critical
+    (None, False),                                                 # no reading at all: one worker, as before
+    (host_memory.MemorySnapshot(2 ** 40, 2 ** 40, True), True),    # a child of a running run is that running work
+], ids=["not-critical", "unread-verdict", "no-reading", "nested-child"])
+def test_only_a_confirmed_critical_verdict_holds_a_new_run(tmp_path, monkeypatch, reading, nested):
+    monkeypatch.setattr(budget, "_ledger_dir", lambda: tmp_path / "slots")
+    monkeypatch.setattr(budget, "_process_table", lambda: ([], ""))
+    monkeypatch.setattr(budget, "physical_memory", lambda: reading)
+    monkeypatch.setattr(budget, "_until_not_critical", lambda *_: pytest.fail("this run waited"))
+    monkeypatch.delenv(budget.WORKERS_ENV, raising=False)  # the operator's own request cap is not this test's subject
+    if nested:
+        monkeypatch.setenv(budget.NESTED_WORKERS_ENV, "2")
+    else:
+        monkeypatch.delenv(budget.NESTED_WORKERS_ENV, raising=False)
+    said = []
+    admitted, lease = budget.reserve("run_tests.py focused", 4, say=said.append, tell=said.append)
+    lease.close()
+    assert (admitted.critical_at, admitted.waited, said) == ("", (), [])
+    assert admitted.workers == (2 if nested else 1 if reading is None else 4)
+
+
 def test_the_ledger_counts_live_leases_and_the_census_counts_unleased_roots(tmp_path, monkeypatch):
     """A live lease outside this lineage holds its slots; a dead, reborn or unreadable row counts nothing
     and the next writer unlinks it; every pytest/node root nobody leased counts one slot, while a nested
@@ -257,7 +368,7 @@ def test_preflight_keeps_the_admission_it_measured_before_the_run(tmp_path, monk
     # The admission's facts travel with the run's evidence (`result.json` `workers`).
     assert preflight_runner.recorded_admission(tmp_path) == {
         "workers": 2, "held_by_other_runs": 4, "leases": [[100, "run_tests.py overlapped"]],
-        "unleased_roots": [[700, "python3 -m pytest"]], "note": ""}
+        "unleased_roots": [[700, "python3 -m pytest"]], "note": "", "memory_wait": None}
 
 
 def test_local_node_lane_uses_the_same_cpu_and_memory_budget(tmp_path, monkeypatch):
@@ -275,8 +386,10 @@ def test_local_node_lane_uses_the_same_cpu_and_memory_budget(tmp_path, monkeypat
     monkeypatch.setattr(preflight_node, "resolve_node", lambda: "/fake/node")
     monkeypatch.setattr(preflight_node, "probe_node_version", lambda node: "24.0.0")
     calls = []
-    monkeypatch.setattr(runner, "_run", lambda label, argv, cwd: calls.append((argv, cwd)) or 0)
-    assert runner._node_lane() == 0
+    # The lane is built from the admission its pass reserves (``_run``), here that admission alone.
+    monkeypatch.setattr(runner, "_run", lambda label, argv, cwd, node: calls.append(
+        (argv(budget.admission(runner._cpu_default())), cwd)) or 0)
+    assert runner._node_lane() == (0, "/fake/node")
     assert calls == [(["/fake/node", "--test", "--test-timeout=300000", "--test-concurrency=3", "tests/a.test.js",
                        "tests/b.test.js"],
                       runner.REPO / "web")]

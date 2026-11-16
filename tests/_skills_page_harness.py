@@ -179,7 +179,7 @@ def capture(page, browser_name, width, state):
     if location := os.environ.get("OUROBOROS_UI_EVIDENCE_OUT"):
         target = Path(location)
         target.mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=str(target / f"skills-{browser_name}-{width}-{state}.png"))
+        page.screenshot(path=str(target / f"skills-{browser_name}-{width}-{state}.png"), animations="disabled")
 
 
 def no_overflow(page) -> bool:

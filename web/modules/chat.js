@@ -380,7 +380,7 @@ export function createChatInstance({
     // Local user submissions awaiting server confirmation (clientMessageId
     // -> { clientMessageId, timestamp }).
     const pendingSubmissions = new Map();
-    const hostStart = createHostStart(); // В9 readiness and boot phases; a disconnect forgets both
+    const hostStart = createHostStart(); // В9 readiness and boot phases; a disconnect and a reconnect forget both
     // Bounded conclusions retain known outcomes for later cards; reusable slots clear on settlement.
     const concludedDirectActivities = new Map();
     const CONCLUDED_ACTIVITY_LEDGER_MAX = 200;
@@ -2245,7 +2245,12 @@ export function createChatInstance({
         }
     }
     function applyHistoryMessages(messages, { fromReconnect = false, archived = false } = {}) {
-        const knownCards = new Set(liveCardRecords.keys());
+        // A returning room reads arrivals instead of receiving socket frames. Only newly drawn content marks ↓:
+        // the first page, older pages and adopting a stored identity for already seen live words stay quiet.
+        const reportActivity = historyLoaded && !archived;
+        const knownRows = reportActivity ? new Set(messagesDiv.children) : null;
+        const knownCards = new Map([...liveCardRecords].map(([id, record]) => [id, reportActivity
+            ? { projection: captureLiveCardProjection(record), items: record.items.length, source: record.latestSourceTs } : null]));
         _historyReplayActive = true;
         _historyAppending = archived;
         liveCardBound.beginReplay();
@@ -2467,14 +2472,22 @@ export function createChatInstance({
                 const dirty = [...liveCardRecords.values()].filter(record => record._timelineDirty);
                 measure(() => { const kept = keepSelection(document); return dirty.map(record => ({ scroll: timelineScroll(record), kept })); },
                     (before) => dirty.forEach((record, index) => renderLiveCardTimeline(record, before[index])));
-                return true;
-            });
+                return reportActivity && ([...messagesDiv.children].some(node => node.classList.contains('chat-bubble') && !knownRows.has(node))
+                    || [...liveCardRecords].some(([id, record]) => {
+                        const before = knownCards.get(id);
+                        // Reconciliation can change liveness or placement of words already seen; that is no arrival.
+                        return record.root?.isConnected && (record.items.length > (before?.items || 0)
+                            || (!before?.projection || isoMicros(record.latestSourceTs) > isoMicros(before.source))
+                                && liveCardProjectionChanged(before?.projection || null, record));
+                    }));
+            }, { remoteContent: reportActivity });
         } finally {
             _historyRow = null;
             _historyReplayActive = false;
             _historyAppending = false;
             replayKeys = null; replaySelection = null;
         }
+        portals.refresh();
         syncChatStatus();
     }
 
@@ -3409,15 +3422,19 @@ export function createChatInstance({
     let wsHasConnectedOnce = false;
 
     onWs('open', (msg) => {
-        const openedVisit = visit;
-        mainWaiting?.setConnected(true);
-        refreshHeaderControlState();
-        syncChatStatus();
+        const openedVisit = visit, readOnOpen = recentRequest;
         // The socket's previouslyConnected covers newly mounted Projects too;
         // per-instance state is only the fallback for legacy open events.
         const isReconnect = typeof msg?.previouslyConnected === 'boolean'
             ? msg.previouslyConnected
             : wsHasConnectedOnce;
+        // A real reconnect forgets the start as the close did: a body polled while the socket was down may be the
+        // server's from before a restart. A room's return (`resumed`) is none: `leave` forgot an outage it left in,
+        // `stay` one it slept through.
+        if (isReconnect && !msg?.resumed) hostStart.forget();
+        mainWaiting?.setConnected(true);
+        refreshHeaderControlState();
+        syncChatStatus();
         // A changed-code reload owes one notice. Main exists from startup: if away at first open, it hears only
         // resume's synthetic reconnect but still owes that notice. A Project mounted later owes none.
         if (isReconnect && !wsHasConnectedOnce && !isMain) pendingRestartNotice = '';
@@ -3435,9 +3452,11 @@ export function createChatInstance({
             clearReloadParams();
         };
         loadUiPreferences()
-            // Reconnect refetches lost task_done; first open shares idle-gated hydration.
-            .then(() => (destroyed || openedVisit !== visit ? false : isReconnect ? syncHistory({ fromReconnect: true })
-                : waitForHydrationWindow().then(awaitInitialHydration)))
+            // A return's paint receipt may have read the newest page while preferences loaded (even a refused read
+            // counts). Share that work; a real reconnect still owes a read newer than any request it interrupted.
+            .then(() => (destroyed || openedVisit !== visit ? false
+                : msg?.resumed && recentRequest > readOnOpen ? historySyncPromise || historyPager.whenIdle()
+                : isReconnect ? syncHistory({ fromReconnect: true }) : waitForHydrationWindow().then(awaitInitialHydration)))
             .then(settled, settled);
     });
 
@@ -3463,6 +3482,7 @@ export function createChatInstance({
             return changed;
         });
         hostStart.forget();
+        portals.retire();
         hideTypingIndicatorOnly();
         syncChatStatus();
         syncHeaderControlState({ accounting: { available: false } });
@@ -3477,7 +3497,7 @@ export function createChatInstance({
     roomWork = createRoomWork({ page, asPanel, ws, statusBadge, messagesDiv, reading, stateSnapshots, revealQuestion,
         works: () => workState, liveCardRecords, pendingSubmissions, pendingSuggestedNames,
         cancelRunFromCard, refreshHeaderControlState, captureVisibleTimelineAnchor, restoreVisibleTimelineAnchor,
-        historyPager, showLatest, hostReady: hostStart.ready });
+        historyPager, showLatest, hostReady: hostStart.ready, hostBoot: () => hostStart.status().bootPhase });
     // Main's bar: Restart, Panic, the budget and the consciousness chip; a Project's bar is app.js's.
     header = asPanel ? null : createRoomHeader({ bar: pageHeader, ws, shade: roomWork, openDashboardTab,
         refreshState: refreshHeaderControlState });
@@ -3497,6 +3517,7 @@ export function createChatInstance({
         revealQuestion,
         revealSource: replies.reveal,
         drawsSource: replies.draws,
+        search: replies.search,
         cancelHistoryPaint: readReceipt.cancel,
         // app.js offers each room its /api/state snapshots (it polls); a room away takes none, catching up on return.
         hydrateStateSnapshot,
@@ -3514,9 +3535,12 @@ export function createChatInstance({
         leave: () => {
             if (leaving) return;
             catchUp.cancel();  // its return reads, and says so, anew
+            // Left in an outage (down after the page's socket opened), it will not hear the reconnect that forgets a
+            // readiness polled meanwhile. Before the first open there is none: that open keeps the boot read.
+            if (ws.isConnected?.() === false && ws.previouslyConnected?.()) hostStart.forget();
             roomWork?.leave(); keepPlace(); leaving = true; visit += 1;
             readReceipt.cancel(); historyReadAbort?.abort(); historyPager.suspend(); historyResyncScheduler.cancel();
-            rowSleep.destroy(); chatResizeObserver?.disconnect(); reviewHydrator.suspend();
+            rowSleep.destroy(); chatResizeObserver?.disconnect(); reviewHydrator.suspend(); replies.search.close();
         },
         stay: () => {
             if (!leaving || destroyed) return;

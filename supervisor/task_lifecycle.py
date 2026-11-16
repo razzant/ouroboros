@@ -877,12 +877,12 @@ def _recover_stranded_reaping_slot(q: Any, task_id: str, intent: Dict[str, Any])
     )
     _reconcile_dead_review_owner(q.DRIVE_ROOT, int(getattr(target.proc, "pid", 0) or 0))
     try:
-        workers.respawn_worker(target.wid)
+        workers.respawn_worker(target.wid, expected_worker=target)
     except Exception:
         log.warning("Respawn of stranded slot for %s failed; clearing the marker", task_id, exc_info=True)
         with q._queue_lock:
             slot = workers.WORKERS.get(target.wid)
-            if slot is not None:
+            if slot is target:
                 slot.reaping = False
     return True
 

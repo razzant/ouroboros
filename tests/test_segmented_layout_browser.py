@@ -12,7 +12,7 @@ import pathlib
 
 import pytest
 
-from tests.settings_browser_helpers import open_settings, setting_row
+from tests.settings_browser_helpers import go_back, open_settings, setting_row
 from tests.test_design_system_gate_browser import MEASURE as GATE_MEASURE
 from tests.test_evolution_browser import history as evolution_history
 
@@ -46,33 +46,45 @@ _MEASURE = """([name, selector]) => {
   const row = group.parentElement, rowStyle = getComputedStyle(row), rowBox = row.getBoundingClientRect();
   group.dataset.strip = name;
   row.dataset.stripRow = name;
-  const style = getComputedStyle(group);
+  const style = getComputedStyle(group), fill = group.querySelector(':scope > .ui-segment-fill');
+  const ink = document.createElement('canvas').getContext('2d');
   const buttons = [...group.querySelectorAll('.ui-segment')].map((button) => {
     const rect = button.getBoundingClientRect(), look = getComputedStyle(button);
+    ink.font = look.font;
     const range = document.createRange();
     range.selectNodeContents(button);
     const text = range.getBoundingClientRect();
     return {...box(rect), width: rect.width, label: button.textContent.trim(), text: box(text),
             lines: new Set([...range.getClientRects()].map((line) => Math.round(line.top))).size,
             // The width of its word on one line, with the option's own padding and border.
-            word: text.width + px(look.paddingLeft) + px(look.paddingRight) + px(look.borderLeftWidth) + px(look.borderRightWidth),
+            word: ink.measureText(button.textContent.trim()).width + px(look.letterSpacing) * button.textContent.trim().length
+              + px(look.paddingLeft) + px(look.paddingRight) + px(look.borderLeftWidth) + px(look.borderRightWidth),
             touch: px(look.getPropertyValue('--touch-target-min')),
             chosen: button.matches('.active, [aria-checked="true"], [aria-pressed="true"]'),
-            fill: look.backgroundColor, overflows: button.scrollWidth > button.clientWidth + 1};
+            fill: button.matches('.active, [aria-checked="true"]') && fill ? getComputedStyle(fill).backgroundColor : look.backgroundColor, overflows: button.scrollWidth > button.clientWidth + 1};
   });
+  const separators = [...group.children].filter(el => !el.matches('.ui-segment, .ui-segment-fill') && el.getClientRects().length);
+  const inset = px(style.paddingLeft) + px(style.paddingRight) + px(style.borderLeftWidth) + px(style.borderRightWidth);
+  const needed = buttons.reduce((sum, b) => sum + Math.max(b.touch, b.word), inset)
+    + separators.reduce((sum, el) => sum + el.getBoundingClientRect().width, 0)
+    + px(style.columnGap) * (buttons.length + separators.length - 1);
   const doc = document.scrollingElement;
-  return {name, ...box(group.getBoundingClientRect()), track: style.backgroundColor, overflowX: style.overflowX,
-          spills: group.scrollWidth > group.clientWidth + 1, buttons,
+  return {name, needed, inset, ...box(group.getBoundingClientRect()), track: style.backgroundColor, overflowX: style.overflowX,
+          spills: group.scrollWidth > group.clientWidth + 1, buttons, backing: fill ? box(fill.getBoundingClientRect()) : null,
           row: {left: rowBox.left + px(rowStyle.borderLeftWidth) + px(rowStyle.paddingLeft),
                 right: rowBox.right - px(rowStyle.borderRightWidth) - px(rowStyle.paddingRight)},
           titled: [group, ...group.querySelectorAll('*')].filter((node) => node.hasAttribute('title')).length,
-          inline: group.hasAttribute('style'), page: doc.scrollWidth - doc.clientWidth};
+          inline: [...group.style].sort(), page: doc.scrollWidth - doc.clientWidth};
 }"""
 # Transitions are off on the measured page, so a theme's colours are final at once: WebKit never ends a transition it
 # skipped (web/modules/motion.js), and the app treats `transition: none` as a motion that ends on the next frame.
 _STILL = "*, *::before, *::after { transition: none !important; }"
 _SETTLE = """async (theme) => {
   document.documentElement.dataset.theme = theme;
+  // A section's entry can still scale its content after the tab click. Measure its resting boxes, not viewport
+  // coordinates against unscaled CSS padding halfway through that motion; the looping work marks do not delay it.
+  await Promise.all(document.getAnimations().filter(a => Number.isFinite(a.effect?.getComputedTiming().endTime))
+    .map(a => a.finished.catch(() => {})));
   await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
 }"""
 # The strip in the middle of its scroller, with the words above it in its row: a tall section is cut, never the strip.
@@ -103,6 +115,8 @@ _TRUST = """async () => {
 
 def _go(page, place: str) -> None:
     toggle = page.locator("[data-mobile-nav-toggle]:visible")
+    while not toggle.count() and page.locator("#page-settings.active .app-page-header [data-settings-back]").is_visible():
+        go_back(page)
     if toggle.count():
         toggle.first.click()
     page.locator(f'[data-nav-page="{place}"]').click()
@@ -121,10 +135,13 @@ def _transparent(colour: str) -> bool:
 
 def _check(strip: dict, count: int, *, desk: bool) -> list[str]:
     name, buttons, problems = strip["name"], strip["buttons"], []
+    available = strip["row"]["right"] - strip["row"]["left"]
+    fits = strip["needed"] <= available + 0.5
     if len(buttons) != count:
         problems.append(f"{len(buttons)} options, expected {count}")
-    if strip["titled"] or strip["inline"]:
-        problems.append(f"a hover title ({strip['titled']}) or an inline style ({strip['inline']}) on the strip")
+    allowed = sorted(f"--segment-fill-{edge}" for edge in "xywh") if strip["backing"] else []
+    if strip["titled"] or strip["inline"] != allowed:
+        problems.append(f"a hover title ({strip['titled']}) or styles other than the fill box ({strip['inline']}) on the strip")
     if strip["page"] > 1:
         problems.append(f"the page scrolls sideways by {strip['page']:.1f}px")
     if strip["left"] < strip["row"]["left"] - 0.5 or strip["right"] > strip["row"]["right"] + 0.5:
@@ -140,6 +157,8 @@ def _check(strip: dict, count: int, *, desk: bool) -> list[str]:
             problems.append(f"{label!r} leaves its option: text {text}, option {button}")
         if button["left"] < strip["left"] - 0.5 or button["right"] > strip["right"] + 0.5:
             problems.append(f"{label!r} sticks out of the track")
+        if name != "skills-trust" and button["word"] <= available - strip["inset"] and button["lines"] != 1:
+            problems.append(f"{label!r} breaks its words although its whole option fits a line")
     chosen = [button for button in buttons if button["chosen"]]
     if len(chosen) != 1:
         problems.append(f"{len(chosen)} chosen options")
@@ -148,9 +167,13 @@ def _check(strip: dict, count: int, *, desk: bool) -> list[str]:
         shown = [strip["track"] if _transparent(button["fill"]) else button["fill"] for button in buttons if not button["chosen"]]
         if _transparent(chosen[0]["fill"]) or chosen[0]["fill"] in shown:
             problems.append(f"the chosen option ({chosen[0]['fill']}) looks like another ({shown})")
-    if desk and name in DRAWN:
-        if len({round(button["top"]) for button in buttons}) != 1:
-            problems.append("wraps on the desk")
+        if strip["backing"] and any(abs(strip["backing"][edge] - chosen[0][edge]) > 0.5 for edge in strip["backing"]):
+            problems.append(f"the chosen option's fill is misplaced: {strip['backing']} versus {chosen[0]}")
+    # DESIGN:432–437: the strip wraps, never scrolls. The section's rail leaves less room even on a desktop
+    # (3347); system faces have different widths. Keep the one-line and word-width checks wherever they fit.
+    if fits and len({round(button["top"]) for button in buttons}) != 1:
+        problems.append(f"wraps despite {strip['needed']:.1f}px of words fitting its {available:.1f}px row")
+    if desk and name in DRAWN and fits:
         for button in buttons:
             if abs(button["width"] - max(button["touch"], button["word"])) > 1:
                 problems.append(f"{button['label']!r} is {button['width']:.1f}px wide, its word {button['word']:.1f}px")
@@ -209,7 +232,7 @@ def test_every_strip_fits_its_row_and_shows_its_choice(direct_server_with_data, 
                     if not desk and page.locator(STRIPS[target][0]).is_visible():
                         # A translated label longer than the line breaks inside its option, and the strip still fits.
                         page.evaluate("""([selector, label]) => {
-                            const option = document.querySelector(`${selector} .ui-segment:last-child`);
+                            const option = [...document.querySelectorAll(`${selector} .ui-segment`)].at(-1);
                             option.textContent = label;
                         }""", [STRIPS[target][0], label])
                         page.evaluate(_SETTLE, "light")
@@ -233,16 +256,15 @@ def test_every_strip_fits_its_row_and_shows_its_choice(direct_server_with_data, 
                 page.locator('[data-dashboard-tab="consciousness"]').click()
                 page.locator(STRIPS['OUROBOROS_CONSCIOUSNESS_AUTONOMY'][0]).wait_for(state='visible')
                 measure('OUROBOROS_CONSCIOUSNESS_AUTONOMY')
+                if not page.locator('[data-dashboard-tab="evolution"]').is_visible():
+                    page.locator('#page-dashboard [data-dashboard-list-back]').click()
                 page.locator('[data-dashboard-tab="evolution"]').click()
                 page.locator(".evo-measures").wait_for(state="visible", timeout=30_000)
                 measure("evolution-measures")
 
                 if seen != set(STRIPS):
                     problems.append(f"{engine} {viewport['width']}: never found {sorted(set(STRIPS) - seen)}")
-                # The negative control: the desk keeps every strip on one line; at 320 px one does wrap, so the wrap
-                # path is what the checks above measured there.
-                if desk and wrapped:
-                    problems.append(f"{engine} desk: {sorted(wrapped)} wrap")
+                # The negative control: at 320 px one drawn strip wraps, so the wrap path was measured too.
                 if not desk and not wrapped & DRAWN:
                     problems.append(f"{engine} 320: no drawn strip wraps, so the wrap was never measured")
                 page.close()

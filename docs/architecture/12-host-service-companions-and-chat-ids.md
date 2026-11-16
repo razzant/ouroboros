@@ -75,14 +75,14 @@ Each message has one destination, else `None` (§11.1 `chat_id_policy`). `HIDDEN
 
 An exhausted terminal outbox skips chat 0 while retaining incident/message. Only positive same-id/destination evidence suppresses notice (`terminal_delivery`), never bare ids or missing ACKs. Memory/consolidation use the same value/None policy: per-window registry snapshots name Main/Projects by stable ids; missing/ambiguous ids remain explicit, never default Main. Presence labels require transport facts re-deriving the chat id. Labels are read-only attribution, changing neither routing, visibility nor delivery.
 
-`place_intake.py` decides attention; `place_arrivals.py` owns heard/imported facts, deferred sources and room/activity indexes. `presence_history.py` records earlier platform-authored messages (never owner/Ouroboros), starting nothing; arrivals retain send order/time (`source_order`; CREATING_SKILLS). `loop_completion_schema.py` selects completion with legacy registry support; `tool_effects.py`/`place_guard.py` own effects/targets (§13).
+`place_intake.py` decides attention; `place_arrivals.py` owns heard/imported facts, deferred sources and room/activity indexes. `presence_history.py` records earlier platform-authored messages (never owner/Ouroboros), starting nothing; arrivals retain send order/time (`source_order`; CREATING_SKILLS). `loop_completion_schema.py` selects completion with legacy registry support; `tool_effects.py`/`place_guard.py` own effects/targets.
 
 Heard-only events make no task/context copy; room rows keep identity/reason. Later On never reconsiders. `/identity.presence_reaction_context: 1`: typed reactions stay context without focus, wait interruption, final reopening or reply anchoring. Focus/heard settlement share the intake lock, preserving custody. Immutable source rows keep `chat_chain.source_row_id`; `dialogue_store` derives deferred pointers from dedup rows.
 
 `places.place_room_index` indexes latest arrivals/nonterminal focus counts without history walks or per-arrival task loads; unknown stays null. Only the rooms endpoint decodes details. Legacy/outgoing-only rooms may be missing; import/gap flags describe the store, not the provider; indexes build once from rows. `ouroboros/gateway/place_history.py` projects delivery/heard facts, exact-task starts, import/send times and current owner confirmation (`places.owner_confirmed_row`; CLIENT_CONTRACT “Places”). `account_candidates` suggests recent nonbot senders, confirming no identity. Migration imports valid bindings, records `migration.problems` for `/api/places` and publishes one marker.
 
 `place_guard.outbox_binding_facts` captures/rechecks queued bindings through dispatch's `places.target_place`.
-Current scopes apply; disconnected bound work never becomes unbound. Explicit accounts outside applicable scopes remain ordinary tool targets.
-`places.outbox_place` keeps legacy lookups and opaque-operation matching Silent/Paused account holds, wildcards included.
-Account/conversation/thread stay distinct; each recipient is checked. Wire: CREATING_SKILLS.
+Current scopes apply; disconnected bound work never becomes unbound.
+`places.outbox_place` keeps legacy lookups and opaque operations' Silent/Paused account holds, wildcards included.
+Account/conversation/thread stay distinct; each recipient, group address and reply target is checked alone; only words take an author. Wire: CREATING_SKILLS.
 Retained-work GET/POST may omit `binding_id`; authentication checks the stored connector. POST accepts `transport_queue` and optional checked legacy `binding_id`.

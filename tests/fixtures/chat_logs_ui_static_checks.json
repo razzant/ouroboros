@@ -15,7 +15,7 @@
     "id": "test_degraded_outcomes_render_with_typed_severity",
     "path": "web/modules/log_events.js",
     "kind": "contains",
-    "value": "((lifecycle === 'failed' || execution === 'failed') && !unanswered)\n        || execution === 'infra_failed'"
+    "value": "((lifecycle === 'failed' && !deliveredAnswerCause(record) || execution === 'failed') && !unanswered)\n        || (execution === 'infra_failed' && !deliveredAnswerCause(record))"
   },
   {
     "id": "test_degraded_outcomes_render_with_typed_severity",
@@ -603,7 +603,7 @@
     "id": "test_costs_uses_css_classes_not_inline",
     "path": "web/modules/costs.js",
     "kind": "contains",
-    "value": "class=\"dashboard-hero\""
+    "value": "class=\"costs-meters\""
   },
   {
     "id": "test_costs_uses_css_classes_not_inline",
@@ -849,7 +849,7 @@
     "id": "test_context_segmented_css_exists",
     "path": "web/style.css",
     "kind": "contains",
-    "value": ":is(.chat-model-mode, .chat-context-mode, .chat-subagents-mode) .chat-seg {"
+    "value": ":is(.chat-context-mode, .chat-subagents-mode) .chat-seg {"
   },
   {
     "id": "test_context_segmented_css_exists",

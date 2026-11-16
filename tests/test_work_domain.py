@@ -11,6 +11,7 @@ parent's Linux qualification. No Docker, daemon, network or engine is used.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import pathlib
 import subprocess
@@ -170,6 +171,34 @@ def test_work_domain_stdin_and_stdout_cross_byte_exact(env, monkeypatch):
     assert not docker.records()
 
 
+def test_an_unmanaged_run_hands_input_bytes_over_as_a_file_never_a_pipe_the_wait_writes(tmp_path, monkeypatch):
+    """Outside the work domain too, ``input`` bytes reach the command from an unlinked temporary file. A pipe the
+    wait wrote into hung the custody pass for four hours on 14.11.2026: macOS called git's full stdin writable, and
+    ``git hash-object --stdin-paths`` waited on its unread answers. The bytes still arrive exact (more than a pipe
+    holds), beside an explicit ``stdin=None`` too; a caller's own ``stdin`` goes as it is, ``input`` beside ``stdin``
+    is still the stdlib's refusal, and with no room for a temporary file the bytes take the stdlib's pipe as before."""
+    probe = ("import os, stat, sys\ndata = sys.stdin.buffer.read()\n"
+             "sys.stdout.buffer.write((b'file ' if stat.S_ISREG(os.fstat(0).st_mode) else b'pipe ') + data)\n")
+    command = [sys.executable, "-c", probe]
+    payload = bytes(range(256)) * 512 + b"\x00tail\xff"  # 128 KiB
+    done = work_domain.run(command, input=payload, capture_output=True, timeout=60)
+    assert (done.returncode, done.stdout) == (0, b"file " + payload)
+    beside_none = work_domain.run(command, input=bytearray(b"ba"), stdin=None, capture_output=True, timeout=60)
+    assert beside_none.stdout == b"file ba"
+    own = tmp_path / "own.bin"
+    own.write_bytes(b"own")
+    with own.open("rb") as handle:
+        assert work_domain.run(command, stdin=handle, capture_output=True, timeout=60).stdout == b"file own"
+    with pytest.raises(ValueError):
+        work_domain.run(command, input=b"x", stdin=subprocess.DEVNULL, capture_output=True)
+
+    def no_room(*_args, **_kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(work_domain.tempfile, "TemporaryFile", no_room)
+    assert work_domain.run(command, input=payload, capture_output=True, timeout=60).stdout == b"pipe " + payload
+
+
 def test_a_native_run_receives_its_inputs_and_returns_verified_outputs_through_the_work_domain(env, monkeypatch, tmp_path):
     """The material flow of a native run on a work repository: its selected inputs are delivered into the staging
     root as bytes the work domain unpacks; its private copy is made there by the work domain's Git (the
@@ -268,3 +297,33 @@ def test_work_outputs_return_as_checked_bytes_and_a_planted_link_returns_nothing
     assert again == [] and second["path"] == record["path"] and second["source_path"] == str(out / "model.bin")
     assert pathlib.Path(second["path"]).read_bytes() == b"retrained\n"  # one artifact, versioned, not a new copy
     assert attached(docker, "tar -c") and not docker.records()
+
+
+def test_an_unmanaged_lookup_never_imports_the_execution_domain(env, monkeypatch):
+    """The first work-domain lookup of a process on an install without an ``execution`` policy answers "no
+    domain" without the execution-domain module graph; a managed one still returns the domain object, and an
+    unusable policy still raises. Each lookup is a fresh interpreter, so ``sys.modules`` is that lookup's own."""
+    from ouroboros import deployment_policy, execution_domain
+
+    probe = ("import sys\nfrom ouroboros import work_domain\ntry:\n    print(work_domain.managed())\n"
+             "except Exception as exc:\n    print(type(exc).__name__)\n"
+             "print('ouroboros.execution_domain' in sys.modules)\n")
+
+    def lookup():
+        root = pathlib.Path(work_domain.__file__).resolve().parents[1]
+        environ = {**os.environ, "PYTHONPATH": str(root)}
+        done = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, cwd=root,
+                              env=environ, timeout=60)
+        assert done.returncode == 0, done.stderr
+        return done.stdout.split()
+
+    assert lookup() == ["False", "False"]  # unmanaged
+    env.manage()
+    assert lookup() == ["False", "False"]  # a policy without ``execution``
+    # A container path is POSIX on every host: name it, never derive it from the host's (a Windows drive path).
+    env.manage(section(env, path_mappings=[{"host_path": str(env.work), "backend_path": "/work"}]))
+    assert lookup() == ["True", "True"]  # managed: the domain, through execution_domain.current()
+    assert work_domain._domain() is execution_domain.current() is not None
+    monkeypatch.setenv(deployment_policy.POLICY_ENV, str(env.admin / "missing.json"))
+    deployment_policy.reset_for_tests()
+    assert lookup() == ["DeploymentPolicyError", "False"]  # a bad file never reads as unmanaged

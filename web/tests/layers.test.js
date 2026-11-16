@@ -153,6 +153,36 @@ test('one same-URL history entry while any layer is open; popstate pops one; a p
     w.layers.destroy();
 });
 
+test('browser Back retains a pending asynchronous close and a refusal; a stale completion cannot remove a new layer', async () => {
+    const w = world();
+    let decide, attempts = 0;
+    const decision = new Promise(resolve => { decide = resolve; });
+    w.layers.push({ id: 'return', page: true, modal: false, focus: false,
+        onClose: () => { attempts++; return decision; } });
+    await tick();
+    w.win.fire('popstate');
+    await tick();
+    assert.equal(w.layers.top(), 'return');
+    assert.equal(w.layers.historyArmed(), true, 'browser Back is re-armed while the owner decides');
+    w.layers.pop('escape');
+    w.win.fire('popstate');
+    await tick();
+    assert.equal(w.layers.historyArmed(), true, 'a repeated browser Back is also re-armed while pending');
+    assert.equal(attempts, 1, 'another dismiss does not start the same leave again');
+    decide(false);
+    await tick();
+    assert.equal(w.layers.top(), 'return', 'refused navigation keeps the return');
+    let finish;
+    w.layers.push({ id: 'return', onClose: () => new Promise(resolve => { finish = resolve; }) });
+    w.layers.pop('escape');
+    w.layers.remove('return');
+    w.layers.push({ id: 'return', page: true, modal: false, focus: false });
+    finish(true);
+    await tick();
+    assert.equal(w.layers.top(), 'return', 'the old close cannot retire its replacement');
+    w.layers.destroy();
+});
+
 test('a modal layer makes everything outside it inert; a non-modal one leaves the sidebar live', () => {
     const w = world();
     w.toast.inert = true;  // the page had already made this inert: the stack leaves it alone

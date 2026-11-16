@@ -300,6 +300,7 @@ class _RetryBinding(NamedTuple):
     continuation: Any   # delegate_continuation.ContinuationStart: the recorded lineage
     prompt_cache_ttl: Dict[str, Any]
     input_files: Optional[List[Dict[str, Any]]]  # the original selection receipt, never reread or recopied
+    row_processing: Optional[str]  # the configured row's own tier as recorded; None on a row that recorded none
 
 
 def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token: str, text: str, *,
@@ -440,6 +441,7 @@ def _resolve_retry_invocation(ctx: ToolContext, drive: pathlib.Path, retry_token
         continuation=replayed_custody(record),
         prompt_cache_ttl=deepcopy(record.get("prompt_cache_ttl") if isinstance(record.get("prompt_cache_ttl"), dict) else {}),
         input_files=deepcopy(record["input_files"]) if isinstance(record.get("input_files"), list) else None,
+        row_processing=record["row_processing"] if isinstance(record.get("row_processing"), str) else None,
     ), None
 
 

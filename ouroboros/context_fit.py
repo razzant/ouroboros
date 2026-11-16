@@ -1000,8 +1000,9 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                                    fixed_tokens=fixed + book, memory_tokens=memory, reserve_tokens=max(reserve, reply),
                                    window_tokens=window, ratio=ratio, required_book_tokens=book)
     counted("view_texts_kept", 2 if snapshot else 0)  # the story and the room text this fit delivers
+    whole = shown.level is None or floor.mv.story_is_whole(shown.level)  # the delivered level's own fact: no render
     return {m: (_system_blocks(whole_core, whole_governance[form[m]], story, room, m,
-        section_views(sections[m], receipts)), receipt) for m in floor.MODES}, mode
+        section_views(sections[m], receipts), whole), receipt) for m in floor.MODES}, mode
 
 
 def _whole_request(core, governance, mode, tool_schemas):

@@ -22,6 +22,7 @@ from ouroboros.config import (
     save_settings,  # noqa: F401
 )
 from ouroboros.depth_evidence import parse_task_depth  # noqa: F401
+from ouroboros.memory_texts import edit_properties
 from ouroboros.headless import prepare_task_drive, task_state_dir  # noqa: F401
 from ouroboros.contracts.task_contract import (
     build_task_contract,  # noqa: F401
@@ -166,8 +167,8 @@ _START_CHOICE_PARAMS = {
 }
 
 
-# The direct-OpenAI custom projection drops parameter prose and keeps this lead only as far as it fits
-# beside the compact schema; tests/test_openai_chat_custom_contract.py holds every actual profile whole.
+# Too large for the direct-OpenAI custom description bound, this tool goes there as its lead beside the bare
+# structure of its schema; tests/test_openai_chat_custom_contract.py holds the lead whole on every actual profile.
 _SCHEDULE_SUBAGENT_DESCRIPTION = (
     # SYSTEM also says start_task is separate work, an evidence-only copy owes no apply, and shared-tree work is
     # verified, not reapplied (integrate_subagent_patch's lead too): this lead pays the typed input_files schema.
@@ -181,7 +182,7 @@ _SCHEDULE_SUBAGENT_DESCRIPTION = (
     "the selected/inherited workspace_root, else one new Git tree for such descendants); genesis gives EACH an empty "
     "Git repo in the durable projects root that IS the deliverable; acting harness work uses a private snapshot and "
     "integrate_delegated_patch. "
-    # Custom-tool projection strips parameter prose; this choice must survive in the tool lead.
+    # Where the custom projection sends this tool without parameter prose, this choice must survive in the tool lead.
     "A non-acting Agent session keeps configured access in an evidence-only private checking copy; "
     "access='readonly' selects read-only session execution. Runtime data (installed skill payloads too) is "
     "never a write_surface. Cyber-effective children inherit "
@@ -224,6 +225,30 @@ def _project_tool_entries() -> List[ToolEntry]:
                 "oldest_first": {"type": "boolean", "default": False, "description": "List by last_active_at from oldest to newest."},
             }},
         }, _list_projects),
+        ToolEntry("manage_project_folder", {
+            "name": "manage_project_folder",
+            "description": (
+                "Read or repair a Project's working folder, where its new work starts; the owner's Project menu has "
+                "the same door (Working folder…). action='view' (default) is read-only: the registered folder, what "
+                "one look found (usable; missing; unusable; unset: no choice made, the first started task would "
+                "provision one; none: the recorded No folder), the changes that state offers with what each means "
+                "for the room's queued work, and expected. A change needs that expected and a reason. 'clear' records "
+                "No folder: new work uses its own temporary area and nothing provisions a folder until one is chosen. "
+                "'choose' attaches path, an existing folder that outlasts its tasks. Offered only where the room has "
+                "no usable default (missing, unusable, unset; choose also over No folder): a folder in place is not "
+                "moved here. Nothing is created, copied, restored or deleted. Admitted work keeps the folder it was "
+                "admitted with, through Resume and Continue; only work moved into the room that has not restarted "
+                "since takes the new default at its next start. The host tells nobody of a change: say what you "
+                "changed and why."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "project_id": {"type": "string"},
+                "action": {"type": "string", "enum": ["view", "clear", "choose"], "default": "view"},
+                "path": {"type": "string", "default": "", "description": "choose: absolute path of an existing folder; never a host working copy, Ouroboros's own repository or data."},
+                "expected": {"type": "string", "default": "", "description": "A change: view.expected as last read; a choice that moved since refuses as stale."},
+                "reason": {"type": "string", "default": "", "description": "A change: why, kept on its receipt."},
+            }, "required": ["project_id"], "additionalProperties": False},
+        }, _manage_project_folder, safety_policy="skip"),  # view reads; changes: safety.CHECKED_ACTIONS
     ]
 
 
@@ -238,6 +263,33 @@ def _sibling_tool_entries() -> List[ToolEntry]:
 
     return [*maintenance_tool_entries(), *storage_tool_entries(), *mind_tool_entries(), *ui_translation_tool_entries(),
             *update_description_tool_entries()]
+
+
+_UPDATE_IDENTITY_DESCRIPTION = (
+    "Revise my identity manifest, who I am and who I want to become, after substantive reflection: one "
+    "file in every room; never write memory/identity.md through file tools. Change parts with "
+    "mode='edit': edits=[{old_str, new_str}, ...] (or one old_str with content), each old_str exact text "
+    "found once in the revision I read, all applied or none, an empty new_str deleting; mode='overwrite' "
+    "(default) replaces the whole text with content; mode='revert' puts back version=<revision> exactly. "
+    "expected_revision (the revision under my resident identity) is required; a stale one writes nothing "
+    "and returns what changed since. The result is never empty; reason is kept in history, not in the "
+    "text. The receipt names the version replaced, who wrote it and what left, with the calls that read "
+    "it (memory_read(source='identity', version=...)) and put it back."
+)
+_UPDATE_WORLD_DESCRIPTION = (
+    "Update my map of my world (memory/WORLD.md): what lives in my environment (agents, services, "
+    "hosts, devices), how I reach each, what worked, what is held or refused; compact, detail in "
+    "knowledge; one file in every room and drive, never written through write_file/edit_text. Change "
+    "parts with mode='edit': edits=[{old_str, new_str}, ...] (or one old_str with content), each old_str "
+    "exact text found once in the revision I read, all or none; mode='overwrite' (default) replaces the "
+    "whole map with content; mode='revert' puts back version=<revision>. The measured block (system, "
+    "roots, tools found at startup) is the host's: an overwrite keeps or restores it, an edit must leave "
+    "it byte for byte and add no marker line, a revert takes that version's own part with the current "
+    "block (a new revision when the block changed since). expected_revision (the revision under my "
+    "resident map) is required; a stale one writes nothing and returns what changed since. The result "
+    "is never empty; reason is kept in history. The receipt names what it replaced and the calls that "
+    "read it (memory_read(source='world', version=...)) and put it back."
+)
 
 
 def get_tools() -> List[ToolEntry]:
@@ -430,29 +482,17 @@ def get_tools() -> List[ToolEntry]:
         }, _send_user_message),
         ToolEntry("update_identity", {
             "name": "update_identity",
-            "description": (
-                'Replace your persistent identity manifest with the full supplied text after substantive reflection. '
-                'Read it first and preserve continuity. This is the identity-writing tool in every project room; do not '
-                'edit memory/identity.md through file tools.'
-            ),
-            "parameters": {"type": "object", "properties": {
-                "content": {"type": "string", "description": "Full identity content (prefer evolving over rewriting from scratch)"},
-                "expected_revision": {"type": "string", "description": "Required for an existing identity: source_revision (SHA-256 of bytes) from read_file. A stale revision refuses with the current revision."},
-            }, "required": ["content"]},
+            "description": _UPDATE_IDENTITY_DESCRIPTION,
+            "parameters": {"type": "object", "properties": edit_properties(
+                "identity", "The current revision (under the resident identity, or a receipt's or refusal's)."),
+                "required": []},
         }, _update_identity),
         ToolEntry("update_world", {
             "name": "update_world",
-            "description": "Update my map of my world (memory/WORLD.md): what lives in my environment — "
-                           "agents, services, hosts, devices — how I reach each, what worked, what is held "
-                           "or refused. The host owns the measured block (system, roots, tools found at "
-                           "startup) and keeps it; I send the whole file with the rest revised. Read it "
-                           "first and keep it compact (detail belongs in knowledge). The same continuous "
-                           "file in every room and drive; this is the only correct way to write it — never "
-                           "write memory/WORLD.md through write_file/edit_text.",
-            "parameters": {"type": "object", "properties": {
-                "content": {"type": "string", "description": "Full file content; the host keeps or restores its measured block"},
-                "expected_revision": {"type": "string", "description": "Required for an existing file: source_revision (SHA-256 of bytes) from read_file. A stale revision refuses with the current revision."},
-            }, "required": ["content"]},
+            "description": _UPDATE_WORLD_DESCRIPTION,
+            "parameters": {"type": "object", "properties": edit_properties(
+                "map", "The current revision (under the resident map, or a receipt's or refusal's)."),
+                "required": []},
         }, _update_world),
         ToolEntry("toggle_evolution", {
             "name": "toggle_evolution",
@@ -560,6 +600,7 @@ from ouroboros.tools.control_routing import (  # noqa: E402, F401 -- intentional
     _finish_swarm_handoff,
     _close_project,
     _list_projects,
+    _manage_project_folder,
     _start_task,
 )
 from ouroboros.tools.control_runtime import (  # noqa: E402, F401 -- intentional public re-exports

@@ -16,25 +16,26 @@ import {
     encodeRouteChoice, indexProfilesByHarness, mintStableId, profileOptionsFor,
     routeChoiceGroups, sameEngineAs, selectHtml, serializeRouteSpec, sessionModelOptions, subagentHandle, updateRouteControlOptions,
     PROCESSING_CHOICES, PROCESSING_PREFERENCE_KEY, processingDetailsHtml, processingIntentLabel, accountScopedModelCatalog,
-    tierPriced } from './route_editor_primitives.js';
+    tierPriced, withoutPrice } from './route_editor_primitives.js';
 import { catalogPrograms } from './model_program.js';
 import { modelChooserHtml, bindModelChoosers } from './model_chooser.js';
 import { mergeModelCatalog, catalogReadNote, mergeHarnessModelCatalog, refreshModelCatalog, watchAccountModelCatalog } from './settings_catalog.js';
 import {
-    harnessMap, lastReviewRunText, reviewCostText, reviewTwinAllowed, rowIdentity, rowMeta, rowStatus, rowStatusReason, rowTaskRun,
+    harnessMap, lastReviewRunText, modelTariffText, reviewCostText, reviewMoneyLine, reviewTwinAllowed, rowIdentity, rowMeta, rowStatus, rowStatusReason, rowTaskRun,
     sessionRouteVerdict,
 } from './subagent_status_primitives.js';
 import { bindRecheckMarks, recheckMarkHtml, syncRecheckState } from './safety_recheck.js';
-import { CODECS, CONFIRMS, bindSettingRows, doorSign, outcomeLine, setButtonBusy, settingsRow, writeEntry } from './settings_controls.js';
+import { CODECS, CONFIRMS, bindSettingRows, doorSign, outcomeLine, paintWithRow, setButtonBusy, settingsReadMessage, settingsRow, settingsSnapshot, writeEntry } from './settings_controls.js';
 import { registerSettingsPage } from './settings_pages.js';
 import { rowById, rowsOf } from './settings_rows.js';
 import { revealNewRow } from './ui_helpers.js';
-import { setResult } from './ui_primitives.js';
+import { createHint } from './ui_hint.js';
+import { setResult, setRowMeta } from './ui_primitives.js';
 import { effortLabel } from './effort_levels.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
-import { currentLanguage } from './i18n.js';
+import { currentLanguage, dictionaryRevision } from './i18n.js';
 
-export const MAX_AVAILABLE_SUBAGENTS = 26;
+export const MAX_AVAILABLE_SUBAGENTS = 50;  // = ouroboros/configured_subagents.py MAX_CONFIGURED_SUBAGENTS
 const KEY = 'OUROBOROS_SUBAGENTS';
 export const SUBAGENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 export const ALLOW_EMPTY_REVIEW_POOL = 'allow_empty_review_pool';
@@ -188,7 +189,7 @@ function rowErrors(row, index, ids, rows = null, inherited = '') {
         }
     }
     if (row?.effort && !EFFORT_CHOICES.includes(String(row.effort))) errors.push('has an unsupported reasoning effort.');
-    if (row?.processing_preference && !PROCESSING_CHOICES.includes(row.processing_preference)) errors.push('needs Standard, Fast, Economy or inherited processing.');
+    if (row?.processing_preference && !PROCESSING_CHOICES.includes(row.processing_preference)) errors.push('needs Standard, Fast, Flex or inherited processing.');
     // A session slug's level refuses a contradicting pin, as the server does. An API-wrapped
     // `claudexor::cursor=…` row keeps a stored pin readable: the name wins when it runs.
     const encodedEffort = route.kind === ROUTE_KIND_AGENT_SESSION
@@ -203,6 +204,10 @@ function rowErrors(row, index, ids, rows = null, inherited = '') {
 
 const listLevelErrors = (setting) => (setting.items.length > MAX_AVAILABLE_SUBAGENTS
     ? [`Available subagents supports at most ${MAX_AVAILABLE_SUBAGENTS} rows.`] : []);
+// A full list holds Add and Duplicate (aria-disabled: still reached by mouse, finger and keyboard) and the one hint of
+// each (DESIGN "Hints") says why in one shared fact: switched-off rows hold their places too.
+const atLimit = (state) => Boolean(state?.loaded) && (state.setting?.items?.length || 0) >= MAX_AVAILABLE_SUBAGENTS;
+const held = (state) => (atLimit(state) ? ' aria-disabled="true"' : '');
 
 /** The rows that review: marked Reviewer and switched on, in catalog order. */
 export function reviewPoolRows(setting) {
@@ -260,12 +265,18 @@ const UNKNOWN_COST = Object.freeze({ usd_per_review: null, basis: 'unknown' });
 
 // Each review fact has the one place its meaning gives it (docs/DESIGN.md §6):
 // the mark itself is the checkbox; a marked row switched off is a current
-// exception under the head; a marked twin's repeat stays visible; the price or
-// seat is the row's Review cost in Details and, for a marked API row, beside
-// its delivery choice; the last review is history in Details.
-function reviewCost(row, state) {
-    return reviewCostText(row, state.reviewCosts?.get(reviewCostKey(row, state.processingPreference)) || null);
+// exception under the head; a marked twin's repeat stays visible; the measured price or
+// seat is the row's Review cost in Details, the model's published tariff its Model tariff there, and a marked
+// API row says one of them beside its delivery choice (the measured cost once it has one); the last review is
+// history in Details.
+function reviewCost(row, state, { line = false } = {}) {
+    const cost = state.reviewCosts?.get(reviewCostKey(row, state.processingPreference)) || null;
+    return line ? reviewMoneyLine(row, cost, modelTariff(row, state)) : reviewCostText(row, cost);
 }
+const modelTariff = (row, state) => modelTariffText(row, state.modelCatalog || {}, state.processingPreference);
+// The delivery line shows the tariff: composed words the translation overlay leaves alone.
+const tariffMark = (row, state) => (modelTariff(row, state) && reviewCost(row, state, { line: true }) === modelTariff(row, state)
+    ? ' data-i18n-fmt="model price"' : '');
 
 function reviewException(row) {
     return row.review_eligible === true && row.enabled === false ? 'Switched off, so not in the review pool.' : '';
@@ -380,7 +391,7 @@ function reviewDeliveryHtml(row, state, index) {
                         { value: 'native', label: 'Reads the work itself' },
                         { value: 'packet', label: 'Packet — for models without tool calling' },
                     ] }], row.delivery === 'packet' ? 'packet' : 'native')}</label>
-                    <span class="ui-field-help" data-subagent-delivery-cost>${escapeHtml(reviewCost(row, state))}</span>
+                    <span class="ui-field-help" data-subagent-delivery-cost${tariffMark(row, state)}>${escapeHtml(reviewCost(row, state, { line: true }))}</span>
                 </div>`;
 }
 
@@ -465,7 +476,8 @@ function rowDetailsHtml(row, state, rowKey) {
     return `<details class="model-role-details available-subagent-details ui-disclosure" data-subagent-details>
                 <summary>Details &amp; history</summary>
                 <dl class="available-subagent-facts">
-                    <div><dt>Review cost</dt><dd data-subagent-review-facts>${escapeHtml(reviewCost(row, state))}</dd></div>
+                    <div${reviewCost(row, state) ? '' : ' hidden'}><dt>Review cost</dt><dd data-subagent-review-facts>${escapeHtml(reviewCost(row, state))}</dd></div>
+                    <div${modelTariff(row, state) ? '' : ' hidden'} data-subagent-tariff><dt>Model tariff</dt><dd data-i18n-fmt="model price">${escapeHtml(modelTariff(row, state))}</dd></div>
                     ${fact('Last review', review, 'data-subagent-last-review')}
                     ${fact('Last task run', task, 'data-subagent-last-task')}
                     ${session ? '' : fact('Stored as', stored, 'data-subagent-stored')}
@@ -523,7 +535,7 @@ function subagentHeadHtml(row, state, index, list = false) {
                 </div>
                 <div class="available-subagent-actions">
                     <label class="available-subagent-reviewer"><input class="ui-checkbox" type="checkbox" data-subagent-field="review_eligible" aria-label="Subagent ${ordinal} reviews"${row.review_eligible === true ? ' checked' : ''}> Reviewer</label>${recheckMarkHtml(row, ordinal)}
-                    <button type="button" class="btn btn-default" data-subagent-duplicate aria-label="Duplicate Subagent ${ordinal}">Duplicate</button>
+                    <span class="ui-hint-host" data-full-hint><button type="button" class="btn btn-default" data-subagent-duplicate aria-label="Duplicate Subagent ${ordinal}"${held(state)}>Duplicate</button></span>
                     <button type="button" class="btn btn-default" data-subagent-remove aria-label="Remove Subagent ${ordinal}">Remove</button>
                 </div>
             </div>
@@ -566,7 +578,7 @@ function subagentFormParts(row, state, index) {
                 <div class="ui-field available-subagent-field available-subagent-field-model">Model ${session
                     ? modelChooserHtml(`data-subagent-field="model" aria-label="Agent session model for Subagent ${ordinal}"`, split.model, `actor-${rowKey}-models`, modelOptions, { placeholder: 'Engine default model', programs: catalogPrograms(harnesses[split.harness], {harness: split.harness, profile: row.route.credential_profile_id}) })
                     : routeModelInputHtml(`data-subagent-field="model" aria-label="${split.subscription ? 'Subscription' : 'API'} model for Subagent ${ordinal}"`, row.route, tierPriced(row.processing_preference || state.processingPreference)
-                        ? state.apiModels.map((item) => ({ ...item, price: null })) : state.apiModels, `actor-${rowKey}-models`, {programs: split.subscription ? catalogPrograms(state.modelCatalog, {source: split.source, profile: row.route.credential_profile_id, sources: state.modelSources}) : []})}</div>
+                        ? state.apiModels.map((item) => withoutPrice(item, { tiered: true })) : state.apiModels, `actor-${rowKey}-models`, {programs: split.subscription ? catalogPrograms(state.modelCatalog, {source: split.source, profile: row.route.credential_profile_id, sources: state.modelSources}) : []})}</div>
                 ${routeSupportsAccount(row.route)
                     ? field('Account', selectHtml(`data-subagent-field="account" aria-label="Account for Subagent ${ordinal}"`, [{ label: '', options: profileOptions }], row.route.credential_profile_id || ''))
                     : ''}
@@ -578,7 +590,7 @@ function subagentFormParts(row, state, index) {
                 <textarea class="ui-control" data-subagent-field="recommended_use" rows="1" aria-label="Description for Subagent ${ordinal}" placeholder="When should Ouroboros choose this subagent?">${escapeHtml(row.recommended_use)}</textarea>
             </label>`,
         meta: `<div id="actor-${escapeHtml(rowKey)}-meta" class="available-subagent-meta ui-field-help" data-subagent-meta${meta.qualifier ? ' data-availability-qualifier' : ''}${meta.tone ? ` data-tone="${escapeHtml(meta.tone)}"` : ''}${meta.text ? '' : ' hidden'}>${escapeHtml(meta.text)}</div>`,
-        more: `${processingDetailsHtml(`data-subagent-field="processing_preference" aria-label="Processing for Subagent ${ordinal}"`, row.processing_preference, state.processingPreference)}
+        more: `${processingDetailsHtml(`data-subagent-field="processing_preference" aria-label="Processing for Subagent ${ordinal}"`, row.processing_preference, state.processingPreference, { helper: true })}
             ${rowDetailsHtml(row, state, rowKey)}`,
     };
 }
@@ -606,7 +618,7 @@ function agentPageHtml(row, state, index, live) {
     const saved = state.loadedItems.find((item) => item.subagent_id === row.subagent_id);
     const recheck = saved?.rechecks_flags === true
         || (saved?.route.kind === ROUTE_KIND_API_MODEL && saved.delivery === 'packet' && saved.enabled !== false);
-    const use = (field, title, meta, checked) => `<div class="ui-row settings-row agent-use" data-kind="switch"><p class="ui-row-title">${title}</p>
+    const use = (field, title, meta, checked) => `<div class="ui-row settings-row agent-use" data-kind="switch"${meta ? '' : ' data-no-meta'}><p class="ui-row-title">${title}</p>
         <p class="ui-row-meta"><span>${escapeHtml(meta)}</span></p><div class="ui-row-actions">${toggleHtml(field, title, checked, live, field === 'rechecks_flags' ? row.subagent_id : '')}</div></div>`;
     const card = (title, body, lead = '') => `<section class="ui-card settings-card"><h3 class="settings-card-title agents-card-title">${title}</h3>
         ${lead ? `<p class="settings-card-lead">${lead}</p>` : ''}${body}</section>`;
@@ -625,7 +637,7 @@ function agentPageHtml(row, state, index, live) {
             <div class="ui-action-row"><button type="button" class="btn btn-save" data-editor-save>Save</button>
                 ${live ? `<button type="button" class="btn btn-default" data-editor-discard${state.dirty ? '' : ' hidden'}>Discard changes</button>` : ''}
                 <span class="ui-result" data-editor-result role="status" aria-live="polite"></span></div>`)}
-            <div class="ui-action-row settings-foot">${live ? '<button type="button" class="btn btn-default" data-subagent-duplicate>Duplicate</button>' : ''}
+            <div class="ui-action-row settings-foot">${live ? `<span class="ui-hint-host" data-full-hint><button type="button" class="btn btn-default" data-subagent-duplicate${held(state)}>Duplicate</button></span>` : ''}
                 <button type="button" class="btn ${live ? 'btn-danger' : 'btn-default'}" data-subagent-remove data-editor-remove>${live ? 'Remove' : 'Discard'}</button></div>
         </div>`;
 }
@@ -641,7 +653,7 @@ export function availableSubagentsRenderSignature(state, nowMs = Date.now()) {
         state.apiModels, state.modelSources, state.modelCatalog, state.modelCatalogNote, state.processingPreference,
         state.providers, state.connections, state.providerProfiles, state.reviewPool, state.allowEmptyReviewPool,
         state.filter, state.tickCaption, state.unsavedId,
-        currentLanguage(),  // the suggestions' prices are composed words: another language is another paint
+        currentLanguage(), dictionaryRevision(),  // prices and tariffs are composed words: another language, or its dictionary arriving, is another paint
     ]);
 }
 
@@ -680,6 +692,8 @@ export function createAvailableSubagentsEditor({
     const getDoc = typeof doc === 'function' ? doc : () => doc;
     const getWin = typeof win === 'function' ? win : () => win;
     let disposeChoosers = () => {};
+    let hints = [];
+    const disposeHints = () => { hints.forEach((hint) => hint.destroy()); hints = []; };
     const state = {
         loaded: false, destroyed: false, parseError: '', setting: { enabled: true, items: [] }, source: '', diagnostics: [],
         dirty: false, saveAttempted: false, baseline: baseline === 'generated' ? 'generated' : 'saved', automatic: false,
@@ -695,7 +709,7 @@ export function createAvailableSubagentsEditor({
         openDisclosures: new Set(),
         // Settings: the list's filter, the Reviewer caption of the saved strictness, the agent this page edits (an
         // unsaved one by `unsavedId`), and the last write's result, which stays through a repaint.
-        filter: 'all', tickCaption: '', entryId: '', unsavedId: '', result: null,
+        filter: FILTERS.some(([key]) => key === page?.filter) ? page.filter : 'all', tickCaption: '', entryId: '', unsavedId: '', result: null,
     };
     const listView = Boolean(page) && !page.entry;
     const current = () => state.setting.items.find((row) => row.subagent_id === state.entryId) || null;
@@ -795,7 +809,7 @@ export function createAvailableSubagentsEditor({
             const el = container.querySelector(`[data-subagent-row="${row._uiKey || row.subagent_id}"]`);
             if (!el) return;
             const processingSummary = el.querySelector('[data-processing-summary]');
-            if (processingSummary) processingSummary.textContent = processingIntentLabel(row.processing_preference, state.processingPreference);
+            if (processingSummary) processingSummary.textContent = processingIntentLabel(row.processing_preference, state.processingPreference, { helper: true });
             el.toggleAttribute('data-invalid', judged);
             el.querySelectorAll('[data-subagent-field]').forEach((field) => {
                 const prefix = `actor-${row._uiKey || row.subagent_id}`;
@@ -819,13 +833,15 @@ export function createAvailableSubagentsEditor({
             show('[data-subagent-review-notes]', said(reviewRepeat(row, state, index)));
             const delivery = el.querySelector('[data-subagent-delivery-field]');
             if (delivery) delivery.hidden = row.review_eligible !== true;
-            const cost = reviewCost(row, state);
-            for (const selector of ['[data-subagent-review-facts]', '[data-subagent-delivery-cost]']) {
-                const node = el.querySelector(selector);
-                if (node) node.textContent = cost;
-            }
+            const money = el.querySelector('[data-subagent-delivery-cost]');
+            if (money) money.textContent = reviewCost(row, state, { line: true });
+            if (money?.dataset) { if (tariffMark(row, state)) money.dataset.i18nFmt = 'model price'; else delete money.dataset.i18nFmt; }
+            const measured = el.querySelector('[data-subagent-review-facts]');
+            if (measured) measured.textContent = reviewCost(row, state);
+            if (measured?.parentElement) measured.parentElement.hidden = !reviewCost(row, state);
             syncEffortFacet(el, row, index);
-            for (const [selector, text] of [['[data-subagent-last-review]', lastReview(row, state)],
+            for (const [selector, text] of [['[data-subagent-tariff]', modelTariff(row, state)],
+                ['[data-subagent-last-review]', lastReview(row, state)],
                 ['[data-subagent-last-task]', rowTaskRun(row, state)],
                 ['[data-subagent-stored]', String(row.route.target_id || '').trim()]]) {
                 const fact = el.querySelector(selector);
@@ -1057,7 +1073,6 @@ export function createAvailableSubagentsEditor({
         const pool = reviewPoolSummary(state, Boolean(page));
         const intent = editorIntent(state);
         const items = state.setting.items;
-        const full = !state.loaded || items.length >= MAX_AVAILABLE_SUBAGENTS;
         const unloaded = '<div class="available-subagents-empty">The saved configuration could not be loaded, so this editor will not replace it.</div>';
         const facts = `<div class="available-subagents-source" data-subagents-read-problem ${readProblem ? '' : 'hidden'}>${escapeHtml(readProblem)}</div>
             <div data-subagents-diagnostics class="available-subagents-diagnostics" ${diagnostics.length ? '' : 'hidden'}>${escapeHtml(diagnostics.join(' · '))}</div>`;
@@ -1090,7 +1105,7 @@ export function createAvailableSubagentsEditor({
             const html = `<section class="ui-card settings-card">
                 <div class="settings-card-head"><h3 class="settings-card-title agents-card-title">${items.length} agent${items.length === 1 ? '' : 's'}</h3>
                     <span class="ui-result" data-entry-result role="status" aria-live="polite"></span>
-                    <div class="ui-section-actions"><button type="button" class="btn btn-default btn-sm" data-subagent-add ${full ? 'disabled' : ''}>Add agent</button></div></div>
+                    <div class="ui-section-actions"><span class="ui-hint-host" data-full-hint><button type="button" class="btn btn-default btn-sm" data-subagent-add ${state.loaded ? '' : 'disabled'}${held(state)}>Add agent</button></span></div></div>
                 <div class="agents-filters">${FILTERS.filter(([key]) => key === 'all' || key === state.filter || count(key)).map(([key, label]) =>
                     `<button type="button" class="filter-chip${key === state.filter ? ' active' : ''}" data-agents-filter="${key}" aria-pressed="${key === state.filter}">${label} ${count(key)}</button>`).join('')}</div>
                 ${state.source === 'undecided' || state.automatic ? `<p class="available-subagents-source" data-agents-automatic>Automatic: this list follows your Main model and accounts. Your first change here saves it as yours.</p>` : ''}
@@ -1098,8 +1113,7 @@ export function createAvailableSubagentsEditor({
                 <div class="settings-rows">${!state.loaded ? unloaded : heads || `<p class="available-subagents-empty">${items.length ? 'No agent here.'
                     : 'No agents yet, so the main model is the one agent. Add one to choose others.'}</p>`}</div>
                 ${below}
-                <p class="available-subagents-source">A change applies to new tasks: a task that is already running keeps the reviewers it started with.${
-                    items.length >= MAX_AVAILABLE_SUBAGENTS ? ` The list holds at most ${MAX_AVAILABLE_SUBAGENTS} agents.` : ''}</p>
+                <p class="available-subagents-source">A change applies to new tasks: a task that is already running keeps the reviewers it started with.</p>
             </section>`;
             if (html === state.html) return true;  // nothing in view changed (a status tick, the pool read): focus and listeners stay
             container.innerHTML = state.html = html;
@@ -1118,7 +1132,7 @@ export function createAvailableSubagentsEditor({
                 <span class="available-subagents-count">${items.length}/${MAX_AVAILABLE_SUBAGENTS}</span>
                 <span class="available-subagents-count" data-review-pool-count>${escapeHtml(pool.count)}</span>
                 <span class="settings-inline-status available-subagents-intent" data-subagents-intent data-tone="${intent.tone}" title="${escapeHtml(intent.title)}">${intent.label}</span>
-                <button type="button" class="btn btn-default" data-subagent-add ${full ? 'disabled' : ''}>Add subagent</button>
+                <span class="ui-hint-host" data-full-hint><button type="button" class="btn btn-default" data-subagent-add ${state.loaded ? '' : 'disabled'}${held(state)}>Add subagent</button></span>
             </div>
             ${above}
             <div class="available-subagents-list">
@@ -1169,6 +1183,7 @@ export function createAvailableSubagentsEditor({
         if (scroller) scroller.scrollTop = top;
         bindRows(container);
         disposeChoosers = bindModelChoosers(container);
+        bindFullHints(container);
         restoreFocus(container, focused);
         renderValidation();
         setResult(container.querySelector('[data-entry-result], [data-editor-result]'), state.result || {});
@@ -1176,6 +1191,23 @@ export function createAvailableSubagentsEditor({
         if (added) { reveal = ''; revealRow(added._uiKey); }
         else if (listView && reveal === '+' && state.loaded && !items.length) { reveal = ''; container.querySelector('[data-subagent-add]')?.focus(); }
         return true;
+    }
+
+    // At the limit each held Add and Duplicate carries the one hint (ui_hint.js) in its host, all saying the one fact,
+    // inside the box that clips it: the Settings page's scroller, or onboarding's collapse (overflow hidden).
+    function bindFullHints(container) {
+        disposeHints();
+        if (!atLimit(state)) return;
+        const said = { text: `The list holds at most ${MAX_AVAILABLE_SUBAGENTS} ${page ? 'agents' : 'subagents'}, including those switched off.`,
+            rule: 'Remove one to add another.' };
+        for (const host of container.querySelectorAll?.('[data-full-hint]') || []) {
+            const hint = createHint(host, { doc: getDoc(), boundary: host.closest?.('.settings-page, .wizard-collapse'), dismissOutside: true });
+            hint.say(said);
+            host.querySelector('button')?.setAttribute('aria-describedby', hint.el.id);
+            for (const type of ['pointerenter', 'focusin', 'click']) host.addEventListener(type, () => hint.show());
+            for (const type of ['pointerleave', 'focusout']) host.addEventListener(type, () => hint.hide());
+            hints.push(hint);
+        }
     }
 
     // Reveal the new row after the painter restores previous focus.
@@ -1321,6 +1353,7 @@ export function createAvailableSubagentsEditor({
         Object.assign(state, { destroyed: true, previewGeneration: state.previewGeneration + 1 });
         getWin()?.removeEventListener?.('ouro:language-changed', onLanguageChanged);
         disposeChoosers();
+        disposeHints();
         for (const disposer of ['statusDisposer', 'catalogDisposer']) { state[disposer]?.(); state[disposer] = null; }
     }
 
@@ -1419,8 +1452,9 @@ CODECS.helperMutation = { read(settings, row) {
 
 let roots = 0;
 /** Settings › Agents (settings_pages.js): the list (`agents`), or one agent's page (`agents/<id>`, `agents/new`). It
- *  reads when it is opened and whenever the shell says it is shown again; an unsaved form survives each read. */
-function mountAgents(container, { path, ctx }) {
+ *  reads when it is opened and whenever the shell says it is shown again; an unsaved form survives each read. A door's
+ *  `view` is the list's first filter (Permissions' Reviewers: `reviewers`). */
+function mountAgents(container, { path, view = '', ctx }) {
     const entry = path.split('/')[1] || '';
     const hostId = `agents-root-${++roots}`;
     const root = `<div id="${hostId}" class="settings-stack agents-root"></div>`;
@@ -1436,25 +1470,38 @@ function mountAgents(container, { path, ctx }) {
     let fold = null;
     const roster = container.querySelector(`[data-setting-row="${KEY}"]`);
     const delegation = roster?.querySelector('[data-setting-control]');
-    let reading = null;
-    const read = async () => {
-        let settings;
-        // A failed read keeps what the page showed (the next showing reads again); with nothing shown yet it says so.
-        try { settings = await ctx.readSettings(); } catch { if (!editor.loaded) editor.load(undefined); return; }
+    // The roster's switch says the stored value, or, until a read answers, that it is being read (or could not be):
+    // not operable, never "off".
+    const paintSwitch = () => {
+        if (!delegation) return;
+        const on = editor.loaded && editor.setting.enabled;
+        Object.assign(delegation, { checked: on, disabled: !editor.loaded }).setAttribute('aria-checked', String(on));
+        setRowMeta(roster.querySelector('[data-setting-meta]'), (!editor.loaded && settingsReadMessage()) || rowById(KEY).meta);
+    };
+    const adopt = (settings) => {
         syncRecheckState(recheckFromSettings(settings), container);
         editor.adopt(settings);
         // The fold's rows are drawn once their values are read: a row the page was opened for takes the focus filled.
         if (foldRows && !fold) foldRows.innerHTML = rowsOf('agents', { fold: true }).map((row) => settingsRow(row)).join('');
         fold = fold || (foldRows ? bindSettingRows(foldRows) : null);
         fold?.paint();
-        if (delegation) Object.assign(delegation, { checked: editor.setting.enabled, disabled: !editor.loaded }).setAttribute('aria-checked', String(editor.setting.enabled));
+        paintSwitch();
+    };
+    // Until it has loaded, the page follows every read: one that lands is adopted, the switch says what the others say.
+    const follow = () => { if (editor.loaded) return; if (settingsSnapshot()) adopt(settingsSnapshot()); else paintSwitch(); };
+    let reading = null;
+    const read = async () => {
+        let settings;
+        // A failed read keeps what the page showed (the next showing reads again); with nothing shown yet it says so.
+        try { settings = await ctx.readSettings(); } catch { if (!editor.loaded) { editor.load(undefined); paintSwitch(); } return; }
+        adopt(settings);
         void readReviewPool().then((payload) => editor.setReviewPool(payload));
         void editor.reloadStatus().then(() => accountCatalog?.arm());
     };
     // One read at a time: opening a page and the shell's "shown" for it are one read.
     const reload = () => (reading ||= read().finally(() => { reading = null; }));
     const editor = createAvailableSubagentsEditor({
-        hostId, page: { entry, ctx, reload },
+        hostId, page: { entry, ctx, reload, filter: view },
         previewGenerated: entry ? null : ({ subscriptionsConnected }) => apiClient.previewOnboardingSubagents({ subscriptionsConnected }),
     });
     delegation?.addEventListener('change', async () => {
@@ -1468,6 +1515,8 @@ function mountAgents(container, { path, ctx }) {
     const onShown = (event) => { if (event.detail?.path === path) { void reload(); catchUp(); } };
     globalThis.window?.addEventListener('ouro:settings-page-shown', onShown);
     editor.mount();
+    follow();  // the last read at once, else the switch says it is reading; this page's own read follows
+    const offRead = paintWithRow(KEY, follow);
     // A sign-in that settles while an agent's form is open renews its model list, as on a role's page. The watch is
     // armed by the form's first account read, so the answer the form opened with is not a change.
     const accountCatalog = entry ? watchAccountModelCatalog() : null;
@@ -1476,7 +1525,7 @@ function mountAgents(container, { path, ctx }) {
     return { unmount() {
         globalThis.window?.removeEventListener('ouro:settings-page-shown', onShown);
         accountCatalog?.dispose();
-        unbindRechecks(); fold?.dispose(); editor.destroy();
+        offRead(); unbindRechecks(); fold?.dispose(); editor.destroy();
     } };
 }
 

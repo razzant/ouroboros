@@ -12,7 +12,7 @@ import { mountDesktopShell } from './desktop_shell.js';
 import { mountInterfaceSize } from './interface_size.js';
 import { getNotifier } from './notifications.js';
 import { bindAutostartControl } from './settings_autostart.js';
-import { CODECS, HIDDEN_WHEN, bindSettingRows, settingsRow } from './settings_controls.js';
+import { CODECS, HIDDEN_WHEN, bindSettingRows, settingsRow, settingsSnapshot } from './settings_controls.js';
 import { readSkills, skillFormTitle, skillForms } from './settings_extension_forms.js';
 import { bindLanguageSettings, languageBlockHtml } from './settings_language.js';
 import { registerSettingsPage } from './settings_pages.js';
@@ -65,11 +65,11 @@ const shapeOf = (rows) => JSON.stringify(rows.map((row) => [row.id, row.control.
  * of a descriptor, changed in place by `tune(rows, settings, row)` for what a read shows); `bind(container, ctx)` wires
  * what is not a row and answers its disposer; `paint(container, settings)` writes the facts beside the rows;
  * `shown(container, again)` runs whenever the page is shown (`again()` paints once more, for a fact it read itself).
- * Remembers the last read, so a page opened again is drawn right.
+ * Starts from the last read of the settings, so a page opened after one is drawn right before its own read answers.
  */
 function rowsPage(path, { ids, draw, tune = null, bind = null, paint = null, shown = null }) {
-    let known = null;
     return (container, { ctx }) => {
+        let known = settingsSnapshot();
         const rows = ids().map((id) => structuredClone(rowById(id)));
         const row = (id) => rows.find((each) => each.id === id);
         let handle = null;
@@ -81,7 +81,8 @@ function rowsPage(path, { ids, draw, tune = null, bind = null, paint = null, sho
             unbind?.();
             container.innerHTML = draw(row, ctx);
             unbind = bind?.(container, ctx) || null;
-            handle = bindSettingRows(container, { rows, ask: ctx.ask, openDoor: (door) => ctx.openSettings?.(door.control.to) });
+            // A door may name what its page shows first (`view`: Reviewers opens Agents on its reviewers).
+            handle = bindSettingRows(container, { rows, ask: ctx.ask, openDoor: (door) => ctx.openSettings?.(door.control.to, { view: door.control.view || '' }) });
             shape = shapeOf(rows);
         };
         const apply = (settings) => {
@@ -437,14 +438,15 @@ const mountAdvanced = rowsPage('computer/advanced', {
     ids: () => rowsOf('computer/advanced').map((row) => row.id),
     draw: (row) => lead('Most installations never change these.')
         + card({ rows: rowsOf('computer/advanced').map((each) => settingsRow(row(each.id))).join('') }),
-    // What is served now stands in the Interface folder row, after its one line: a fact of the running core, in the
-    // warning's tone when it refused the saved folder.
+    // What is served now stands in the Interface folder row, under its words and control as a row's result does: a
+    // fact of the running core, in the warning's tone when it refused the saved folder.
     bind: (container) => {
         const fact = globalThis.document.createElement('span');
         fact.className = 'ui-result settings-row-result';
         fact.setAttribute('data-served-ui', '');
         fact.setAttribute('role', 'status');
-        rowNode(container, 'OUROBOROS_UI_DIR')?.querySelector('.ui-row-meta')?.append(fact);
+        const row = rowNode(container, 'OUROBOROS_UI_DIR');
+        row?.insertBefore(fact, row.querySelector('.settings-row-more') || null);  // before its More, as a result stands
         return null;
     },
     paint: (container) => setResult(container.querySelector('[data-served-ui]'), servedUiStatus(servedUi) || {}),

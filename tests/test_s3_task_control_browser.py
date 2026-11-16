@@ -153,6 +153,42 @@ def _assert_menu_geometry(metrics: dict, *, placement: str | None = None) -> Non
         assert rect["bottom"] <= metrics["trigger"]["top"] - 3, metrics
 
 
+def _scrolls_settled(page, frames: int = 5, limit_ms: int = 10_000) -> None:
+    """Return once ``frames`` animation frames pass with no scroll anywhere on the page. A viewport change and a
+    restyled card re-place the chat feed (its reader stays at the newest message, chat_reading_position.js), and
+    that scroll's event arrives a frame or two after the write. A scroll of the feed holding the trigger closes an
+    open menu (owner decision 1D, asserted below), so a press before it lands proves that race, not the portal.
+    A page that still scrolls, or draws no frames, after ``limit_ms`` fails here, at once, rather than at the test's
+    own ceiling: the limit is a timer, so it holds even where frames stopped."""
+    page.evaluate(
+        """
+        ([frames, limit]) => new Promise((resolve, reject) => {
+            let quiet = 0;
+            let done = false;
+            const scrolled = () => { quiet = 0; };
+            const finish = (error) => {
+                if (done) return;
+                done = true;
+                clearTimeout(timer);
+                document.removeEventListener('scroll', scrolled, true);
+                if (error) reject(error); else resolve();
+            };
+            const timer = setTimeout(() => finish(new Error(
+                `only ${quiet} of ${frames} quiet frames within ${limit} ms of the change: the page still scrolled or drew no frames`)), limit);
+            document.addEventListener('scroll', scrolled, true);
+            const frame = () => {
+                if (done) return;
+                quiet += 1;
+                if (quiet < frames) requestAnimationFrame(frame);
+                else finish(null);
+            };
+            requestAnimationFrame(frame);
+        })
+        """,
+        [frames, limit_ms],
+    )
+
+
 def _hold_live_root(data_dir, task_id: str, *, hold_seconds: float = 90.0) -> None:
     """Make ``task_id`` a GENUINELY running managed root for the test's duration: a queued
     row restored from the queue snapshot at boot, dispatched by the pool, and held inside
@@ -387,6 +423,7 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                 # Narrow viewports must shrink the menu instead of allowing the
                 # historical 220px minimum to overflow the page.
                 page.set_viewport_size({"width": 320, "height": 700})
+                _scrolls_settled(page)
                 trigger.click()
                 menu.wait_for(state="visible", timeout=10_000)
                 _assert_menu_geometry(_menu_metrics(page, menu, trigger))
@@ -417,6 +454,9 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                     }
                     """,
                 )
+                # The feed takes its new place first (one scroll, 10-20 ms after the resize): opened before it,
+                # the menu closes by 1D rather than by anything this step measures.
+                _scrolls_settled(page)
                 trigger.click()
                 menu.wait_for(state="visible", timeout=10_000)
                 short_metrics = menu.evaluate(
@@ -477,6 +517,7 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                     """,
                 )
                 page.set_viewport_size({"width": 1440, "height": 1000})
+                _scrolls_settled(page)
 
                 # 2) "Hurry up": typed control + LOCAL toast; the chat DOM
                 #    gains ZERO bubbles (HQ1's no-chat contract, live DOM).

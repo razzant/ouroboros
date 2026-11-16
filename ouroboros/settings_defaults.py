@@ -539,6 +539,11 @@ SETTINGS_KEYS_NOT_EXPORTED_TO_ENV = frozenset({
     "MCP_SERVERS",
     # The same for the API connection rows, whose keys would otherwise ride every child's environment.
     "OUROBOROS_CONNECTIONS",
+    # The subagent catalog: its readers take the document or the task's snapshot (``settings_integrity.
+    # runtime_catalog_settings``), and a copy of its rows' free text outgrows one environment entry (Linux execve: 32
+    # pages; Windows documents 32,767 characters per variable). An operator's own variable stays input for a document
+    # that sets none; ``note_proposal_projection`` retires the mirror an earlier projection left.
+    "OUROBOROS_SUBAGENTS",
     # ENV IS THE AUTHORITY for the bind host, not settings. `ouroboros server --host 0.0.0.0` puts the choice in
     # the environment, and both consumers (server.main, server_control.restart_current_process) deliberately read
     # env BEFORE settings. Exporting this key stamped the settings value — usually the shipped 127.0.0.1 default,

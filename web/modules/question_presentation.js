@@ -63,6 +63,17 @@ export function vouchedBy(data) {
 }
 
 const listed = value => (Array.isArray(value) ? value : []);
+
+/**
+ * A question's opening words as one plain line, for a place that names the question instead of showing it (a work
+ * list's row, a Project's line in the sidebar and that row's name): the emphasis and code markers dropped, then the
+ * spaces folded (markers around nothing leave no words), at most `max` characters with an ellipsis that says the cut.
+ * The question's card holds the whole text.
+ */
+export function questionWords(text, max = Infinity) {
+    const plain = String(text ?? '').replace(/\*\*|__|`/g, '').replace(/\s+/g, ' ').trim();
+    return plain.length > max ? `${plain.slice(0, max - 1).trimEnd()}…` : plain;
+}
 // One question's exact address: a bare wait without a quiz never stands for an addressed question (as on the server).
 const sameAddress = (one, other) => String(one?.task_id) === String(other?.task_id)
     && String(one?.quiz_id || '') === String(other?.quiz_id || '');
@@ -218,6 +229,44 @@ export function normalizeQuiz(msg) {
     };
 }
 
+/**
+ * A question's stake as its card draws it (`node` a `.chat-quiz-stake`): `At stake:` and the asker's words through
+ * `mount` (the chat's Markdown), the label in its own `.chat-quiz-stake-label` so a reader of the card's words
+ * (chat_search_words.js) can tell the card's label from what the asker wrote. The card and a search candidate draw it
+ * here alike.
+ */
+export function mountQuizStake(node, stake, mount = null) {
+    const label = tr('quiz.at_stake', 'At stake:');
+    if (mount) mount(node, `${label} ${stake}`);
+    else node.textContent = `${label} ${stake}`;
+    labelLead(node, label, 'chat-quiz-stake-label');
+}
+
+/** The card's `label` leading `node`'s words moves into a span of its own (`className`), the words after it staying. */
+function labelLead(node, label, className) {
+    let first = node.firstChild;
+    while (first && first.nodeType !== 3) first = first.firstChild;
+    if (!first || typeof first.splitText !== 'function' || !first.data.startsWith(label)) return;
+    first.splitText(label.length);
+    const span = node.ownerDocument.createElement('span');
+    span.className = className;
+    first.replaceWith(span);
+    span.append(first);
+}
+
+/** An option's words as its card draws them in its button: the label, then the detail when the option has one. */
+export function quizOptionWords(doc, option) {
+    const label = doc.createElement('span');
+    label.className = 'chat-quiz-option-label';
+    label.textContent = String(option.label || '');
+    const detailText = String(option.detail || '');
+    if (!detailText) return [label];
+    const detail = doc.createElement('span');
+    detail.className = 'chat-quiz-option-detail';
+    detail.textContent = detailText;
+    return [label, detail];
+}
+
 export function appendRecommendedBadge(button) {
     // The asker's recommendation (the "A" option) is a badge on that option, every surface alike.
     if (button.querySelector('.chat-quiz-option-recommended')) return;
@@ -258,22 +307,28 @@ export function paintChosenAnswer(button, chosen) {
 export function renderOwnerAnswer(card, comment) {
     // The owner's own words are a SECOND primary line under the question:
     // with no chosen option they are the entire answer, and beside a
-    // chosen one they qualify it.
+    // chosen one they qualify it. Its label stands in its own
+    // `.chat-quiz-answer-label` (as a stake's does), so a reader of the
+    // card's words (chat_search_words.js) tells it from what the owner wrote.
     let line = card.querySelector('.chat-quiz-answer');
     if (!comment) {
         if (!line) return false;
         line.remove();
         return true;
     }
-    const text = `Owner's answer: ${comment}`;
+    const label = "Owner's answer:";
+    const text = `${label} ${comment}`;
     if (line) {
         if (line.textContent === text) return false;
         line.textContent = text;
+        labelLead(line, label, 'chat-quiz-answer-label');
         return true;
     }
-    line = document.createElement('div');
+    // The card's own document: a search candidate draws its card in an inert one.
+    line = (card.ownerDocument || document).createElement('div');
     line.className = 'chat-quiz-answer';
     line.textContent = text;
+    labelLead(line, label, 'chat-quiz-answer-label');
     const assumption = card.querySelector('.chat-quiz-assumption');
     if (assumption) assumption.before(line);
     else card.append(line);

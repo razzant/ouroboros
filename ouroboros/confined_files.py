@@ -56,6 +56,10 @@ DIR_FLAGS = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLL
              | getattr(os, "O_CLOEXEC", 0))
 FILE_FLAGS = (os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
               | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0))
+# A root held only to stat and open its entries needs search permission alone, as a path walk does (``--x``):
+# ``O_SEARCH`` (macOS, BSD) or Linux's ``O_PATH``; 0 where neither exists, and the root opens as ``DIR_FLAGS``.
+_SEARCH = getattr(os, "O_SEARCH", 0) or getattr(os, "O_PATH", 0)
+SEARCH_DIR_FLAGS = _SEARCH and _SEARCH | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
 # A confined open exists on this platform: the POSIX descent or the Windows handle proof.
 CONFINED_OPEN_AVAILABLE = POSIX_CONFINED or IS_WINDOWS
 
@@ -118,20 +122,22 @@ class ConfinedDirectory:
     """Held directory, descended only by plain names. The root is host-owned and may
     be a configured junction; descendants never follow links. No path is reopened.
     A child must be closed before its parent (use ExitStack for a multi-part walk).
+    ``search_only`` holds the root for ``open``/``open_for_read``/``child`` alone, never a listing: POSIX by a
+    search descriptor, Windows by a handle without ``FILE_LIST_DIRECTORY`` (``_Win32Files.open_root``).
     """
 
-    def __init__(self, root: Any = None, *, _parent: Any = None, _name: str = "") -> None:
+    def __init__(self, root: Any = None, *, search_only: bool = False, _parent: Any = None, _name: str = "") -> None:
         self.api = _parent.api if _parent is not None else (_Win32Files.load() if IS_WINDOWS else None)
         self.handle = None
         if _parent is not None and not native_name(_name):
             raise OSError(errno.EINVAL, "not a plain directory component")
         if self.api:
             handle = (self.api.open_relative(_parent.handle, _name, directory=True) if _parent is not None
-                      else self.api.open_root(str(root)))
+                      else self.api.open_root(str(root), search_only=search_only))
         elif POSIX_CONFINED:
             # Only the configured root may follow a link, never a descendant.
             handle = (os.open(_name, DIR_FLAGS, dir_fd=_parent.handle) if _parent is not None else
-                      os.open(root, DIR_FLAGS & ~os.O_NOFOLLOW))
+                      os.open(root, (search_only and SEARCH_DIR_FLAGS) or DIR_FLAGS & ~os.O_NOFOLLOW))
         else:
             raise OSError(errno.ENOTSUP, "confined directory reads unavailable")
         self.handle = handle
@@ -223,6 +229,17 @@ class ConfinedDirectory:
         with os.scandir(self.handle) as entries:
             return [(entry.name, entry.is_dir(follow_symlinks=False)) for entry in entries
                     if include_links or entry.is_dir(follow_symlinks=False) or entry.is_file(follow_symlinks=False)]
+
+
+def real_directory(path: Any) -> bool:
+    """Whether PATH names a directory itself, no link followed at its end: the question after a confined
+    open refused it. Only a missing path answers no. A lookup that fails for any other reason raises, so
+    the refusal stays unknown and is never read as absence (``Path.is_dir`` answers "no" to every lookup
+    error from Python 3.14)."""
+    try:
+        return stat.S_ISDIR(os.lstat(path).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
 
 
 @contextlib.contextmanager
@@ -431,10 +448,13 @@ class _Win32Files:
             number = self._ERRNO.get(self._nt_error(status), errno.EIO)
         return OSError(number, f"confined NT read failed (NTSTATUS 0x{code:08X})")
 
-    def open_root(self, path: str) -> int:
-        """Only the host-configured anchor follows junctions, once, on acquisition."""
+    def open_root(self, path: str, *, search_only: bool = False) -> int:
+        """Only the host-configured anchor follows junctions, once, on acquisition. ``search_only``: a root that
+        only names entries asks no listing right, as a path walk needs none; ``require_plain`` still needs
+        ``FILE_READ_ATTRIBUTES``, and relative opens (``NtCreateFile`` RootDirectory) document no right on it."""
         # Walk handles share delete like a POSIX dirfd; only the upload proof (``open``) denies it.
-        handle = self._create(path, self.FILE_LIST_DIRECTORY | self.FILE_READ_ATTRIBUTES,
+        listing = 0 if search_only else self.FILE_LIST_DIRECTORY
+        handle = self._create(path, listing | self.FILE_READ_ATTRIBUTES,
                               self.SHARE_READ | self.SHARE_WRITE | self.SHARE_DELETE, None, self.OPEN_EXISTING,
                               self.FLAG_BACKUP_SEMANTICS, None)
         if handle in (None, self._invalid):

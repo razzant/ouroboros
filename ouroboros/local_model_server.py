@@ -35,7 +35,7 @@ def object_tool_arguments(messages: Any) -> Any:
                 if isinstance(arguments, str):
                     try:
                         parsed = json.loads(arguments)
-                    except ValueError:
+                    except (ValueError, RecursionError):  # nesting past the decoder's depth stays text
                         parsed = None
                     if isinstance(parsed, dict):
                         call = {**call, "function": {**function, "arguments": parsed}}

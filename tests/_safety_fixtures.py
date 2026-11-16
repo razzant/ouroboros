@@ -34,6 +34,8 @@ def supervisor(monkeypatch, tmp_path):
     monkeypatch.setattr(safety, "_SAFETY_STORM_UNTIL", 0)
     monkeypatch.setattr(safety, "_CHAIN_STORMS", {})
     monkeypatch.setattr(safety, "runtime_setting", lambda key, default=None: values.get(key, default))
+    # The catalog's own reader (task snapshot or document; the real one: tests/test_task_settings_snapshot.py).
+    monkeypatch.setattr(safety, "runtime_catalog_settings", lambda: values)
     monkeypatch.setattr(safety, "get_safety_mode", lambda kind="owner": modes[kind])
     monkeypatch.setattr(safety, "get_runtime_mode", lambda: "advanced")
     monkeypatch.setattr(safety, "get_safety_model", lambda: values.get("OUROBOROS_MODEL_SAFETY") or "test/checker")

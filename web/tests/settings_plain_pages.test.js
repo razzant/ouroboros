@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import test from 'node:test';
 
 import { SAFETY_LEVELS } from '../modules/consciousness_words.js';
+import { getNotifier } from '../modules/notifications.js';
 import { forgetSettingRows, readSettings, settingsRow } from '../modules/settings_controls.js';
 import { settingsPageFor } from '../modules/settings_pages.js';
 import { policyValueLabel } from '../modules/settings_policy.js';
@@ -18,6 +19,7 @@ import { NodeStub, setup } from './dashboard_dom_fixture.js';
 const MY_PAGES = ['permissions', 'rules', 'appearance', 'notifications', 'voice', 'computer', 'computer/advanced', 'computer/about'];
 const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => structuredClone(data) });
 const settle = async (rounds = 10) => { for (let i = 0; i < rounds; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+const deferred = () => { let resolve; const promise = new Promise((done) => { resolve = done; }); return { promise, resolve }; };
 const EFFECTS = { OUROBOROS_RUNTIME_MODE: 'restart', OUROBOROS_SERVER_HOST: 'restart', OUROBOROS_SAFETY_MODE: 'next_task',
     OUROBOROS_CONSCIOUSNESS_SAFETY_MODE: 'next_task', OUROBOROS_TASK_REVIEW_MODE: 'next_task', OUROBOROS_NETWORK_PASSWORD: 'now',
     OUROBOROS_SAFETY_OWNER_RULES: 'next_task', OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: 'now', OUROBOROS_UI_DIR: 'restart',
@@ -360,6 +362,16 @@ test('Notifications keeps the notifier\'s own switches, as switches that act at 
     assert.ok(page.row('notify:enabled').querySelector('[data-setting-meta]').hasAttribute('data-notify-status'));
     assert.match(page.meta('notify:enabled'), /Notifications are off|This device blocks storage/);
     assert.ok(page.row('notify:test').querySelector('[data-setting-meta]').hasAttribute('data-notify-attention-status'));
+    // Off, the test row has no attention line and its row says so (settings.css: one line); turned on, the notifier writes
+    // the line through the rows' one writer, and the row has words again (in WebKit a `:has()` kept the line hidden).
+    const bare = () => ['notify:enabled', 'notify:test'].map((id) => page.row(id).hasAttribute('data-no-meta'));
+    assert.deepEqual([page.meta('notify:test'), ...bare()], ['', false, true]);
+    const notifier = getNotifier();
+    t.after(() => notifier.setPref('enabled', false));
+    await notifier.setPref('enabled', true);
+    notifier.mountSettings(page.container);
+    assert.ok(page.meta('notify:test'));
+    assert.deepEqual(bare(), [false, false]);
     assert.deepEqual(page.container.querySelectorAll('.settings-card-title').map((title) => title.textContent), ['Notify me about', 'How']);
     await page.container.querySelector('[data-notify-doors]').fire('click', { target: page.row('notify:places') });
     assert.deepEqual(page.opened, ['page:circles'], 'what a place is sent is set in Circles');
@@ -497,6 +509,73 @@ test('a stored network password is a stored key\'s row: Replace, Show the stored
     assert.match(shut.meta('OUROBOROS_NETWORK_PASSWORD'), /^Not set\./);
 });
 
+test('a stored network password starts neutral until its first settings read', async (t) => {
+    forgetSettingRows();
+    forgetUnsavedRules();
+    const env = setup(t);
+    const server = fakeServer(env.routes, { OUROBOROS_NETWORK_PASSWORD: 'old horse' });
+    const originalSettings = env.routes.get('/api/settings');
+    const held = deferred();
+    env.routes.set('/api/settings', async (url, init = {}) => init.method ? originalSettings(url, init) : held.promise);
+    const container = new NodeStub();
+    const ctx = { readSettings, openSettings() {}, ask: async () => true };
+    const handle = await settingsPageFor('computer').mount(container, { path: 'computer', row: '', ctx });
+    t.after(() => {
+        const previousWindow = globalThis.window;
+        globalThis.window = env.window;
+        handle?.unmount?.();
+        globalThis.window = previousWindow;
+    });
+    env.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'computer' } }));
+    await settle();
+    const row = () => container.querySelector('[data-setting-row="OUROBOROS_NETWORK_PASSWORD"]');
+    const part = (hook) => row().querySelector(hook);
+    const hostRow = () => container.querySelector('[data-setting-row="OUROBOROS_DESKTOP_KEEP_RUNNING"]');
+    assert.deepEqual([part('[data-secret-state]').textContent, part('[data-secret-open]').hidden,
+        part('[data-secret-open]').disabled, part('[data-secret-show]').disabled, part('[data-secret-remove]').hidden],
+    ['', true, true, true, true]);
+    assert.equal(part('[data-setting-meta]').textContent, 'Reading…');
+    assert.equal(row().textContent.match(/Reading…/g)?.length, 1, 'only the row line says it is reading');
+    assert.equal(hostRow().querySelector('[data-background-toggle]').disabled, false, 'the host-owned switch stays usable');
+    assert.equal(hostRow().querySelector('[data-setting-meta]').textContent, rowById('OUROBOROS_DESKTOP_KEEP_RUNNING').meta);
+    assert.doesNotMatch(hostRow().textContent, /Reading|Could not be read/);
+    held.resolve(response({ error: 'settings unavailable' }, 500));
+    await settle();
+    assert.deepEqual([part('[data-secret-state]').textContent, part('[data-secret-open]').hidden,
+        part('[data-secret-open]').disabled, part('[data-secret-remove]').hidden],
+    ['', true, true, true]);
+    assert.equal(row().textContent.match(/Could not be read/g)?.length, 1);
+    assert.equal(hostRow().querySelector('[data-background-toggle]').disabled, false, 'a failed settings read does not lock the host switch');
+    env.routes.set('/api/settings', originalSettings);
+    env.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'computer' } }));
+    await settle();
+    assert.deepEqual([part('[data-secret-state]').textContent, part('[data-secret-open]').textContent,
+        part('[data-secret-open]').disabled, part('[data-secret-show]').disabled, part('[data-secret-remove]').hidden],
+    ['Saved', 'Replace', false, false, false]);
+    assert.equal(part('[data-secret-open]').hidden, false);
+    assert.equal(server.values.OUROBOROS_NETWORK_PASSWORD, 'old horse');
+    // Both replacing and removing own this row's busy state. Its saved-key painter must not unlock the actions.
+    await container.fire('click', { target: part('[data-secret-open]') });
+    const actions = () => ['[data-secret-show]', '[data-secret-remove]'].map((hook) => [part(hook).disabled, part(hook).getAttribute('aria-busy')]);
+    assert.deepEqual(actions(), [[false, null], [false, null]]);
+    for (const action of ['replace', 'remove']) {
+        const write = deferred();
+        env.routes.set('/api/settings', (url, init = {}) => init.method === 'POST' ? write.promise : originalSettings(url, init));
+        const input = part('[data-setting-control]');
+        input.value = action === 'replace' ? 'new horse' : '';
+        const pending = container.fire(action === 'replace' ? 'change' : 'click',
+            { target: action === 'replace' ? input : part('[data-secret-remove]') });
+        await settle();
+        assert.deepEqual(actions(), [[true, 'true'], [true, 'true']], `${action}: both actions wait for the write`);
+        await readSettings();
+        assert.deepEqual(actions(), [[true, 'true'], [true, 'true']], `${action}: a read cannot unlock them either`);
+        write.resolve(response({ saved: false, error: 'refused' }, 500));
+        await pending;
+        await settle();
+        assert.deepEqual(actions(), [[false, null], [false, null]], `${action}: both actions return after the refusal`);
+    }
+});
+
 test('Advanced holds what an installation rarely changes, and About the reset in its fold, asked first', async (t) => {
     const advanced = await open(t, 'computer/advanced');
     assert.match(advanced.container.textContent, /^Most installations never change these\./);
@@ -578,4 +657,123 @@ test('Permissions and checks: the checks a spare model answered are counted by m
         + ' models and got no answer. 412 checks with a recorded verdict in the same span.');
     assert.equal(spareWords([walk(null)], 1, 'in the last 24 h'),
         '1 check went to the spare models in the last 24 h and got no answer. 1 check with a recorded verdict in the same span.');
+});
+
+// A read held until the test lets it answer: what a page shows meanwhile it shows without its own read.
+function holdReads(routes) {
+    const answer = routes.get('/api/settings');
+    const held = { status: 200, gate: null };
+    held.next = () => { let resolve; held.gate = { promise: new Promise((done) => { resolve = done; }) }; held.gate.resolve = resolve; return held.gate; };
+    routes.set('/api/settings', async (url, init = {}) => {
+        if (init.method === 'POST') return answer(url, init);
+        await held.gate.promise;
+        return held.status === 200 ? answer(url, init) : response({ error: 'offline' }, held.status);
+    });
+    return held;
+}
+
+test('Your rules: inert and saying so until a read answers, "Could not be read" after a failed first one, and the last read at once', async (t) => {
+    forgetSettingRows();
+    forgetUnsavedRules();
+    const env = setup(t);
+    fakeServer(env.routes);
+    const held = holdReads(env.routes);
+    const mount = () => {
+        const container = new NodeStub();
+        const handle = settingsPageFor('rules').mount(container, { path: 'rules', row: '', ctx: { readSettings } });
+        t.after(() => handle.unmount());
+        const field = container.querySelector('#settings-rules');
+        return () => [field.value ?? '', field.disabled, container.querySelector('[data-editor-save]').disabled, container.querySelector('[data-editor-result]').textContent];
+    };
+    held.next();
+    const cold = mount();
+    assert.deepEqual(cold(), ['', true, true, 'Reading…']);
+    held.status = 500;
+    held.gate.resolve();
+    await settle();
+    assert.deepEqual(cold(), ['', true, true, 'Could not be read']);
+    // Shown again, it reads again: reading, then the stored text, which may be edited.
+    held.status = 200;
+    held.next();
+    env.window.dispatchEvent(new CustomEvent('ouro:settings-page-shown', { detail: { path: 'rules' } }));
+    await settle();
+    assert.deepEqual(cold(), ['', true, true, 'Reading…']);
+    held.gate.resolve();
+    await settle();
+    assert.deepEqual(cold(), ['Ask before paying.', false, false, '']);
+    // Opened again: the last read at once, before its own read answers.
+    held.next();
+    const warm = mount();
+    assert.deepEqual(warm(), ['Ask before paying.', false, false, '']);
+    held.gate.resolve();
+    await settle();
+});
+
+test('a page opened after a read paints its own facts and tunes its choices from that read before its own read answers', async (t) => {
+    const page = await open(t, 'computer', { values: { OUROBOROS_NETWORK_PASSWORD: 'old horse' } });
+    page.handle.unmount();
+    // This installation is reached on its network, and an organization holds Access at Pro.
+    const document = page.server.document;
+    page.server.document = () => {
+        const read = document();
+        Object.assign(read._meta, { reachability: 'lan_reachable', recommended_url: 'http://192.0.2.1:8000' });
+        read._meta.policy_state.deployment = { access_max: 'pro', min_coverage: 'full', checker: { model: 'anthropic@safety::checker' } };
+        return read;
+    };
+    await readSettings();
+    const held = holdReads(page.routes);
+    held.next();
+    const mount = (path) => {
+        const container = new NodeStub();
+        const handle = settingsPageFor(path).mount(container, { path, row: '', ctx: { readSettings } });
+        t.after(() => handle.unmount());
+        return container;
+    };
+    const computer = mount('computer');
+    const password = computer.querySelectorAll('[data-setting-row]').find((node) => node.dataset.settingRow === 'OUROBOROS_NETWORK_PASSWORD');
+    assert.deepEqual([password.querySelector('[data-secret-state]').textContent, password.querySelector('[data-secret-open]').textContent], ['Saved', 'Replace']);
+    assert.match(computer.querySelector('[data-lan-address]').textContent, /^http:\/\/192\.0\.2\.1:8000/);
+    const permissions = mount('permissions');
+    const access = () => permissions.querySelectorAll('[data-setting-row]').find((node) => node.dataset.settingRow === 'OUROBOROS_RUNTIME_MODE')
+        .querySelectorAll('[data-setting-value]').map((button) => button.dataset.settingValue);
+    const before = access();
+    assert.equal(before.includes('cyber_pro'), false, 'what the organization closes is not offered');
+    held.gate.resolve();
+    await settle();
+    assert.deepEqual(access(), before);
+});
+
+test('Your rules follows the reads made anywhere: its own fails while a newer one runs, then says what that one and the next find', async (t) => {
+    forgetSettingRows();
+    forgetUnsavedRules();
+    const env = setup(t);
+    fakeServer(env.routes);
+    const answer = env.routes.get('/api/settings');
+    const gates = [];
+    env.routes.set('/api/settings', async (url, init = {}) => {
+        if (init.method === 'POST') return answer(url, init);
+        const gate = {};
+        gate.promise = new Promise((done) => { gate.resolve = done; });
+        gates.push(gate);
+        return (await gate.promise) === 200 ? answer(url, init) : response({ error: 'offline' }, 500);
+    });
+    const container = new NodeStub();
+    const handle = settingsPageFor('rules').mount(container, { path: 'rules', row: '', ctx: { readSettings } });
+    t.after(() => handle.unmount());
+    const field = container.querySelector('#settings-rules');
+    const facts = () => [field.value ?? '', field.disabled, container.querySelector('[data-editor-result]').textContent];
+    const newer = readSettings().catch(() => 'failed');  // the list's, made after the page's own
+    await settle();
+    gates[0].resolve(500);
+    await settle();
+    assert.deepEqual(facts(), ['', true, 'Reading…'], 'its own read failed, a newer one still runs');
+    gates[1].resolve(500);
+    await newer;
+    assert.deepEqual(facts(), ['', true, 'Could not be read']);
+    const elsewhere = readSettings();  // made for another page
+    assert.equal(facts()[2], 'Reading…');
+    await settle();
+    gates[2].resolve(200);
+    await elsewhere;
+    assert.deepEqual(facts(), ['Ask before paying.', false, ''], 'the read that lands is the page\'s too');
 });

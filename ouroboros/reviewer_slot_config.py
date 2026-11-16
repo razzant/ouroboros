@@ -30,7 +30,7 @@ from __future__ import annotations
 import contextlib as _contextlib
 import contextvars as _contextvars
 import json
-from ouroboros.settings_integrity import runtime_environ
+from ouroboros.settings_integrity import SettingsDocumentUnknown, runtime_catalog_settings
 from ouroboros.model_slots import resolve_processing_preference
 import pathlib
 import threading
@@ -167,9 +167,17 @@ def _catalog_row_slot(row: Any, settings: Any, *, where: str = "") -> Configured
 
 def _catalog_settings(snapshot: Any = None) -> Any:
     """The settings plane the pool reads: an explicit settings snapshot (a task's,
-    a save handler's incoming document, a benchmark container's), else the
-    applied runtime environment."""
-    return snapshot if snapshot is not None else runtime_environ()
+    a save handler's incoming document, a benchmark container's), else the task's
+    catalog or the document (``runtime_catalog_settings``). A document that cannot
+    be read is the typed catalog failure, never an empty pool reviewed by Main."""
+    if snapshot is not None:
+        return snapshot
+    from ouroboros.configured_subagents import SUBAGENTS_SETTING
+
+    try:
+        return runtime_catalog_settings()
+    except SettingsDocumentUnknown as exc:
+        raise ValueError(f"{SUBAGENTS_SETTING} is unknown: {exc}") from exc
 
 
 def _parse_catalog(settings: Any) -> Any:
@@ -362,7 +370,8 @@ def compose_review_panel(reviewers: Sequence[str] = (), reason: str = "", *, sur
     Narrowing on them outside Cyber Pro requires a reason; an adviser neither
     satisfies the counted minimum nor acquires authority from its delivery. Optional
     plan follow-ups, preflight, Auto/child result waves and Cyber Pro keep named-row
-    composition. Omission selects the pool, including its disclosed Main fallback.
+    composition; only Cyber Pro may seat advisers alone (a wave with no counted
+    verdict). Omission selects the pool, including its disclosed Main fallback.
     ``chosen_by`` is whatever the caller records (the host floor passes ``host``).
     The caller retains these facts on retries.
     """
@@ -413,7 +422,8 @@ def compose_review_panel(reviewers: Sequence[str] = (), reason: str = "", *, sur
             ignored.append(name)
         else:
             seats.append(PoolSeat(slot, tuple(seat_parts(slot, coupling_only=True)), True))
-    if not any(not seat.additional for seat in seats) and surface not in {"plan", "plan_first"}:
+    counted_seated = any(not seat.additional for seat in seats)
+    if not counted_seated and surface not in {"plan", "plan_first"} and strictness != "cyber_pro":
         raise PanelCompositionError(f"REVIEW_PANEL_EMPTY: {counted_hint}; an added critic never satisfies quorum. No review was dispatched ($0).")
     if len(seats) > MAX_CONFIGURED_SUBAGENTS:
         raise PanelCompositionError(f"REVIEW_PANEL_TOO_LARGE: a wave seats at most {MAX_CONFIGURED_SUBAGENTS} reviewers (this call asks {len(seats)}).")
@@ -422,7 +432,7 @@ def compose_review_panel(reviewers: Sequence[str] = (), reason: str = "", *, sur
         "pool": [{"seat_id": slot.slot_id, "model": slot.model, "effort": slot.effort,
                   "delivery": "retrieving" if slot.retrieves else "packet",
                   "route": str(getattr(slot.route, "value", slot.route))} for slot in configured if not main_alone],
-        "pool_empty": main_alone, "main_self_review": main_alone,
+        "pool_empty": main_alone, "main_self_review": main_alone and counted_seated,
         "chosen_by": chosen_by, "strictness": strictness, "reason": str(reason),
         "composition": "full_pool" if not named else "composed",
         "reason_missing": narrowed and not str(reason).strip(),
@@ -483,7 +493,11 @@ def reviewer_slot_config_error() -> str:
     fix is seen immediately."""
     from ouroboros.configured_subagents import SUBAGENTS_SETTING
 
-    return review_pool_state(_catalog_settings().get(SUBAGENTS_SETTING))["error"]
+    try:
+        settings = _catalog_settings()
+    except ValueError as exc:  # the settings document could not be read: the pool is unknown
+        return str(exc)
+    return review_pool_state(settings.get(SUBAGENTS_SETTING))["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -689,7 +703,7 @@ def row_effort_source(row: ConfiguredReviewerSlot) -> str:
 # ---------------------------------------------------------------------------
 
 LAST_EXECUTION_FILENAME = "reviewer_slot_last_execution.json"
-_LAST_EXECUTION_CAP = 64  # the pool is ≤ MAX_CONFIGURED_SUBAGENTS (26) rows; the cap only bounds junk growth
+_LAST_EXECUTION_CAP = 64  # the pool is ≤ MAX_CONFIGURED_SUBAGENTS rows; the cap only bounds junk growth
 
 
 def _last_execution_path() -> "pathlib.Path":

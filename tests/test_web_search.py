@@ -17,6 +17,7 @@ import pytest
 
 import ouroboros.tools.search as search_module
 from ouroboros.tools.search import _web_search
+from tests._tariff_guard import _no_unscripted_tariff_reads  # noqa: F401  (autouse: DeepSeek sends here)
 from tests._usage_store_testing import ledger_rows
 
 
@@ -1035,7 +1036,9 @@ def test_deepseek_sends_the_query_as_written_once_and_never_reads_its_unknown_pr
                                   "rerank_score": 2.1}]
     [row] = ledger_rows(deepseek.root)
     assert (row["state"], row["provider"], row["model"], row["source"]) == ("settled", "deepseek", "", "web_search.deepseek")
-    assert (row["cost_usd"], row["cost_final"], row["cost_evidence"]) == (None, False, {"results": 1})
+    # The pin needs the catalog, which this case does not read: the outcome is kept, the amount unknown.
+    assert (row["cost_usd"], row["cost_final"]) == (None, False)
+    assert row["cost_evidence"] == {"results": 1, "http_status": 200, "outcome": "results"}
     assert result["ledger_attempt_ids"] == [row["attempt_id"]]
     spent = ua.usage_breakdown(deepseek.root)  # the public reader: an unknown amount, never a priced zero
     assert (spent["unknown_unmetered"], spent["priced_rows"], spent["cost_final"]) == (1, 0, False)
@@ -1078,7 +1081,84 @@ def test_deepseek_without_a_match_is_an_answered_search(deepseek):
     result = json.loads(_web_search(deepseek.ctx, "nothing matches this"))
     assert "error" not in result and (result["answer"], result["sources"]) == ("(no matches)", [])
     [row] = ledger_rows(deepseek.root)
-    assert (row["state"], row["cost_usd"], row["cost_evidence"]) == ("settled", None, {"results": 0})
+    assert (row["state"], row["cost_usd"]) == ("settled", None)
+    assert row["cost_evidence"] == {"results": 0, "http_status": 200, "outcome": "empty"}
+
+
+def _deepseek_tariff(monkeypatch, currency="USD"):
+    """The retained DeepSeek catalog entries (tests/test_deepseek_pricing.py) behind the pin, and a scripted read
+    of the key's currency; the keys it was asked with are returned."""
+    import hashlib
+    import pathlib
+
+    from ouroboros import pricing_catalog
+
+    raw = (pathlib.Path(__file__).parent / "fixtures" / "pricing" / "litellm-deepseek-20261115.json").read_text()
+    snapshot = pricing_catalog._decode({"url": pricing_catalog.CATALOG_URL, "content": raw, "fetched_at": "",
+                                        "sha256": hashlib.sha256(raw.encode()).hexdigest()})
+    from ouroboros.utils import utc_now_iso
+
+    snapshot["fetched_at"] = utc_now_iso()
+    asked = []
+    for name, value in (("_cache", {}), ("_retry_after", {}), ("_currency", {}), ("_currency_fetching", set())):
+        monkeypatch.setattr(pricing_catalog, name, value)
+    monkeypatch.setattr(pricing_catalog, "_fetch_catalog", lambda: snapshot)
+    monkeypatch.setattr(pricing_catalog, "_fetch_currency",
+                        lambda key: asked.append(key) or (currency, "" if currency else "http_401"))
+    return asked
+
+
+@pytest.mark.parametrize("status, results, cost, outcome", [
+    (200, [_DEEPSEEK_ITEM], 0.00075, "results"),
+    (200, [_DEEPSEEK_ITEM] * 3, 0.00075, "results"),  # one request, however many results
+    (200, [], None, "empty"),  # documented as not billed, not yet reconciled: unknown, never $0
+    (200, [{}], None, "malformed_results"),  # an object that names no page is not a result
+    (200, [_DEEPSEEK_ITEM, {"title": "no url"}], None, "malformed_results"),
+    (201, [_DEEPSEEK_ITEM], None, "http_201"),  # outside the documented HTTP 200
+], ids=["one_result", "three_results", "no_results", "blank_item", "partly_blank", "http_201"])
+def test_a_deepseek_search_prices_one_unit_only_for_a_documented_answer_with_results(deepseek, monkeypatch, status,
+                                                                                    results, cost, outcome):
+    asked = _deepseek_tariff(monkeypatch)
+    deepseek.answer = lambda _request: httpx.Response(status, json={"results": results})
+    shown = json.loads(_web_search(deepseek.ctx, "q"))
+    assert "error" not in shown and len(shown["sources"]) == len(results), "what is shown does not follow the price"
+    [row] = ledger_rows(deepseek.root)
+    assert (row["cost_usd"], row["cost_estimated"], row["cost_final"]) == (cost, cost is not None, False)
+    assert row["reservation_upper_bound_usd"] is None, "the reservation stays unknown"
+    evidence = row["cost_evidence"]
+    assert evidence["tariff_quote"]["catalog_id"] == "deepseek/search"
+    assert (evidence["http_status"], evidence["results"], evidence["outcome"]) == (status, len(results), outcome)
+    assert evidence["tariff_pricing"] == ({"billable_requests": 1} if cost else {"unpriced": f"search_{outcome}"})
+    assert row.get("price_source") == (f"litellm@{evidence['tariff_quote']['fetched_at']}" if cost else None)
+    assert asked == ["synthetic-deepseek"], "the selected key's own currency, read before the send"
+
+
+@pytest.mark.parametrize("currency", ["CNY", None])
+def test_a_deepseek_search_on_a_key_not_proven_usd_stays_unknown(deepseek, monkeypatch, currency):
+    _deepseek_tariff(monkeypatch, currency)
+    json.loads(_web_search(deepseek.ctx, "q"))
+    [row] = ledger_rows(deepseek.root)
+    assert (row["cost_usd"], row["cost_estimated"]) == (None, False)
+    assert row["cost_evidence"]["tariff_pricing"]["unpriced"] == ("currency_not_usd" if currency else "currency_unknown")
+
+
+def _read_timeout(request):
+    raise httpx.ReadTimeout("synthetic ReadTimeout", request=request)
+
+
+@pytest.mark.parametrize("answer", [
+    lambda _r: httpx.Response(500, json={"error": {"message": "Internal"}}),
+    lambda _r: httpx.Response(400, json={"error": {"message": "Query refused"}}),
+    lambda _r: httpx.Response(200, json={"data": []}),
+    _read_timeout,
+], ids=["server_error", "refused_400", "malformed_200", "read_timeout"])
+def test_a_failed_or_unreadable_deepseek_search_is_never_priced(deepseek, monkeypatch, answer):
+    _deepseek_tariff(monkeypatch)
+    deepseek.answer = answer
+    json.loads(_web_search(deepseek.ctx, "q"))
+    [row] = ledger_rows(deepseek.root)
+    assert (row["state"], row.get("cost_usd"), row.get("cost_estimated")) == ("unresolved", None, None)
+    assert "tariff_pricing" not in (row.get("cost_evidence") or {})
 
 
 def _raises(error):

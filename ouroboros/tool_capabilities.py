@@ -62,7 +62,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # enable_tools detour to route — though initial_tool_schemas exposes the full
     # set today, this makes the coupling explicit).
     "list_projects", "start_task", "tell_task",
-    "move_to_project", "close_project",
+    "move_to_project", "close_project", "manage_project_folder",
     *COGNITIVE_MEMORY_TOOL_NAMES,
     "chronicle_write",
     "recent_tasks", "live_roots", "update_focus",
@@ -232,7 +232,7 @@ READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
 # parallel. A tool not named here stays loud unless its leftover is details-only (a command that ran and failed, a call
 # refused before running: _outcome_tool_errors).
 PURE_READ_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | frozenset({
-    "browse_page", "view_image", "github_read", "knowledge_read", "youtube_transcript",
+    "browse_page", "view_image", "github_read", "knowledge_read", "youtube_transcript", "workpad_read",
 })
 
 # Enqueue-only tools safe to emit in parallel within one tool-call round.
@@ -243,7 +243,7 @@ PURE_READ_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | frozenset({
 # serially, so cap/dedup/enqueue remain single-threaded and safe.
 PARALLEL_SAFE_ENQUEUE_TOOLS: frozenset[str] = frozenset({"schedule_subagent"})
 
-# Stateful browser tools need the thread-sticky executor.
+# Browser tools run one at a time on the task's sticky executor.
 STATEFUL_BROWSER_TOOLS: frozenset[str] = frozenset({
     "browse_page", "browser_action",
 })
@@ -351,6 +351,22 @@ def tool_result_limit(tool_name: str) -> int:
     return TOOL_RESULT_LIMITS.get(str(tool_name or ""), DEFAULT_TOOL_RESULT_LIMIT)
 
 
+def result_window(head: str, text: str, start: Any, limit: int, resume: Any, order: str = "") -> str:
+    """One character window of a document a self-paging producer emits within ``limit``: ``head``, then a line naming
+    the window and its continuation (``next_start`` and the call ``resume(next_start)``; ``order`` names the order the
+    document reads in) or completeness, then the window. The continuation line is measured, and a page holds at least
+    one character, so ``next_start`` always advances. Used by memory_read's modes and its version door."""
+    total = len(text)
+    start = min(max(int(start or 0), 0), total)
+    label = f" ({order})" if order else ""
+    widest = f"chars {total}–{total} of {total}; next_start={total}{label}; " + resume(total)
+    room = max(limit - len(head) - len(widest) - 2, 1)
+    end = min(start + room, total)
+    cont = (f"chars {start}–{end} of {total}; next_start={end}{label}; " + resume(end) if end < total
+            else f"chars {start}–{end} of {total}; complete")
+    return head + "\n" + cont + "\n" + text[start:end]
+
+
 # Explicit first-view request a call may carry: how many chars of the head and
 # of the tail to show when the complete result cannot be delivered whole. The
 # complete result is kept as an exact source either way; these only shape the
@@ -402,21 +418,34 @@ def requested_result_view(tool_args: Any) -> Optional[tuple[Optional[int], Optio
     return None
 
 
+def mcp_gateway_arguments(value: Any) -> Optional[dict]:
+    """The one reading of the ``arguments`` a ``call_mcp_tool`` envelope passes its MCP tool: an object, or ``None``.
+
+    Omitted, ``null``, ``{}``, empty or blank text and the JSON text ``null`` are a call without arguments (``{}``);
+    an object, or JSON text of one, passes as given. Anything else passes no object and is never read as a call
+    without arguments, nor corrected: text that is not JSON, an array, a number, a boolean, or JSON text of one of
+    those or of a further string."""
+    if isinstance(value, str):
+        if not value.strip():
+            return {}
+        import json
+
+        try:
+            value = json.loads(value)
+        except (ValueError, RecursionError):  # nesting past the decoder's depth is no JSON this call can pass
+            return None
+    if value is None:
+        return {}
+    return value if isinstance(value, dict) else None
+
+
 def requested_call_view(name: str, tool_args: Any) -> Optional[tuple[Optional[int], Optional[int]]]:
     """``requested_result_view`` of a whole call: the catalog view ``enable_tools`` returns is a form the mind
     asked for, and a call through the MCP gateway asks for the view its inner arguments name."""
     if name == "enable_tools":
         return (None, None)
     if name == MCP_GATEWAY_TOOL_NAME and isinstance(tool_args, dict):
-        inner = tool_args.get("arguments")
-        if isinstance(inner, str):
-            import json
-
-            try:
-                inner = json.loads(inner or "{}")
-            except ValueError:
-                inner = {}
-        tool_args = inner if isinstance(inner, dict) else {}
+        tool_args = mcp_gateway_arguments(tool_args.get("arguments"))
     return requested_result_view(tool_args)
 
 
@@ -483,7 +512,7 @@ OBSERVE_WORLD_MUTATION_TOOLS: frozenset[str] = frozenset({
     "maintain_harness", "free_storage",
     # starting or steering work (tell_task stays: the nanny of a running campaign)
     "start_task", "schedule_subagent", "schedule_followup", "plan_task",
-    "move_to_project", "close_project", "delegate_start", "initiate_presence",
+    "move_to_project", "close_project", "manage_project_folder", "delegate_start", "initiate_presence",
     "cancel_task", "resume_child_task", "override_delegation_constraint", "request_deep_self_review",
     "set_task_retention",
     # writing files, running processes, integrating patches

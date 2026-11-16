@@ -1280,6 +1280,8 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list,
     busy_count = sum(1 for w in workers_dict.values() if getattr(w, 'busy_task_id', None) is not None)
     lines.append(f"workers: {len(workers_dict)} (busy: {busy_count})")
     lines.append(f"pending: {len(pending_list)}")
+    from supervisor.pool_admission import status_words  # why queued work may wait for a new process
+    lines.extend(filter(None, [status_words()]))
     lines.append(f"running: {len(running_dict)}")
     if pending_list:
         preview = []

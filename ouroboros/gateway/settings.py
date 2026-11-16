@@ -634,13 +634,15 @@ def review_pool_payload(snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, 
     from ouroboros.review_pool_receipts import document_as_read
     from ouroboros.reviewer_slot_config import public_slot_executions, review_pool_slots, review_pool_state, reviewer_slot_last_executions
     from ouroboros.server_maintenance import review_pool_migration_payload
-    from ouroboros.settings_integrity import runtime_environ
+    from ouroboros.settings_integrity import SettingsDocumentUnknown, runtime_catalog_settings
 
-    env = dict(runtime_environ() if snapshot is None else snapshot)
-    # The receipt is judged against the settings DOCUMENT, not the process projection the pool
-    # runs from: the projection carries only the live settings keys, so a lane value a refused
-    # migration kept in the document is absent from it and the current receipt would read as
-    # history (VD3-06). The retained lanes never return to the runtime configuration here.
+    try:
+        env, unknown = dict(runtime_catalog_settings() if snapshot is None else snapshot), ""
+    except SettingsDocumentUnknown as exc:  # the pool is unknown, never the defaults' empty or factory one
+        env, unknown = {}, f"{SUBAGENTS_SETTING} is unknown: {exc}"
+    # The receipt is judged against the settings DOCUMENT as the read seam leaves it, not the settings the pool
+    # runs from: those merge the environment, which decides only whether its own catalog runs in place of the
+    # minted rows (VD3-06). The retained lanes never return to the runtime configuration here.
     settings_document = env if snapshot is not None else document_as_read(_config.SETTINGS_PATH, env)
     raw = str(env.get(SUBAGENTS_SETTING) or "")
     document = _catalog_document(raw)
@@ -655,8 +657,8 @@ def review_pool_payload(snapshot: Optional[Dict[str, Any]] = None) -> Dict[str, 
     }
     state = review_pool_state(raw)
     try:
-        if state.get("state") == "error":
-            raise ValueError(str(state.get("error") or "the review pool could not be read"))
+        if unknown or state.get("state") == "error":
+            raise ValueError(unknown or str(state.get("error") or "the review pool could not be read"))
         # The catalog's pool rows: an empty pool's Main seat is no catalog row (Settings says it).
         slots = [slot for slot in review_pool_slots(env) if slot.subagent_id]
         handles = roster_handles(parse_configured_subagents(raw), env) if items else {}
@@ -894,9 +896,10 @@ async def api_settings_get(request: Request) -> JSONResponse:
     meta["connections"] = connections_meta(settings, document)
     meta["main_connection_choice"] = main_connection_choice(settings, document)  # Main waits for the owner's pick
     try:  # what the limits cannot count, said under them on Dashboard › Costs
-        from ouroboros.pricing import known_spend_gaps
+        from ouroboros.pricing import spend_coverage
         # No valid catalog is no helper: the runtime refuses an invalid one whole.
-        meta["known_spend_gaps"] = known_spend_gaps(settings, meta["available_subagents"]["candidate"] or {})
+        meta["known_spend_gaps"], meta["partly_counted_spend"] = spend_coverage(
+            settings, meta["available_subagents"]["candidate"] or {})
     except Exception:
         log.warning("Could not build the known-spend gaps; Costs says nothing of them", exc_info=True)
     safe["_meta"] = meta

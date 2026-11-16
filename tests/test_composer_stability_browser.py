@@ -90,11 +90,17 @@ def test_nothing_the_composer_opens_moves_the_composer(direct_server_with_data, 
                         steps["choose"] = page.evaluate(WHERE, OPENERS)
                         _still(rest, steps["choose"], i, f"{availability}, choosing in {name}")
                     if name == "model":
-                        # Main's choice closes the strip and asks in its sheet before writing Main itself.
-                        press(page.locator("#chat-model-mode .chat-model-find"))
+                        # The press opened the Model sheet over the page; a model typed there is Main's choice, which
+                        # closes the sheet and asks in Main's confirming sheet before writing Main itself.
+                        page.wait_for_selector(".ui-popup.model-sheet .chat-model-row", timeout=20_000)
+                        steps["model_sheet"] = page.evaluate(WHERE, OPENERS)
+                        _still(rest, steps["model_sheet"], i, f"{availability}, the Model sheet")
                         chosen = f"mock-stability-{availability}"
-                        page.fill("#chat-model-mode .chat-model-query", f"openai-compatible::{chosen}")
-                        press(page.locator(".chat-model-list .chat-model-typed"))
+                        page.fill(".ui-popup.model-sheet .chat-model-query", f"openai-compatible::{chosen}")
+                        page.wait_for_selector(".ui-popup.model-sheet .chat-model-typed", timeout=10_000)
+                        steps["typed"] = page.evaluate(WHERE, OPENERS)
+                        _still(rest, steps["typed"], i, f"{availability}, typing in the Model sheet")
+                        press(page.locator(".ui-popup.model-sheet .chat-model-typed"))
                         page.wait_for_selector(".confirm-dialog [data-confirm-ok]")
                         steps["sheet"] = page.evaluate(WHERE, OPENERS)
                         _still(rest, steps["sheet"], i, f"{availability}, Main's sheet")

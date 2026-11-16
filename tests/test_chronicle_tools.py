@@ -441,6 +441,67 @@ def test_rows_read_attributes_each_row_by_its_source_fields_as_text(tmp_path):
     assert "TOOL_ARG_ERROR" in missing and "row_missing" in missing
 
 
+def test_one_row_the_selected_room_does_not_hold_is_said_not_returned_and_never_lost(tmp_path, monkeypatch):
+    """A ``row:`` address names the chat it was written in; the room that shows it is its membership's, and a work
+    moved from Main into a Project keeps its ``row:1@…`` addresses there. One row asked by itself (from = to, no task
+    or period) that the selected room's selection does not hold says only that this reading did not return it -- no
+    loss, no other room named -- while its continuation line keeps the contract. A row it does return, one larger
+    than a page, a range (``from`` alone stays positional), a filtered read, a typed address refusal and a known
+    gap keep their own words: the first reading shows the source, the gap stays its own fact beside the miss."""
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.projects_registry import bind_task_to_project, create_project
+
+    project = create_project(tmp_path, "alpha", name="Alpha")
+    alpha = str(project["chat_id"])
+    origin = {"chat_id": 1, "direction": "in", "ts": ts(1), "text": "start the moved work", "client_message_id": "o1"}
+    rows = chat(tmp_path, [
+        {"chat_id": 1, "direction": "in", "ts": ts(0), "text": "main question"},
+        origin,  # its binding's origin: Alpha shows it too
+        {"chat_id": 1, "direction": "out", "ts": ts(2), "task_id": "mover", "text": "moved reply, written in Main"},
+        {"chat_id": int(alpha), "direction": "in", "ts": ts(3), "text": "alpha words"},
+        {"chat_id": 1, "direction": "out", "ts": ts(4), "task_id": "root0001", "text": "main reply"},
+        {"chat_id": int(alpha), "direction": "out", "ts": ts(5), "task_id": "ta", "text": "G" * (LIMIT + 50)},
+    ])
+    ref = build_owner_message_ref(chat_id=1, client_message_id="o1", ts=ts(1), text=origin["text"])
+    bind_task_to_project(tmp_path, "mover", project["id"], origin={"ref": ref, "text": origin["text"]})  # moved
+    ctx = ctx_for(tmp_path)
+    miss = "did not return that row"  # the plain fact, true of every missing row, an A2A row no room shows included
+
+    def one(room, row, **extra):
+        return _memory_read(ctx, room_id=room, rows=True, **{"from": addr(row), "to": addr(row)}, **extra)
+
+    moved_in_main, moved_here = one("1", rows[2]), one(alpha, rows[2])
+    assert moved_in_main.split("\n") == [  # the room in its address does not hold it any more: said so, nothing else
+        f"room 1; rows; from {addr(rows[2])}; to {addr(rows[2])}; this reading of room 1 {miss}",
+        "complete: no further rows (stored order)"]
+    assert moved_here.split("\n")[2].endswith(f"{addr(rows[2])}] moved reply, written in Main")
+    assert miss not in moved_here and all(miss not in one(room, row) for room, row in (
+        ("1", rows[0]), ("1", rows[1]), (alpha, rows[1]), ("1", rows[4]), (alpha, rows[3])))
+    assert miss in one(alpha, rows[0]) and miss in one(alpha, rows[4]) and miss in one("1", rows[3])
+    giant = one(alpha, rows[5])  # found, larger than a page: its words by character window, never a miss
+    assert miss not in giant and re.match(rf"next: from={re.escape(addr(rows[5]))} start=\d+ ", second_line(giant))
+    ranged = _memory_read(ctx, room_id=alpha, rows=True, **{"from": addr(rows[0])})  # Main's row bounds a range here
+    assert miss not in ranged and "alpha words" in ranged and "moved reply" in ranged and "main reply" not in ranged
+    assert "main question" not in ranged  # positional: the rows of Alpha from there on, not Main's row itself
+    filtered = one("1", rows[2], task_id="mover")
+    assert miss not in filtered and second_line(filtered).startswith("complete: no further rows")
+    absent = "row:1@" + ts(9) + "#" + "a" * 12
+    refused = _memory_read(ctx, room_id="1", rows=True, **{"from": absent, "to": absent})
+    assert "TOOL_ARG_ERROR" in refused and "row_missing" in refused and miss not in refused
+    real = chat_chain.source_row_id
+    with monkeypatch.context() as collided:  # a twelve-hex prefix two rows share stays the typed refusal
+        chat(tmp_path, [{"chat_id": 1, "direction": "in", "ts": ts(7), "text": side} for side in ("left", "right")])
+        collided.setattr(chat_chain, "source_row_id", lambda row: "abcdef012345" + real(row)[12:])
+        shared = "row:1@" + ts(7) + "#abcdef012345"
+        ambiguous = _memory_read(ctx, room_id="1", rows=True, **{"from": shared, "to": shared})
+        assert "TOOL_ARG_ERROR" in ambiguous and "row_ambiguous" in ambiguous and miss not in ambiguous
+    from ouroboros import room_appearances
+    monkeypatch.setattr(room_appearances, "read_gaps", lambda *_a, **_kw: {room_appearances.APPEARANCES_DERIVING})
+    gap = room_appearances.GAP_DETAILS[room_appearances.APPEARANCES_DERIVING]
+    assert one(alpha, rows[0]).split("\n")[0].endswith(f"; incomplete: {gap}; this reading of room {alpha} {miss}")
+    assert f"; incomplete: {gap}" in one(alpha, rows[2]) and miss not in one(alpha, rows[2])
+
+
 def test_an_install_without_any_lineage_row_attributes_old_outgoing_rows_by_task_results_only(tmp_path):
     """An update from a version that never recorded a child's lineage: no row proves which old
     outgoing row was mine, so the task results decide and the rest is unattributed. Rows written

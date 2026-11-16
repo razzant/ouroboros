@@ -34,8 +34,10 @@ def _gist_records(group):
 
 
 def _gist_lines(group, excluded=(), *, gists=None, replies=None):
-    from ouroboros.memory_view_work import first_sentence
-    return [f"[{(replies or {}).get(key, gist['address'])}] «{first_sentence(gist['summary'])}»"
+    """Each telling at its replies here, else at its own address: with that room's reader when no room here holds it."""
+    from ouroboros.memory_view_work import first_sentence, gist_address
+    rooms = [room["room_id"] for room in group["rooms"]]
+    return [f"[{(replies or {}).get(key) or gist_address(gist, rooms)}] «{first_sentence(gist['summary'])}»"
             for key, gist in (_gist_records(group) if gists is None else gists) if key not in excluded]
 
 
@@ -135,7 +137,7 @@ def _kind(word):
 def _sources(group):
     from ouroboros.memory_view_work import row_range
     words, kinds, rooms, owners, ids = [], {}, {}, [], set()
-    replies = {}
+    replies, held = {}, {}  # a work's reply bounds per chat they were written in, and per room showing them
     untold = 0
     overheard_rooms, overheard_words = 0, []
     for room in group["rooms"]:
@@ -149,10 +151,11 @@ def _sources(group):
             ids.add(ident)
             key = word.get("work_id") or word.get("task_id")
             if word.get("kind") == "ouroboros" and key and word.get("gist"):
-                key = (key, word["address"].partition("@")[0])  # the address's room, not its memberships
-                first, last = replies.get(key, (word, word))
-                replies[key] = (word if word["pos"] < first["pos"] else first,
-                                word if word["pos"] > last["pos"] else last)
+                chat = word["address"].partition("@")[0]  # a range per written chat, as the gist line shows it
+                for spans, span in ((replies, (key, chat)), (held, (key, chat, room["room_id"]))):
+                    first, last = spans.get(span, (word, word))
+                    spans[span] = (word if word["pos"] < first["pos"] else first,
+                                   word if word["pos"] > last["pos"] else last)
             if kind == "owner":
                 owners.append(word)
             elif kind == "untold":
@@ -161,11 +164,16 @@ def _sources(group):
         if room.get("overheard") and parts["unread"]:
             overheard_rooms += 1
             overheard_words.extend(parts["unread"])
-    ranges = {}
-    for (key, _room), (first, last) in sorted(replies.items(), key=lambda item: item[1][0]["pos"]):
+    ranges, readers = {}, {}
+    for (key, _chat), (first, last) in sorted(replies.items(), key=lambda item: item[1][0]["pos"]):
         ranges.setdefault(key, []).append(row_range(first["address"], last["address"]))
+    for (key, _chat, room_id), (first, last) in sorted(held.items(), key=lambda item: item[1][0]["pos"]):
+        readers.setdefault(key, []).append((room_id, first["address"], last["address"]))
     return {"words": words, "kinds": kinds, "rooms": rooms,
             "replies": {key: ", ".join(spans) for key, spans in ranges.items()},
+            # Each room's part of those replies, which that room's reader returns: membership, not the address's
+            # chat, decides where a row reads (a work moved from Main keeps ``row:1@…``; ``row_reader``).
+            "reply_rooms": readers,
             "overheard": (overheard_rooms, overheard_words),
             "owners": owners, "ids": ids, "gists": _gist_records(group), "untold": untold,
             "ordinary": not untold and all(

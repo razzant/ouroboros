@@ -21,6 +21,7 @@ import types
 import pytest
 
 from tests._budget_pause_exact_helpers import _install_queue
+from tests._tariff_guard import _no_unscripted_tariff_reads  # noqa: F401  (autouse: DeepSeek sends here)
 from tests.test_restart_retention import _pool_events, _restart_door
 
 

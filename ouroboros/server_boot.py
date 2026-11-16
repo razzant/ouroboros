@@ -2,15 +2,19 @@
 
 What the lifespan ran before it served now runs here, in the same order, on the boot
 coordinator's thread while the socket already answers (``server_liveness.start_boot_coordinator``;
-the step list and the pinned seams stay in ``server.py::lifespan``). Each function is one named
-step: it does its work or raises, and the coordinator records the outcome in the boot document.
-Nothing here decides readiness; the two waits at the end only observe the store's publication
-and the supervisor's outcome for the document's phase.
+the step list and the pinned seams stay in ``server.py::lifespan``). A step does its work or
+raises, and the coordinator records the outcome in the boot document; ``on_loop`` and
+``stop_extension_loop`` are helpers, not steps. One step, ``prepare_event_queue``, gives the event
+bus a head start on its own thread while the extensions load; the supervisor waits for it to end
+(``wait_event_queue``) before it initializes its workers. Nothing here decides readiness; the two
+waits at the end only observe the store's publication and the supervisor's outcome for the
+document's phase.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import pathlib
 import threading
 from concurrent.futures import Future, wait
@@ -51,6 +55,77 @@ def remember_log_listings(root: pathlib.Path) -> threading.Thread:
     thread = threading.Thread(target=Memory(root).remember_log_listings, daemon=True, name="log-listings")
     thread.start()
     return thread
+
+
+def prepare_pinned_node(root: pathlib.Path) -> Optional[threading.Thread]:
+    """Boot step, on disk only: before skills, extensions, MCP servers and companions, this process names Playwright's
+    driver Node (``node_runtime.select_local_playwright_node``), so in-process extensions and every child it builds an
+    environment for never run the SDK's own Node. Preparing the pin's Node, when it still has to be copied or
+    downloaded (an operator's explicit driver does not change that: skills and the gate's Node lane use the pin's
+    too), is ``request_pinned_node``'s, off the steps readiness waits for, as the owned daemon's warm-up is."""
+    from ouroboros.node_runtime import select_local_playwright_node
+
+    return request_pinned_node(root) if select_local_playwright_node() else None
+
+
+_PREPARING = threading.Lock()  # one preparation thread per process; the install lock orders processes
+
+
+def request_pinned_node(root: "pathlib.Path | None" = None) -> Optional[threading.Thread]:
+    """Prepare the pin's Node off the caller's path (``finish_pinned_node`` on a daemon thread), single-flight: a
+    request while one runs in this process is that one. Asked by the boot step and by an acting consumer that found the
+    pin unprepared after a failed attempt (a skill or companion start, the attach role, the gate's Node lane), never by
+    a lookup, an environment built for a child, a status read or read-only work. No timer: the next acting consumer
+    asks again. ``OUROBOROS_PYTEST_ACTIVE=1`` starts none, as it blocks dependency installs. ``root``: the data root
+    whose extensions are asked again, by default this process's."""
+    if os.environ.get("OUROBOROS_PYTEST_ACTIVE") == "1" or not _PREPARING.acquire(blocking=False):
+        return None
+    if root is None:
+        from ouroboros.config import DATA_DIR as root
+
+    def _prepare() -> None:
+        try:
+            finish_pinned_node(root)
+        finally:
+            _PREPARING.release()
+
+    thread = threading.Thread(target=_prepare, daemon=True, name="pinned-node")
+    thread.start()
+    return thread
+
+
+def finish_pinned_node(root: pathlib.Path) -> str:
+    """Prepare the pin's Node, Node only (never the engine or an account), under the install lock a browser call joins;
+    then this process's automatic selection names it, and ``requeue_waiting_extensions`` asks again. A failure is
+    logged: the next acting consumer (``request_pinned_node``), the browser tool and the next boot try again."""
+    from ouroboros.claudexor_runtime import get_runtime_manager
+    from ouroboros.node_runtime import select_playwright_node
+
+    try:
+        get_runtime_manager().reviewed_node(allow_install=True)
+        node = select_playwright_node()
+    except Exception as exc:
+        log.warning("The pinned Node for Playwright's driver was not prepared: %s", exc)
+        return ""
+    requeue_waiting_extensions(root)
+    return node
+
+
+def requeue_waiting_extensions(root: pathlib.Path) -> None:
+    """After the pin's Node was prepared: each enabled extension not live in this process is asked again through the
+    server's reconcile queue (``request_extension_reconcile``, file-backed, so a worker's request reaches it too): one
+    whose load failed on the planned path, as one starting Playwright while loading does, or one still loading, whose
+    reconcile waits for that load (its lifecycle lock). A disabled one is never asked; a live one is not reloaded."""
+    from ouroboros.config import get_skills_repo_path
+    from ouroboros.extension_reconcile_queue import request_extension_reconcile
+    from ouroboros.extension_registry_state import _extensions, _lock
+    from ouroboros.skill_loader import discover_skills
+
+    skills = discover_skills(root, repo_path=get_skills_repo_path() or None)
+    with _lock:
+        live = set(_extensions)
+    for name in sorted(s.name for s in skills if s.manifest.is_extension() and s.enabled and s.name not in live):
+        request_extension_reconcile(root, name, reason="pinned Node prepared", source="server")
 
 
 def start_background_services(settings: dict, *, local_model: bool, boot_managed_update: Callable[[], Any],
@@ -160,21 +235,28 @@ def wait_store_published(root: pathlib.Path, stop: threading.Event, document: Bo
 def wait_supervisor_outcome(ready: threading.Event, error: Callable[[], Optional[str]], stop: threading.Event,
                             document: BootDocument = BOOT) -> None:
     """The generation is ready once the supervisor (or the providerless recovery) is; its failure
-    is this step's failure."""
+    is this step's failure. The lifespan names the step ``supervisor_outcome``: ``supervisor`` is the
+    generation's own step with its startup sub-steps, which this observation never overwrites."""
     while not (ready.wait(0.5) or error() or stop.is_set() or document.phase() == "failed"):
         pass
     if error():
         raise RuntimeError(error())
 
 
+_head_start: Optional[Future] = None  # the latest provider-ready lifespan's (prepare_event_queue); a done one is inert
+
+
 def prepare_event_queue(root: pathlib.Path, stop_requested: Callable[[], bool],
                         document: BootDocument = BOOT) -> Future:
-    """Overlap only the process-lifetime transport with extension loading, never workers/recovery.
+    """Start the process-lifetime event bus on its own thread while the extensions load: a head
+    start, never workers or recovery, which still wait for the registered subscribers.
 
-    One retained attempt: consumers observe its exception rather than retrying creation. The
-    queue's existing lock/shutdown owner covers an in-flight manager and rechecks Stop there.
-    """
-    future = Future()
+    The supervisor waits for it to end (``wait_event_queue``), then makes its ordinary
+    ``get_event_q`` call: that returns this queue, or after a failure (this step's, in the boot
+    document) ends the attempt's never-published manager and creates anew, as without the head
+    start. Stop/Panic is rechecked under the queue's lock, and fences the manager's start."""
+    global _head_start
+    future = _head_start = Future()
 
     def prepare():
         try:
@@ -192,6 +274,8 @@ def prepare_event_queue(root: pathlib.Path, stop_requested: Callable[[], bool],
                 queue = get_event_q(drive_root=root, stop_requested=stop_requested)
             future.set_result(queue)
         except BaseException as exc:
+            log.warning("The event bus head start failed; unless the boot stops, the supervisor creates the bus itself",
+                        exc_info=True)
             future.set_exception(exc)
 
     try:
@@ -201,12 +285,9 @@ def prepare_event_queue(root: pathlib.Path, stop_requested: Callable[[], bool],
     return future
 
 
-def wait_event_queue(preparation: Optional[Future], stop_requested: Callable[[], bool]) -> bool:
-    """Observe the same boot attempt; Stop never waits for its thread or retries it."""
-    if preparation is not None:
-        while not preparation.done() and not stop_requested():
-            wait([preparation], timeout=0.1)
-        if stop_requested():
-            return False
-        preparation.result()  # a TimeoutError from creation is a failure, not a poll
+def wait_event_queue(stop_requested: Callable[[], bool]) -> bool:
+    """Wait until the head start ended, never past a Stop; False once stopping. Its outcome is not
+    re-raised: the caller's own ``get_event_q`` call owns creation, as without a head start."""
+    while _head_start is not None and not _head_start.done() and not stop_requested():
+        wait([_head_start], timeout=0.1)
     return not stop_requested()

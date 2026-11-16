@@ -1,8 +1,11 @@
-"""The owner's work-local primary: one durable decision and a text-free wake.
+"""The owner's work-local primary and processing tier: durable decisions and a text-free wake.
 
 The task document is the authority, including after a worker's acknowledgement
 and before its next checkpoint. The queue mirrors that document under Q. Mail
 only asks the loop to reread it, so delayed deliveries cannot undo a later act.
+A tier act (``action: processing``) is its own decision beside the primary's
+(``owner_processing``, ``metadata.processing``): it never resets a fallback, a
+wait or the route, and a model act never changes the tier.
 """
 from __future__ import annotations
 
@@ -56,6 +59,73 @@ def recorded_primary(row: Mapping) -> dict:
     return {"model": model, "use_local": local, "role": role}
 
 
+def _live_root(task_id: str) -> tuple[Any, dict, bool, Any]:
+    """Under Q: the live root's queue entry, its task, whether it runs, and its drive root; refusals typed."""
+    from ouroboros.cancel_intents import cancel_pending
+    from ouroboros.task_results import load_task_result
+    from supervisor import queue as q
+    from supervisor.queue_transitions import settled_status_of
+
+    meta = q.RUNNING.get(task_id)
+    task = meta.get("task") if isinstance(meta, dict) else None
+    running = isinstance(task, dict)
+    if not running:
+        task = next((row for row in q.PENDING if row.get("id") == task_id), None)
+    if not isinstance(task, dict):
+        raise ModelActRefused("task_not_live", 404)
+    if refusal := eligibility(task):
+        raise ModelActRefused(refusal)
+    root = task.get("budget_drive_root") or q.DRIVE_ROOT
+    existing = load_task_result(root, task_id, strict=True)
+    if not existing:
+        raise ModelActRefused("model_control_unavailable")
+    if settled_status_of(existing):
+        raise ModelActRefused("task_not_live", 404)
+    if cancel_pending(root, task_id, strict=True):
+        raise ModelActRefused("cancel_pending")
+    return meta, task, running, root
+
+
+def admit_processing(task_id: str, body: Mapping) -> tuple[dict, dict]:
+    """The owner's tier for this work's own next calls (``""``: Default), under Q like a model act.
+
+    The decision and its receipt live with the task (``owner_processing``) beside the primary's; a
+    repeated request answers its original receipt. Nothing else of the route, its fallback or its wait moves."""
+    from ouroboros.lead_fact import processing_fields
+    from ouroboros.route_choice import DEFAULT_PROCESSING, PROCESSING_KEY
+    from ouroboros.task_store import patch_document
+    from supervisor import queue as q
+    from supervisor.queue_transitions import settled_status_of
+
+    tier, request_id = body["processing"], body["request_id"]
+    with q._queue_lock:
+        _meta, task, running, root = _live_root(task_id)
+
+        def mutate(row):
+            if not row or settled_status_of(row):
+                raise ModelActRefused("task_not_live", 404)
+            receipts = (row.get("owner_processing") or {}).get("receipts") or {}
+            if request_id in receipts:
+                return None
+            metadata = dict(row.get("metadata") or {})
+            # Default is a decision too: it is recorded, so nothing later re-reads the room's tier for this work.
+            metadata[PROCESSING_KEY] = {"source": "owner", "tier": tier} if tier else dict(DEFAULT_PROCESSING)
+            receipt = {"ok": True, "task_id": task_id, "applied": "next_step" if running else "at_start",
+                       **processing_fields({**row, "metadata": metadata,
+                           "_lead_request_id": (_meta or {}).get("_lead_request_id")}, (_meta or {}).get("lead"))}
+            return {**row, "metadata": metadata,
+                    "owner_processing": {"request_id": request_id, "receipts": {**receipts, request_id: receipt}}}
+
+        stored = patch_document(root, task_id, mutate)
+        task["metadata"] = {**(task.get("metadata") or {}), **copy.deepcopy(stored["metadata"])}
+        task["owner_processing"] = copy.deepcopy(stored["owner_processing"])
+        result = copy.deepcopy(stored["owner_processing"]["receipts"][request_id])
+        current = copy.deepcopy(task)
+    if q.persist_queue_snapshot(reason="owner_processing") is False:
+        raise ModelActRefused("model_queue_publish_failed", 503)
+    return result, current
+
+
 def admit(task_id: str, body: dict, *, source: str = "owner") -> tuple[dict, dict, bool]:
     """Write under Q, returning the durable receipt and the current queue task.
 
@@ -65,31 +135,12 @@ def admit(task_id: str, body: dict, *, source: str = "owner") -> tuple[dict, dic
     if source not in {"owner", "owner_words"}:
         raise ValueError("A work model act requires an owner source")
     from ouroboros.lead_fact import project_lead
-    from ouroboros.task_results import load_task_result
     from ouroboros.task_store import patch_document
     from supervisor import queue as q
     from supervisor.queue_transitions import settled_status_of
 
     with q._queue_lock:
-        meta = q.RUNNING.get(task_id)
-        task = meta.get("task") if isinstance(meta, dict) else None
-        running = isinstance(task, dict)
-        if not running:
-            task = next((row for row in q.PENDING if row.get("id") == task_id), None)
-        if not isinstance(task, dict):
-            raise ModelActRefused("task_not_live", 404)
-        if refusal := eligibility(task):
-            raise ModelActRefused(refusal)
-        root = task.get("budget_drive_root") or q.DRIVE_ROOT
-        existing = load_task_result(root, task_id, strict=True)
-        if not existing:
-            raise ModelActRefused("model_control_unavailable")
-        if settled_status_of(existing):
-            raise ModelActRefused("task_not_live", 404)
-        from ouroboros.cancel_intents import cancel_pending
-
-        if cancel_pending(root, task_id, strict=True):
-            raise ModelActRefused("cancel_pending")
+        meta, task, running, root = _live_root(task_id)
         fact = (meta.get("lead") or {}) if running else {}
         action, request_id = body["action"], body["request_id"]
         duplicate = False
@@ -158,20 +209,32 @@ def request(task_id: str, body: Mapping, *, source: str = "owner") -> dict:
     from ouroboros.owner_mailbox import KIND_OWNER_MODEL, write_owner_message
     from supervisor.queue import _task_drive_for_task
 
-    result, task, _duplicate = admit(task_id, body, source=source)
-    control = task["owner_model"]
+    if body.get("action") == "processing":
+        result, task = admit_processing(task_id, body)
+        wake = f"owner_processing:{task['owner_processing']['request_id']}"
+    else:
+        result, task, _duplicate = admit(task_id, body, source=source)
+        wake = f"owner_model:{task['owner_model']['request_id']}"
     if result["applied"] == "next_step" and not write_owner_message(
-            _task_drive_for_task(task, task_id), "owner_model", task_id,
-            msg_id=f"owner_model:{control['request_id']}", kind=KIND_OWNER_MODEL):
+            _task_drive_for_task(task, task_id), "owner_model", task_id, msg_id=wake, kind=KIND_OWNER_MODEL):
         raise ModelActRefused("model_wake_failed", 503)
     return result
 
 
 def preserve_carrier(existing: Mapping, fields: dict) -> dict:
-    """A worker's older task copy cannot replace a host-owned primary decision."""
+    """A worker's older task copy cannot replace a host-owned primary or tier decision."""
+    from ouroboros.route_choice import PROCESSING_KEY
+
     carrier = (existing.get("metadata") or {}).get("lead")
     if carrier is not None and isinstance(fields.get("metadata"), dict):
         fields = {**fields, "metadata": {**fields["metadata"], "lead": copy.deepcopy(carrier)}}
+    held = existing.get("metadata") or {}
+    if (existing.get("owner_processing") or PROCESSING_KEY in held) and isinstance(fields.get("metadata"), dict):
+        fields = {**fields, "metadata": {key: value for key, value in fields["metadata"].items() if key != PROCESSING_KEY}}
+        if PROCESSING_KEY in held:  # absent after the owner's Default: an older copy cannot bring it back
+            fields["metadata"][PROCESSING_KEY] = copy.deepcopy(held[PROCESSING_KEY])
+    if existing.get("owner_processing"):
+        fields = {**fields, "owner_processing": copy.deepcopy(existing["owner_processing"])}
     if existing.get("owner_model") and isinstance(fields.get("metadata"), dict):
         fields = {**fields, "metadata": dict(fields["metadata"])}
         fields["metadata"].pop("model_role", None)
@@ -246,8 +309,13 @@ def apply_current(ctx: Any) -> bool:
     applied, so a checkpoint cannot acknowledge a handover that never happened.
     """
     row = read_current(ctx)
+    tier_words = _apply_processing(ctx, row)
     control = row.get("owner_model") or {}
     request_id = control.get("request_id")
+    if not request_id or request_id == getattr(ctx, "_owner_model_applied_id", None):
+        # No new primary to hand over; a new tier still reaches the next call, and the mind hears of it.
+        if tier_words:
+            ctx._route_facts_pending = " ".join(filter(None, [getattr(ctx, "_route_facts_pending", ""), tier_words]))
     if not request_id:
         return False
     carrier = route_choice.lead_snapshot((row.get("metadata") or {}).get("lead"))
@@ -288,8 +356,46 @@ def apply_current(ctx: Any) -> bool:
     ctx._owner_model_request_id = request_id
     words = {"follow": "set this work to follow Main", "return": "requested a return to this work's primary",
              "wait": "requested waiting for this work's primary"}.get(action, "set this work's primary")
-    ctx._route_facts_pending = f"[ROUTE FACTS] My human {words}: {model}{' (local)' if local else ''}."
+    told = getattr(ctx, "_owner_processing_notice", "") or ""
+    pending = getattr(ctx, "_route_facts_pending", "") or ""
+    tier_said = tier_words or (told if told and told in pending else "")  # a tier act told in an earlier drain
+    ctx._route_facts_pending = " ".join(filter(None, [
+        f"[ROUTE FACTS] My human {words}: {model}{' (local)' if local else ''}.", tier_said]))
     return True
+
+
+def _apply_processing(ctx: Any, row: Mapping) -> str:
+    """Mirror the durable tier into the task's metadata, which every next call reads; the route facts of a
+    tier act not yet applied, else ''. Applying it moves nothing else: no handover, no fallback, no wait."""
+    from ouroboros.route_choice import PROCESSING_KEY, processing_snapshot
+
+    carrier = processing_snapshot((row.get("metadata") or {}).get(PROCESSING_KEY))
+    metadata = getattr(ctx, "task_metadata", None)
+    if not isinstance(metadata, dict) and carrier:
+        metadata = ctx.task_metadata = dict(metadata or {})
+    # In place: whoever else holds the work's metadata (a deadline written during a round) keeps sharing it.
+    if isinstance(metadata, dict):
+        if carrier:
+            if metadata.get(PROCESSING_KEY) != carrier:
+                metadata[PROCESSING_KEY] = carrier
+        elif row:  # the stored row has none: neither has the work (an older copy cannot bring one back)
+            metadata.pop(PROCESSING_KEY, None)
+    request_id = (row.get("owner_processing") or {}).get("request_id")
+    if not request_id or request_id == getattr(ctx, "_owner_processing_applied_id", None):
+        return ""
+    ctx._owner_processing_applied_id = request_id
+    tier = carrier.get("tier", "") if carrier else ""
+    ctx._owner_processing_notice = (
+        f"[ROUTE FACTS] My human set this work's processing tier to {PROCESSING_WORDS[tier]} from its next call;"
+        " the route and model are unchanged." if tier else
+        "[ROUTE FACTS] My human returned this work's processing tier to the default from its next call;"
+        " the route and model are unchanged.")
+    return ctx._owner_processing_notice
+
+
+# The tiers in the words the owner chose them by (the UI's Flex is the stored ``economy``).
+PROCESSING_WORDS = {"standard": "Standard", "fast": "Fast", "economy": "Flex (economy)", "ultrafast": "Ultrafast",
+                    "": "the default"}
 
 
 def restore_current(ctx: Any, messages: list | None = None) -> None:

@@ -81,6 +81,14 @@ def encode(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, allow_nan=False, indent=None, separators=(",", ":")).encode("utf-8")
 
 
+def wire_bindings(bindings: Any) -> Dict[str, Dict[str, Any]]:
+    """The bindings map as a reader receives it: each bound task's Project id and room, without the Project's name.
+    The server's own map keeps the name for the census rows that show it; a reader opens only the id, and a name in
+    every entry made each rename a new map for every reader and tied the map's revision to the registry."""
+    return {str(task): {key: value for key, value in row.items() if key != "project_name"}
+            for task, row in (bindings if isinstance(bindings, dict) else {}).items() if isinstance(row, dict)}
+
+
 def map_revision(bindings: Any) -> str:
     """The revision a reader holds its ``task_bindings`` map by: a digest of the bytes it was sent. The map itself
     names its revision, so it stands while those bytes would be the same, whatever else was written meanwhile (a
@@ -443,6 +451,7 @@ def produced_fields(snap: Dict[str, Any]) -> Dict[str, Any]:
         "subagents_mode": snap["subagents_mode"],
         "subagents_availability": snap["subagents_availability"],
         "main_route": snap["main_route"],
+        "processing_tiers": snap.get("processing_tiers") or {"main": "", "default": ""},
         "github_token_configured": snap["github_token_configured"],
         "accounting": _accounting_block(snap["accounting"], available, limit),
         "projects": snap["projects"],

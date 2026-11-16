@@ -395,6 +395,7 @@ def test_the_token_scan_keeps_its_own_cadence_and_its_members_stay_counted(monke
     (1, 0.9, 2.0, 16, False, False),     # the one admitted worker on a busy 16 GB laptop runs
     (1, 2.5, 2.0, 16, False, False),     # past its admitted size, but the machine keeps its reserve
     (1, 2.5, 8.0, 16, True, True),       # macOS: critical kernel pressure while inactive pages look free
+    (1, 2.5, 8.0, 16, None, False),      # an unreadable kernel level is unknown: it stops nothing
     (1, 1.5, 8.0, 16, True, False),      # an admitted-size tree survives the kernel's pressure too
     (1, 0.05, 12.0, 128, False, False),  # a small tree is not killed for another program's pressure
     (1, 1.5, 10.0, 128, False, False),   # an admitted-size tree survives pressure that arrives later

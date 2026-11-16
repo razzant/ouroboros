@@ -406,10 +406,10 @@ def required_material(ctx: Any, llm_trace: Dict[str, Any], content: str,
 
 def _result_rows(ctx: Any) -> List[Dict[str, Any]]:
     from ouroboros import review_ledger as ledger
-
-    try:
-        return ledger.recent_records(ledger.ledger_root(ctx), str(getattr(ctx, "task_id", "") or ""), limit=50,
-                                     hot_only=True, surface="result")
+    from ouroboros.review_ledger import advisers_only
+    try:  # advisers alone (Cyber Pro) are heard by their caller and kept, never a review a delivery binds or awaits
+        return [row for row in ledger.recent_records(ledger.ledger_root(ctx), str(getattr(ctx, "task_id", "") or ""),
+                limit=50, hot_only=True, surface="result") if not advisers_only(row)]
     except Exception:
         log.debug("result records of %s unreadable", getattr(ctx, "task_id", ""), exc_info=True)
         return []

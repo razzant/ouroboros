@@ -37,6 +37,8 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/skills/{skill}/review-history/{job_id}` | the skill's ledger record, else a legacy `review_history.jsonl` tail |
 | POST | `/api/owner/skills/{skill}/attest-review` | owner-only skip of the LLM review; deterministic preflight still runs |
 | POST | `/api/skills/{skill}/grants` | |
+| GET | `/api/skills/{skill}/mcp-connect` | |
+| POST | `/api/skills/{skill}/mcp-connect` | |
 | POST | `/api/skills/{skill}/reconcile` | |
 | GET | `/api/marketplace/clawhub/search` | |
 | GET | `/api/marketplace/clawhub/installed` | |
@@ -76,12 +78,13 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/onboarding/complete` | |
 | GET | `/api/onboarding/complete` | |
 | POST | `/api/onboarding/subagents/preview` | |
+| POST | `/api/onboarding/model-catalog` | draft's access, nothing saved |
 | GET | `/api/settings` | effects, tokens (§7) |
 | POST | `/api/settings` | origin, conditions, receipt (§7) |
 | POST | `/api/settings/secret` | |
 | GET | `/api/review-pool` | |
 | GET | `/api/claudexor/status` | `last_exit`/`memory` (§9), resource-catalog evidence (§3); never wakes |
-| POST | `/api/claudexor/quota/refresh` | full or exact account (§3) |
+| POST | `/api/claudexor/quota/refresh` | full/exact; joins identical attempt in flight (§3) |
 | POST | `/api/claudexor/account-resets` | exact request (§3) |
 | GET | `/api/claudexor/account-resets/{operation_id}` | receipt inspection (§3) |
 | POST | `/api/claudexor/wake` | |
@@ -104,6 +107,7 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/owner/effort-range` | |
 | POST | `/api/owner/subagents-mode` | `{mode, project_id?}` → `{ok, project_id, subagents_mode, cognition}` (§7) |
 | POST | `/api/owner/chat-model` | |
+| POST | `/api/owner/chat-processing` | |
 | POST | `/api/owner/safety-mode` | |
 | POST | `/api/owner/safety-model` | |
 | POST | `/api/owner/safety-rules` | |
@@ -181,13 +185,16 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/services/kept/{launch_id}/stop` | `reason`; one launch, fresh outcome |
 | POST | `/api/storage/free/cancel` | stop preview/run; freed stays freed |
 | GET | `/api/evolution-data` | |
-| GET | `/api/projects` | 200 rows; `all=1` all; `id` (active/deleting) or `chat_id` (active): one room (missing → none; unreadable → error) |
+| GET | `/api/projects` | |
 | POST | `/api/projects` | |
 | POST | `/api/projects/from-task` | |
 | POST | `/api/projects/{project_id}/update` | |
 | POST | `/api/projects/{project_id}/delete` | |
+| GET | `/api/projects/{project_id}/folder` | |
+| POST | `/api/projects/{project_id}/folder` | |
 | GET | `/api/fs/dirs` | |
 | GET | `/api/chat/history` | |
+| GET | `/api/chat/search` | |
 | GET | `/api/logs/{name}` | |
 | GET | `/api/logs/{name}/raw` | |
 | POST | `/api/chat/upload` | |

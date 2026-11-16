@@ -547,6 +547,12 @@ def test_history_details_selection_replay_and_project_reopen(direct_server_with_
                     _to_beginning(page, feed)
                     child = page.locator(f'{feed} .chat-live-card[data-task-id="linked-child"]')
                     assert child.get_attribute("data-finished") == "1"
+                    if not child.is_visible():
+                        # A finished subagent folds into its finished, collapsed root's Details (DESIGN, live
+                        # cards: owner 09.11 A); the root's own disclosure brings it back.
+                        page.locator(f'{feed} .chat-live-card[data-task-id="far-parent"]'
+                                     ' > [data-live-summary-button] [data-live-disclosure]').click()
+                        child.wait_for(state="visible")
                     if child.get_attribute("data-expanded") != "1":
                         child.locator(':scope > [data-live-summary-button] [data-live-disclosure]').click()
                     assert "EARLY_CHILD_NARRATION" in child.inner_text()
@@ -613,13 +619,17 @@ def test_history_details_selection_replay_and_project_reopen(direct_server_with_
                     page.locator(destination_feed).wait_for(state="visible", timeout=30_000)
                     _idle(page, destination_feed)
                     _screenshot(page, tmp_path, f"routing-destination-opened-{browser_engine}-{width}")
-                    # Opened again after reading back to its first message, the room is at its
-                    # newest message and reads its newest page only (owner decision 2026-10-05).
+                    # Opened again after reading back to its first message, the kept room is found as left, on
+                    # that passage (owner 2026-11-03, DESIGN "History edges"), and reads no older page again;
+                    # `Scroll to latest message` is the one return to its newest message (owner decision 2026-10-05).
                     page.locator('#project-panel-close').click()
                     seen = len(page.evaluate("() => window.__historyReads"))
                     reopened = _open_project(page, project)
                     assert not [read["cursor"] for read in page.evaluate("n => window.__historyReads.slice(n)", seen)
                                 if read["cursor"]], "no older page is read again"
+                    assert other.count() == 1, "the passage read before leaving is still there"
+                    page.locator(f'#pchat-{project["id"]}-scroll-bottom').click()
+                    _idle(page, reopened)
                     _assert_at_newest(page, reopened, "Following dialogue 19")
                     _screenshot(page, tmp_path, f"reopened-at-newest-{browser_engine}-{width}")
                 finally:

@@ -184,6 +184,7 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
     from ouroboros.tools.github import github_token_from_env_or_settings
     from ouroboros.config import load_settings
     from ouroboros.composer_cognition import main_cognition
+    from ouroboros.model_slots import processing_tiers
     from ouroboros.route_choice import configured_references
     from ouroboros.subagent_runtime import subagents_availability
 
@@ -272,7 +273,8 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         decision_owners=decision_owners, work_facts=work_facts,
     )
     from ouroboros.gateway.main_decisions import main_decisions_snapshot
-    from ouroboros.gateway.state_publication import map_revision
+    from ouroboros.gateway.state_publication import map_revision, wire_bindings
+    sent_bindings = wire_bindings(task_bindings)  # what a reader receives; the census below keeps the named map
     decisions = main_decisions_snapshot(drive_root, decision_owners, task_bindings,
                                        activities_complete=activity_availability["complete"],
                                        bindings_complete=bindings_complete)
@@ -291,8 +293,8 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
 
         listable = list_sidebar_projects(root := request_drive_root(request))  # one read: the feed and its count
         messages_revision = project_revision(root, listable)  # read before the feed: a later move reads the list again
-        # A listed room that is the owner's turn always has its row: the Projects header's amber stands for a row the
-        # owner can reach, however long ago its work ended (after the recent slice, in the same message order).
+        # A listed room that is the owner's turn always has its row: the amber on Ouroboros's picture stands for a row
+        # the owner can reach, however long ago its work ended (after the recent slice, in the same message order).
         waiting = {int(chat) for chat, room in (works.get("rooms") or {}).items()
                    if room.get("amber") and str(chat).isdigit()}
         projects = projects_summary(root, include_pinned=True, sidebar_rows=listable, by_message=True, keep=waiting)
@@ -308,8 +310,9 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
     except Exception:  # unknown, never "no Projects": a reader keeps the set it holds
         project_chat_ids = None
     if project_chat_ids is None:
-        # The same registry counts the feed and names the bound tasks' Projects: while it vouches for no room,
-        # the count is unknown too (never "none listed"), and the bindings map below carries no revision.
+        # The same registry counts the feed: while it vouches for no room, the count is unknown too (never "none
+        # listed"). The bindings map a reader receives names no Project, so a registry that reads but vouches for no
+        # room leaves its revision standing; one that cannot be read fails the bindings read too.
         project_listable_count = None
     from ouroboros.gateway.ui_preferences import main_room_revision
 
@@ -337,16 +340,15 @@ def _state_snapshot(request: Request, direct: Optional[tuple] = None) -> Dict[st
         "subagents_mode": main_cognition(settings)["subagents_mode"],
         "subagents_availability": subagents_availability(settings),
         "main_route": configured_references()["main"],
+        "processing_tiers": processing_tiers(settings),
         "projects": projects,
         "project_messages_revision": messages_revision,
         "project_listable_count": project_listable_count,
         "project_chat_ids": project_chat_ids,
         "main_visible_revision": main_visible_revision,
-        "task_bindings": task_bindings,
-        # The map names its own revision (a digest of what a reader receives); a failed read has none, and so has a
-        # map whose Project names an unknown registry could not vouch for (a reader keeps the map it holds).
-        "task_bindings_revision": (map_revision(task_bindings) if bindings_complete and project_chat_ids is not None
-                                   else ""),
+        "task_bindings": sent_bindings,
+        # The map names its own revision (a digest of what a reader receives); a failed read has none.
+        "task_bindings_revision": map_revision(sent_bindings) if bindings_complete else "",
         # A carried Presence turn is a census row of its own kind (CLIENT_CONTRACT), never the owner's direct turn.
         "active_direct_turns": [row for row in direct_turns if row.get("kind") != "presence"],
         "active_chat_activities": activities,
@@ -460,15 +462,16 @@ def _task_activity_facts(drive_root: Any, task_id: str) -> dict:
     from ouroboros.outcomes import normalize_outcome_axes
 
     display = {key: data[key] for key in ("status", "reason_code", "timeout_retry_from", "original_task_id",
-                                          "delegated_runs_unreconciled") if key in data}
+                                          "delegated_runs_unreconciled", "terminal_origin") if key in data}
     if isinstance(data.get("model_waits"), dict):
         from ouroboros.deployment_policy import served_waits
 
         display["model_waits"] = served_waits(data["model_waits"])
     if data.get("status") or data.get("outcome_axes"):
         display["outcome_axes"] = normalize_outcome_axes(data)
-    if isinstance(data.get("cancel_origin"), dict):
-        display["cancel_origin"] = dict(data["cancel_origin"])  # the stop the status fold reads beside the axes
+    for name in ("cancel_origin", "finalization_recovery"):  # the stop and the adopted answer the status fold reads beside the axes
+        if isinstance(data.get(name), dict):
+            display[name] = dict(data[name])
     if synthesis:
         display["root_phase_checkpoint"] = {"post_task_synthesis": synthesis}
     if _answer_stored(synthesis):
@@ -679,7 +682,7 @@ def _chat_activities_snapshot_safe(drive_root: Any, task_bindings: Any = None, *
                     or (meta.get("task") or {}).get("_attempt") or 1),
                     "model_activity": (meta.get("active_llm_call") or {}).get("model_activity"),
                     "context_attempt": meta.get("context_attempt"), "lead": meta.get("lead"),
-                    "_lead_request_id": meta.get("_lead_request_id"),
+                    "_lead_request_id": meta.get("_lead_request_id"), "processing_last": meta.get("processing_last"),
                     "turn_phase": meta.get("turn_phase"), "_census_carrier": "worker" if meta.get(
                         "worker_id") is not None else "",
                     "owner_wait": dict(meta.get("owner_wait") or {}),
@@ -811,7 +814,7 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
             from ouroboros.project_naming import derived_run_name
             from ouroboros.task_activity_facts import card_facts
             from ouroboros.work_stop import parked_stop_view
-            from ouroboros.lead_fact import lead_fields
+            from ouroboros.lead_fact import lead_processing_fields
 
             if phase == "unknown" and availability is not None:
                 availability["complete"] = False
@@ -823,7 +826,7 @@ def _chat_activities_snapshot(drive_root, task_bindings, direct_rows, pending_ro
                     phase = "budget_paused"
             return {
                 "activity_id": task_id,
-                **(lead_fields(row.get("lead"), row, queued=phase == "queued") if root else {}),
+                **(lead_processing_fields(row.get("lead"), row, queued=phase == "queued") if root else {}),
                 "detached": card_facts(row)["detached"],
                 "chat_id": int(row.get("chat_id") or 0),
                 "project_id": str(row.get("project_id") or ""),

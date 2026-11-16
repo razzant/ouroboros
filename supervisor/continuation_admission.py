@@ -145,7 +145,7 @@ def action_writers(q: Any, predecessor: str, *, drive_root: Any = None, owner_pa
     exactly as ``conflicting_writers`` — which stays the passive, write-free
     reader every census and GET uses (#1554). ``purpose`` and ``gaps`` are
     passed through unchanged: only the owner's Continue and its held selection
-    name ``CONTINUE_PURPOSE``; Pause and Resume keep the default.
+    name ``CONTINUE_PURPOSE``; Pause and Resume keep the default census.
     """
     from ouroboros.control_actor import accepted_unknown, control_actor
     from ouroboros.local_custody_repair import accept_unknown_custody, repair_ended_local_custody
@@ -481,10 +481,15 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
     model_role = str(metadata.get("model_role") or "").strip()
     # The same work keeps its primary, a recorded follow included (route_choice),
     # never the room's newer choice.
-    from ouroboros.route_choice import LEAD_KEY, MODEL_ROLE_SETTINGS, lead_snapshot
+    from ouroboros.route_choice import (DEFAULT_PROCESSING, LEAD_KEY, MODEL_ROLE_SETTINGS, PROCESSING_KEY, lead_snapshot,
+                                        processing_snapshot)
 
     model_role = model_role if model_role in MODEL_ROLE_SETTINGS else ""
     lead = lead_snapshot(metadata.get(LEAD_KEY))
+    # Its tier too, as the stored row has it now: a tier returned to Default stays Default, never the room's newer one.
+    # Work admitted before tiers carries none and ran on the default resolution: its successor records that decided
+    # Default, so its admission does not read the room's tier as a new root's would.
+    processing = processing_snapshot(metadata.get(PROCESSING_KEY)) or dict(DEFAULT_PROCESSING)
     stored = metadata.get("task_contract") if isinstance(metadata.get("task_contract"), dict) else {}
     canonical = result.get("task_contract") if isinstance(result.get("task_contract"), dict) else {}
     contract = {**stored, **canonical}
@@ -518,6 +523,7 @@ def _successor_task(q: Any, predecessor: str, result: Dict[str, Any], binding: D
             **({"project_id": binding["project_id"]} if binding.get("project_id") else {}),
             **({"model_role": model_role} if model_role else {}),
             **({LEAD_KEY: lead} if lead else {}),
+            PROCESSING_KEY: processing,
             **({"resource_intent": dict(intent)} if isinstance(intent, dict) and intent.get("kind") else {}),
             # The same work's withheld tools, protected artifacts, resources, criteria, executor and teardown.
             **_recorded_work_limits(result, metadata, contract),

@@ -1,11 +1,13 @@
-"""One knowledge note's history, read from its shelf's journal: versions, outline, listing, changes.
+"""One memory text's history, read from its journal: versions, outline, listing, changes.
 
-The journal is ``address.shelf.parent / "knowledge_history.jsonl"``, the append-only record the one
-writer (``knowledge.write_knowledge_note``) keeps for a shelf. A row belongs to a note by its
-``topic`` and the scope its ``address`` names. Lines are pre-filtered by the note's topic as the
-writer encodes it in JSON before anything is parsed and are read newest first, in blocks from the
-journal's end, so a large journal is never parsed whole; a line naming the note that is not JSON is
-counted as a gap, never fatal. A version is named by its revision (the sha256 of its exact bytes);
+A note's journal is ``address.shelf.parent / "knowledge_history.jsonl"``, the append-only record the
+one writer (``knowledge.write_knowledge_note``) keeps for a shelf; a row belongs to a note by its
+``topic`` and the scope its ``address`` names. The same helpers read a plain memory text's journal
+(``memory_texts.TextSource``: identity, the world map, a project's workpad): the source names its
+``journal``, its rows' ``topic`` (none for a journal of one text, whose every row is its) and the
+``noun`` the answers use. Lines are pre-filtered by the topic as the writer encodes it in JSON before
+anything is parsed and are read newest first, in blocks from the journal's end, so a large journal is
+never parsed whole; a line naming the text that is not JSON is counted as a gap, never fatal. A version is named by its revision (the sha256 of its exact bytes);
 its text is read through ``knowledge_rows`` (stored whole, or rebuilt from the changes rows carry)
 and returned only after it hashes to that revision. Nothing here writes: no index, no cache, no
 sidecar.
@@ -21,7 +23,7 @@ import json
 import os
 from collections import Counter
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from ouroboros import knowledge_rows, text_change
 from ouroboros.utils import jsonl_window
@@ -37,24 +39,34 @@ class VersionUnavailable(ValueError):
 
 
 def journal_path(address: Any) -> Path:
-    return address.shelf.parent / JOURNAL_NAME
+    """A note's shelf journal, or the journal a plain source names."""
+    own = getattr(address, "journal", None)
+    return own if own is not None else address.shelf.parent / JOURNAL_NAME
+
+
+def noun(address: Any) -> str:
+    """What the answers call the text: ``note``, or the plain source's own noun."""
+    return getattr(address, "noun", "note")
 
 
 def _needle(address: Any) -> bytes:
     """The topic as a JSON string, spelled as every writer of this journal writes it (``ensure_ascii=False``).
 
-    One spelling: a second one that no row carries would rescan the whole block for every line found."""
-    return json.dumps(address.topic, ensure_ascii=False).encode("utf-8")
+    One spelling: a second one that no row carries would rescan the whole block for every line found. A
+    source without a topic (a journal of one text) takes every row, and every row is an object: ``{``."""
+    topic = getattr(address, "topic", None)
+    return json.dumps(topic, ensure_ascii=False).encode("utf-8") if isinstance(topic, str) else b"{"
 
 
 def _belongs(row: Any, address: Any) -> bool:
-    """A version row of this note: its topic, a version field, a capture (or an older unstamped row)."""
-    if not isinstance(row, dict) or row.get("topic") != address.topic:
+    """A version row of this text: its topic (none for a journal of one text), a version field, a capture (or an
+    older unstamped row) of its scope."""
+    if not isinstance(row, dict) or row.get("topic") != getattr(address, "topic", None):
         return False
     if ("new_content" not in row and "new_sha256" not in row) or row.get("publication", "source_capture") != "source_capture":
         return False
-    where = row.get("address")
-    return not isinstance(where, dict) or where.get("scope", address.scope) == address.scope
+    where, scope = row.get("address"), getattr(address, "scope", None)
+    return not isinstance(where, dict) or where.get("scope", scope) == scope
 
 
 def _matching_lines(region: bytes, base: int, needle: bytes) -> Iterator[tuple[int, bytes]]:
@@ -114,7 +126,7 @@ def tail_rows(journal: Path, address: Any, tail_bytes: int) -> Iterator[tuple[in
 
 
 class NoteHistory:
-    """This note's rows over the whole journal, newest first, with the gaps met on the way."""
+    """This text's rows over the whole journal, newest first, with the gaps met on the way."""
 
     def __init__(self, address: Any, extra: bytes = b""):
         self.address, self.extra = address, extra
@@ -139,15 +151,19 @@ class NoteHistory:
     def gaps(self) -> list[str]:
         out = []
         if self.malformed:
-            out.append(f"{self.malformed} journal line(s) naming this note are not JSON and were skipped "
+            naming = f" naming this {noun(self.address)}" if isinstance(getattr(self.address, "topic", None), str) else ""
+            out.append(f"{self.malformed} journal line(s){naming} are not JSON and were skipped "
                        f"(the first at byte offset {self.first_malformed})")
         if self.error:
             out.append(f"the journal could not be read to its beginning ({self.error}); older rows are not shown")
         return out
 
 
-def find_version(address: Any, version: Any) -> tuple[str, dict]:
-    """The exact text of one version of this note and the row that wrote it, newest rows first.
+_READ = object()  # find_version reads the live text itself
+
+
+def find_version(address: Any, version: Any, live: Any = _READ) -> tuple[str, dict]:
+    """The exact text of one version of this text and the row that wrote it, newest rows first.
 
     Every row that names the version, as the text it published (``new_sha256``) or replaced
     (``old_sha256``), is read through ``knowledge_rows.Texts``: stored whole, rebuilt through its
@@ -155,13 +171,16 @@ def find_version(address: Any, version: Any) -> tuple[str, dict]:
     the live note); the text is returned only when it hashes to the version (an empty text is the
     version sha256(b"")). The row is the one that wrote the version, or ``{}`` when none did (an
     outside edit, or a write before history). ``VersionUnavailable`` says why there is no text and
-    names the gaps among the lines that name this note."""
+    names the gaps among the lines that name this note. ``live`` is the current text a writer already
+    captured under its lock (the journal and the text it reads are then one state); by default the file
+    is read here."""
     if not isinstance(version, str) or len(version) != 64 or version.strip("0123456789abcdef"):
         raise VersionUnavailable("a version is a revision: the 64 lowercase hex characters of its sha256")
-    try:
-        live = address.path.read_bytes().decode("utf-8")
-    except (OSError, UnicodeDecodeError):
-        live = None
+    if live is _READ:
+        try:
+            live = address.path.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            live = None
     texts, why, held = knowledge_rows.Texts(journal_path(address), live), "", None
     history = NoteHistory(address, version.encode("ascii"))
     for offset, row in history:
@@ -184,7 +203,7 @@ def find_version(address: Any, version: Any) -> tuple[str, dict]:
     for _row in unfiltered:
         pass
     gaps = "; ".join(unfiltered.gaps())
-    raise VersionUnavailable((why or f"no version {version} of this note in its history")
+    raise VersionUnavailable((why or f"no version {version} of this {noun(address)} in its history")
                              + (f" ({gaps})" if gaps else ""))
 
 
@@ -195,24 +214,50 @@ def row_facts(row: Mapping[str, Any]) -> dict[str, Any]:
             "reason": row.get("reason") or UNKNOWN}
 
 
+def written_text(facts: Mapping[str, Any], outside: str = "an outside edit, or a write before history") -> str:
+    """Who wrote a version, as a read, a receipt or a refusal says it: ``row_facts`` of the row that wrote it, or
+    that no row did (``outside`` names what can change the text without one; it never names a cause as fact)."""
+    if facts.get("ts") in (None, UNKNOWN):
+        return f"no history row wrote it ({outside})"
+    return (f"written {facts['ts']} by focus {focus_text(facts.get('focus'))} "
+            f"({facts.get('mode') or UNKNOWN}; reason: {reason_text(facts.get('reason'))})")
+
+
 def held_version(journal: Path, address: Any, revision: str, tail_bytes: int,
                  live: str | None = None) -> dict[str, Any] | None:
-    """The version a stale write holds, when this note's rows in the writer's tail have it.
+    """The version a stale write holds, when this text's rows in the writer's tail have it.
 
-    ``{"facts", "text", "since"}``: that row's facts, its text read through ``knowledge_rows``
-    (``live``, the note's current text, closes the newest segment) and the facts of the rows written
-    after it, oldest first. ``None``: the tail holds no such row, or no verified text for it."""
-    since, texts = [], knowledge_rows.Texts(journal, live)
+    ``{"facts", "text", "since"}``: the facts of the row that wrote it, its text read through
+    ``knowledge_rows`` (``live``, the current text, closes the newest segment) and the facts of the rows
+    written after it, oldest first. A version only a row's old side holds (a first captured pre-image,
+    an outside edit) is read from that side, verified; its author is unknown unless an older row in the
+    tail wrote it, and the writes since begin with the oldest row that replaced it. ``None``: the tail
+    holds no verified text of it."""
+    since, texts, held = [], knowledge_rows.Texts(journal, live), None
     for offset, row in tail_rows(journal, address, tail_bytes):
         texts.rows.setdefault(offset, row)
         if row.get("new_sha256") == revision:
             try:
                 text = texts.text(offset, "new")
             except knowledge_rows.TextUnavailable:
+                text = held[0] if held else None
+            if text is None:
                 return None
             return {"facts": row_facts(row), "text": text, "since": [row_facts(item) for item in reversed(since)]}
         since.append(row)
-    return None
+        if row.get("old_sha256") == revision:  # the version this row replaced, held only on its old side so far
+            text = held[0] if held else None
+            if text is None:
+                try:
+                    text = texts.text(offset, "old")
+                except knowledge_rows.TextUnavailable:
+                    text = None
+            if text is not None:
+                held = (text, list(since))
+    if held is None:
+        return None
+    return {"facts": {**row_facts({}), "revision": revision}, "text": held[0],
+            "since": [row_facts(item) for item in reversed(held[1])]}
 
 
 def focus_text(focus: Any) -> str:
@@ -323,27 +368,36 @@ def _listed(row: Mapping[str, Any]) -> dict[str, Any]:
     """The facts a listing line shows, without the row's note texts (a long history is not held whole).
 
     A row has its text when it holds the whole ``new_content`` or a ``change`` against a ``base``, unless it is
-    marked ``content_digested`` (the reader refuses such a row whatever it holds); no version is rebuilt to say so."""
+    marked ``content_digested`` (the reader refuses such a row whatever it holds); no version is rebuilt to say so.
+    The sizes a row recorded travel with it: an identity or map row written before rows carried a ``delta`` has only
+    its ``old_len``/``new_len``, shown as they are (``delta_parts``), never turned into removed and added counts."""
     text = row.get("new_content")
     stored = not row.get("content_digested") and (
         (isinstance(text, str) and bool(text or not row.get("new_sha256")
                                          or row.get("new_sha256") == knowledge_rows.sha256_text("")))
         or (isinstance(row.get("change"), list) and isinstance(row.get("base"), Mapping)))
     return {**{key: row.get(key) for key in ("new_sha256", "old_sha256", "ts", "focus", "mode", "reason", "delta",
-                                             "old_chars", "new_chars", "reverted_from")}, "text_stored": stored}
+                                             "old_chars", "new_chars", "old_len", "new_len", "reverted_from",
+                                             "old_not_text")},
+            "text_stored": stored}
 
 
-def _row_line(row: Mapping[str, Any], marks: list[str]) -> str:
+def delta_parts(row: Mapping[str, Any]) -> list[str]:
+    """What a write changed, as its row (or a receipt's ``{"delta": ...}``) records it: characters, sections, headings.
+
+    Recorded at write time: no earlier version is parsed again here."""
     delta = row.get("delta") if isinstance(row.get("delta"), Mapping) else {}
-    parts = [str(row.get("new_sha256") or "(no revision recorded)"), str(row.get("ts") or "time unknown"),
-             "focus " + focus_text(row.get("focus")), str(row.get("mode") or "mode unknown"),
-             "reason: " + (str(row["reason"]) if row.get("reason") else "not recorded")]
+    parts = []
     if isinstance(delta.get("removed_chars"), int) and isinstance(delta.get("added_chars"), int):
         parts.append(f"{delta['removed_chars']} chars removed, {delta['added_chars']} added")
     elif isinstance(delta.get("change_chars"), int):
         parts.append(f"net change {delta['change_chars']:+d} chars")
+    elif delta.get("old_not_text") and isinstance(delta.get("old_bytes"), int):  # the replaced bytes were no text
+        parts.append(f"{delta['old_bytes']} bytes that were not UTF-8 text → {delta.get('new_chars')} chars")
     elif isinstance(row.get("old_chars"), int) and isinstance(row.get("new_chars"), int):
         parts.append(f"{row['old_chars']} → {row['new_chars']} chars")
+    elif isinstance(row.get("old_len"), int) and isinstance(row.get("new_len"), int):  # a plain journal's row
+        parts.append(f"{row['old_len']} → {row['new_len']} chars")
     # A stored heading is '#' * level + ' ' + title; a setext title that spans lines is named by its first line.
     sections, headings = delta.get("removed_sections"), delta.get("removed_headings")
     if isinstance(sections, list) and sections:
@@ -351,9 +405,42 @@ def _row_line(row: Mapping[str, Any], marks: list[str]) -> str:
                                                       for item in sections if isinstance(item, Mapping)))
     elif isinstance(headings, list) and headings:
         parts.append("headings removed: " + "; ".join(_first_line(str(item)) for item in headings))
-    added = delta.get("added_headings")  # recorded at write time: no earlier version is parsed again here
+    added = delta.get("added_headings")
     if isinstance(added, list) and added:
         parts.append("headings added: " + "; ".join(_first_line(str(item)) for item in added))
+    return parts
+
+
+def _replaced(row: Mapping[str, Any], current: str, revert: Callable[[str], str] | None,
+              blocked: tuple[str, str], lifecycle: Callable[[str], str] | None = None) -> list[str]:
+    """The version a write replaced, its actual undo target, and the call that puts it back over the current text
+    (``revert``; ``None`` while no revert can run, ``blocked`` saying why and how the version is written instead). An
+    empty ``old_sha256`` is a text that did not exist: no earlier version. A row that names no replaced version has no
+    undo; never the line below's. A note's archive or restore row is undone by the opposite lifecycle call
+    (``lifecycle(mode)``): the writer refuses a revert across archive states."""
+    old = row.get("old_sha256")
+    if old == "":
+        return ["created it: no earlier version to put back"]
+    if not isinstance(old, str) or not old:
+        return ["replaced: not recorded, so no undo (the version it replaced is unknown)"]
+    if row.get("old_not_text"):
+        return [f"replaced {old}", "undo: none, those bytes were not UTF-8 text and history keeps only their sha256"]
+    if old == current:
+        undo = "undo: nothing to put back, that version is the current text"
+    elif lifecycle is not None and row.get("mode") in ("archive", "restore"):
+        undo = "undo: " + lifecycle("restore" if row["mode"] == "archive" else "archive")
+    elif revert is None:
+        undo = f"undo: {blocked[0]}, so read that version and write it with {blocked[1]}"
+    else:
+        undo = "undo: " + revert(old)
+    return [f"replaced {old}", undo]
+
+
+def _row_line(row: Mapping[str, Any], marks: list[str], replaced: list[str]) -> str:
+    parts = [str(row.get("new_sha256") or "(no revision recorded)"), str(row.get("ts") or "time unknown"),
+             "focus " + focus_text(row.get("focus")), str(row.get("mode") or "mode unknown"),
+             "reason: " + (str(row["reason"]) if row.get("reason") else "not recorded"), *replaced]
+    parts += delta_parts(row)
     if row.get("reverted_from"):
         parts.append(f"reverted_from {row['reverted_from']}")
     if not row["text_stored"]:
@@ -361,35 +448,58 @@ def _row_line(row: Mapping[str, Any], marks: list[str]) -> str:
     return "- " + " · ".join(parts + marks)
 
 
-def render_history(note: Any) -> str:
-    """This note's versions, newest first, one line each, with the current one marked."""
-    history = NoteHistory(note.address)
+def render_listing(source: Any, current: str, title: str, read: str, revert: Callable[[str], str] | None,
+                   blocked: tuple[str, str] | None = None, lifecycle: Callable[[str], str] | None = None) -> str:
+    """A text's versions, newest first, one line each: who wrote it, when, in which mode, why, the version it replaced
+    (its actual undo target, also where no line above wrote it: a first write, an outside change, a write that did not
+    land) and the call that puts that version back, what it changed, with the current one marked; then the calls that
+    read and put back a version. ``revert(version)`` is the exact call that puts ``version`` back over the current text
+    (expected_revision, address and project included); ``None`` while no revert can run, ``blocked`` naming why and
+    the write that brings a version back instead (default: the text does not exist, an overwrite creates it), so no
+    line offers a call the writer refuses; ``lifecycle(mode)`` renders a note's archive or restore call, the undo of the
+    opposite lifecycle row."""
+    history = NoteHistory(source)
     rows = [_listed(row) for _offset, row in history]
-    address = note.address
-    lines = [f"History of {address.topic!r} ({address.scope}): {len(rows)} recorded version(s), newest first. "
-             f"Current revision: {note.revision}."]
+    what = noun(source)
+    blocked = blocked or (f"the {what} does not exist now", "mode=overwrite")
+    lines = [f"{title}: {len(rows)} recorded version(s), newest first. Current revision: {current}."]
     lines += [f"Gap: {gap}." for gap in history.gaps()]
     current_seen = False
     for index, row in enumerate(rows):
         marks = []
         revision = row.get("new_sha256")
-        if revision == note.revision:
+        if revision == current:
             marks.append("same text as the current version" if current_seen else "current")
             current_seen = True
         newer = rows[index - 1] if index else None
         if newer is not None and revision != newer.get("old_sha256"):
             marks.append("not the base of the next write (it did not land, or the file changed outside)")
-        elif newer is None and revision != note.revision:
+        elif newer is None and revision != current:
             marks.append("not the current text (it did not land, or the file changed outside)")
-        lines.append(_row_line(row, marks))
+        lines.append(_row_line(row, marks, _replaced(row, current, revert, blocked, lifecycle)))
     if not rows:
-        lines.append("(no rows: this note was written before the journal recorded it, or outside the writer)")
-    arguments = f"topic={address.topic!r}, scope={address.scope!r}"
-    lines.append(f"Read one: knowledge_read({arguments}, version=<revision>). Put one back: knowledge_write({arguments}, "
-                 f"mode='revert', version=<revision>, expected_revision={note.revision!r}). Each line is the note after "
-                 "its write, so undoing a write means putting back the line below it, unless that line is marked not "
-                 "the base of the next write.")
+        lines.append(f"(no rows: this {what} was written before the journal recorded it, or outside the writer)")
+    put_back = (revert("<revision>").replace("'<revision>'", "<revision>") if revert is not None else
+                f"{blocked[0]}, so mode=revert cannot run: read a version and write it with {blocked[1]}")
+    lifecycle_rows = lifecycle is not None and any(row.get("mode") in ("archive", "restore") for row in rows)
+    lines.append(f"Read one: {read}. Put one back: {put_back}. Each line is the {what} after its write; its undo puts "
+                 "back the version that write replaced, which is not always the line below" + (
+                     "; an archive or restore line's undo is the opposite lifecycle mode, which changes the archive "
+                     "field only" if lifecycle_rows else "") + ".")
     return "\n".join(lines) + "\n"
+
+
+def render_history(note: Any) -> str:
+    """This note's versions, newest first, one line each, with the current one marked (``render_listing``)."""
+    address = note.address
+    arguments = f"topic={address.topic!r}, scope={address.scope!r}"
+    return render_listing(address, note.revision, f"History of {address.topic!r} ({address.scope})",
+                          f"knowledge_read({arguments}, version=<revision>)",
+                          lambda version: f"knowledge_write({arguments}, mode='revert', version={version!r}, "
+                                          f"expected_revision={note.revision!r})",
+                          lifecycle=lambda mode: f"knowledge_write({arguments}, mode={mode!r}, "
+                                                 + ("reason=<why>, " if mode == "archive" else "")
+                                                 + f"expected_revision={note.revision!r})")
 
 
 def _lines(raw: bytes, start: int, end: int, sign: str) -> tuple[int, list[str]]:
@@ -403,16 +513,27 @@ def _lines(raw: bytes, start: int, end: int, sign: str) -> tuple[int, list[str]]
 
 
 def render_changes(note: Any, held: Mapping[str, Any]) -> str:
-    """Every change between the version a stale write holds and the current text, in whole lines.
+    """Every change between the version a stale write holds and the current note (``changes_since``), then its
+    outline and the full read. Nothing here is cut: a reply that cannot carry all of it sends the complete current
+    note instead (``tools/knowledge.py``)."""
+    address = note.address
+    return changes_since(note, held, ["Outline of the current note:", render_outline(note).rstrip("\n"),
+                                      f"The complete current text is knowledge_read(topic={address.topic!r}, "
+                                      f"scope={address.scope!r})."])
+
+
+def changes_since(current: Any, held: Mapping[str, Any], tail: list[str]) -> str:
+    """Every change between the version a stale write holds and ``current`` (its ``raw``, ``text``, parsed ``source``
+    or ``None``, ``revision`` and ``address``), in whole lines, then the ``tail`` lines.
 
     After the rows written since that version, each block is the whole lines it touches: ``- `` every
     line of the held version, then ``+ `` every line of the current one, with where each side's lines
-    begin and the heading the block sits under in the current note (its line as the outline prints it,
-    so a header stays one line under a setext heading whose title spans lines); then the outline and the full
-    read. Putting each block's ``+`` lines in place of its ``-`` lines in the held version gives the
-    current note (``text_change.line_blocks``). Nothing here is cut: a reply that cannot carry all of
-    it sends the complete current note instead (``tools/knowledge.py``)."""
-    address, old_raw, new_raw = note.address, held["text"].encode("utf-8"), note.raw
+    begin and the heading the block sits under in the current text (its line as the outline prints it,
+    so a header stays one line under a setext heading whose title spans lines). Putting each block's
+    ``+`` lines in place of its ``-`` lines in the held version gives the current text
+    (``text_change.line_blocks``). Nothing here is cut."""
+    note, what = current, noun(current.address)
+    old_raw, new_raw = held["text"].encode("utf-8"), note.raw
     headings = note.source.headings if note.source else ()
     blocks = text_change.line_blocks(held["text"], note.text, text_change.exact_change(held["text"], note.text))
     body = []
@@ -426,15 +547,13 @@ def render_changes(note: Any, held: Mapping[str, Any]) -> str:
                     f"{new_line}, {where}: {removed} chars removed, {added} added")
         body += old_lines + new_lines
     facts = held["facts"]
-    head = [f"The revision you sent is an earlier version of this note, written {facts['ts']} by focus "
-            f"{focus_text(facts['focus'])} ({facts['mode']}; reason: {reason_text(facts['reason'])}). "
-            f"Current revision: {note.revision}.", "Written since that version, oldest first:"]
+    written = written_text(facts, getattr(note.address, "outside", "an outside edit, or a write before history"))
+    head = [f"The revision you sent is an earlier version of this {what}{', ' if written.startswith('written') else '; '}"
+            f"{written}. Current revision: {note.revision}.", "Written since that version, oldest first:"]
     head += [f"- {item['ts']} · focus {focus_text(item['focus'])} · {item['mode']} · reason: {reason_text(item['reason'])}"
              f" → {item['revision']}" for item in held["since"]] or ["- (no row: the file changed outside the writer)"]
     head.append(f"What changed from your version to the current text, in whole lines ({len(blocks)} block(s)): "
-                "in your version, put each block's + lines in place of its - lines and you have the current note.")
-    tail = ["Outline of the current note:", render_outline(note).rstrip("\n"),
-            f"The complete current text is knowledge_read(topic={address.topic!r}, scope={address.scope!r})."]
+                f"in your version, put each block's + lines in place of its - lines and you have the current {what}.")
     return "\n".join(head + body + tail) + "\n"
 
 

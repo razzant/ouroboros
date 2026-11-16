@@ -68,7 +68,7 @@ def pool(tmp_path, monkeypatch):
     monkeypatch.setattr(queue, "_reap_queue", jobs)
     monkeypatch.setattr(queue, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(task_reaper, "_deferred_reap_jobs", [])
-    monkeypatch.setattr(workers, "respawn_worker", respawns.append)
+    monkeypatch.setattr(workers, "respawn_worker", lambda wid, **_kwargs: respawns.append(wid))
     proc = SimpleNamespace(pid=2147483100, alive=True, exitcode=None)  # no OS process has it
     proc.is_alive = lambda: proc.alive
     slot = affirm_ready(workers.Worker(0, proc, stdqueue.Queue()))

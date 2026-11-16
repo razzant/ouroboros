@@ -41,7 +41,7 @@ def test_every_child_is_told_the_spawners_transport_policy(monkeypatch):
     the unstated worker default (no proxy); a forked child is told to avoid OS proxy lookup (fork safety)."""
     from supervisor import worker_process
 
-    captured, options = [], []
+    captured = []
 
     class Ctx:
         def __init__(self, method):
@@ -50,8 +50,7 @@ def test_every_child_is_told_the_spawners_transport_policy(monkeypatch):
         def get_start_method(self):
             return self.method
 
-        def Process(self, *, target, args, kwargs):
-            options.append(kwargs)
+        def Process(self, *, target, args):
             captured.append(args)
             return _FakeProcess()
 
@@ -65,12 +64,9 @@ def test_every_child_is_told_the_spawners_transport_policy(monkeypatch):
     captured.clear()
     worker_process.spawn_worker_process(Ctx("spawn"), 0, None, None, "/repo", "/data")
     assert captured[0][-1] is True
-    assert options == [{}, {}, {}, {}]
-    worker_process.spawn_worker_process(Ctx("spawn"), 0, None, None, "/repo", "/data", warm_context_sources=True)
-    assert options[-1] == {"warm_context_sources": True}
 
 
-def _policy_entry(*args, **kwargs):
+def _policy_entry(*args):
     """The real ``worker_main`` in a real child with only the agent replaced: its task reports the child's policy."""
     from ouroboros import agent, extension_loader
     from supervisor.worker_process import worker_main
@@ -82,7 +78,7 @@ def _policy_entry(*args, **kwargs):
 
     agent.make_agent = lambda **_: PolicyAgent()
     extension_loader.reload_all = lambda *_a, **_k: None
-    worker_main(*args, **kwargs)
+    worker_main(*args)
 
 
 @pytest.mark.parametrize("method", ["spawn", "forkserver"])

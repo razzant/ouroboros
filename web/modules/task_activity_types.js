@@ -20,6 +20,7 @@
 /**
  * @typedef {Object} ActiveDirectTurn
  * @property {import('./work_types.js').WorkLead=} lead  // the model it runs on and whose choice that is
+ * @property {import('./work_types.js').WorkProcessing=} processing  // its own tier and the newest call's receipt
  * @property {Object=} model_activity  // exact-call transport observation; no request/account content
  * @property {ContextAttemptFact=} context_attempt  // its task attempt's latest sent attempt, kept past the call
  * @property {Object.<string,Object>=} model_waits
@@ -39,6 +40,7 @@
 /**
  * @typedef {Object} ActiveChatActivity
  * @property {import('./work_types.js').WorkLead=} lead  // the model it runs on and whose choice that is
+ * @property {import('./work_types.js').WorkProcessing=} processing  // its own tier and the newest call's receipt
  * @property {string=} executor  // where the turn runs: worker, inline_call or inline_degraded
  * @property {string=} carrier  // a lane row: awaiting (no carrier holds it yet) or worker
  * @property {string=} last_line Visible model narration; empty when not recorded.
@@ -50,6 +52,8 @@
  * @property {Object=} outcome_axes
  * @property {string=} reason_code
  * @property {Object=} cancel_origin  // the stored stop origin the status fold reads (an owner-stopped turn's typed stop)
+ * @property {Object=} finalization_recovery The stored result's adopted answer, read by that fold.
+ * @property {string=} terminal_origin
  * @property {string[]=} delegated_runs_unreconciled  // the stored result's current custody debt, read by that fold
  * @property {Object=} root_phase_checkpoint  // compact post_task_synthesis fact only
  * @property {string=} timeout_retry_from  // explicit automatic-retry predecessor, never owner Continue

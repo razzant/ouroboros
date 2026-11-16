@@ -101,6 +101,7 @@ async function withWizard(bootstrap, query, body, { fetch, location, prepare } =
         __OURO_ONBOARDING_BOOTSTRAP__: bootstrap,
         addEventListener(type, listener) { listeners.set(listener, type); },
         removeEventListener(type, listener) { listeners.delete(listener); },
+        dispatchEvent(event) { for (const [listener, type] of [...listeners]) if (type === event.type) listener(event); return true; },
         setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
         requestAnimationFrame: (fn) => setTimeout(fn, 0), getComputedStyle: () => ({}),
         matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
@@ -141,6 +142,7 @@ async function withWizard(bootstrap, query, body, { fetch, location, prepare } =
         for (const [listener, type] of listeners) {
             if (type === 'pagehide') listener({ persisted: false });
         }
+        assert.ok(![...listeners.values()].includes('ouro:language-changed'), 'leaving the page drops its language listener');
         for (const [name, descriptor] of Object.entries(installed)) {
             if (descriptor) Object.defineProperty(globalThis, name, descriptor);
             else delete globalThis[name];
@@ -243,7 +245,14 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
     const response = new Promise((resolve) => { returnReceipt = resolve; });
     let recordCompletion;
     const completed = new Promise((resolve) => { recordCompletion = resolve; });
+    const catalogReads = [];
     const fetch = (url, init) => {
+        // The Models step reads the catalog of the draft's own access: the key typed here, which no saved file holds.
+        if (String(url) === '/api/onboarding/model-catalog') {
+            catalogReads.push(JSON.parse(init.body));
+            const body = { items: [], model_sources: [], errors: [] };
+            return Promise.resolve({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
+        }
         requests.push({ url, method: init.method, body: JSON.parse(init.body) });
         recordSubmission();
         return response;
@@ -274,6 +283,8 @@ test('wizard renders and submits the edited owner draft on Finish', { timeout: 3
         assert.match(doc.getElementById('root').innerHTML, />Access level</, 'the summary names the access level as the step does');
         doc.getElementById('next-btn').fire('click');
         await submitted;
+        assert.deepEqual(catalogReads.map((draft) => draft.OPENROUTER_API_KEY), ['test-key-not-a-secret'],
+            'one catalog read for the draft\'s access, carrying its key');
         assert.equal(requests.length, 1);
         assert.equal(requests[0].url, '/api/onboarding/complete');
         assert.equal(requests[0].method, 'POST');
@@ -800,15 +811,16 @@ test('Summary says what an exhausted subscription quota does, with and without a
     const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
     const fetch = async (url, init = {}) => {
         let body = {};
-        if (String(url) === '/api/model-catalog') body = subscription.catalog;
+        if (String(url) === '/api/onboarding/model-catalog') body = subscription.catalog;
         else if (String(url) === '/api/claudexor/status') body = subscription.status;
         else if (String(url) === '/api/onboarding/subagents/preview') {
             const payload = JSON.parse(init.body);
-            body = { ok: true, available_subagents: { enabled: true, items: [] },
+            body = { ok: true, available_subagents: { enabled: true, items: [] }, known_spend_gaps: gaps, partly_counted_spend: partly,
                 model_settings: Object.fromEntries(Object.keys(subscription.preview.model_settings).map((key) => [key, payload[key]])) };
         }
         return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
     };
+    let gaps = [], partly = [];
     const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
     // Walk from Accounts (where the connected subscription is observed) to Summary.
     const summary = async (query, fallbackModel, mainModel = 'claudexor::codex=gpt-test', openrouterKey = '') => {
@@ -838,6 +850,149 @@ test('Summary says what an exhausted subscription quota does, with and without a
     const api = await summary('quota-api-main', '', 'google/gemini-3.8-flash', 'sk-or-v1-test-not-a-secret');
     assert.match(api.html, /Total API budget/, 'the walk reached Summary');
     assert.doesNotMatch(api.html, /When quota runs out/);
+    // The limits step says what its limits cannot count, as the preview of this draft names it (Dashboard › Costs'
+    // line); with nothing named the line is hidden.
+    assert.match(api.budget, /id="budget-gaps"[^>]* hidden><\/div>/);
+    gaps = ['Light', 'Web search'];
+    const uncounted = await summary('limits-not-counted', '', 'google/gemini-3.8-flash', 'sk-or-v1-test-not-a-secret');
+    assert.match(uncounted.budget, /id="budget-gaps"[^>]*data-i18n-fmt="spend gaps">Not counted: Light, Web search \(price unknown\)\.<\/div>/);
+    // What the draft counts only under a condition shares that one line (Dashboard › Costs' words).
+    gaps = [];
+    partly = [{ name: 'all model roles', condition: 'off_peak_usd' }, { name: 'Web search', condition: 'usd' }];
+    const partial = await summary('limits-partly-counted', '', 'google/gemini-3.8-flash', 'sk-or-v1-test-not-a-secret');
+    assert.match(partial.budget, /id="budget-gaps"[^>]*>Partly counted: all model roles \(text only, off-peak, USD only\); Web search \(USD only\)\.<\/div>/);
+});
+
+// A read in flight for another access is no longer wanted once the draft is back at an access already read: its late
+// answer (the list of a key since replaced) must not land. This stand-in DOM paints no model list, so the test reads
+// what a landed answer changes on the wire: the wizard would hold the replaced key's list as the one read whole and
+// ask again for the first key's when Models reopens. No account is connected until the end, so until then nothing
+// but the owner's own asks reads the catalog; the account that connects then reads with the key he last asked with.
+// And the limits line speaks only for an answered preview.
+test('a replaced key\'s catalog never lands late, the key asked again stays the asked one, and a failed preview leaves the limits line unsaid', async () => {
+    const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
+    const held = [];
+    const reads = [];
+    let accounts = 0;
+    let previewFails = false;
+    const answer = (body, status = 200) => ({ ok: status < 400, status, json: async () => body, text: async () => JSON.stringify(body) });
+    const listed = (id) => ({ items: [{ provider_id: 'openrouter', id, value: id, name: id }], model_sources: [], errors: [] });
+    const fetch = async (url, init = {}) => {
+        if (String(url) === '/api/onboarding/model-catalog') {
+            const typed = JSON.parse(init.body).OPENROUTER_API_KEY;
+            reads.push(typed.split('-')[3]);
+            if (typed !== 'sk-or-v1-second-not-a-secret') return answer(listed('first/model'));
+            return new Promise((resolve) => held.push(() => resolve(answer(listed('late/from-replaced-key')))));
+        }
+        if (String(url) === '/api/claudexor/status') {
+            return answer({ ...subscription.status, profiles: { ...subscription.status.profiles,
+                profiles: subscription.status.profiles.profiles.slice(0, accounts) } });
+        }
+        if (String(url) === '/api/onboarding/subagents/preview') {
+            return previewFails ? answer({ ok: false, error: 'Automatic assignments unavailable.', saved: false }, 503)
+                : answer({ ok: true, model_settings: {}, available_subagents: { enabled: true, items: [] }, known_spend_gaps: ['Light'] });
+        }
+        return answer({});
+    };
+    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    const bootstrap = { ...BOOTSTRAP, initialState: { ...BOOTSTRAP.initialState, mainModel: 'first/model', automaticModels: [] } };
+    await withWizard(bootstrap, 'late-catalog', async ({ doc, win }) => {
+        await settle();
+        const type = (value) => { const key = doc.getElementById('openrouter-key'); key.value = value; key.fire('input'); };
+        const click = async (id) => { doc.getElementById(id).fire('click'); await settle(); };
+        type('sk-or-v1-first-not-a-secret');
+        await click('next-btn');                                        // Accounts → Models: this access is read whole
+        await click('back-btn');
+        type('sk-or-v1-second-not-a-secret');
+        await click('onboarding-access-retry');                         // the owner asks again: a read with the second key, held
+        assert.equal(held.length, 1);
+        type('sk-or-v1-first-not-a-secret');                            // back to the key already read
+        await click('next-btn');                                        // Models opens: nothing to read, the held read is dropped
+        held.forEach((release) => release());
+        await settle();
+        await click('back-btn');
+        await click('next-btn');                                        // Models again, same key: still the list read whole
+        assert.deepEqual(reads, ['first', 'second'], 'the late answer did not become the list read whole');
+        await click('next-btn');                                        // Models → Access
+        await click('next-btn');                                        // Access → limits: the answered preview's line
+        assert.match(doc.getElementById('root').innerHTML, /id="budget-gaps"[^>]*>Not counted: Light \(price unknown\)\.</);
+        // Its words are composed (data-i18n-fmt, which the page walker skips): a language change says them again.
+        const { applyPayload } = await import('../modules/i18n.js');
+        const say = (payload) => { const kept = globalThis.document; globalThis.document = undefined;
+            try { applyPayload(payload); } finally { globalThis.document = kept; } };
+        say({ language: 'ru', english: false, revision: 81, entries: {
+            'Not counted: {roles} (price unknown).': { text: 'Не учитываются: {roles} (цена неизвестна).' }, Light: { text: 'Лёгкая' } } });
+        try {
+            win.dispatchEvent(new CustomEvent('ouro:language-changed'));
+            assert.equal(doc.getElementById('budget-gaps').textContent, 'Не учитываются: Лёгкая (цена неизвестна).');
+        } finally {
+            say({ language: '', english: true, revision: 82, entries: {} });
+            win.dispatchEvent(new CustomEvent('ouro:language-changed'));
+        }
+        assert.equal(doc.getElementById('budget-gaps').textContent, 'Not counted: Light (price unknown).');
+        previewFails = true;
+        await click('back-btn');
+        await click('next-btn');                                        // a forced preview that fails
+        const line = doc.getElementById('budget-gaps');
+        assert.deepEqual([line.hidden, line.textContent], [true, ''], 'no answered preview of this draft: nothing is claimed');
+        // Going back to the first key and opening Models reused its list, and was still his ask: an account that
+        // connects now reads with that key, not with the access the wizard opened with.
+        const asked = reads.length;
+        accounts = 1;
+        await (await import('../modules/claudexor_status_store.js')).claudexorStatus.refresh();
+        await settle();
+        assert.deepEqual(reads.slice(asked), ['first'], 'the unasked read sends the key he last asked with');
+    }, { fetch });
+});
+
+// A key or an address being typed leaves the page only when the owner asks for the list (the Models step, Retry). A
+// read he did not ask for (an account connecting meanwhile) sends the access the wizard opened with, and it is made
+// for every such change: a second account of a family already connected is read too.
+test('an account that connects while a key is being typed never sends that key; opening Models does', async () => {
+    const subscription = JSON.parse(readFileSync(new URL('./fixtures/subscription_setup.json', import.meta.url), 'utf8'));
+    let accounts = 0;
+    const reads = [];
+    const fetch = async (url, init = {}) => {
+        let body = {};
+        if (String(url) === '/api/onboarding/model-catalog') {
+            reads.push(JSON.parse(init.body).OPENROUTER_API_KEY);
+            body = subscription.catalog;
+        } else if (String(url) === '/api/claudexor/status') {
+            body = { ...subscription.status, profiles: { ...subscription.status.profiles,
+                profiles: subscription.status.profiles.profiles.slice(0, accounts) } };
+        } else if (String(url) === '/api/onboarding/subagents/preview') {
+            body = { ok: true, model_settings: {}, available_subagents: { enabled: true, items: [] } };
+        }
+        return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };
+    };
+    const settle = async () => { for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+    await withWizard(BOOTSTRAP, 'typed-key-stays', async ({ doc }) => {
+        await settle();
+        const key = doc.getElementById('openrouter-key');
+        key.value = 'sk-or-v1-typed-not-a-secret';
+        key.fire('input');
+        const { claudexorStatus } = await import('../modules/claudexor_status_store.js');
+        accounts = 1;
+        await claudexorStatus.refresh();
+        await settle();
+        assert.deepEqual(reads, [''], 'the unasked read carries the access the wizard opened with');
+        accounts = 2;                                    // a second account of the same family
+        await claudexorStatus.refresh();
+        await settle();
+        assert.deepEqual(reads, ['', ''], 'its list is read too, still without the key being typed');
+        doc.getElementById('next-btn').fire('click');   // Accounts → Models: the owner asks for the list
+        await settle();
+        assert.deepEqual(reads, ['', '', 'sk-or-v1-typed-not-a-secret']);
+        doc.getElementById('back-btn').fire('click');
+        await settle();
+        const asked = reads.length;                      // while the draft is the one he asked with, it may be read again
+        key.value = '';
+        key.fire('input');                               // the key he asked with is deleted
+        accounts = 1;                                    // and an account leaves meanwhile
+        await claudexorStatus.refresh();
+        await settle();
+        assert.deepEqual(reads.slice(asked), [''], 'a key deleted since he last asked is not sent again');
+    }, { fetch });
 });
 
 // Review R1 (C3): a model the local runtime serves is named Local in Summary, never by the cloud source its stored id implies.
@@ -883,7 +1038,7 @@ async function finishFromAccounts(bootstrap, query, { inputs = {}, models = {}, 
         } else if (String(url) === '/api/claudexor/status') {
             body = { ...subscription.status, profiles: { ...subscription.status.profiles,
                 profiles: connected ? subscription.status.profiles.profiles : [] } };
-        } else if (String(url) === '/api/model-catalog') {
+        } else if (String(url) === '/api/onboarding/model-catalog') {
             body = subscription.catalog;
         }
         return { ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) };

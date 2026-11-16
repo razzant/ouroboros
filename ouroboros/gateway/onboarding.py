@@ -692,6 +692,29 @@ def review_rows_on_main(catalog: Mapping[str, Any], settings: Mapping[str, Any])
                                  for item in catalog.get("items") or []]}
 
 
+async def api_onboarding_model_catalog(request: Request) -> JSONResponse:
+    """The model catalog of an unsaved setup draft: the access it names (keys, connection rows, local model) over
+    the saved settings, asked as ``GET /api/model-catalog`` asks the saved one. Only the access fields are read,
+    never the whole-draft validator: Main is picked from this list, so it answers while Main is blank."""
+    from ouroboros.config import load_settings
+    from ouroboros.gateway.models import draft_catalog
+    from ouroboros.provider_models import CONNECTIONS_KEY
+    from ouroboros.settings_setup_contract import draft_access
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict):
+        return unsaved_error("JSON body must be an object.", 400)
+    saved = load_settings()
+    connections, keys, typed, error = draft_access(body, saved)
+    if error:
+        return unsaved_error(error, 400, code="invalid_onboarding_settings")
+    local = {key: body[key] for key in ("LOCAL_MODEL_SOURCE", "LOCAL_MODEL_FILENAME", "LOCAL_MODEL_CONTEXT_LENGTH") if key in body}
+    return JSONResponse(await draft_catalog(saved, {**saved, **keys, CONNECTIONS_KEY: connections, **local}, typed))
+
+
 async def api_onboarding_subagents_preview(request: Request) -> JSONResponse:
     """Read-only canonical preview for the wizard; never persists or projects env."""
     try:
@@ -736,10 +759,16 @@ async def api_onboarding_subagents_preview(request: Request) -> JSONResponse:
         available = normalize_configured_subagents(catalog)[0]
     except ValueError as exc:
         return unsaved_error(str(exc), 400, code="invalid_onboarding_settings")
+    from ouroboros.pricing import spend_coverage
+
+    shown = configured_subagents_dict(available)
+    gaps, partial = spend_coverage(current, shown)
     return JSONResponse({
         "ok": True,
         "model_settings": dict(preset.model_settings),
-        "available_subagents": configured_subagents_dict(available),
+        "available_subagents": shown,
+        # What the limits of this draft cannot count, as Dashboard › Costs names it after the save.
+        "known_spend_gaps": gaps, "partly_counted_spend": partial,
         "source": preset.source,
         "diagnostics": list(preset.diagnostics),
     })
@@ -963,7 +992,8 @@ async def api_onboarding_complete(request: Request) -> JSONResponse:
 
 
 __all__ = [
-    "PRESET_UNVERIFIED_MESSAGE", "PresetFailure", "api_onboarding_complete", "api_onboarding_subagents_preview",
+    "PRESET_UNVERIFIED_MESSAGE", "PresetFailure", "api_onboarding_complete", "api_onboarding_model_catalog",
+    "api_onboarding_subagents_preview",
     "install_is_unconfigured", "preset_eligible", "resolve_install_preset", "subscription_routable_harnesses",
     "verified_harness_discoveries",
 ]

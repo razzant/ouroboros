@@ -1,59 +1,44 @@
 /**
  * The Model capsule (docs/DESIGN.md "Composer owner controls"): the first capsule of the composer's row, before
- * Subagents, Context and Effort, and one of their family. A Project room's capsule holds the model new work in that
- * room starts on and saves it for the room; until the room chooses it follows Main and says so: the name word is
+ * Subagents, Context and Effort, and one of their family closed. A Project room's capsule holds the model new work in
+ * that room starts on and saves it for the room; until the room chooses it follows Main and says so: the name word is
  * `Main`, the value Main's model. In the Main chat the capsule is Main itself, and a pick there asks first (owner
- * 10.11, «1. A», «6. A»). Closed it always shows the room's choice, never the model of a running work (owner 11.11);
- * open, its hint adds one fact line when works here run on other models.
+ * 10.11, «1. A», «6. A»). Closed it always shows the room's choice, never the model of a running work (owner 11.11),
+ * and its processing tier when that is not Standard.
  *
- * It opens inline into its strip on the capsule machine (capsule.js): `Main · the two most recent models · Search`
- * (one recent in the stack layout). Search turns the strip into a field on the composer's line; its suggestions float
- * above the row like the hint and never move the composer (owner 10.11, «9. A»). They list only the sources that can
- * lead a work, one row per (source, model) (chat_model_routes.js); the catalog suggests and never admits, so any id
- * can still be typed. A room's pick saves at once through `POST /api/owner/chat-model`; Send waits for it.
+ * A press opens the Model sheet (model_sheet.js, owner 12.11 «A»; never hover): search, Main, the pinned and recent
+ * models, all sources, and at its foot the room's processing tier. The sheet lists only the sources that can lead a
+ * work, one row per (source, model) (chat_model_routes.js); the catalog suggests and never admits, so any id can still
+ * be typed. A room's pick saves at once through `POST /api/owner/chat-model`, its tier through
+ * `POST /api/owner/chat-processing`; Send waits for both.
  */
 import { apiClient, taskModel } from './api_client.js';
-import { createCapsule } from './capsule.js';
 import { APPLIED_WORDS, basisWords, leadView, refusalWords } from './card_model.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 import { fmt, fmtInto, tr, translateString } from './i18n.js';
-import { createModelList, modelSearchField, routeFacts, SEARCH_ICON } from './model_list.js';
+import { routeFacts } from './model_list.js';
 import { haptic } from './haptics.js';
-import { isCoarsePointer, isStackLayout, onLayoutChange } from './layout.js';
+import { isCoarsePointer, isStackLayout } from './layout.js';
 import { modelCatalog } from './model_catalog_store.js';
 import { MAIN_FOLLOW_NOTE } from './model_roles.js';
+import { openModelSheet } from './model_sheet.js';
 import { sourceMark } from './model_source_mark.js';
+import { offersUltrafast, resolvedTier, tierExplanation, tierNamed, tierSupport, tierWord } from './processing_choice.js';
 import { bindPopoverPosition } from './ui_interactions.js';
 import { escapeHtmlAttr as esc } from './ui_primitives.js';
 import { clock, workControls } from './work_status.js';
 import {
-    MAIN_CHOICE, describeRoute, normalizeChoice, normalizeRoute, routeKey, sameRoute, shortName, sourceUnlisted,
+    MAIN_CHOICE, describeRoute, normalizeChoice, normalizeRoute, sameRoute, sourceUnlisted,
 } from './chat_model_routes.js';
 
-// When a pick takes effect, the hint's rule line: for a room, and for Main itself.
-export const MODEL_RULE = 'Applies to new work here; running work keeps its model.';
+// When a pick of Main takes effect, its confirming sheet's rule line.
 export const MAIN_RULE = 'New work starts on it everywhere, unless a room has its own model.';
-const MAIN_KEY = 'main';
+/** The sheet's own fact about what follows Main, said where Main is changed (owner 2026-11-15, #3271): a fact, never
+ *  a forecast of cost. The catalog's cache-write price follows it when the catalog states one. */
+export const MAIN_CACHE_NOTE = 'Whatever follows Main (running works, child works, a consciousness wake) may write most of its start to the new model\'s cache again at its next call.';
 // How long Main's sheet waits for a state read taken for it before it lists what the page already has.
 const FRESH_STATE_MS = 700;
 let serial = 0;
-
-/**
- * The models of this room's live works that differ from what the capsule shows, by their short names: the hint's one
- * fact line (CLIENT_CONTRACT §5 `works[].lead`). A work without the fact says nothing, so a server that does not publish it
- * yet shows no line.
- */
-export function modelsRunningElsewhere(works, chatId, shown) {
-    if (!Array.isArray(works) || chatId == null) return [];
-    const names = [];
-    for (const work of works) {
-        const lead = normalizeRoute(work?.lead);
-        if (!lead || !work.live || String(work.room || 0) !== String(chatId) || sameRoute(lead, shown)) continue;
-        const name = shortName(lead);
-        if (!names.includes(name)) names.push(name);
-    }
-    return names;
-}
 
 /**
  * What a change of Main does not move, from the state the page already has (CLIENT_CONTRACT §5 `works[].lead`, §9
@@ -167,7 +152,9 @@ export async function confirmMainChange({ next, previous, census = null, dialog 
             else if (lists.followers === 0) count.textContent = 'No running work follows Main now.';
             else if (lists.followers === 1) count.textContent = '1 running work follows Main now.';
             else fmtInto(count, '{n} running works follow Main now.', { n: lists.followers });
-            container.append(row, facts, line(`${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`), count);
+            const cache = line(next.cacheWrite ? `${translateString(MAIN_CACHE_NOTE)} ${next.cacheWrite}` : MAIN_CACHE_NOTE);
+            if (next.cacheWrite) cache.dataset.i18nFmt = 'main cache note';  // composed: the overlay leaves it alone
+            container.append(row, facts, line(`${MAIN_RULE} ${MAIN_FOLLOW_NOTE}`), cache, count);
             const sub = (text) => { const made = line(text); made.className = 'chat-model-sheet-sub'; return made; };
             const section = (entries, heading) => {
                 if (!entries.length) return;
@@ -212,113 +199,65 @@ export function showMainMoves({ results, dialog = openConfirmDialog, doc = globa
 }
 
 /**
- * The capsule in its room's composer row. `save(body)` is the owner write (`apiClient.ownerChatModel`), `openSettings()`
- * Settings › Accounts and keys, `askMain({next, previous, census})` the Main chat's confirming sheet, `moveWork(taskId)` one
- * work's return to Main and `sayMoves({results})` the sheet of what its ticks did, `store` the window's catalog store,
- * `placeList(list)` the suggestions' place above the row.
- * Returns `{ el, capsule, syncState(data), hasPendingSave, pendingSave, pick, startSearch, destroy }`.
+ * The capsule in its room's composer row. `save(body)` is the owner write (`apiClient.ownerChatModel`),
+ * `saveTier(body)` the room's or Main's own processing tier (`apiClient.ownerChatProcessing`), `openSettings()`
+ * Settings › Accounts and keys, `askMain({next, previous, census})` the Main chat's confirming sheet, `moveWork(taskId)`
+ * one work's return to Main and `sayMoves({results})` the sheet of what its ticks did, `store` the window's catalog
+ * store, `place(sheet, anchor)` the sheet's place above the row.
+ * Returns `{ el, capsule, syncState(data), hasPendingSave, pendingSave, pick, chooseTier, open, destroy }`.
  */
 export function createModelControl({
-    el, row, projectId = '', chatId = projectId ? null : 1, save = apiClient.ownerChatModel, openSettings = () => {},
+    el, row, projectId = '', chatId = projectId ? null : 1, save = apiClient.ownerChatModel,
+    saveTier = apiClient.ownerChatProcessing, openSettings = () => {},
     showToast = () => {}, refreshState = () => {}, onLayout, onSettled, askMain = confirmMainChange, store = modelCatalog,
     moveWork = (taskId) => taskModel(taskId, globalThis.crypto?.randomUUID?.() || `main-sheet-${Date.now()}-${++serial}`, { action: 'follow' }),
     sayMoves = showMainMoves,
     isStack = () => isStackLayout(), isCoarse = () => isCoarsePointer(),
     // Anchored to the row, as the hint is to its capsule: the composer under it never moves.
-    placeList = (list) => bindPopoverPosition(list, { anchor: row, align: 'start' }),
-    watchLayout = (handler) => (typeof win?.addEventListener === 'function' ? onLayoutChange(handler, { w: win }) : () => {}),
+    place = (sheet) => bindPopoverPosition(sheet, { anchor: row, align: 'start' }),
     win = globalThis.window, doc = globalThis.document,
 }) {
     const isMain = !projectId;
-    const id = `chat-model-${++serial}`;
     el.classList.add('chat-capsule');
     el.setAttribute('role', 'group');
     el.setAttribute('aria-label', 'Model');
     el.dataset.known = 'false';
-    const node = (tag, className, attrs = {}) => {
-        const made = doc.createElement(tag);
-        made.className = className;
-        for (const [key, text] of Object.entries(attrs)) made.setAttribute(key, text);
-        return made;
-    };
-    // The head's words are written by render(): the mark, whose model this is, and the model.
-    el.innerHTML = '<button type="button" class="chat-capsule-head ui-hit-area chat-model-head" aria-expanded="false"><span class="chat-capsule-glyph" aria-hidden="true"></span><span class="chat-capsule-name"></span><span class="chat-capsule-value" data-i18n-skip></span></button><div class="chat-capsule-body"></div>';
+    // The head's words are written by render(): the mark, whose model this is, the model, and its tier when not Standard.
+    el.innerHTML = '<button type="button" class="chat-capsule-head ui-hit-area chat-model-head" aria-expanded="false" aria-haspopup="dialog"><span class="chat-capsule-glyph" aria-hidden="true"></span><span class="chat-capsule-name"></span><span class="chat-capsule-value" data-i18n-skip></span><span class="chat-capsule-tier" data-i18n-skip hidden></span></button>';
     const head = el.querySelector('.chat-model-head');
     const glyph = el.querySelector('.chat-capsule-glyph');
     const name = el.querySelector('.chat-capsule-name');
     const value = el.querySelector('.chat-capsule-value');
-    const strip = node('div', 'chat-context-strip chat-model-strip', { role: 'radiogroup', 'aria-label': 'Model' });
-    strip.dataset.scroll = 'none';
-    el.querySelector('.chat-capsule-body').append(strip);
+    const tierWordEl = el.querySelector('.chat-capsule-tier');
 
-    // `main` is what Main is now (the state body's `main_route` field), `choice` the room's own (`projects[].model_choice`); the
-    // Main chat's capsule is Main, so it has no choice of its own.
-    // `works`, `complete` and `projects` are the last state body's census, for the hint's fact line and Main's sheet.
-    const state = { main: null, choice: { ...MAIN_CHOICE }, works: null, complete: false, projects: [], saving: null,
-        lastOk: true, destroyed: false };
-    const search = { on: false, rows: null, list: null, position: null };  // rows: the list of models while Search is on
-    const segs = [];          // the strip's values as the machine's fit measures them: Main, the recents, Search
-    const routes = new Map(); // a segment's key → its route
-    let segsKey = null, markKey = null, nameWords = null, control = null;
+    // `main` is what Main is now (the state body's `main_route` field), `choice` the room's own (`projects[].model_choice`),
+    // `tier` its own processing tier (`projects[].processing_choice`, '' = Default); the Main chat's capsule is Main, so
+    // its tier is Main's own (`processing_tiers.main`). `works`, `complete` and `projects` are the last state body's
+    // census, for the sheet's fact lines and Main's confirming sheet.
+    const state = { main: null, choice: { ...MAIN_CHOICE }, tier: '', works: null, complete: false, projects: [],
+        saving: null, tierSaving: null, lastOk: true, destroyed: false };
+    let sheet = null, markKey = null, nameWords = null;
 
     const shown = () => (isMain || state.choice.kind === 'main' ? state.main : normalizeRoute(state.choice));
     const follows = () => isMain || state.choice.kind === 'main';
-    const describe = (route) => (route ? describeRoute(store.index(), route) : null);
-    // The strip's models after Main: the room's own, then the owner's recent ones, none twice. Main's model is the
-    // Main segment; only a room that chose that same model for itself keeps it as its own.
-    function quick() {
-        const own = isMain ? null : normalizeRoute(state.choice);
-        const out = own ? [own] : [];
-        for (const route of store.recents()) {
-            if (!sameRoute(route, state.main) && !out.some((seen) => sameRoute(seen, route))) out.push(route);
-        }
-        return out.slice(0, isStack() ? 1 : 2);
-    }
-
-    /* --- the strip: Main · recents · Search, the chosen one under the family's glass thumb --- */
-    function seg(key, words, { model = false } = {}) {
-        const made = node('button', 'chat-seg ui-hit-area', { type: 'button', role: 'radio', tabindex: '-1', 'aria-checked': 'false' });
-        made.dataset.mode = key;
-        const text = node('span', 'chat-seg-text', model ? { 'data-i18n-skip': '' } : {});
-        text.textContent = words;
-        made.append(text);
-        return made;
-    }
-    function buildStrip() {
-        const mainWords = isMain ? (state.main ? shortName(state.main) : 'Main') : 'Main';
-        const models = quick();
-        const key = JSON.stringify([mainWords, models.map(routeKey)]);
-        if (key === segsKey && !search.on && segs.length) return false;
-        segsKey = key;
-        routes.clear();
-        routes.set(MAIN_KEY, state.main);
-        const made = [seg(MAIN_KEY, mainWords, { model: isMain && Boolean(state.main) })];
-        for (const route of models) {
-            routes.set(routeKey(route), route);
-            made.push(seg(routeKey(route), shortName(route), { model: true }));
-        }
-        const find = node('button', 'chat-seg ui-hit-area chat-model-find', { type: 'button', tabindex: '-1',
-            'aria-label': 'Search all models' });
-        find.innerHTML = `<span class="chat-seg-text">${SEARCH_ICON}<span class="chat-model-find-word">Search</span></span>`;
-        const thumb = node('span', 'chat-context-thumb', { 'aria-hidden': 'true' });
-        strip.replaceChildren(thumb, ...made, find);
-        segs.length = 0;
-        segs.push(...made, find);
-        return true;
-    }
-    const chosenKey = () => (follows() ? MAIN_KEY : routeKey(shown()));
-    const chosenSeg = () => segs.find((made) => made.dataset.mode === chosenKey()) || segs[0];
+    const tiers = () => store.tiers?.() || null;
+    // The tier this scope's new work takes: its own, else Main's for what follows Main, else the default one.
+    const resolved = () => (isMain ? resolvedTier({ choice: tiers()?.main || '', tiers: tiers() })
+        : resolvedTier({ choice: state.tier, follows: follows(), tiers: tiers() }));
+    // The tier a pick would run on here, for the catalog's price beside it (a catalog price is Standard's).
+    const tierOf = (route, { main = false } = {}) => (isMain ? resolved()
+        : state.tier || resolvedTier({ follows: main, tiers: tiers() }));
+    const describe = (route) => (route ? describeRoute(store.index(), route, { tier: resolved() }) : null);
 
     function render() {
-        const open = Boolean(control?.isOpen());
         const said = describe(shown());
         el.dataset.known = String(Boolean(said));
         el.dataset.own = String(Boolean(said) && !follows());
         const mark = said ? `${said.lane}|${said.harness}|${said.kind}|${said.sourceLabel}` : '';
         if (mark !== markKey) { markKey = mark; glyph.innerHTML = sourceMark(said); }
-        // Open, the name says what the strip sets; closed, whose model this is: Main's, or its own source's.
-        const sourceNamed = !open && Boolean(said) && !follows();
-        const words = open ? (isMain ? 'Main model' : 'New work here') : sourceNamed ? said.sourceLabel : 'Main';
+        // Whose model this is: Main's, or its own source's.
+        const sourceNamed = Boolean(said) && !follows();
+        const words = sourceNamed ? said.sourceLabel : 'Main';
         if (words !== nameWords) {  // the overlay may have translated the word it was given
             nameWords = words;
             if (sourceNamed) name.dataset.i18nSkip = ''; else delete name.dataset.i18nSkip;  // a source's name is not chrome
@@ -326,45 +265,57 @@ export function createModelControl({
         }
         const model = said ? said.short : '—';
         if (value.textContent !== model) value.textContent = model;
+        // A tier other than Standard is said beside the model, closed too (owner 12.11: the word only when not Standard).
+        const tier = resolved();
+        const tierText = tierNamed(tier) ? tierWord(tier) : '';
+        if (tierWordEl.textContent !== tierText) tierWordEl.textContent = tierText;
+        tierWordEl.hidden = !tierText;
+        el.dataset.tier = tier || 'default';
+        const tierSaid = tierText ? `, ${tierText}` : '';
         head.setAttribute('aria-label', !said ? 'Model for new work: not read yet'
-            : isMain ? fmt('Main model: {model}, {source}.', { model: said.short, source: said.sourceLabel })
-                : follows() ? fmt('Model for new work here: {model}, {source}. Follows Main.', { model: said.short, source: said.sourceLabel })
-                    : fmt('Model for new work here: {model}, {source}.', { model: said.short, source: said.sourceLabel }));
-        if (!search.on) {
-            const rebuilt = buildStrip();
-            const key = chosenKey();
-            const stop = chosenSeg();
-            for (const made of segs) {
-                if (made.dataset.mode !== undefined) made.setAttribute('aria-checked', String(made.dataset.mode === key));
-                made.tabIndex = open && made === stop ? 0 : -1;  // one tab stop; arrows move within
-            }
-            const on = segs.find((made) => made.dataset.mode === key);
-            strip.style.setProperty('--thumb-left', `${Number(on?.offsetLeft) || 0}px`);
-            strip.style.setProperty('--thumb-width', `${Number(on?.offsetWidth) || 0}px`);
-            if (rebuilt && open) control.relayout();
-        }
+            : isMain ? fmt('Main model: {model}, {source}.', { model: `${said.short}${tierSaid}`, source: said.sourceLabel })
+                : follows() ? fmt('Model for new work here: {model}, {source}. Follows Main.', { model: `${said.short}${tierSaid}`, source: said.sourceLabel })
+                    : fmt('Model for new work here: {model}, {source}.', { model: `${said.short}${tierSaid}`, source: said.sourceLabel }));
         // The settings document, read only when it changes a word: why a saved API source this catalog did not list
-        // cannot send, or Main's processing tier where the catalog states prices (Fast and Economy price otherwise).
+        // cannot send, or in Main the cache tier a catalog's cache-write figure is said for (Main's confirming sheet).
         if (said && store.status().read && !store.status().failed
-            && (sourceUnlisted(store.index(), shown()) || store.index().priced)) void store.readConnections();
-        control?.sayHint();
-        if (search.on) search.rows.paint();
+            && (sourceUnlisted(store.index(), shown()) || (isMain && store.index().cacheFigures))) void store.readConnections();
+        sheet?.paint();
     }
 
-    // The chosen route, or the one a mouse rests on; under it, the models this room's works run on when they differ.
-    const say = (preview) => {
-        const rule = isMain ? MAIN_RULE : MODEL_RULE;
-        const previewed = preview && routes.has(preview);
-        const said = describe(previewed ? routes.get(preview) : shown());
-        if (!said) return { text: 'Main\'s model has not been read yet.', rule };
-        const ofMain = previewed ? preview === MAIN_KEY : follows();
-        const elsewhere = modelsRunningElsewhere(state.works, chatId, shown());
+    /* --- the sheet's words: what the tier strip applies to, and what each tier means on this route --- */
+    function followersOfMainTier() {
+        if (!Array.isArray(state.works) || !state.complete) return null;
+        // A work follows Main's tier while it follows Main and has no tier of its own (owner 13.11 steering).
+        return state.works.filter((work) => work?.live !== false && work.activity !== 'queued' && work.confirmed !== false
+            && normalizeRoute(work.lead) && String(work.lead?.basis || '') === 'main' && !work.processing?.choice).length;
+    }
+    function scopeWords() {
+        const tier = resolved();
+        const state_ = isMain ? (tiers()?.main ? tierWord(tier) : fmt('Default · {tier}', { tier: tierWord(tier || 'standard') }))
+            : state.tier ? tierWord(state.tier)
+                : fmt(follows() ? 'Default · {tier} as Main' : 'Default · {tier}', { tier: tierWord(tier || 'standard') });
+        // The tier a work runs on, its own or Default's (Main's included), reaches its new subagents without one
+        // (owner 13.11).
+        if (!isMain) return `${state_} · ${tr('processing.scope.room_helpers', 'for new work here and its new subagents without a tier of their own; running work keeps its own')}`;
+        const n = followersOfMainTier();
+        const followers = n === null ? tr('processing.scope.main_unknown', 'for Main, the running works that follow it and their new subagents')
+            : n === 0 ? tr('processing.scope.main_none', 'for Main and its new subagents; no running work follows it now')
+                : n === 1 ? tr('processing.scope.main_one', 'for Main, 1 running work that follows it and their new subagents')
+                    : fmt('for Main, {n} running works that follow it and their new subagents', { n });
+        return `${state_} · ${followers}`;
+    }
+    const tierView = () => {
+        const route = shown();
+        const said = describe(route);
         return {
-            word: ofMain ? translateString('Main') : said.short,
-            text: `${ofMain ? `${said.short} · ` : ''}${routeFacts(said)}.`,
-            fact: elsewhere.length ? { word: tr('model.running_here', 'Running here'),
-                text: fmt('on other models: {models}', { models: elsewhere.join(', ') }) } : null,
-            rule,
+            choice: isMain ? tiers()?.main || '' : state.tier,
+            resolved: resolved(),
+            busy: Boolean(state.tierSaving),
+            ultrafast: offersUltrafast({ main: isMain, support: tierSupport(store.index(), route, 'ultrafast'), choice: state.tier }),
+            scope: scopeWords(),
+            supportOf: (tier) => tierSupport(store.index(), route, tier),
+            explain: (tier) => tierExplanation(tier, { support: tierSupport(store.index(), route, tier), route, sourceLabel: said?.sourceLabel }),
         };
     };
 
@@ -451,118 +402,116 @@ export function createModelControl({
             if (also.length) showToast(also.join(' '), 'info');
         });
     }
-    /** One pick, from the strip or the suggestions: null follows Main again; a route becomes the room's own. */
+    /** One pick from the sheet: null follows Main again (its own row); a route becomes the room's own, even Main's
+     *  model now (a model row is always that route). In the Main chat a pick changes Main itself. */
     function pick(route) {
         if (state.saving || state.destroyed) return undefined;
         if (isMain) {
-            if (!route || sameRoute(route, state.main)) return undefined;
-            control.setOpen(false);
+            closeSheet();
+            if (!route || sameRoute(route, state.main)) return undefined;  // Main's own row: nothing changes
             return changeMain(route);
         }
-        if (route ? sameRoute(route, normalizeRoute(state.choice)) : state.choice.kind === 'main') return undefined;
+        if (route ? state.choice.kind === 'model' && sameRoute(route, normalizeRoute(state.choice)) : state.choice.kind === 'main') return undefined;
         haptic('tick');  // another model, chosen by a press (haptics.js)
         return saveRoom(route ? { kind: 'model', model: route.model, use_local: route.use_local } : { kind: 'main' });
     }
+    /** The scope's own tier ('' = Default): the room's for its new work, or Main's own. It moves nothing else. */
+    function chooseTier(tier) {
+        if (state.tierSaving || state.destroyed) return state.tierSaving;
+        let settle = () => {};
+        state.tierSaving = new Promise((resolve) => { settle = resolve; });
+        sheet?.paint();  // the strip shows the save in flight before it is sent
+        const saving = state.tierSaving;
+        void (async () => {
+            let ok = false;
+            try {
+                const reply = await saveTier(projectId ? { processing: tier, project_id: projectId } : { processing: tier });
+                if (state.destroyed) return false;
+                if ((reply?.project_id || '') !== projectId || reply?.ok !== true) throw new Error('The server did not confirm the tier.');
+                if (isMain) store.adoptTiers?.({ main: reply.main_processing, default: reply.processing_default });
+                else state.tier = String(reply.processing_choice || '');
+                haptic('tick');
+                ok = true;
+            } catch (error) {
+                if (!state.destroyed) showToast(error?.message || 'Could not change the processing tier.', 'error');
+            } finally {
+                state.tierSaving = null;
+                if (!state.destroyed) { render(); refreshState(true); }
+                settle(ok);
+            }
+        })();
+        return saving;
+    }
+    async function setPinned(route, pinned) {
+        try {
+            await store.setPinned(route, pinned);
+        } catch (error) {
+            if (!state.destroyed) showToast(error?.message || 'Could not change the pinned models.', 'error');
+        }
+    }
 
-    /* --- Search: the strip becomes a field in the row; its suggestions float above the row (model_list.js) --- */
-    function startSearch({ focus = !isCoarse() } = {}) {
-        if (search.on || state.destroyed) return;
-        search.on = true;
-        el.dataset.search = 'true';
-        row.dataset.ownerSearch = 'true';
-        const { label, input } = modelSearchField(doc, `${id}-list`);
-        strip.replaceChildren(label);
-        segs.length = 0;
-        const list = node('div', 'ui-popup chat-model-list', { role: 'listbox', 'aria-label': 'Models' });
-        list.id = `${id}-list`;
-        doc.body.append(list);
-        search.list = list;
-        search.rows = createModelList({
-            el: list, input, id, store, main: () => state.main, current: shown, rule: isMain ? MAIN_RULE : MODEL_RULE,
-            recents: () => (isMain ? store.recents().filter((route) => !sameRoute(route, state.main)) : quick()),
-            // Main's own row follows Main; every other row is that route. A room's closed capsule then says what was set.
-            onRoute: (route) => { if (!isMain) control.setOpen(false); pick(sameRoute(route, state.main) ? null : route); },
-            onSettings: () => { control.setOpen(false); openSettings(); },
-            // Escape with nothing typed leaves the search for the strip; the capsule's own Escape closes it.
-            onLeave: endSearch,
-            onPaint: () => search.position?.reposition(),
+    /* --- the sheet: opened by a press, never hover; one capsule or sheet open at a time --- */
+    function openSheet() {
+        if (sheet || state.destroyed) return;
+        control.peers.forEach((peer) => peer.snapClosed());
+        head.setAttribute('aria-expanded', 'true');
+        el.dataset.sheetOpen = 'true';
+        row.dataset.ownerSheet = 'true';
+        sheet = openModelSheet({
+            anchor: row, label: isMain ? 'Main model' : 'Model for new work here', doc, place,
+            stack: isStack, coarse: isCoarse, returnFocus: head,
+            list: {
+                store, main: () => state.main, current: shown, follows: () => !isMain && follows(),
+                mainRow: isMain ? 'main' : 'follow', tierOf,
+                // The room's own model, then the owner's recent ones: a room keeps its choice in view.
+                recents: () => [...(isMain ? [] : [normalizeRoute(state.choice)].filter(Boolean)), ...store.recents()],
+                mainFacts: () => {
+                    const said = describe(state.main);
+                    if (!said) return '';
+                    const tier = resolvedTier({ follows: true, tiers: tiers() });
+                    return [tr('model.row.follows', 'Follows Main'), said.short, tierNamed(tier) ? tierWord(tier) : ''].filter(Boolean).join(' · ');
+                },
+                onRoute: (route) => { if (!isMain) closeSheet({ focus: true }); pick(route); },
+                onPin: setPinned,
+                onSettings: () => { closeSheet(); openSettings(); },
+            },
+            tier: { onChoose: chooseTier, view: tierView },
+            onClose: () => {
+                sheet = null;
+                head.setAttribute('aria-expanded', 'false');
+                delete el.dataset.sheetOpen;
+                delete row.dataset.ownerSheet;
+                onLayout?.();
+                onSettled?.();
+            },
         });
         void store.read();
         void store.readRecents();
-        search.rows.paint();
-        search.position = placeList(list);
-        control.relayout();
-        // A finger's press on Search shows the field and the list; the keyboard waits for a press on the field itself.
-        if (focus) input.focus({ preventScroll: true });
         onLayout?.();
     }
-    function endSearch({ focus = false } = {}) {
-        if (!search.on) return;
-        search.position?.destroy();
-        search.rows?.destroy();
-        search.list?.remove();
-        Object.assign(search, { on: false, rows: null, list: null, position: null });
-        delete el.dataset.search;
-        delete row.dataset.ownerSearch;
-        segsKey = null;
-        if (state.destroyed) return;
-        render();
-        if (control.isOpen()) control.relayout();
-        if (focus) segs.at(-1)?.focus({ preventScroll: true });
+    function closeSheet({ focus = false } = {}) {
+        sheet?.close({ focus });
     }
+    const onHead = () => { if (sheet) closeSheet(); else openSheet(); };
+    head.addEventListener('click', onHead);
 
-    /* --- the strip's presses and keys --- */
-    const onStripClick = (event) => {
-        const made = event.target?.closest?.('.chat-seg');
-        if (!made || search.on) return undefined;
-        if (made.classList.contains('chat-model-find')) { startSearch(); return undefined; }
-        return pick(made.dataset.mode === MAIN_KEY ? null : routes.get(made.dataset.mode));
+    // The composer's row treats it as one of its capsules: it fits closed like them, and opening one closes the others.
+    const control = {
+        el, kind: 'model', hoverCapable: false, peers: [],
+        isOpen: () => Boolean(sheet), isPinned: () => Boolean(sheet), isSettled: () => true,
+        measureName() {}, sayHint() {}, relayout() { sheet?.reposition(); },
+        setOpen(open) { if (open) openSheet(); else closeSheet(); },
+        snapClosed() { closeSheet(); },
+        destroy() {},
     };
-    // Arrows, Home and End move among the values; a model is chosen by its own press, never by passing over it.
-    const onStripKey = (event) => {
-        const at = segs.indexOf(event.target?.closest?.('.chat-seg'));
-        if (at < 0) return;
-        const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
-        const to = step ? Math.min(segs.length - 1, Math.max(0, at + step))
-            : event.key === 'Home' ? 0 : event.key === 'End' ? segs.length - 1 : -1;
-        if (to < 0) return;
-        event.preventDefault?.();
-        segs[to].focus({ preventScroll: true });
-        control.reveal(Number(segs[to].offsetLeft), Number(segs[to].offsetLeft) + Number(segs[to].offsetWidth));
-    };
-    const revealChosen = () => {
-        const made = chosenSeg();
-        if (made) control.reveal(Number(made.offsetLeft), Number(made.offsetLeft) + Number(made.offsetWidth));
-    };
-
-    control = createCapsule({
-        el, row, kind: 'model', strip, segs, render, focusTarget: chosenSeg, say, onLayout, onSettled, win, doc,
-        // The suggestions stand outside the capsule's element and are its own; a search in progress holds the strip.
-        parts: () => [search.list], busy: () => search.on,
-        onClosed: () => endSearch(),
-        afterOpen: () => {
-            void store.read();
-            void store.readRecents();
-            control.relayout();  // the open name differs from the closed one: the fit measures it as it stands
-            revealChosen();
-        },
-        afterOverflow: revealChosen,
-    });
-    // The hint's first line and its fact name models: authored words, not chrome.
-    for (const selector of ['.ui-hint-word', '.ui-hint-text']) {
-        for (const part of el.querySelectorAll(selector)) part.dataset.i18nSkip = '';
-    }
-    strip.addEventListener('click', onStripClick);
-    strip.addEventListener('keydown', onStripKey);
     const unsubscribe = store.subscribe(() => { if (!state.destroyed) render(); });
-    const unwatchLayout = watchLayout(() => { if (!state.destroyed && !search.on) render(); });
     render();
 
     return {
         el,
         capsule: control,
-        /** One `/api/state` body (or a room's own read): what Main is now, this room's choice, and its works' models. A
-         *  save in flight answers for itself; a body without a field keeps what was last read. */
+        /** One `/api/state` body (or a room's own read): what Main is now, this room's choice and tier, and its works'
+         *  models. A save in flight answers for itself; a body without a field keeps what was last read. */
         syncState(data) {
             if (state.destroyed || !data) return;
             if (Array.isArray(data.works)) {
@@ -570,28 +519,33 @@ export function createModelControl({
                 state.complete = data.works_complete === true && data.supervisor_ready === true;
             }
             if (Array.isArray(data.projects)) state.projects = data.projects;
+            if (data.processing_tiers) store.adoptTiers?.(data.processing_tiers);
             if (!state.saving) {
                 const main = normalizeRoute(data.main_route);
                 if (main) state.main = main;
                 const room = projectId ? data.projects?.find?.((project) => project?.id === projectId) : null;
                 if (room) state.choice = normalizeChoice(room.model_choice);
+                if (room && !state.tierSaving) state.tier = String(room.processing_choice || '');
             }
             render();
         },
-        hasPendingSave: () => Boolean(state.saving),
-        /** Resolves once the save settled: true when it was accepted. */
-        pendingSave: () => state.saving || Promise.resolve(state.lastOk),
+        hasPendingSave: () => Boolean(state.saving || state.tierSaving),
+        /** Resolves once the saves settled: true unless a model save in flight was refused (a refused tier keeps the
+         *  old one and says so; an earlier refusal already said its own). */
+        pendingSave: async () => {
+            const model = state.saving;
+            await state.tierSaving;
+            return model ? model : true;
+        },
         /** The capsule's one save path: a route, or null to follow Main again. */
         pick,
-        startSearch,
+        chooseTier,
+        open: openSheet,
         destroy() {
             state.destroyed = true;
-            endSearch();
+            closeSheet();
             unsubscribe();
-            unwatchLayout?.();
-            control.destroy();
-            strip.removeEventListener('click', onStripClick);
-            strip.removeEventListener('keydown', onStripKey);
+            head.removeEventListener('click', onHead);
         },
     };
 }

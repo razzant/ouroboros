@@ -3,7 +3,7 @@ import { openConfirmDialog } from './confirm_dialog.js';
 import { saveCheckerSettings, saveSafetyLevel, saveSafetyRules } from './consciousness_api.js';
 import { isDoorId } from './settings_pages.js';
 import { rowById } from './settings_rows.js';
-import { errorWords, escapeHtmlAttr, setResult } from './ui_primitives.js';
+import { errorWords, escapeHtmlAttr, setResult, setRowMeta } from './ui_primitives.js';
 import { API_CHOICE_PREFIX, connectionParts, parseModelSource, routeChoiceGroups, selectHtml } from './route_editor_primitives.js';
 
 /** Read the complete custom-key draft, including blank and removed rows. No paint. */
@@ -120,6 +120,7 @@ export function settingsSection({ title, lead = '', details = '', body = '', act
 
 let lastSettings = null;         // the last GET /api/settings: values, `_meta.effects`, `_meta.tokens`, the setup contract
 let settingsEpoch = 0;           // a read that started before a newer read or write never puts an old document back
+let unreadFailed = false;        // nothing was read and the newest read failed: until a read starts again, rows say so
 const ROW_STATES = new Map();    // row id -> { row, busy, job, waiting, outcome, seen, typed, reread, sent }
 const BOUND = new Map();         // row id -> the painters of that row on screen
 const ENTRY_QUEUES = new Map();  // list key -> the tail of its entry writes
@@ -132,33 +133,54 @@ function rowState(row) {
     return ROW_STATES.get(row.id);
 }
 const repaintRow = (id) => BOUND.get(id)?.forEach((paint) => paint());
+const repaintAll = () => BOUND.forEach((paints) => paints.forEach((paint) => paint()));
 
 // The composer's list and the circle and place Model fields learn the tiers and keys from the newest document
 // (model_catalog_store.js): a read, or a row's landed write.
 const announce = (data) => globalThis.document?.dispatchEvent?.(new CustomEvent('settings-document:applied', { detail: data }));
 
 /** One fresh read of the settings document; the helper keeps the newest for values, effects, tokens and the setup
- *  contract. A row whose write was not confirmed says it saved once a read shows the value it sent. */
+ *  contract. A row whose write was not confirmed says it saved once a read shows the value it sent. The rows on
+ *  screen are painted from the read that lands; while none has, from what the newest read says (settingsReadMessage). */
 export async function readSettings() {
     const epoch = ++settingsEpoch;
-    const data = await fetchJson('/api/settings', { cache: 'no-store' });
+    if (unreadFailed) { unreadFailed = false; repaintAll(); }
+    let data;
+    try { data = await fetchJson('/api/settings', { cache: 'no-store' }); } catch (error) {
+        // Only the newest read, and only while nothing was read: an older failure never stands over a newer answer.
+        if (epoch === settingsEpoch && !lastSettings) { unreadFailed = true; repaintAll(); }
+        throw error;
+    }
     if (epoch !== settingsEpoch && lastSettings) return data;
     lastSettings = data;
     announce(data);
     ROW_STATES.forEach((state) => {
         if (state.busy || state.outcome?.state !== 'unknown' || !sameValue(currentValue(state.row, data), state.sent)) return;
         Object.assign(state, { outcome: { ...state.outcome, state: 'saved', message: '', details: '' }, reread: false, typed: null, seen: false });
-        repaintRow(state.row.id);
     });
+    repaintAll();
     return data;
 }
 let firstRead = null;  // writes that come before any read wait on one read
 const ensureRead = () => (firstRead ||= readSettings().catch(() => null).finally(() => { firstRead = null; }));
 
+/** The last settings document read, null before any: what a page paints at once, before its own read answers. */
+export const settingsSnapshot = () => lastSettings;
+/** What a row of the settings says until a read answers: that it is being read, or that it could not be ('' once read). */
+export const settingsReadMessage = () => (lastSettings ? '' : unreadFailed ? 'Could not be read' : 'Reading…');
+/** Paint `paint` with the bound rows of `id`, for a row a page draws by hand (the Agents switch, Your rules): when a
+ *  read lands, when the newest first read fails, when a read starts again. Answers its disposer. */
+export function paintWithRow(id, paint) {
+    if (!BOUND.has(id)) BOUND.set(id, new Set());
+    BOUND.get(id).add(paint);
+    return () => BOUND.get(id)?.delete(paint);
+}
+
 /** Forget every row's standing and the last read (a signed-out page, a test). */
 export function forgetSettingRows() {
     lastSettings = null;
     settingsEpoch += 1;
+    unreadFailed = false;
     firstRead = null;
     [ROW_STATES, BOUND, ENTRY_QUEUES, HOST_STATES].forEach((map) => map.clear());
 }
@@ -590,7 +612,8 @@ export function outcomeLine(row, outcome) {
     if (!isTyped(row) && outcome.effect === 'now' && !outcome.message) return null;
     const known = outcome.old !== undefined;
     const parts = ['Saved'];
-    if ((known || outcome.withheld) && EFFECT_WORDS[outcome.effect]) parts.push(EFFECT_WORDS[outcome.effect]);
+    // A restart is why the line takes the warning's ink: it says so even without a receipt.
+    if ((known || outcome.withheld || outcome.effect === 'restart') && EFFECT_WORDS[outcome.effect]) parts.push(EFFECT_WORDS[outcome.effect]);
     // A switch has one other value and a restart row says both values in its meta: neither repeats it here.
     if (known && row.control?.kind !== 'switch' && outcome.effect !== 'restart') parts.push(`was ${valueWords(row, outcome.old)}`);
     const undo = known && !outcome.withheld && Boolean(outcome.token) && GUARDED_WRITERS.has(row.writer || 'generic');
@@ -660,14 +683,18 @@ function controlHtml(row, control, ctx) {
     }
 }
 
-/** One row as HTML: its name, one meta line with the row's result after it, its control at the end, and its More.
+/** One row as HTML: its name, one meta line, its control at the end, the row's result under them, and its More.
  *  `ctx.describedBy(row)` adds ids to the control's description; `ctx.custom(row)` draws a `custom` control. */
 export function settingsRow(row, ctx = {}) {
     const control = controlOf(row);
     const id = rowDomId(row);
     const name = escapeHtmlAttr(row.name);
     const meta = `<span id="${id}-meta" data-setting-meta>${escapeHtmlAttr(row.meta || '')}</span>`;
-    const attrs = `class="ui-row settings-row" data-setting-row="${escapeHtmlAttr(row.id)}" data-kind="${escapeHtmlAttr(control.as || control.kind || 'custom')}"${control.noLimit ? ' data-no-limit' : ''}`;
+    // A wide control (a strip, a list, a longer field, a number that names "No limit", a row's own buttons) goes under
+    // the words sooner than a door, a switch, a key's state or a short number (settings.css `[data-wide]`).
+    const kind = control.as || control.kind || 'custom';
+    const wide = !['door', 'switch', 'secret', 'choices'].includes(kind) && (kind !== 'number' || control.noLimit);
+    const attrs = `class="ui-row settings-row" data-setting-row="${escapeHtmlAttr(row.id)}" data-kind="${escapeHtmlAttr(kind)}"${control.noLimit ? ' data-no-limit' : ''}${wide ? ' data-wide' : ''}${row.meta ? '' : ' data-no-meta'}`;
     if (control.kind === 'door') {  // the whole row is the press: phrasing content only
         return `<button type="button" ${attrs} data-setting-door><span class="ui-row-title">${name}</span>`
             + `<span class="ui-row-meta">${meta}</span><span class="ui-row-actions">${controlHtml(row, control, ctx)}</span></button>`;
@@ -675,8 +702,9 @@ export function settingsRow(row, ctx = {}) {
     const labelled = ['number', 'text', 'secret', 'select'].includes(control.kind);
     return `<div ${attrs}>
         ${labelled ? `<label class="ui-row-title" for="${id}">${name}</label>` : `<p class="ui-row-title" id="${id}-name">${name}</p>`}
-        <div class="ui-row-meta">${meta}<span class="ui-result settings-row-result" id="${id}-result" data-setting-result role="status" aria-live="polite"></span></div>
+        <div class="ui-row-meta">${meta}</div>
         <div class="ui-row-actions">${controlHtml(row, control, ctx)}</div>
+        <span class="ui-result settings-row-result" id="${id}-result" data-setting-result role="status" aria-live="polite"></span>
         ${row.more ? `<details class="ui-disclosure settings-row-more"><summary>More</summary><p class="settings-row-copy">${escapeHtmlAttr(row.more)}</p></details>` : ''}
     </div>`;
 }
@@ -699,7 +727,7 @@ function paintResult(result, line) {
     if (tail) result.append(doc.createTextNode(tail));
 }
 
-function paintRow(node, row) {
+function paintRow(node, row, ctx) {
     const state = rowState(row);
     const control = controlOf(row);
     const stored = currentValue(row);
@@ -711,6 +739,7 @@ function paintRow(node, row) {
     const running = state.outcome?.running ?? CODECS[row.codec]?.running?.(lastSettings, row)
         ?? lastSettings?._meta?.restart_state?.running?.[row.keys[0]];
     const waits = running !== undefined && stored !== undefined && !sameValue(running, stored);
+    const unread = row.keys.length && row.writer !== 'host' ? settingsReadMessage() : '';  // host rows have their own read
     if (row.hiddenWhen) node.hidden = Boolean(HIDDEN_WHEN[row.hiddenWhen]?.(lastSettings));
     if (isTyped(row)) {
         const text = (value) => (value === undefined ? undefined : control.kind === 'secret' || (control.noLimit && isUnlimited(value)) ? '' : String(value ?? ''));
@@ -753,7 +782,7 @@ function paintRow(node, row) {
     }
     // A write in flight: the control is disabled and busy; nothing else is drawn for "saving". Disabling moves the
     // focus away, so a control that had it takes it back when the answer comes, unless the owner has moved on.
-    [...controls, ...node.querySelectorAll('[data-setting-value]'), ...node.querySelectorAll('[data-setting-no-limit]')].forEach((element) => {
+    [...controls, ...node.querySelectorAll('[data-setting-value]'), ...node.querySelectorAll('[data-setting-no-limit], [data-secret-show], [data-secret-remove]')].forEach((element) => {
         if (state.busy) {
             if (!element.dataset.settingBusy && doc?.activeElement === element) element.dataset.settingRefocus = '1';
             element.disabled = true;
@@ -769,16 +798,21 @@ function paintRow(node, row) {
                 if (!active || active === doc.body || active === element) element.focus?.();
             }
         }
+        // Not read yet: not operable. The lock is marked as this helper's, so only it is lifted when the value comes
+        // and a control its own module disabled stays as that module left it.
+        if (unread && !element.disabled) Object.assign(element, { disabled: true }).dataset.settingUnread = '1';
+        else if (!unread && element.dataset.settingUnread) { element.disabled = Boolean(element.dataset.settingBusy); delete element.dataset.settingUnread; }
     });
     // A strip or a select whose options carry a line of meaning says the chosen one's (a `choices` row and a page's own
     // `custom` control draw each option's line themselves).
     const noted = ['strip', 'select'].includes(control.kind)
         && (control.options || []).find((option) => String(option.value) === String(shown ?? ''))?.note;
-    const meta = waits ? `Running: ${valueWords(row, running)} · after restart: ${valueWords(row, stored)}` : noted || row.meta || '';
-    const metaNode = node.querySelector('[data-setting-meta]');
-    if (metaNode && metaNode.textContent !== meta) metaNode.textContent = meta;
+    const meta = unread || (waits ? `Running: ${valueWords(row, running)} · after restart: ${valueWords(row, stored)}` : noted || row.meta || '');
+    setRowMeta(node.querySelector('[data-setting-meta]'), meta);
     paintResult(node.querySelector('[data-setting-result]'), outcomeLine(row, state.outcome));
     if (state.outcome) state.seen = true;
+    const settled = !state.outcome || ['saved', 'saved_then_failed', 'unchanged', 'changed_elsewhere'].includes(state.outcome.state);
+    if (control.kind !== 'custom' || (!state.busy && state.typed === null && settled)) ctx.onPaint?.(lastSettings, row, node);
 }
 
 // A value from a control: the value already there (or already on its way) sends nothing.
@@ -809,8 +843,10 @@ function commitTyped(row, text, ctx) {
  * Wire the rows drawn in `container`: a typed value, a switch and a select commit on `change` (for a field: leaving it
  * or Enter); a strip option and "No limit" on the press. Each row shows its result line and its Undo. `ctx.rows` names
  * descriptors that are not in settings_rows.js; `ctx.ask` stands in for the confirm dialog; `ctx.openDoor(row)` takes
- * a door's press. Answers `{ paint, leave, dispose }`: `paint()` after a fresh read (it never touches a focused or
- * typed field), `leave()` when the page is left (a result the owner saw ends there), `dispose()` when it is torn down.
+ * a door's press; `ctx.onPaint(settings, row, node)` paints the row's own control and words from the document whenever
+ * it holds no pending custom choice or draft. Answers `{ paint, leave, dispose }`: `paint()` after a fresh read (it never
+ * touches a focused or typed field), `leave()` when the page is left (a result the owner saw ends there), `dispose()`
+ * when it is torn down.
  */
 export function bindSettingRows(container, ctx = {}) {
     const find = (id) => ctx.rows?.find((row) => row.id === id) || rowById(id);
@@ -820,10 +856,9 @@ export function bindSettingRows(container, ctx = {}) {
         if (!row) return;
         const paint = () => {
             if (node.isConnected === false) { BOUND.get(row.id)?.delete(paint); return; }
-            paintRow(node, row);
+            paintRow(node, row, ctx);
         };
-        if (!BOUND.has(row.id)) BOUND.set(row.id, new Set());
-        BOUND.get(row.id).add(paint);
+        paintWithRow(row.id, paint);
         bindings.push({ row, node, paint });
         paint();
         if (CODECS[row.codec]?.host && !HOST_STATES.has(row.codec)) void readHost(row);
@@ -834,8 +869,9 @@ export function bindSettingRows(container, ctx = {}) {
     };
     const onInput = (event) => {
         const binding = of(event);
-        if (!binding || !isTyped(binding.row) || !event.target.matches?.('[data-setting-control]')) return;
+        if (!binding || !(isTyped(binding.row) || binding.row.control?.kind === 'custom') || !event.target.matches?.('[data-setting-control]')) return;
         event.target.dataset.settingDirty = '1';
+        if (binding.row.control?.kind === 'custom') rowState(binding.row).typed = event.target.value;
         // An edit of the row starts a new subject: its last result goes.
         rowState(binding.row).outcome = null;
         binding.paint();
@@ -844,6 +880,7 @@ export function bindSettingRows(container, ctx = {}) {
         const binding = of(event);
         if (!binding || !event.target.matches?.('[data-setting-control]')) return;
         const { row, node } = binding;
+        if (row.control?.kind === 'custom') return;  // its page commits the value assembled from its fields
         if (row.control?.kind === 'switch') { void commitValue(row, Boolean(event.target.checked), ctx); return; }
         if (!isTyped(row)) { void commitValue(row, event.target.value, ctx); return; }
         const inputs = node.querySelectorAll('[data-setting-control]');
@@ -889,7 +926,7 @@ export function bindSettingRows(container, ctx = {}) {
     container.addEventListener('keydown', onKeydown);
     const leave = () => bindings.forEach(({ row, paint }) => {
         const state = rowState(row);
-        if (state.seen && !state.busy) Object.assign(state, { outcome: null, typed: null });
+        if (!state.busy && (state.seen || row.control?.kind === 'custom')) Object.assign(state, { outcome: null, typed: null });
         paint();
     });
     return {
