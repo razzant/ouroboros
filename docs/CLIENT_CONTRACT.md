@@ -738,7 +738,7 @@ with the `presence` permission, `id`, `label`, and `destination: vendor:<Name>`;
 `scope` defaults to `account` (or `conversation`), `wakes` lists typed wake facts,
 `source` uses the chip contract, `settings` names a section, and `read_only: provider`
 indicates provider support. Their `tools` list carries full names and declared
-`effect`, `target`, `conversation`, `thread` facts. No speech-engine runtime/route
+`effect`, `target`, `conversation`, `thread`, `message`, `sends` and `touches` facts. No speech-engine runtime/route
 is required. `icon_spec` is `{kind:"host", name}` or `{kind:"svg", svg}` with
 sanitized geometry, else `{}` for the fallback; the `icon` declaration remains
 a host name or `ui/icon.svg`. SVG assets carry sandbox CSP. Installed and Browse

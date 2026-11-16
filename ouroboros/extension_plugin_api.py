@@ -1031,8 +1031,8 @@ class PluginAPIImpl:
             return {key: settings[key] for key in self._readable_settings_keys(keys, document) if key in settings}
 
     def _require_api_generation(self, method: str) -> None:
-        """2.4 methods need a 2.x negotiation: every declared 2.x minimum negotiates the host's 2.4, so in
-        practice a field-less legacy (1.3) payload is the one refused them."""
+        """2.4 methods need a 2.x negotiation: every declared 2.x minimum negotiates the host's current 2.x, so
+        in practice a field-less legacy (1.3) payload is the one refused them."""
         try:
             major, minor = (int(part) for part in self._plugin_api_generation.split(".", 1))
         except ValueError:

@@ -437,3 +437,219 @@ def test_routes_carry_the_effective_binding_of_a_live_switch(supervisor, monkeyp
     # A switch to a local runtime is sent and charged as local.
     assert [route[:3] for route in h.module._safety_routes("model/a", False, {"fallback:1": {"use_local": True}})] == [
         ("model/a", False, "safety"), ("model/b", True, "fallback:1")]
+
+
+def _card_answer(h, quiz, words, named):
+    """My human answered a card holding these words on their own line and these destination tokens."""
+    h.ctx._owner_directives = [{"source": "owner_quiz_answer", "quiz_id": quiz, "content": "1. Send", "reply_to": {
+        "address": f"quiz {quiz} of task work", "text": f"Send to {'; '.join(named)}?\n{words}\n1. Send"}}]
+
+
+def _thread_place(root, conversation, thread, *, account="A", label="Team"):
+    from dataclasses import replace
+    from ouroboros import places
+    place = places.connect_place(root, connector="connector", provider="service", account_id=account,
+                                 conversation_id=conversation, label=label,
+                                 place_id="-".join(filter(None, (account, conversation, thread))))
+    return places._write(root, place.place_id, lambda old: replace(old, thread_id=thread)) if thread else place
+
+
+def test_my_humans_card_names_every_address_declared_words_reach(supervisor, monkeypatch, published_tool, tmp_path):
+    """The card holds every place and address the words reach: each place by its label and, where another place it
+    reaches shares that label, its exact address too; and each group address with its effect, a secondary write
+    included. A card naming less, or another write, releases nothing: the words are read."""
+    from ouroboros import places
+    h = supervisor
+    monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
+    monkeypatch.setattr(_place_guard, "call_place_facts", REAL_CALL_PLACE_FACTS)
+    for conversation in ("C1", "C2"):
+        places.connect_place(tmp_path, connector="connector", provider="service", account_id="A",
+                             conversation_id=conversation, label="Team")
+    published_tool.bundle.loaded_skill.manifest.plugin_api = {"version": "2.5", "capabilities": []}
+    name, _tool = published_tool("message", target="room", conversation="room", touches=[
+        {"conversation": "emitted", "effect": "message"}, {"conversation": "cc", "effect": "write"}])
+    call = {"account_id": "A", "room": "C1", "emitted": "C2", "cc": "outsider@example.test", "text": "Ship it Friday."}
+    every = ["Team", "C1 · account A", "message: C2 · account A", "write: outsider@example.test · account A"]
+    # The coarse key is where the words are spoken (both places labelled Team), never the write beside them.
+    assert h.module._exit_subject(h.ctx, name, call, REAL_EFFECT_OF(name, args=call)) == (
+        "Ship it Friday.", every, False, ["Team"])
+    for named, sent in ((["Team"], False), (every[:3], False),  # the secondary write omitted
+                        ([*every[:3], "write: other@example.test · account A"], False), (every, True)):
+        _card_answer(h, "q4", call["text"], named)
+        h.replies.append(RuntimeError("provider_failed"))
+        ok, message = h.module.check_safety(name, call, ctx=h.ctx)
+        assert ok is sent and ("(q4)" in message) is sent, (named, message)
+        h.later()
+
+
+@pytest.mark.parametrize("by", ["account", "thread"])
+def test_one_label_on_one_conversation_never_covers_another_account_or_thread(supervisor, monkeypatch, published_tool,
+                                                                              tmp_path, by):
+    """Two places sharing a label and a conversation, in two accounts or two threads: the card names each exactly, so
+    a card naming the label alone releases nothing."""
+    h = supervisor
+    monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
+    monkeypatch.setattr(_place_guard, "call_place_facts", REAL_CALL_PLACE_FACTS)
+    published_tool.bundle.loaded_skill.manifest.plugin_api = {"version": "2.5", "capabilities": []}
+    if by == "account":
+        _thread_place(tmp_path, "C1", "", account="A")
+        _thread_place(tmp_path, "C1", "", account="B")
+        name, _tool = published_tool("message", target=["account_id", "room"], conversation="room", touches=[
+            {"conversation": "copy", "account": "copy_account", "effect": "message"}])
+        call = {"account_id": "A", "room": "C1", "copy": "C1", "copy_account": "B", "text": "Ship it Friday."}
+        every = ["Team", "C1 · account A", "message: C1 · account B"]
+    else:
+        _thread_place(tmp_path, "C1", "T1")
+        _thread_place(tmp_path, "C1", "T2")
+        name, _tool = published_tool("message", target=["account_id", "room"], conversation="room", thread="topic",
+                                     touches=[{"conversation": "copy", "thread": "copy_topic", "effect": "message"}])
+        call = {"account_id": "A", "room": "C1", "topic": "T1", "copy": "C1", "copy_topic": "T2", "text": "Ship it Friday."}
+        every = ["Team", "C1 · thread T1 · account A", "message: C1 · thread T2 · account A"]
+    assert h.module._exit_subject(h.ctx, name, call, REAL_EFFECT_OF(name, args=call))[1] == every
+    for named, sent in ((["Team"], False), (every, True)):
+        _card_answer(h, "q5", call["text"], named)
+        h.replies.append(RuntimeError("provider_failed"))
+        assert h.module.check_safety(name, call, ctx=h.ctx)[0] is sent
+        h.later()
+
+
+def test_a_words_hold_outlives_groups_its_connector_adds(supervisor, monkeypatch, published_tool, tmp_path):
+    """DANGEROUS words to a place wait for my human whatever groups a later publication declares: another folder,
+    draft or request_id beside the same words to the same place, or the automatic reply there, buys no new reading."""
+    from ouroboros import places
+    h = supervisor
+    monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
+    monkeypatch.setattr(_place_guard, "call_place_facts", REAL_CALL_PLACE_FACTS)
+    team = places.connect_place(tmp_path, connector="connector", provider="service", account_id="A",
+                                conversation_id="C1", label="Team")
+    places.connect_place(tmp_path, connector="connector", provider="service", account_id="A",
+                         conversation_id="Drafts", label="Drafts")
+    name, _tool = published_tool("message", target="room", conversation="room")
+    words = {"account_id": "A", "room": "C1", "text": "The merger closes Friday.", "request_id": "r1"}
+    h.replies.append({"status": "DANGEROUS", "reason": "a private deal", "speech": True})
+    assert not h.module.check_safety(name, words, ctx=h.ctx)[0]
+    readings = len(h.calls)
+    published_tool.bundle.loaded_skill.manifest.plugin_api = {"version": "2.5", "capabilities": []}
+    published_tool("message", target="room", conversation="room", touches=[
+        {"conversation": "folder", "effect": "write"}, {"conversation": "draft", "thread": "draft", "effect": "write"}])
+    for extra in ({"request_id": "r2", "folder": "Drafts"}, {"request_id": "r3", "folder": "Archive", "draft": "d-9"}):
+        h.later()
+        ok, message = h.module.check_safety(name, {**words, **extra}, ctx=h.ctx)
+        assert not ok and "waits for your human" in message and "whatever the tool or request_id" in message, message
+    h.later()
+    reply = {"place_id": team.place_id, "text": words["text"], "destination": {"account_id": "A", "conversation_id": "C1"}}
+    ok, message = h.module.check_safety("place_reply", reply, ctx=h.ctx)
+    assert not ok and "waits for your human" in message, message
+    assert len(h.calls) == readings, "the same words to the same place bought another reading"
+
+
+def test_words_beside_groups_wait_where_they_are_spoken_whatever_folder_draft_or_request_id(
+        supervisor, monkeypatch, published_tool):
+    """Beside groups the words' coarse key is where they are spoken: another folder, draft or request_id beside the
+    same words in the same conversation buys no new reading, while the same words spoken in another conversation are
+    read again, the folder they share notwithstanding. With no place and no conversation, the audience a row declares
+    in its target is where they are spoken: another request_id or folder waits, another recipient is read again.
+    Words with no such address at all, only write groups, keep the exact call: no card approves them for less."""
+    h = supervisor
+    monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
+    monkeypatch.setattr(_place_guard, "call_place_facts", REAL_CALL_PLACE_FACTS)
+    published_tool.bundle.loaded_skill.manifest.plugin_api = {"version": "2.5", "capabilities": []}
+    name, _tool = published_tool("message", target=[], text="body", touches=[
+        {"conversation": "room", "effect": "message"}, {"conversation": "folder", "effect": "write"},
+        {"conversation": "draft", "thread": "draft", "effect": "write"}])
+    sent = {"account_id": "A", "room": "C1", "folder": "Sent", "draft": "d-1", "body": "The merger closes Friday.",
+            "request_id": "r1"}
+    assert h.module._exit_subject(h.ctx, name, sent, REAL_EFFECT_OF(name, args=sent)) == (
+        sent["body"], ["message: C1 · account A", "write: Sent · account A", "write: d-1 · thread d-1 · account A"],
+        False, ["C1"])
+    h.replies.append({"status": "DANGEROUS", "reason": "a private deal"})
+    assert not h.module.check_safety(name, sent, ctx=h.ctx)[0]
+    readings = len(h.calls)
+    for edit in ({"folder": "Archive", "request_id": "r2"}, {"draft": "d-2", "request_id": "r3"}):
+        h.later()
+        ok, message = h.module.check_safety(name, {**sent, **edit}, ctx=h.ctx)
+        assert not ok and "waits for your human" in message and len(h.calls) == readings, message
+    h.later()
+    assert h.module.check_safety(name, {**sent, "room": "C2"}, ctx=h.ctx) == (True, "")
+    assert len(h.calls) == readings + 1, "the shared folder held words spoken elsewhere"
+    name, _tool = published_tool("message", target=["to"], conversation="room", text="body", touches=[
+        {"conversation": "to", "effect": "write", "match": "exact"}, {"conversation": "folder", "effect": "write"}])
+    new = {"account_id": "A", "to": "peer@example.invalid", "folder": "Sent", "body": "The merger closes Friday.",
+           "request_id": "n1"}
+    assert h.module._exit_subject(h.ctx, name, new, REAL_EFFECT_OF(name, args=new))[3] == ["peer@example.invalid"]
+    h.replies.append({"status": "DANGEROUS", "reason": "a private deal"})
+    h.later()
+    assert not h.module.check_safety(name, new, ctx=h.ctx)[0]
+    readings = len(h.calls)
+    for edit in ({"request_id": "n2"}, {"folder": "Archive", "request_id": "n3"}):
+        h.later()
+        ok, message = h.module.check_safety(name, {**new, **edit}, ctx=h.ctx)
+        assert not ok and "waits for your human" in message and len(h.calls) == readings, message
+    h.later()
+    assert h.module.check_safety(name, {**new, "to": "other@example.invalid"}, ctx=h.ctx) == (True, "")
+    assert len(h.calls) == readings + 1, "a shared folder held another recipient's words"
+    name, _tool = published_tool("message", target=[], text="body", touches=[{"conversation": "to", "effect": "write"}])
+    bare = {"account_id": "A", "to": "peer@example.invalid", "body": "The merger closes Friday.", "request_id": "b1"}
+    assert h.module._exit_subject(h.ctx, name, bare, REAL_EFFECT_OF(name, args=bare)) == (
+        h.module._exact_call(name, bare), [name], True, [])
+
+
+def test_a_rich_call_declaring_no_words_keeps_its_exact_call(supervisor, monkeypatch, published_tool):
+    """A message row without ``text`` (subject, display names, HTML, attachments) is judged and held as its exact call
+    whatever its audience and exact constraints: no card approves its body and recipients alone."""
+    h = supervisor
+    monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
+    monkeypatch.setattr(_place_guard, "call_place_facts", REAL_CALL_PLACE_FACTS)
+    published_tool.bundle.loaded_skill.manifest.plugin_api = {"version": "2.5", "capabilities": []}
+    name, _tool = published_tool("message", target=["account_id", "to"], conversation="conversation_id", touches=[
+        {"conversation": "to", "effect": "write", "match": "exact_casefold"}])
+    rich = {"account_id": "A", "to": ["peer@example.invalid"], "subject": "Deal", "body": "The merger closes Friday.",
+            "html": "<p>The merger closes Friday.</p>", "attachments": ["deal.pdf"]}
+    assert h.module._exit_subject(h.ctx, name, rich, REAL_EFFECT_OF(name, args=rich)) == (
+        h.module._exact_call(name, rich), [name], True, [])
+
+
+def test_one_broad_places_account_reaches_keep_their_own_card_addresses(
+        supervisor, monkeypatch, published_tool, tmp_path):
+    """A write in B must not erase the primary A address, letting its card release words from Z.
+    The separate words hold still follows the legacy place label across accounts."""
+    from ouroboros import places
+    h = supervisor
+    monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
+    monkeypatch.setattr(_place_guard, "call_place_facts", REAL_CALL_PLACE_FACTS)
+    places.connect_place(tmp_path, connector="connector", provider="service", account_id="*",
+                         conversation_id="", label="Team", place_id="broad")
+    published_tool.bundle.loaded_skill.manifest.plugin_api = {"version": "2.5", "capabilities": []}
+    name, _tool = published_tool("message", target=["account_id", "room"], conversation="room", touches=[
+        {"conversation": "folder", "account": "folder_account", "effect": "write"}])
+    original = {"account_id": "A", "room": "C", "folder": "Drafts", "folder_account": "B", "text": "Ship Friday."}
+    changed = {**original, "account_id": "Z"}
+    subject = lambda args: h.module._exit_subject(h.ctx, name, args, REAL_EFFECT_OF(name, args=args))
+    _card_answer(h, "account-card", original["text"], ["Team", "C", "account A", "write: Drafts · account B"])
+    assert h.module._owner_yes(h.ctx, lambda: subject(original)) == "account-card"
+    assert h.module._owner_yes(h.ctx, lambda: subject(changed)) == ""
+    assert h.module._words_key(subject(original)) == h.module._words_key(subject(changed))
+    h.replies.append(RuntimeError("provider_failed"))
+    ok, message = h.module.check_safety(name, changed, ctx=h.ctx)
+    assert not ok and "account-card" not in message
+    h.later()
+    _card_answer(h, "changed-account-card", changed["text"], subject(changed)[1])
+    assert h.module.check_safety(name, changed, ctx=h.ctx)[0]
+
+
+def test_one_accountless_places_message_reaches_keep_the_primary_address(
+        supervisor, monkeypatch, published_tool, tmp_path):
+    from ouroboros import places
+    h = supervisor
+    monkeypatch.setattr(_tool_effects, "effect_of", REAL_EFFECT_OF)
+    monkeypatch.setattr(_place_guard, "call_place_facts", REAL_CALL_PLACE_FACTS)
+    places.connect_place(tmp_path, connector="connector", provider="service", account_id="",
+                         conversation_id="C1", label="Team", place_id="team")
+    published_tool.bundle.loaded_skill.manifest.plugin_api = {"version": "2.5", "capabilities": []}
+    name, _tool = published_tool("message", target=["account_id", "room"], conversation="room", touches=[
+        {"conversation": "room", "account": "other_account", "effect": "message"}])
+    args = {"account_id": "A", "room": "C1", "other_account": "B", "text": "Ship Friday."}
+    subject = h.module._exit_subject(h.ctx, name, args, REAL_EFFECT_OF(name, args=args))
+    assert subject[1] == ["Team", "C1 · account A", "message: C1 · account B"]
+    _card_answer(h, "both-accounts", args["text"], subject[1])
+    assert h.module._owner_yes(h.ctx, lambda: subject) == "both-accounts"
