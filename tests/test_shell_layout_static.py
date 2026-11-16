@@ -117,6 +117,9 @@ def test_folded_rings_leave_each_others_touch_reach():
     rings = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] {')
     assert "--composer-glyph-gap: max(var(--composer-row-gap), calc(var(--touch-target-min) - var(--composer-control-height)));" in rings
     assert "column-gap: var(--composer-glyph-gap);" in rings
+    # Only a measured tight line gives up the extra reach; both states share the chips' matching give-back below.
+    tight = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"][data-owner-tight] {')
+    assert "--composer-glyph-gap: var(--composer-row-gap);" in tight
     # The chips slot gives back that same wider gap, or a folded row with chips would wrap onto a second line.
     chips = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips {')
     assert "margin-inline-start: calc(-1 * var(--composer-glyph-gap));" in chips

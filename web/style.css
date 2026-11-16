@@ -5442,6 +5442,11 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
         --composer-glyph-gap: max(var(--composer-row-gap), calc(var(--touch-target-min) - var(--composer-control-height)));
         column-gap: var(--composer-glyph-gap);
     }
+    /* A folded line that still wraps gives up the extra reach spacing before cutting Model's value. The fit owns
+       this state; the chips slot below gives back the same gap in either state. */
+    .chat-toolbar-row[data-owner-glyphs="true"][data-owner-tight] {
+        --composer-glyph-gap: var(--composer-row-gap);
+    }
     .chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips { margin-inline-start: calc(-1 * var(--composer-glyph-gap)); }
     .chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips::before { width: calc(var(--composer-glyph-gap) - 6px); }
 }
