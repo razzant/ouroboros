@@ -10,7 +10,6 @@ from ouroboros.llm import LocalContextTooLargeError
 from ouroboros.loop_transport import provider_recovery_hint as _provider_recovery_hint
 from ouroboros.loop_llm_call import (
     _LlmErrorContext,
-    _is_context_overflow_error,
     _record_llm_call_error,
     call_llm_with_retry,
     classify_llm_exception,
@@ -23,14 +22,16 @@ class _TypedOverflow(RuntimeError):
 
 
 def test_untyped_context_scan_excludes_rate_and_output_size_errors():
-    assert _is_context_overflow_error(LocalContextTooLargeError("too big"), "")
-    assert _is_context_overflow_error(Exception(), "prompt is too long for context window")
-    assert not _is_context_overflow_error(Exception(), "429 rate limit exceeded")
-    assert not _is_context_overflow_error(Exception(), "Rate limit: too many tokens per minute")
+    def overflow(exc, text=""):  # an answer without a body speaks through its printed form
+        return classify_llm_exception(exc, text).kind == "context_overflow"
+
+    assert overflow(LocalContextTooLargeError("too big"))
+    assert overflow(Exception(), "prompt is too long for context window")
+    assert not overflow(Exception(), "429 rate limit exceeded")
+    assert not overflow(Exception(), "Rate limit: too many tokens per minute")
     # Output-size precedence is applied by the SHARED helper, so the untyped
     # scan itself rejects output-limit wording that mentions the context window.
-    assert not _is_context_overflow_error(
-        Exception(), "max_tokens 65536 exceeds maximum context length 32768")
+    assert not overflow(Exception(), "max_tokens 65536 exceeds maximum context length 32768")
 
     for text in (
         "max_tokens 65536 exceeds maximum context length 32768",

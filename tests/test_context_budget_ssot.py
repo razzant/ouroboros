@@ -147,10 +147,11 @@ def test_overflow_classification_is_one_shared_seam():
     the third reader, left with its engine.)"""
     import ouroboros.context_compaction as cc_mod
     import ouroboros.llm as llm_mod
+    import ouroboros.llm_attempt as attempt_mod
     import ouroboros.loop_llm_call as loop_call_mod
 
     assert llm_mod.context_overflow_message is cb.context_overflow_message
-    assert loop_call_mod._context_overflow_message is cb.context_overflow_message
+    assert loop_call_mod.size_refusal is attempt_mod.size_refusal is cb.size_refusal  # one recognition, both layers
     assert loop_call_mod._output_or_body_size_message is cb.output_or_body_size_message
     assert llm_mod.CONTEXT_OVERFLOW_CODES is cb.CONTEXT_OVERFLOW_CODES
     assert loop_call_mod._STRUCTURED_CONTEXT_OVERFLOW_CODES is cb.CONTEXT_OVERFLOW_CODES
@@ -168,6 +169,36 @@ def test_output_size_precedence_lives_inside_the_shared_helper():
     assert not cb.context_overflow_message(probe)
     assert cb.context_overflow_message("prompt is too long: 250000 tokens > 200000 maximum")
     assert not cb.context_overflow_message("request body too large")
+
+
+def test_a_cited_number_recognises_size_only_by_equality_with_a_declared_limit_above_the_reply_allowance():
+    """Recognition by number compares two statements of one party: a plain integer the refusal cites and a token
+    limit declared for the route. The reply allowance the refused request sent keeps output caps quiet without
+    reading a word (a cap refuses only a reply larger than itself); a nearby, grouped or decimal number equals
+    nothing; and a declaration that costs a read is asked only for an integer still unmatched."""
+    record = {32_768: ("total", "the window record (metadata)"), 131_072: ("total", "the window record (metadata)")}
+    vllm = [("", "'max_tokens' or 'max_completion_tokens' is too large: 65536. This model's maximum context length "
+                 "is 32768 tokens and your request has 10000 input tokens (65536 > 32768 - 10000).", False)]
+    assert cb.cited_declared_limit(vllm, 8_192, record)[:2] == (32_768, record[32_768])
+    assert cb.cited_declared_limit(vllm, 65_536, record) is None  # the reply it sent is the larger number: an output cap
+    gmicloud = [("GMICloud", "max_tokens is too large: 942733. This model supports at most 131072 completion tokens, "
+                             "whereas you provided 942733.", False)]
+    assert cb.cited_declared_limit(gmicloud, 942_733, record) is None
+    assert cb.cited_declared_limit([("", "max_tokens 131072 exceeds the limit", False)], 131_072, record) is None
+    near = [("", "limit 131071, 131,072 or 131072.5 tokens; trace line 1747; id req-131072", False)]
+    assert cb.cited_declared_limit(near, 16, record) is None
+    reads = []
+
+    def catalogue():
+        reads.append(1)
+        return {983_616: ("input", "the endpoint catalogue (alibaba max_prompt_tokens)")}
+
+    alibaba = [("", "Provider returned error", False), ("Alibaba", "Range of input length should be [1, 983616]", False)]
+    assert cb.cited_declared_limit([("", "Invalid request", False)], 16, {}, catalogue) is None and not reads
+    assert cb.cited_declared_limit(alibaba, 65_536, {1_000_000: ("total", "the window record (metadata)")}, catalogue) == (
+        983_616, ("input", "the endpoint catalogue (alibaba max_prompt_tokens)"), "Alibaba", alibaba[1][1])
+    assert reads == [1]
+    assert cb.cited_declared_limit(alibaba, 65_536, {1_000_000: ("total", "record")}, dict) is None  # no catalogue row
 
 
 @pytest.mark.parametrize("reserve", ["max_tokens", "`max_tokens`"])
