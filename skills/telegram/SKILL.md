@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.15
+version: 1.4.16
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -389,6 +389,14 @@ fallback. A nonempty machine value takes precedence over the interpreter build;
 macOS and Linux use only the machine value.
 
 The Mini App is Beta. Its best-effort Cloudflare Quick Tunnel has no SLA and
-lacks Server-Sent Events (SSE). Each run is a new origin: an earlier one's saved text
+lacks Server-Sent Events (SSE). Every new link is one more request to Cloudflare, so a
+new link has two minutes to register before answers without the Mini App's marker count
+toward replacing it. When cloudflared reports Cloudflare's HTTP 429 for that request,
+the companion plans the next one for an hour later (90 minutes after each further
+refusal until a link is allocated), and the Mini App status shows that planned time.
+The wait ends at that time on this computer's clock or after its full length, whichever
+comes first, so changing the clock meanwhile can bring the request sooner.
+Only the running companion process remembers this wait: a restart, an Update or a new
+token starts without it. Each run is a new origin: an earlier one's saved text
 preview stays in Telegram's storage after a later sign-out. It targets native clients;
 Telegram WebA/WebK are unsupported.
