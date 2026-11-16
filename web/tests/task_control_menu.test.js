@@ -230,6 +230,57 @@ test('Chat and Activity both wire the shared dropdown', () => {
     assert.equal(typeof TASK_CONTROL_TRIGGER_LABEL, 'string');
 });
 
+test('a compensated feed scroll keeps an anchored menu; moving or losing its trigger still dismisses it', async (t) => {
+    const { closeTaskControlMenu, openTaskControlMenu } = await import('../modules/task_control_menu.js');
+    const { installDomDouble } = await import('./dom_double.js');
+    const env = installDomDouble();
+    const prior = globalThis.IntersectionObserver;
+    let observed;
+    globalThis.IntersectionObserver = class {
+        constructor(callback) { observed = callback; }
+        observe() {} disconnect() {} takeRecords() { return []; }
+    };
+    t.after(() => { closeTaskControlMenu(); globalThis.IntersectionObserver = prior; env.restore(); });
+    const feed = env.el('div'), other = env.el('div'), anchor = env.el('button');
+    feed.nodeType = other.nodeType = 1;
+    env.doc.body.append(feed, other);
+    feed.append(anchor);
+    const open = () => openTaskControlMenu(anchor, { actions: [ACTION_HURRY, ACTION_STOP_NOW] });
+    const scroll = (target) => {
+        for (const listener of [...env.doc.captures.get('scroll') || []]) listener({ type: 'scroll', target });
+    };
+    let menu = open();
+    feed.scrollTop = 26;  // a late card fact grew above the trigger; the feed restored its place
+    scroll(feed);
+    assert.equal(menu.isConnected, true, 'the same on-screen trigger still owns the open choice');
+    scroll(menu);
+    assert.equal(menu.isConnected, true, 'a constrained menu can scroll inside itself');
+    anchor.rect = { ...anchor.rect, top: 10, bottom: 40 };
+    scroll(other);
+    assert.equal(menu.isConnected, true, 'an unrelated scroller does not own dismissal');
+    scroll(feed);
+    assert.equal(menu.isConnected, false, 'a scroll that moved the trigger dismisses');
+    assert.equal(env.doc.activeElement, anchor);
+    menu = open();
+    anchor.rect = { ...anchor.rect, left: 12, right: 112 };
+    scroll(feed);
+    assert.equal(menu.isConnected, false, 'horizontal movement dismisses too');
+    menu = open();
+    scroll(env.doc);
+    assert.equal(menu.isConnected, false, 'the document keeps its page-level dismissal contract');
+    menu = open();
+    env.doc.defaultView.emit('resize');
+    assert.equal(menu.isConnected, false, 'a changed viewport still dismisses');
+    menu = open();
+    observed([{ target: anchor, isIntersecting: false }]);
+    assert.equal(menu.isConnected, false, 'an off-screen trigger cannot own a menu');
+    menu = open();
+    anchor.remove();
+    observed([{ target: anchor, isIntersecting: true }]);
+    assert.equal(menu.isConnected, false, 'a detached trigger cannot keep the old menu');
+    assert.equal(env.doc.captures.get('scroll').size, 0, 'dismissal releases its listener');
+});
+
 test('a single offered action is the trigger itself: it names the action and a stop asks first', async (t) => {
     const { closeTaskControlMenu, openTaskControlMenu } = await import('../modules/task_control_menu.js');
     const { installDomDouble } = await import('./dom_double.js');

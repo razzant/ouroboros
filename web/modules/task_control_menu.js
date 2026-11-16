@@ -516,13 +516,21 @@ function positionTaskControlMenu(anchor, menu) {
 
 function watchTaskControlMenu(anchor, menu) {
     const isCurrentMenu = () => openMenu === menu && openTrigger === anchor;
+    const openedAt = anchor.getBoundingClientRect();
     const closeForViewportChange = (event) => {
         // A height-clamped portal is its own scrollport. Scrolling it does not
-        // move the trigger, so keep it open; ancestor/page scroll still closes.
+        // move the trigger, so keep it open; ancestor/page scroll may move it.
         if (event.type === 'scroll' && event.target === menu) return;
         // Nor does a scroller that does not hold the trigger: the chat feed re-anchoring behind a floating list
-        // (a late history page, a refit) cannot have moved it. The page itself (the document) still closes.
+        // (a late history page, a refit) cannot have moved it.
         if (event.type === 'scroll' && event.target?.nodeType === 1 && !event.target.contains(anchor)) return;
+        // A late card fact can grow the feed while its reading-place keeper compensates the scroll. The menu
+        // is still anchored at the same point; a deferred feed scroll from before opening is harmless too.
+        // The document itself keeps its page-level dismissal contract.
+        if (event.type === 'scroll' && event.target?.nodeType === 1 && anchor.isConnected) {
+            const now = anchor.getBoundingClientRect();
+            if (['top', 'right', 'bottom', 'left'].every(edge => Math.abs(now[edge] - openedAt[edge]) < 0.5)) return;
+        }
         if (isCurrentMenu()) closeTaskControlMenu();
     };
     document.addEventListener('scroll', closeForViewportChange, true);
