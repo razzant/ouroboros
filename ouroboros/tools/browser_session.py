@@ -199,8 +199,8 @@ class BrowserOwner:
             future.cancel()
 
     def _refuse_own_thread(self, coro: Any = None) -> None:
-        thread = self._thread
-        if thread is not None and thread.ident == threading.get_ident():
+        # The loop's own thread by identity: its number goes to a later thread once it has ended.
+        if self._thread is not None and self._thread is threading.current_thread():
             if coro is not None:
                 coro.close()
             raise RuntimeError("a browser session's own event loop cannot wait for itself")
