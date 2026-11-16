@@ -221,7 +221,7 @@ def test_the_allowance_is_edited_in_costs_alone_and_survives_an_unrelated_row_wr
             _shoot(page, f"{engine}-settings-costs-return")
             back = page.locator('#page-dashboard > .app-page-header [data-shell-back]')
             expect(back).to_be_visible()
-            expect(back).to_have_text('Settings')
+            expect(back).to_have_attribute('title', back.get_attribute('aria-label'))
             assert back.get_attribute('aria-label').startswith('Back to Settings')
             back.click()
             expect(home).to_be_visible()

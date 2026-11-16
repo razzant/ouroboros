@@ -109,7 +109,7 @@ def test_home_opens_a_page_and_every_way_back_returns_one_level(subscription_ui,
     assert not page.locator(HOME).is_visible(), "one column: the page alone"
     assert level.evaluate("node => getComputedStyle(node).touchAction") == touch
     back = page.locator("#page-settings > .app-page-header [data-shell-back]")
-    assert back.inner_text().strip() == "Settings" and back.get_attribute("aria-label") == "Back to Settings"
+    assert back.get_attribute("aria-label") == back.get_attribute("title") == "Back to Settings"
     assert page.locator("#page-settings [data-settings-lead-name]").inner_text().strip() == "This computer"
     assert _focused(page, '[data-settings-page="computer"]')
     assert _menu_visible(page)
@@ -233,7 +233,7 @@ def test_a_wide_page_box_shows_the_home_beside_the_page_with_no_layer(subscripti
     second = settings_page(page, "test-shell/deeper")
     second.wait_for(state="visible")
     back = page.locator("#page-settings > .app-page-header [data-shell-back]")
-    assert back.is_visible() and back.inner_text().strip() == "Shell test"
+    assert back.is_visible() and back.get_attribute("aria-label") == back.get_attribute("title") == "Back to Shell test"
     assert go_back(page) == "test-shell"
     assert first.is_visible() and back.count() == 0 and page.evaluate(SETTINGS_LAYERS) == []
     # A jump from Skills has the same named return in the wide header.
@@ -241,7 +241,7 @@ def test_a_wide_page_box_shows_the_home_beside_the_page_with_no_layer(subscripti
     page.wait_for_selector("#page-skills.active")
     page.evaluate("() => window.__ouroSettings.open('test-shell')")
     back.wait_for(state="visible")
-    assert back.inner_text().strip() == "Skills"
+    assert back.get_attribute("aria-label") == back.get_attribute("title") == "Back to Skills"
     back.click()
     page.wait_for_selector("#page-skills.active")
     assert back.count() == 0
