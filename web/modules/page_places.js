@@ -24,8 +24,11 @@
 import { revealPastFade } from './scroll_fade.js';
 
 export const OWN_PLACE = '.chat-messages, #chat-messages, #page-logs';
-// The row of a section's list that names the page open beside it (Settings' rail, the Dashboard's list).
-const NAMING_ROW = '[data-section-view="page"] :is([aria-current="page"], [aria-orientation="vertical"] [aria-selected="true"])';
+// The row of a section's list that names the page open beside it (Settings' rail, the Dashboard's list): the chosen
+// row, while its shell draws the page's column too. The sheets decide that (the Dashboard's automatic view), and a list
+// that stands alone names nothing.
+const NAMING_ROW = '.section-shell > .section-rail :is([aria-current="page"], [aria-orientation="vertical"] [aria-selected="true"])';
+const drawn = (node) => node?.getClientRects?.().length > 0;
 
 // Whether this engine drops a box's scroll when what it holds is drawn again: the plain case, off screen.
 export function dropsOnRedraw(doc = document) {
@@ -199,7 +202,7 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
             // both cannot share it, the list stays where it was left.
             const scrolls = (box) => box.scrollHeight > box.clientHeight && /auto|scroll/.test(win.getComputedStyle?.(box)?.overflowY);
             for (const row of root?.querySelectorAll?.(NAMING_ROW) || []) {
-                if (!row.getClientRects?.().length) continue;
+                if (!drawn(row) || !drawn(row.closest?.('.section-shell')?.querySelector?.(':scope > .section-pane'))) continue;
                 let box = row.parentElement;
                 while (box && !scrolls(box)) box = box === root ? null : box.parentElement;
                 if (!box) continue;

@@ -85,8 +85,13 @@ test('a return within its fade\'s depth goes to the top, and a list beside its o
         scrollWidth: 100, clientWidth: 100, clientTop: 0, matches: (selector) => fades && selector === '.scroll-fade-y',
         ownerDocument: { defaultView: w.win }, getBoundingClientRect: () => ({ top: 0, bottom: 600, left: 0, right: 100 }) });
     const rail = box(0), pane = box(12), deep = box(240), plain = box(12, false);
-    // The row naming the open page lies under the rail's lower edge: the owner had scrolled the list away from it.
-    const row = { parentElement: rail, getClientRects: () => [1], getBoundingClientRect: () => ({ top: 700, bottom: 748 }) };
+    // The row naming the open page lies under the rail's lower edge: the owner had scrolled the list away from it. The
+    // sheets decide whether the page's column is drawn beside it (the Dashboard's automatic view names no column).
+    let columns = 2;
+    const column = { getClientRects: () => (columns === 2 ? [1] : []) };
+    const shell = { querySelector: (selector) => (selector === ':scope > .section-pane' ? column : null) };
+    const row = { parentElement: rail, getClientRects: () => [1], getBoundingClientRect: () => ({ top: 700, bottom: 748 }),
+        closest: (selector) => (selector === '.section-shell' ? shell : null) };
     let beside = false;
     Object.assign(root, { matches: () => false, parentElement: null,
         querySelectorAll: (selector) => (selector === '*' ? [rail, pane, deep, plain] : beside ? [row] : []) });
@@ -95,6 +100,10 @@ test('a return within its fade\'s depth goes to the top, and a list beside its o
     assert.deepEqual([rail.scrollTop, pane.scrollTop, deep.scrollTop, plain.scrollTop], [0, 0, 240, 12],
         'a few pixels under a fade go to the top; a real place, or a box without a fade, keeps its pixels');
     beside = true;
+    columns = 1;
+    back();
+    assert.equal(rail.scrollTop, 0, 'a list standing alone names no page: its chosen row stays where the list was left');
+    columns = 2;
     back();
     assert.equal(rail.scrollTop, 748 - (600 - 32), 'the naming row comes in just past the lower fade');
     // The pressed row's own reveal (scroll_fade.js, on its focus) moves its list a few pixels: the top wins.
