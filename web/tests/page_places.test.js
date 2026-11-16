@@ -97,6 +97,12 @@ test('a return within its fade\'s depth goes to the top, and a list beside its o
     beside = true;
     back();
     assert.equal(rail.scrollTop, 748 - (600 - 32), 'the naming row comes in just past the lower fade');
+    // The pressed row's own reveal (scroll_fade.js, on its focus) moves its list a few pixels: the top wins.
+    const pressed = { isConnected: true, parentElement: root, matches: () => true, closest: () => null,
+        getClientRects: () => [1], focus: () => { pane.scrollTop = 19; } };
+    root.contains = (node) => node === pressed;
+    w.restore.capture(root, pressed)();
+    assert.equal(pane.scrollTop, 0, 'a reveal that leaves the list within its fade\'s depth settles at the top');
 });
 
 test('disposal releases a room\'s places even before another page restore', () => {

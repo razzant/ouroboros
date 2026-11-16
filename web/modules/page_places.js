@@ -177,13 +177,19 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
         for (let at = root?.contains(opener) ? opener : null; at && at !== root; at = at.parentElement) {
             anchors.push(at, at.nextElementSibling, at.previousElementSibling);
         }
+        // Within its fade's depth the top is the place: a few pixels, left by the owner or by the returned row's own
+        // reveal past the lower fade, would only dim the first row under the upper one.
+        const settle = () => {
+            for (const [box] of saved) {
+                if (!box.isConnected || !(box.scrollTop > 0) || !box.matches('.scroll-fade-y')) continue;
+                const fade = parseFloat(win.getComputedStyle?.(box)?.getPropertyValue?.('--scroll-fade-edge')) || 0;
+                if (box.scrollTop < fade) { box.scrollTop = 0; remember(box); }
+            }
+        };
         return ({ keyboard = false } = {}) => {
             for (const [box, top, left] of saved) {
                 if (!box.isConnected) continue;
-                // Within its fade's depth the top is the place: a few pixels would only dim the first row under it.
-                const fade = box.matches('.scroll-fade-y')
-                    ? parseFloat(win.getComputedStyle?.(box)?.getPropertyValue?.('--scroll-fade-edge')) || 0 : 0;
-                box.scrollTop = top < fade ? 0 : top;
+                box.scrollTop = top;
                 box.scrollLeft = left;
                 remember(box);
             }
@@ -199,7 +205,7 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
                 remember(box);
             }
             const anchor = anchors.find((el) => el?.isConnected && el.getClientRects().length && !el.closest('[hidden], [inert]')) || root;
-            if (!anchor || !anchor.isConnected) return;
+            if (!anchor || !anchor.isConnected) { settle(); return; }
             if (!anchor.matches('button, a, input, select, textarea, [tabindex]')) anchor.tabIndex = -1;
             anchor.setAttribute?.('data-return-focus', keyboard ? 'keyboard' : 'pointer');
             const clear = () => {
@@ -210,6 +216,7 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
             anchor.addEventListener?.('blur', clear);
             anchor.addEventListener?.('keydown', clear);
             anchor.focus?.({ preventScroll: true });
+            settle();
         };
     };
     return restore;
