@@ -6,6 +6,7 @@ call to the projector. The shared provider fixture makes no external calls.
 """
 from copy import deepcopy
 from dataclasses import replace
+import json
 import math
 from types import SimpleNamespace
 
@@ -178,3 +179,48 @@ def test_ingress_after_real_fallback_uses_adopted_plan_and_sent_envelope(main_lo
         assert measured["effort"] == f.inputs[1]["reasoning_effort"] == "max"
         assert measured["mode"] == f.ctx.active_context_mode
     assert _tool_messages(f.inputs[-1])["fallback-result"] == "Fallback result stays exact."
+
+
+@pytest.mark.parametrize("known", [True, False], ids=["known-window", "unknown-window"])
+def test_pending_effort_rebind_reaches_result_ingress(main_loop, monkeypatch, known):
+    """A real switch_model tool opens the longer OpenAI shape; ingress uses its newly resolved window."""
+    from ouroboros.capability_evidence import CapabilityEvidence
+    from ouroboros.context_fit import ContextCore, build_context_fit_plan
+
+    f, resolved = main_loop, []
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "cyber_pro")
+    core = ContextCore("Core", "Bible", "Architecture", "", "Identity", "Facts", json.dumps("go"), False)
+    model = "openai::fixture-model"
+    original = build_context_fit_plan(None, core, {"model": model}, preferred_mode="max", reasoning_effort="none",
+        route_resolver=lambda *_a, **_kw: ({"model": model, "provider": "openai"},
+            CapabilityEvidence(900_000, "confirmed", "metadata", "before-switch")))
+    f.ctx.context_fit_plan, f.messages = original, original.messages_for("max")
+
+    def route(task, **_kw):
+        resolved.append(task["model"])
+        return {"model": task["model"], "provider": "openai"}, CapabilityEvidence(
+            200_000 if known else 0, "confirmed" if known else "unprobeable", "metadata", "after-switch")
+
+    monkeypatch.setattr(context, "_context_fit_route", route)
+    body = "EXACT_RESULT\n" + "Ω" * 180_000 + "\nPROCESS_EXIT=0"
+    executed = _register_results(f, monkeypatch, {"large": ToolResult(status="ok", code="OK", text=body)})
+    measurements = _observe_measurements(monkeypatch)
+    answer, _, trace = f.run([call("switch_model", {"effort": "high"}, "switch-effort"),
+        call(TOOL, {"name": "large"}, "large-result"), {"content": "done"}], initial_effort="none")
+
+    assert answer == "done" and executed == ["large"]
+    assert [request["reasoning_effort"] for request in f.inputs] == ["none", "high", "high"]
+    assert resolved == [model] and f.ctx.active_effort_override is None
+    rebound = f.ctx.context_fit_plan
+    assert rebound is not original and rebound.start_reasoning_effort == "high"
+    assert rebound.route_fp == "after-switch" and rebound.window_tokens == (200_000 if known else 0)
+    assert measurements[-1]["plan"] is rebound and measurements[-1]["effort"] == "high"
+    assert trace["tool_result_delivery"][-1]["status"] == ("projected" if known else "capacity_unknown")
+    visible = _tool_messages(f.inputs[-1])["large-result"]
+    row = next(row for row in trace["tool_calls"] if row["tool_call_id"] == "large-result")
+    if known:
+        assert row["result_partial"] is True
+        assert read_actor_source_bytes(f.ctx.drive_root, "authored-main", row["result_source_ref"]) == body.encode("utf-8")
+        assert 0 < visible.count("Ω") <= math.ceil(200_000 / 8) and "PROCESS_EXIT=0" in visible
+    else:
+        assert visible == body and "result_partial" not in row
