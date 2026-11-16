@@ -76,7 +76,7 @@ def test_display_redacts_typed_details_without_mutating_custody():
     ("invalid_request", 400, False, "bad_request", False, "", "invalid_value"),
 ])
 def test_vendor_facts_reach_shared_readers_without_changing_wrapper_custody(code, status, unknown, kind, retry, wait, vendor):
-    from ouroboros.llm_attempt import _is_structured_context_overflow_exception
+    from ouroboros.llm_attempt import is_size_refusal
     from ouroboros.loop_llm_call import classify_llm_exception
     from ouroboros.model_wait import model_wait_reason
 
@@ -87,7 +87,17 @@ def test_vendor_facts_reach_shared_readers_without_changing_wrapper_custody(code
     assert error.display_message and classify_llm_exception(error) == classified
     assert classified.kind == kind and classified.retry_same_request is retry
     assert model_wait_reason(error) == wait
-    assert _is_structured_context_overflow_exception(error) is (kind == "context_overflow")
+    assert is_size_refusal(error) is (kind == "context_overflow")
+    # The request that continues reads the engine's typed fields as fields: no sentence is invented for it.
+    from ouroboros.loop_transport import stamp_owner_provider_message
+    from ouroboros.primary_route_observation import failed_attempt_facts
+
+    usage = {"_last_llm_failure": {"model": "claudexor::codex=exact-model", "failure_code": classified.kind,
+                                   "status_code": status, "ts": "2026-11-15T18:20:21+00:00"}}
+    stamp_owner_provider_message(usage, error, classified)
+    told = failed_attempt_facts(usage, "claudexor::codex=exact-model", False)
+    assert f': its typed error code was "{vendor.strip()}"; its parameter was "input".' in told
+    assert " said " not in told and "Controlled model refusal" not in told and failed_attempt_facts(usage, "other/model", False) == ""
     wrapper = "model_outcome_unknown" if unknown else code
     assert error.code == wrapper and error.problem == problem
     assert error.body == ({"code": wrapper} if unknown else problem)

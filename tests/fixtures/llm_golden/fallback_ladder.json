@@ -71,6 +71,7 @@
           "usage": {
             "prompt_tokens": 200,
             "completion_tokens": 10,
+            "cost": 0.004,
             "effort": {
               "requested": "medium",
               "sent": {
@@ -84,7 +85,6 @@
             "response_finish_reason": "stop",
             "provider": "openai",
             "resolved_model": "openai/gpt-5.5",
-            "cost": 0.004,
             "cost_estimated": true,
             "cost_final": false,
             "request_wire": {
@@ -1578,6 +1578,7 @@
             "response_id": "gen-fixture-429"
           },
           "usage": {
+            "cost": null,
             "effort": {
               "requested": "medium",
               "sent": {
@@ -1595,11 +1596,26 @@
               "code": 429,
               "type": null,
               "message": "Provider returned error: rate limit exceeded",
-              "kind": "rate_limit"
+              "kind": "rate_limit",
+              "answer": {
+                "sentence": "Provider returned error: rate limit exceeded",
+                "said": [
+                  [
+                    "",
+                    "Provider returned error: rate limit exceeded",
+                    false
+                  ]
+                ],
+                "codes": [
+                  [
+                    "",
+                    "429"
+                  ]
+                ]
+              }
             },
             "provider": "openrouter",
             "resolved_model": "z-ai/glm-5.2",
-            "cost": null,
             "cost_final": false,
             "reasoning_pin": {
               "sealed": true,
@@ -2756,6 +2772,7 @@
           "usage": {
             "prompt_tokens": 200,
             "completion_tokens": 10,
+            "cost": 0.0021,
             "effort": {
               "requested": "medium",
               "sent": {
@@ -2772,7 +2789,6 @@
             "response_finish_reason": "stop",
             "provider": "openrouter",
             "resolved_model": "x-ai/grok-4.5",
-            "cost": 0.0021,
             "cost_estimated": true,
             "cost_final": false,
             "request_wire": {

@@ -18,8 +18,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 from ouroboros.llm_attempt import (
-    _applied_payload_cache_ttl, apply_processing_preference, attach_processing_receipt, openai_family_route,
-    supports_message_cache_control,
+    _applied_payload_cache_ttl, apply_processing_preference, attach_processing_receipt, body_error_facts,
+    openai_family_route, supports_message_cache_control,
 )
 from ouroboros.llm_messages import project_declared_system_prefix
 from ouroboros.usage_accounting import UsageScope, usage_scope
@@ -466,16 +466,7 @@ class _OpenAICompatibleLaneMixin:
         # a blank finish_reason=null "incomplete response".
         _body_err = self._provider_body_error(resp_dict)
         if _body_err:
-            _body_message = str(_body_err.get("message") or "")
-            usage["provider_error"] = {
-                "code": _body_err.get("code"),
-                "type": _body_err.get("type"),
-                "message": _body_message[:300],
-                # A cut sentence says so: the owner's quote must not read this prefix as whole.
-                **({"message_truncated": True} if len(_body_message) > 300 else {}),
-                "kind": "rate_limit" if self._is_transient_body_error(_body_err) and str(_body_err.get("code")) == "429"
-                else ("provider_transient" if self._is_transient_body_error(_body_err) else "provider_error"),
-            }
+            usage["provider_error"] = body_error_facts(_body_err, self._is_transient_body_error(_body_err))
         choices = resp_dict.get("choices") or [{}]
         first_choice = choices[0] if choices and isinstance(choices[0], dict) else {}
         msg = dict(first_choice.get("message") or {})

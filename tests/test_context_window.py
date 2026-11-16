@@ -139,7 +139,12 @@ def test_numberless_refusal_bounds_the_window_only_at_a_measured_size(tmp_path, 
     assert resolve_window(evidence, 65_536, root=tmp_path).usable == 919_379
     record_refused_input({**usage, "_last_llm_provider_code": "string_above_max_length"}, plan, 911_000, measured=True)
     assert resolve_window(evidence, 65_536, root=tmp_path).usable == 919_379
-    record_refused_input(usage, plan, 911_000, measured=True)
+    # A refusal recognised only by a cited number or by HTTP 413 states no unit: nothing is written, the host's
+    # measured size included (15.11: an estimate of 819,929 under a real limit of 983,616 would have become a ceiling).
+    for basis in ("number_equals_declared", "status_413"):
+        record_refused_input({**usage, "_last_llm_provider_answer": {"basis": basis}}, plan, 911_000, measured=True)
+        assert resolve_window(evidence, 65_536, root=tmp_path).usable == 919_379
+    record_refused_input({**usage, "_last_llm_provider_answer": {"basis": "typed"}}, plan, 911_000, measured=True)
     window = resolve_window(evidence, 65_536, root=tmp_path)
     assert (window.usable, window.source.split()[0]) == (911_000, "refusal")
     assert resolve_window(replace(evidence, route_fp="other"), 65_536, root=tmp_path).total.tokens == 872_000
@@ -393,8 +398,8 @@ def test_direct_account_scope_survives_same_key_but_not_key_rotation(tmp_path, m
     same = start()
     assert same.window_record.usable == 700_000
     assert main_input_anchor(usage, same)[1] == 700_000
-    record_refusal({"_last_llm_provider_message": "maximum context length is 200000 tokens"}, first)
-    assert start().window_record.usable == 134_464
+    record_refusal({"_last_llm_provider_message": "maximum context length is 750000 tokens"}, first)
+    assert start().window_record.usable == 684_464  # a stated total not below the accepted input caps (6A)
     settings[key] = "fixture-account-B"
     other = start()
     assert other.route_fp == first.route_fp  # capability acknowledgement contract is unchanged
@@ -402,7 +407,7 @@ def test_direct_account_scope_survives_same_key_but_not_key_rotation(tmp_path, m
     assert other.window_record.accepted == 0 and other.window_record.usable == 534_464
     assert main_input_anchor(usage, other) == (None, None)
     settings[key] = "fixture-account-A"
-    assert start().window_record.usable == 134_464
+    assert start().window_record.usable == 684_464
     assert "fixture-account-" not in json.dumps(ce._load(tmp_path))
 
 
