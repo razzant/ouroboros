@@ -43,8 +43,12 @@ def test_a_refusal_window_names_how_its_number_was_known(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(ce, "canonical_evidence_root", lambda: tmp_path)
     plan_ = SimpleNamespace(route_fp="route", window_witness_bound=True, provider="openai", model="model")
-    record_observation(tmp_path, "route", accepted=920_650, reserve=65_536, transmitted=65_536)
-    if basis == "provider_stated":
+    # A provider's stated limit below an input this scope already had accepted writes no ceiling (it sizes that pass
+    # only), so the stated case stands on a smaller accepted input under a wider declared window; the other bases
+    # still overrule a larger accepted input.
+    stated = basis == "provider_stated"
+    record_observation(tmp_path, "route", accepted=800_000 if stated else 920_650, reserve=65_536, transmitted=65_536)
+    if stated:
         record_refusal({"_last_llm_provider_message": "The input token count (900000) exceeds the maximum number "
                                                       "of tokens allowed (883899)."}, plan_)
     elif basis:  # the loop's seam: the refused candidate says how its size was known (a numberless refusal either way)
@@ -55,7 +59,8 @@ def test_a_refusal_window_names_how_its_number_was_known(tmp_path, monkeypatch, 
                              candidate=local)
     else:
         record_observation(tmp_path, "route", refused=883_899, kind="input")
-    record = resolve_window(ce.CapabilityEvidence(872_000, "confirmed", "metadata", "route"), 65_536)
+    record = resolve_window(ce.CapabilityEvidence(1_000_000 if stated else 872_000, "confirmed", "metadata", "route"),
+                            65_536)
     limit, projection = record.limiting, window_projection(record, under_way=True)
     assert (limit.tokens, limit.kind, limit.source, record.usable, record.admitted) == (
         883_899, "input", "refusal", 883_899, 883_899)  # what sizes and admits requests is the number alone
