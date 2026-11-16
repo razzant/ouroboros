@@ -28,6 +28,7 @@ class MCPImportDraftServer(TypedDict, total=False):
     header_names: List[str]  # the editor's current header list, the legacy row included
     legacy_header: Optional[str]  # which of those names is the stored legacy pair
     unreadable_headers: bool  # a malformed saved map that a file's headers would replace
+    skill: str  # a row Connect tools bound to a skill: import never rewrites it
 
 
 class MCPImportHeaderChanges(TypedDict):

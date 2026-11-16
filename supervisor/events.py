@@ -345,6 +345,7 @@ from supervisor.events_task_done import (  # noqa: E402, F401 -- intentional pub
 from supervisor.events_worker_reports import (  # noqa: E402, F401 -- intentional public re-exports
     _handle_acceptance_fence,
     _handle_log_event,
+    _handle_mcp_configuration_changed,
     _handle_mcp_signed_in,
     _handle_skill_lifecycle,
     _handle_task_dispatch_resolved,
@@ -429,6 +430,7 @@ EVENT_HANDLERS = {
     "skill_exec_finished": _handle_skill_lifecycle,
     "skill_exec_failed": _handle_skill_lifecycle,
     "acceptance_fence": _handle_acceptance_fence,
+    "mcp_configuration_changed": _handle_mcp_configuration_changed,
 }
 
 

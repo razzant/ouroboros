@@ -1032,9 +1032,9 @@ def test_skill_scripts_and_dependency_builds_run_in_the_pinned_executor_or_not_a
     assert len(docker.calls()) == before and not docker.records()  # each adopted record abandoned, nothing ran
 
 
-def _reviewed_skill(env, monkeypatch, name, script, *, runtime="python3", entry="run.py", skills=None):
+def _reviewed_skill(env, monkeypatch, name, script, *, runtime="python3", entry="run.py", skills=None, extra=""):
     """A reviewed, enabled script skill in a skills checkout (inside the work mapping unless ``skills`` names another
-    folder); the service keeps its review and enablement in its own drive."""
+    folder); the service keeps its review and enablement in its own drive. ``extra``: more manifest lines."""
     from ouroboros.skill_loader import SkillReviewState, compute_content_hash, save_enabled, save_review_state
     from ouroboros.tools.registry import ToolContext
 
@@ -1042,7 +1042,7 @@ def _reviewed_skill(env, monkeypatch, name, script, *, runtime="python3", entry=
     (skills / name / "scripts").mkdir(parents=True)
     (skills / name / "SKILL.md").write_text(
         f"---\nname: {name}\ndescription: Probe.\nversion: 0.1.0\ntype: script\nruntime: {runtime}\ntimeout_sec: 30\n"
-        f"scripts:\n  - name: {entry}\n    description: Probe.\n---\n# body\n", encoding="utf-8")
+        f"{extra}scripts:\n  - name: {entry}\n    description: Probe.\n---\n# body\n", encoding="utf-8")
     (skills / name / "scripts" / entry).write_text(script, encoding="utf-8")
     (env.root / "repo").mkdir(exist_ok=True)
     drive.mkdir(exist_ok=True)
@@ -1098,6 +1098,157 @@ def test_a_managed_skill_without_its_work_folders_is_refused_before_anything_sta
         and "nothing runs on the service instead" in answer, answer
     assert not marker.exists() and not [call for call in docker.calls() if call[:2] == ["exec", "-i"]]
     assert not docker.records()
+
+
+_MCP_SKILL_SERVER = r"""
+import { appendFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+const MARK = 'reviewed';
+const reply = (id, result) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n');
+createInterface({ input: process.stdin }).on('line', (line) => {
+  const msg = JSON.parse(line);
+  if (msg.id === undefined) return;
+  appendFileSync(process.env.WITNESS, JSON.stringify({ method: msg.method, cwd: process.cwd(), argv1: process.argv[1],
+    container: process.env.IN_FAKE_CONTAINER || '', mark: MARK }) + '\n');
+  if (msg.method === 'initialize') reply(msg.id, { protocolVersion: msg.params.protocolVersion,
+    capabilities: { tools: {} }, serverInfo: { name: 'probe', version: '1' } });
+  else if (msg.method === 'tools/list') reply(msg.id, { tools: [{ name: 'echo', description: 'Echo',
+    inputSchema: { type: 'object', properties: { text: { type: 'string' } } } }] });
+  else if (msg.method === 'tools/call') reply(msg.id, { content: [{ type: 'text', text: `echo:${msg.params.arguments.text}` }] });
+  else reply(msg.id, {});
+});
+"""
+
+
+def test_a_skill_bound_mcp_server_inside_the_mappings_gets_its_state_and_key_and_no_service_path(env, monkeypatch):
+    """A skill folder inside the work mappings starts as installed in the pinned executor, with its scripts'
+    environment: the work domain's own state folder, its granted key and its own packages. No service search or
+    dependency path crosses (``attached_launch`` would refuse one outside the mappings; the service's PATH stays)."""
+    import os
+    import shutil
+
+    from ouroboros import config, mcp_client
+    from ouroboros.skill_loader import load_skill, save_skill_grants
+
+    pytest.importorskip("mcp")
+    if not shutil.which("node"):
+        pytest.skip("the faked container's node is this host's PATH node")
+    server = _MCP_SKILL_SERVER.replace("mark: MARK }", (
+        "mark: MARK, state: process.env.OUROBOROS_SKILL_STATE_DIR || '', key: process.env.WITNESS_KEY || '', "
+        "node_path: process.env.NODE_PATH || '' }"))
+    _ctx, drive = _reviewed_skill(env, monkeypatch, "mapped_mcp", server, runtime="node", entry="server.mjs",
+                                  extra='env_from_settings: [WITNESS_KEY]\n'
+                                        'mcp_servers: [{"id": "mapped_mcp", "entry": "scripts/server.mjs"}]\n')
+    skill_dir, witness = env.work / "skills" / "mapped_mcp", env.work / "observed.jsonl"
+    (skill_dir / ".ouroboros_env" / "node" / "node_modules").mkdir(parents=True)
+    row = {"id": "mapped_mcp", "name": "Mapped", "enabled": True, "transport": "stdio", "skill": "mapped_mcp",
+           "env": {"WITNESS": str(witness)}}
+    settings = {"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": 30, "MCP_SERVERS": [row], "WITNESS_KEY": "granted-value"}
+    (drive / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+    monkeypatch.setattr(config, "DATA_DIR", drive)
+    monkeypatch.setattr(config, "SETTINGS_PATH", drive / "settings.json")  # the saved key is what the grant names
+    save_skill_grants(drive, "mapped_mcp", ["WITNESS_KEY"], content_hash=load_skill(skill_dir, drive).content_hash,
+                      requested_keys=["WITNESS_KEY"])
+    env.manage(section(env, state_root=str(env.work / "skill-state")))
+    fake_docker(env, monkeypatch)
+    seen, real = [], domain.attached_launch
+    monkeypatch.setattr(domain, "attached_launch", lambda *args: seen.append(args) or real(*args))
+    manager = mcp_client.MCPManager()
+    manager.reconfigure(settings)
+    assert manager.server_config("mapped_mcp").skill_error == ""
+    listed = manager.refresh_server("mapped_mcp")
+    assert listed["ok"] and listed["tool_count"] == 1, listed
+    observed = json.loads(witness.read_text(encoding="utf-8").splitlines()[0])
+    assert (observed["state"], observed["key"], observed["container"]) == (
+        str(env.work / "skill-state" / "mapped_mcp"), "granted-value", "1")
+    assert observed["node_path"] == str(skill_dir / ".ouroboros_env" / "node" / "node_modules")
+    (argv, cwd, started), = seen
+    service_path = set(os.environ.get("PATH", "").split(os.pathsep))
+    crossing = domain._work_env(started)
+    assert not set(crossing.get("PATH", "").split(os.pathsep)) & service_path  # the service's search stays behind
+    assert all(not part.startswith("/") or part.startswith(str(env.work)) or part == str(witness)
+               for value in crossing.values() for part in str(value).split(os.pathsep))
+
+
+def test_a_skill_bound_mcp_server_starts_its_verified_work_copy_in_the_pinned_executor(env, monkeypatch, tmp_path):
+    """Connect tools' row, managed, its skill installed outside every mapping: binding and the Connect preview copy and
+    start nothing (the preview names what the work domain will start); each real start (listing, call) runs the
+    reviewed payload's verified work copy with the container's node, that copy as its folder and the row's variables,
+    and a copy the work domain changed is replaced first. A domain naming no staging_root, and a skill changed since
+    its binding, start nothing anywhere. The faked Docker CLI stands in for the container: no daemon runs here."""
+    import shutil
+
+    from ouroboros import config, mcp_client, skill_mcp, work_domain
+
+    pytest.importorskip("mcp")
+    if not shutil.which("node"):
+        pytest.skip("the faked container's node is this host's PATH node")
+    installed, witness = tmp_path / "installed-skills", env.work / "observed.jsonl"
+    _ctx, drive = _reviewed_skill(env, monkeypatch, "demo_mcp", _MCP_SKILL_SERVER, runtime="node", entry="server.mjs",
+                                  skills=installed, extra='mcp_servers: [{"id": "demo_mcp", "entry": "scripts/server.mjs"}]\n')
+    managed = {**section(env, state_root=str(env.work / "skill-state")), "staging_root": str(env.work / "staging")}
+    env.manage(managed)
+    docker = fake_docker(env, monkeypatch)
+    monkeypatch.setattr(config, "DATA_DIR", drive)
+    monkeypatch.setattr(config, "SETTINGS_PATH", drive / "settings.json")
+    row = {"id": "demo_mcp", "name": "Demo", "enabled": True, "transport": "stdio", "skill": "demo_mcp",
+           "env": {"WITNESS": str(witness)}}
+    settings = {"MCP_ENABLED": True, "MCP_TOOL_TIMEOUT_SEC": 30, "MCP_SERVERS": [row]}
+    manager = mcp_client.MCPManager()
+    manager.reconfigure(settings)
+    bound, source = manager.server_config("demo_mcp"), installed / "demo_mcp"
+    home = env.work / "staging" / "skills" / "demo_mcp" / bound.skill_revision
+    assert bound.skill_error == "" and bound.args == [str((source / "scripts" / "server.mjs").resolve())]
+    preview = skill_mcp.preview_connect(drive, "demo_mcp")
+    assert preview["ready"] and preview["servers"][0]["executable"] == {
+        "command": "node", "args": [str(home / "scripts" / "server.mjs")], "cwd": str(home)}
+    assert docker.calls() == [] and not home.exists()  # passive: no copy and no process for a binding or a card
+    from ouroboros.workspace_executor_paths import ManagedPathRefused
+
+    with pytest.raises(ManagedPathRefused):  # the installed folder as bound: the domain cannot start it there
+        domain.attached_launch([bound.command, *bound.args], bound.cwd, {})
+    listed = manager.refresh_server("demo_mcp")
+    assert listed["ok"] and listed["tool_count"] == 1, listed
+    called = manager._call_tool_result("mcp_demo_mcp__echo", {"text": "hi"}, None)
+    assert called.status == "ok" and "echo:hi" in called.text, called
+    rows = [json.loads(line) for line in witness.read_text(encoding="utf-8").splitlines()]
+    assert rows and all((row["cwd"], row["argv1"], row["container"], row["mark"]) == (
+        str(home), str(home / "scripts" / "server.mjs"), "1", "reviewed") for row in rows), rows
+    starts = attached(docker, "server.mjs")
+    assert len(starts) == 2 and all(call[call.index("--workdir") + 1] == str(home) for call in starts)
+    assert all(f"node {home / 'scripts' / 'server.mjs'}" in call[-1] and str(source) not in json.dumps(call)
+               for call in starts)  # the container's node and the work copy; the installed folder is never named
+    assert (home / "scripts" / "server.mjs").read_bytes() == (source / "scripts" / "server.mjs").read_bytes()
+    (home / "scripts" / "server.mjs").write_text(_MCP_SKILL_SERVER.replace("'reviewed'", "'changed'"), encoding="utf-8")
+    assert manager.refresh_server("demo_mcp")["ok"]  # the changed copy is replaced before the start
+    assert json.loads(witness.read_text(encoding="utf-8").splitlines()[-1])["mark"] == "reviewed"
+    assert not docker.records() and not list(docker.tmp.glob("*.pid"))  # every group confirmed ended, then retired
+    seen, real, scope = [], domain.attached_launch, "OURO_TASK_SCOPE_" + "b" * 32
+    monkeypatch.setattr(domain, "attached_launch", lambda *args: seen.append(args) or real(*args))
+    mcp_client._transport_factory(manager.server_config("demo_mcp"), {scope: "1"})  # a task session's start, not entered
+    (argv, cwd, started), = seen  # the row's variables and the task's marker over its skill's script environment
+    assert (argv, cwd) == (["node", str(home / "scripts" / "server.mjs")], str(home))
+    assert {key: started[key] for key in ("WITNESS", scope, "OUROBOROS_SKILL_NAME", "OUROBOROS_SKILL_STATE_DIR")} == {
+        "WITNESS": str(witness), scope: "1", "OUROBOROS_SKILL_NAME": "demo_mcp",
+        "OUROBOROS_SKILL_STATE_DIR": str(env.work / "skill-state" / "demo_mcp")}
+    assert str(source) not in json.dumps(started)  # the installed folder's paths stay on the service
+    monkeypatch.setattr(domain, "attached_launch", real)
+    before = len(docker.calls())
+    for missing, unnamed in (({"staging_root": str(env.work / "staging")}, "skill_state_root"),
+                             ({"skill_state_root": str(env.work / "skill-state")}, "staging_root")):
+        env.manage({**section(env), **missing})  # a domain that names no state root, or no staging_root
+        manager.rebind()
+        refused = manager.refresh_server("demo_mcp")
+        assert not refused["ok"] and refused["code"] == "MCP_SKILL_UNAVAILABLE" and f"names no {unnamed}" in refused["error"]
+        assert not skill_mcp.preview_connect(drive, "demo_mcp")["ready"]  # said before Connect, not at the start
+    env.manage(managed)
+    manager.rebind()
+    old = manager.server_config("demo_mcp")
+    (source / "scripts" / "server.mjs").write_text(_MCP_SKILL_SERVER + "// edited\n", encoding="utf-8")
+    with pytest.raises(work_domain.WorkDomainRefused, match="changed since it was bound"):
+        skill_mcp.work_start(old, {})  # a start racing an edit: refused before any copy or process
+    assert "review" in manager.refresh_server("demo_mcp")["error"]  # rebound: the edit is not accepted
+    assert len(docker.calls()) == before and not docker.records()  # nothing started, here or in the container
 
 
 def test_env_deno_permission_and_go_build_use_the_one_work_state_path(env, monkeypatch):
