@@ -12,7 +12,7 @@ import pytest
 
 from ouroboros import config, model_wait, subagent_runtime
 from ouroboros.settings_integrity import task_settings_snapshot
-from tests._safety_fixtures import supervisor  # noqa: F401 -- fixture
+from tests._safety_fixtures import supervisor as supervisor
 from tests._task_settings_helpers import isolated_runtime, save_owner  # noqa: F401 -- fixture
 
 
