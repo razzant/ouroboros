@@ -130,6 +130,7 @@ def local_model_choices(model_start, monkeypatch, request):
     ctx, events = model_start
     settings = {}
     monkeypatch.setattr(settings_integrity, "runtime_setting", settings.get)
+    monkeypatch.setattr(settings_integrity, "runtime_catalog_settings", lambda: settings)
     monkeypatch.setattr(provider_connections, "runtime_setting", settings.get)
     monkeypatch.setattr(config, "get_fallback_models", lambda: [])
     monkeypatch.setattr(route_choice, "following_route", lambda _role: ("vendor/main", False))

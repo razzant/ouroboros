@@ -337,7 +337,8 @@ def test_apply_settings_ignores_the_retired_review_models_key(monkeypatch):
                 "OUROBOROS_SUBAGENTS": packet_pool(["vendor/selected"])}
     apply_settings_to_env(settings)
     assert "OUROBOROS_REVIEW_MODELS" not in os.environ
-    assert [slot.model for slot in review_pool_slots()] == ["vendor/selected"]
+    assert [slot.model for slot in review_pool_slots(settings)] == ["vendor/selected"]
+    assert "OUROBOROS_SUBAGENTS" not in os.environ
 
 
 def test_apply_settings_ignores_the_retired_review_enforcement_key(monkeypatch):

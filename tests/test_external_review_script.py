@@ -23,6 +23,7 @@ from scripts.run_external_review import (
     _contributor_proposal,
     _contributor_result,
     _freeze_contributor_slots,
+    _frozen_pool_catalog,
     _openrouter_key_health,
     _openrouter_pool,
     _prepare_review_configuration,
@@ -221,8 +222,9 @@ def _contributor_fakes(module, monkeypatch, repo: Path, drive: Path) -> None:
     monkeypatch.setattr(module, "isolate_review_data", lambda **_kwargs: shared.isolation_record(drive))
     monkeypatch.setattr(module, "_load_settings_into_env", lambda: None)
     monkeypatch.setattr(module, "_apply_contributor_review_env", lambda: None)
-    monkeypatch.setattr(module, "_resolved_review_config",
-                        lambda *, profile="production_commit_gate": json.loads(json.dumps(shared.GOLDEN_CONFIG)))
+    monkeypatch.setattr(module, "_resolved_review_config",  # its frozen catalog resolves to the same
+                        lambda *, profile="production_commit_gate", catalog=None, view=None: json.loads(
+                            json.dumps(shared.GOLDEN_CONFIG)))
     monkeypatch.setattr(module, "_select_healthy_openrouter_key", lambda **_kwargs: None)
     # The gate's panel is the review pool: the golden's three seats as catalog rows.
     monkeypatch.setenv("OUROBOROS_SUBAGENTS", shared.golden_pool())
@@ -666,6 +668,170 @@ def test_contributor_result_is_decided_by_the_exit_code_alone():
     assert _contributor_result(3) == "INCOMPLETE"
 
 
+def test_a_pinned_fifty_row_panel_rides_no_environment_and_runs_as_it_was_resolved(tmp_path, monkeypatch):
+    """The pinned document is the panel in preparation and execution: never exported (a stale inherited copy
+    leaves too), resolved and frozen under explicit views, the freeze unshaken by an enclosing task's catalog."""
+    import scripts.run_external_review as module
+    from ouroboros import config as cfg
+    from ouroboros.reviewer_slot_config import review_pool_slots
+    from ouroboros.settings_integrity import SETTINGS_INTEGRITY_ENV, task_settings_scope, task_settings_snapshot
+
+    rows = [{"subagent_id": f"seat-{i:02d}", "recommended_use": f"{i} Рецензент 🦊 " * 30, "effort": "high",
+             "route": {"kind": "api_model", "target_id": f"openrouter::vendor/model-{i}"}, "delivery": "native",
+             "review_eligible": i % 2 == 0} for i in range(50)]
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": rows})}))
+    monkeypatch.setattr(module, "_keys_file", lambda: None)
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", settings)
+    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(settings))
+    monkeypatch.setenv(SETTINGS_INTEGRITY_ENV, hashlib.sha256(settings.read_bytes()).hexdigest())
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", json.dumps({"enabled": True, "items": []}))  # a stale inherited copy
+    module._load_settings_into_env()
+    assert "OUROBOROS_SUBAGENTS" not in os.environ
+    marked = [row["subagent_id"] for row in rows if row["review_eligible"]]
+    config = module._resolved_review_config(profile=module._CONTRIBUTOR_PROFILE)
+    assert [row["slot_id"] for row in config["pool_slots"]] == marked
+    elsewhere = task_settings_snapshot({"OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": rows[:1]})}, {})
+    with task_settings_scope(elsewhere):
+        frozen = module._freeze_contributor_slots(config)
+    assert frozen["pool_slots"] == config["pool_slots"]
+    with task_settings_scope(module._review_view(catalog=module._frozen_pool_catalog(frozen))):
+        assert [slot.slot_id for slot in review_pool_slots()] == marked
+        assert "OUROBOROS_SUBAGENTS" not in cfg.runtime_environ()
+
+
+def test_operator_preparation_keeps_the_whole_catalog_through_a_settings_save(tmp_path, monkeypatch):
+    """A native 500001-char admission cannot execute a replacement packet seat; unticked advisers survive too."""
+    import scripts.run_external_review as module
+    from ouroboros import config
+    from ouroboros.reviewer_slot_config import review_pool_rows
+    from ouroboros.settings_integrity import runtime_catalog_settings
+    from ouroboros.subagent_runtime import select_subagent_snapshot
+    from ouroboros.tools.commit_gate import preflight_reviewer_error
+    from tests.review_pool_rosters import pool_roster, pool_seat
+
+    path = tmp_path / "settings.json"
+    catalog = pool_roster(pool_seat("reader", "vendor/original", delivery="native"),
+                          pool_seat("adviser", "vendor/adviser", marked=False))
+    path.write_text(json.dumps({"OUROBOROS_SUBAGENTS": catalog}))
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(path))
+    monkeypatch.delenv("OUROBOROS_SETTINGS_SHA256", raising=False)
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
+    monkeypatch.setattr(module, "_keys_file", lambda: None)
+    monkeypatch.setattr(module, "_git_bytes", lambda _: b"x" * 500001)
+    monkeypatch.setattr(module, "_operator_reviewable_diff_chars", lambda _: 500001)
+    probes, executed = [], []
+
+    def fake_probe(**kwargs):
+        probes.append(kwargs)
+        path.write_text(json.dumps({"OUROBOROS_SUBAGENTS": pool_roster(pool_seat("packet", "vendor/new"))}))
+        monkeypatch.setenv("OPENROUTER_API_KEY", "test-selected-probe-key")
+
+    def fake_execution(*args, **kwargs):
+        executed.extend(review_pool_rows())
+        assert [r.slot_id for r in executed] == [r["slot_id"] for r in kwargs["resolved_config"]["pool_slots"]]
+        settings = runtime_catalog_settings()
+        assert settings["OUROBOROS_SUBAGENTS"] == catalog
+        adviser, _ = select_subagent_snapshot(settings, subagent_id="adviser")
+        assert adviser["route"]["target_id"] == "vendor/adviser"
+        assert preflight_reviewer_error("adviser") == ""
+        assert preflight_reviewer_error("packet")  # the replacement document never joins this run
+        assert config.runtime_setting("OPENROUTER_API_KEY") == "test-selected-probe-key"
+        assert "OUROBOROS_SUBAGENTS" not in config.runtime_environ()
+        return 0
+
+    monkeypatch.setattr(module, "_select_healthy_openrouter_key", fake_probe)
+    monkeypatch.setattr(module, "_operator_lane", fake_execution)
+    monkeypatch.setattr(module.sys, "argv", ["run_external_review.py", "--preflight-reviewer=adviser",
+                        f"--output={tmp_path / 'out'}", f"--drive-root={tmp_path / 'drive'}"])
+    assert module.main() == 0
+    assert probes and [r.slot_id for r in executed] == ["reader"]
+
+
+def test_the_operator_lane_keeps_its_panel_choice_without_exporting_it(tmp_path, monkeypatch):
+    """Unpinned, an explicit environment catalog wins over the document's as every key does, and a document without
+    one leaves the Main model reviewing alone, as before; the document's catalog is never exported."""
+    import scripts.run_external_review as module
+    from ouroboros import config as cfg
+    from tests.review_pool_rosters import pool_roster, pool_seat
+
+    settings = tmp_path / "settings.json"
+    document, operator = pool_roster(pool_seat("doc", "vendor/doc")), pool_roster(pool_seat("env", "vendor/env"))
+    settings.write_text(json.dumps({"OUROBOROS_SUBAGENTS": document}))
+    monkeypatch.setattr(module, "_keys_file", lambda: None)
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", settings)
+    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(settings))
+    monkeypatch.delenv("OUROBOROS_SETTINGS_SHA256", raising=False)
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
+    module._load_settings_into_env()
+    assert "OUROBOROS_SUBAGENTS" not in os.environ
+    assert [row["slot_id"] for row in _resolved_review_config()["pool_slots"]] == ["doc"]
+    settings.write_text(json.dumps({"OUROBOROS_SUBAGENTS": json.loads(document)}))
+    assert [row["slot_id"] for row in _resolved_review_config()["pool_slots"]] == ["doc"]
+    for invalid in ({}, False, 0):
+        settings.write_text(json.dumps({"OUROBOROS_SUBAGENTS": invalid}))
+        with pytest.raises(ValueError, match="OUROBOROS_SUBAGENTS"):
+            _resolved_review_config()
+    settings.write_text(json.dumps({"OUROBOROS_SUBAGENTS": document}))
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", operator)
+    assert [row["slot_id"] for row in _resolved_review_config()["pool_slots"]] == ["env"]
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS")
+    settings.write_text(json.dumps({}))
+    assert _resolved_review_config()["pool_slots"] == []
+
+
+@pytest.mark.parametrize("contents", [b"{broken", b"null", b"[]", b"\xff", None])
+def test_wrapper_refuses_unknown_unpinned_settings_before_review(tmp_path, monkeypatch, capsys, contents):
+    import scripts.run_external_review as module
+    from ouroboros import config
+
+    path = tmp_path / "settings.json"
+    if contents is None:
+        path.mkdir()  # A present path that cannot be opened as a settings file.
+    else:
+        path.write_bytes(contents)
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(path))
+    monkeypatch.delenv("OUROBOROS_SETTINGS_SHA256", raising=False)
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
+    monkeypatch.setattr(module, "_keys_file", lambda: None)
+    monkeypatch.setattr(module, "_select_healthy_openrouter_key", lambda **kw: pytest.fail("unknown panel must not probe"))
+    monkeypatch.setattr(module.sys, "argv", ["run_external_review.py", f"--output={tmp_path / 'out'}"])
+    assert module.main() == 3
+    assert "review configuration preflight failed: settings document" in capsys.readouterr().err
+    assert not (tmp_path / "out").exists()
+
+
+def test_wrapper_distinguishes_missing_explicit_and_frozen_catalogs(tmp_path, monkeypatch):
+    import scripts.run_external_review as module
+    from ouroboros import config
+    from ouroboros.reviewer_slot_config import review_pool_rows
+    from ouroboros.settings_integrity import task_settings_scope
+    from tests.review_pool_rosters import pool_roster, pool_seat
+
+    path = tmp_path / "settings.json"
+    monkeypatch.setattr(config, "SETTINGS_PATH", path)
+    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(path))
+    monkeypatch.delenv("OUROBOROS_SETTINGS_SHA256", raising=False)
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
+    monkeypatch.setattr(module, "_keys_file", lambda: None)
+    module._load_settings_into_env()
+    assert _resolved_review_config()["pool_slots"] == []  # genuinely missing, not an unreadable document
+    raw = pool_roster(pool_seat("saved", "codex=gpt-saved", kind="agent_session", profile_id="account-a", effort="high"))
+    path.write_text(json.dumps({"OUROBOROS_SUBAGENTS": raw}))
+    frozen = module._review_view()
+    path.write_text("{broken")
+    with task_settings_scope(module._review_view(pinned=frozen)):
+        [row] = review_pool_rows()
+        assert (row.slot_id, row.profile_id, row.effort) == ("saved", "account-a", "high")
+    # A genuine operator input is sufficient even when the saved catalog cannot be read.
+    monkeypatch.setenv("OUROBOROS_SUBAGENTS", raw)
+    module._load_settings_into_env()
+    assert [r["slot_id"] for r in _resolved_review_config()["pool_slots"]] == ["saved"]
+    assert os.environ["OUROBOROS_SUBAGENTS"] == raw
+
+
 def test_contributor_policy_preserves_configured_routes(monkeypatch):
     from tests.review_pool_rosters import pool_roster, pool_seat, set_review_pool
 
@@ -701,7 +867,8 @@ def test_contributor_policy_preserves_configured_routes(monkeypatch):
     frozen = _freeze_contributor_slots(config)
     assert frozen["execution_slot_config_source"] == "frozen_review_pool"
     assert len(frozen["slot_plan_sha256"]) == 64
-    pinned = json.loads(os.environ["OUROBOROS_SUBAGENTS"])["items"]
+    assert os.environ["OUROBOROS_SUBAGENTS"] == raw  # the freeze writes no environment
+    pinned = json.loads(_frozen_pool_catalog(frozen))["items"]
     assert [row["subagent_id"] for row in pinned] == ["session", "direct", "reader"]
     assert pinned[0]["route"] == {"kind": "agent_session", "target_id": "codex=gpt-5.6-sol",
                                   "credential_profile_id": "account-a"}
@@ -739,7 +906,7 @@ def test_agent_session_only_preflight_needs_no_api_budget_or_key(monkeypatch):
     with pytest.raises(RuntimeError, match="--attach-host-engine"):
         _prepare_review_configuration(args)
     args.attach_host_engine = True
-    proposal, resolved = _prepare_review_configuration(args)
+    proposal, resolved, _view = _prepare_review_configuration(args)
 
     assert proposal == {"base_sha": "a" * 40}
     assert resolved == config and resolved["data_isolation"] is isolation
@@ -1118,7 +1285,7 @@ def test_contributor_openrouter_preflight_fails_closed(monkeypatch):
 
     monkeypatch.setattr(module, "_openrouter_pool", lambda: [])
     with pytest.raises(RuntimeError, match="no OpenRouter key"):
-        _select_healthy_openrouter_key(required=True)
+        _select_healthy_openrouter_key(required=True, probe_models=["one"])
 
     monkeypatch.setattr(module, "_openrouter_pool", lambda: [("key", "secret")])
     monkeypatch.setattr(
@@ -1127,7 +1294,7 @@ def test_contributor_openrouter_preflight_fails_closed(monkeypatch):
         lambda _token, **_kwargs: (False, "model_probe_http_403"),
     )
     with pytest.raises(RuntimeError, match="no healthy OpenRouter key"):
-        _select_healthy_openrouter_key(required=True)
+        _select_healthy_openrouter_key(required=True, probe_models=["one"])
 
 
 def _persist_review_prompt(tmp_path, *, call_id: str, slot: dict):
@@ -1385,7 +1552,7 @@ def test_normal_key_probe_stays_single_model_but_contributor_probes_all(monkeypa
     import scripts.run_external_review as module
 
     calls: list[str] = []
-    monkeypatch.setattr(module, "_review_probe_models", lambda: ["one", "two", "three"])
+    models = ["one", "two", "three"]
     monkeypatch.setattr(
         module,
         "_probe_model_for_key",
@@ -1402,11 +1569,14 @@ def test_normal_key_probe_stays_single_model_but_contributor_probes_all(monkeypa
 
     monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: Response())
 
-    assert _openrouter_key_health("secret")[0] is True
+    assert _openrouter_key_health("secret", probe_models=models)[0] is True
     assert calls == ["one"]
     calls.clear()
-    assert _openrouter_key_health("secret", probe_all_models=True)[0] is True
+    assert _openrouter_key_health("secret", probe_all_models=True, probe_models=models)[0] is True
     assert calls == ["one", "two", "three"]
+    calls.clear()
+    assert _openrouter_key_health("secret", probe_models=[]) == (True, "limit_ok_no_probe_model")
+    assert calls == []
 
 
 def _git(repo: Path, *args: str) -> str:

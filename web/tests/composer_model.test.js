@@ -280,6 +280,11 @@ test('Search is a field in the row and its suggestions stand outside it: Main, t
     ]);
     assert.deepEqual(r.notes(), ['Recent', 'Sources']);
     assert.match(r.list().innerHTML, /<p class="chat-model-rule" role="presentation">Applies to new work here; running work keeps its model\.<\/p>$/);
+    // A press or a finger's scroll in the floating list is the capsule's own: the strip, the search and its hint stay.
+    const hint = r.el.querySelector('.ui-hint');
+    assert.equal(hint.hidden, false);
+    r.doc.fire('pointerdown', { target: r.list(), pointerType: 'touch' });
+    assert.deepEqual([r.el.dataset.open, r.el.dataset.search, hint.hidden], ['true', 'true', false]);
     // A source's own list, and the way back.
     await r.take('source:subscription:codex');
     assert.deepEqual(r.rows().map((row) => row.text), ['All sources Codex', 'gpt-6.1-sol Codex · subscription',

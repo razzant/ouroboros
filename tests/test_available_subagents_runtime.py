@@ -173,6 +173,50 @@ def test_snapshot_is_immutable_across_queue_persistence(monkeypatch, tmp_path):
     assert restored["parent_cognitive_route"]["model"] == "openai/parent"
 
 
+def test_rows_past_the_former_26_are_offered_whole_selected_exactly_and_never_retargeted(tmp_path):
+    """A 50-row catalog: every switched-on row is offered with its guidance whole; the 27th and the 50th are
+    selected by handle and by stored id alike, a switched-off one is refused as switched off; the snapshot
+    keeps its row through queue persistence and a later save that moves or removes that row."""
+    from ouroboros.configured_subagents import parse_configured_subagents, roster_handles
+    from ouroboros.subagent_runtime import (
+        SubagentSelectionError,
+        model_visible_subagent_catalog,
+        select_subagent_snapshot,
+    )
+    from supervisor import queue as task_queue
+
+    rows = [_api_row(f"row-{i}", model=f"openai/m-{i}") for i in range(50)]
+    rows[-1].update(subagent_id="z" * 64, recommended_use="Последняя строка: " + "длинное описание · " * 40)
+    for row in rows[3::7]:
+        row["enabled"] = False
+    settings = _settings(*rows)
+    handles = roster_handles(parse_configured_subagents(settings["OUROBOROS_SUBAGENTS"]), settings)
+    offered = model_visible_subagent_catalog(settings)["rows"]
+    assert [row["subagent_id"] for row in offered] == [handles[row["subagent_id"]] for row in rows if row.get("enabled", True)]
+    assert offered[-1]["recommended_use"] == rows[-1]["recommended_use"] and len(offered) == 50 - len(rows[3::7])
+    for row in (rows[26], rows[49]):
+        by_handle, _ = select_subagent_snapshot(settings, subagent_id=handles[row["subagent_id"]])
+        by_id, _ = select_subagent_snapshot(settings, subagent_id=row["subagent_id"])
+        assert by_handle["selected_subagent_id"] == by_id["selected_subagent_id"] == row["subagent_id"]
+        assert by_handle["route"]["target_id"] == row["route"]["target_id"]
+    with pytest.raises(SubagentSelectionError) as off:
+        select_subagent_snapshot(settings, subagent_id=rows[45]["subagent_id"])
+    assert off.value.code == "subagent_disabled"
+    snapshot = _snapshot(settings, rows[49]["subagent_id"])
+    pending = [{"id": "child50", "type": "task", "chat_id": 1, "text": "work", "delegation_role": "subagent",
+                "configured_subagent": snapshot, "_attempt": 1}]
+    task_queue.init(tmp_path)
+    task_queue.init_queue_refs(pending, {}, {"value": 0})
+    assert task_queue.persist_queue_snapshot(reason="test") is True
+    pending.clear()
+    assert task_queue.restore_pending_from_snapshot() == 1 and pending[0]["configured_subagent"] == snapshot
+    moved = _settings(*rows[:-1], {**rows[-1], "route": {"kind": "api_model", "target_id": "openai/elsewhere"}})
+    assert _snapshot(moved, rows[49]["subagent_id"])["route"]["target_id"] == "openai/elsewhere"
+    assert pending[0]["configured_subagent"]["route"]["target_id"] == "openai/m-49", "a taken snapshot is never retargeted"
+    with pytest.raises(SubagentSelectionError):
+        select_subagent_snapshot(_settings(*rows[:-1]), subagent_id=rows[49]["subagent_id"])
+
+
 def test_api_actor_dispatch_is_exact_recursive_route_without_slot_substitution(monkeypatch):
     from ouroboros.subagents import resolve_subagent_dispatch
     import ouroboros.provider_models as provider_models

@@ -79,6 +79,52 @@ def test_live_off_refuses_schedule_and_session_but_same_task_review_runs(monkeyp
         assert len(started) == 3
 
 
+def test_a_failed_catalog_read_is_unknown_at_both_admission_consumers_then_recovers(monkeypatch):
+    from ouroboros.settings_integrity import actor_settings_snapshot
+    from ouroboros.tools import control_scheduling, delegate
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    values = configured()
+    task = {"id": "parent", "project_id": "alpha"}
+    frozen = snapshot(task)
+    config.SETTINGS_PATH.write_text('{broken')
+    failed = actor_settings_snapshot(runtime.apply_task_start_settings_or_disclose(
+        "broken", lambda *a, **k: None), task, config.DATA_DIR)
+    ctx = ToolContext(repo_dir=config.REPO_DIR, drive_root=config.DATA_DIR, task_id="parent")
+    ctx.task_metadata = {"project_id": "alpha"}
+    registry = ToolRegistry(repo_dir=config.REPO_DIR, drive_root=config.DATA_DIR)
+    registry.set_context(ctx)
+    monkeypatch.setattr(delegate, "_delegate_start", lambda *a, **k: pytest.fail("no physical start in this probe"))
+
+    def admissions():
+        return [runtime.exact_start(ctx, "work", {"subagent_id": "session"}).text,
+                registry.execute_result("schedule_subagent", {
+                    "subagent_id": "critic", "objective": "Check", "expected_output": "Findings"}).text]
+
+    with task_settings_scope(failed):
+        for text in admissions():
+            assert "subagent_catalog_unknown" in text and "not valid JSON" in text
+    recovered = json.loads(values["OUROBOROS_SUBAGENTS"])
+    for row in recovered["items"]:
+        row["route"]["target_id"] += "-recovered"
+    values["OUROBOROS_SUBAGENTS"] = json.dumps(recovered)
+    config.SETTINGS_PATH.write_text(json.dumps(values))  # a repair restores a readable document
+    selected = []
+    real_select = runtime.select_subagent_snapshot
+
+    def observe(settings, **kwargs):
+        selected.append(real_select(settings, **kwargs)[0]["route"]["target_id"])
+        raise runtime.SubagentSelectionError("probe_stopped_after_selection", "No dispatch")
+
+    monkeypatch.setattr(runtime, "select_subagent_snapshot", observe)
+    monkeypatch.setattr(control_scheduling, "select_subagent_snapshot", observe)
+    for view, suffix in ((failed, "-recovered"), (frozen, "")):
+        with task_settings_scope(view):
+            for text in admissions():
+                assert "probe_stopped_after_selection" in text
+        assert selected[-2:] == ["codex=gpt-5.6-sol" + suffix, "openai::old" + suffix]
+
+
 @pytest.mark.parametrize("task", [
     {"type": "evolution", "metadata": {"work_kind": "owner"}},
     {"metadata": {"evolution_root_task_id": "evolve", "work_kind": "owner"}},

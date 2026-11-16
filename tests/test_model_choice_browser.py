@@ -172,6 +172,13 @@ def _capsule_walk(page, tag: str) -> None:
     still(listed, closed, "the search and its list open")
     assert listed["search"] == "true" and listed["listInside"] and listed["listOverRow"], (tag, "the list floats above the row, on screen", listed)
     assert listed["rows"] >= 5, (tag, "Main, then the sources", listed)
+    # A press in the floating list (its rule line chooses nothing) is the capsule's own: the search and its hint stay.
+    rule = page.locator(".ui-popup.chat-model-list .chat-model-rule")
+    rule.tap() if tag.endswith("phone") else rule.click()
+    page.wait_for_timeout(200)
+    kept = page.evaluate("() => { const m = document.querySelector('#chat-model-mode');"
+                         " return [m.dataset.open, m.dataset.search, m.querySelector('.ui-hint').hidden]; }")
+    assert kept == ["true", "true", False], (tag, "a press in its own list keeps the capsule's hint", kept)
 
     page.fill("#chat-model-mode .chat-model-query", "model-1")
     page.wait_for_function("() => document.querySelectorAll('.ui-popup.chat-model-list .chat-model-row').length >= 60", timeout=10_000)

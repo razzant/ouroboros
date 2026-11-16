@@ -6,13 +6,12 @@ import json
 from ouroboros.claudexor_observations import quota_availability, resource_rows, subject_rows
 from ouroboros.configured_subagents import roster_handles
 from ouroboros.subagent_runtime import (
-    SubagentSelectionError, effective_runtime_subagent_settings, offered_subagents, resolve_configured_row,
+    SubagentSelectionError, runtime_subagent_settings, offered_subagents, resolve_configured_row,
 )
 
 
 def inspect_subagent(subagent_id: str, *, request_kind: str = "text", drive_root=None) -> dict:
     """Saved row intent and independently dated observations, never selection policy."""
-    from ouroboros.config import runtime_settings
     from ouroboros.gateway.claudexor_passive import _quota_payload
     from ouroboros.provider_models import parse_claudexor_model, provider_for_model
     from ouroboros.route_spec import model_named_effort, route_spec_dict
@@ -20,7 +19,7 @@ def inspect_subagent(subagent_id: str, *, request_kind: str = "text", drive_root
 
     if request_kind not in ("text", "image"):
         raise ValueError("request_kind must be text or image")
-    settings = effective_runtime_subagent_settings(runtime_settings())
+    settings = runtime_subagent_settings()
     resolution = offered_subagents(settings)
     if resolution.config is None:
         raise SubagentSelectionError("subagent_catalog_unavailable", "This task has no readable configured catalog")
