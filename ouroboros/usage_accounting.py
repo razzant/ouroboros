@@ -1060,7 +1060,8 @@ def _transition_once(reservation: AttemptReservation, state: str, **fields: Any)
             raise_group_refusal(view, scope)
         replaced = {"seq", "ts", "revision", "pre_compaction_seq", "settle_reason", "reason"}
         if state == "settled":
-            replaced.update(("effort", "effort_resolution", "processing", "speed", "service_tier", "cost_basis", "cost_evidence"))
+            replaced.update(("effort", "effort_resolution", "processing", "speed", "service_tier", "cost_basis",
+                             *(("cost_evidence",) if "cost_evidence" in fields else ())))  # A close keeps pre-send facts.
             if "effort" not in fields and isinstance(current.get("effort"), dict):  # Keep candidate facts, not older observations.
                 fields["effort"] = {**current["effort"], "reported": None, "report_source": None}
         row = {key: value for key, value in current.items() if key not in replaced}
@@ -1156,6 +1157,7 @@ def terminalize_abandoned_attempt(
     ``expected_revision`` (or the row's ``expected_seq``) that no longer matches
     leaves a concurrent settlement authoritative. A late real receipt may
     replace this administrative settlement; unknown price stays non-final.
+    Without usage the row keeps its reserved evidence (a pinned tariff) for it.
     """
     normalized = dict(usage or {})
     measured = any(_reported_token_count(normalized, *keys) for keys in (

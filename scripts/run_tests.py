@@ -56,13 +56,6 @@ def _cpu_default() -> int:
     return physical or os.cpu_count() or 1
 
 
-def _admission():
-    """xdist's CPU default within the physical and inherited allocation, minus what other runs hold."""
-    from ouroboros.test_parallelism import admission
-
-    return admission(_cpu_default())
-
-
 def _pass_slots(argv: list[str], workers: int) -> int:
     """The slots one pass really uses, for its ledger row: the admitted workers for an xdist pass (`-n`), a Node
     lane's `--test-concurrency` or the warm's `--workers` within them, one for the one-process pass."""
@@ -74,10 +67,6 @@ def _pass_slots(argv: list[str], workers: int) -> int:
         if arg == "--workers" and index + 1 < len(argv) and argv[index + 1].isdecimal():
             return min(int(argv[index + 1]), workers)
     return 1
-
-
-def _workers() -> int:
-    return _admission().workers
 
 
 def point_at_durations() -> None:
@@ -114,7 +103,9 @@ def battery_commands() -> list[tuple[str, list[str]]]:
     ]
 
 
-def _run(label: str, argv: list[str], cwd: pathlib.Path, node: str = "") -> int:
+def _run(label: str, argv, cwd: pathlib.Path, node: str = "") -> int:
+    """``argv``: the pass's command, or a function of the ``Admission`` its one reservation took (after any wait for
+    memory) that returns it: a pass sized by its workers or recording its admission reads nothing earlier."""
     from ouroboros.preflight_node import node_environment
     from ouroboros.process_containment import ProcessContainer
     from ouroboros.test_parallelism import NESTED_WORKERS_ENV, bounded_test_command, reserve
@@ -124,11 +115,23 @@ def _run(label: str, argv: list[str], cwd: pathlib.Path, node: str = "") -> int:
     for key in _OUTER_WORKER_KEYS:  # a battery is a run of its own, never a worker of the session that started it
         env.pop(key, None)
     # One reservation under the ledger's lock: the admission, and this pass's row holding what the pass uses.
-    admitted, lease = reserve(f"run_tests.py {label}", _cpu_default(),
-                              slots=lambda admitted: _pass_slots(argv, admitted.workers))
+    # Under critical memory pressure it waits first, saying so here. An interrupt then cancels the whole run, not
+    # this pass: no caller's continuation (a warm decides nothing, --keep-going) may start the next pass's wait.
+    built = []
+
+    def slots(admitted) -> int:  # called once, under the ledger lock, with the admission reserve returns
+        built.append(argv(admitted) if callable(argv) else argv)
+        return _pass_slots(built[-1], admitted.workers)
+
+    try:
+        admitted, lease = reserve(f"run_tests.py {label}", _cpu_default(), slots=slots,
+                                  say=lambda text: print(f"=== {label}: {text}", flush=True))
+    except KeyboardInterrupt:
+        print(f"=== {label}: interrupted before it started; the run ends with exit 130", flush=True)
+        raise SystemExit(130) from None
     env["PYTEST_XDIST_AUTO_NUM_WORKERS"] = str(admitted.workers)
     env[NESTED_WORKERS_ENV] = env["PYTEST_XDIST_AUTO_NUM_WORKERS"]
-    argv = bounded_test_command(argv, env)
+    argv = bounded_test_command(built[-1], env)
     print(f"\n=== {label}: {shlex.join(argv[2:] if argv[0] == sys.executable else argv)}", flush=True)
     if disclosure := admitted.host.disclosure():
         print(f"=== {label}: {admitted.workers} worker(s); {disclosure}", flush=True)
@@ -186,7 +189,8 @@ def _warm_bytecode(files=(), evidence=None) -> None:
     if files:
         files_from = pathlib.Path(evidence) / "warm-files.txt"
         files_from.write_text("\n".join(files) + "\n", encoding="utf-8")
-    if code := _run("warm", command(sys.executable, REPO, workers=_workers(), files_from=files_from), REPO):
+    if code := _run("warm", lambda admitted: command(sys.executable, REPO, workers=admitted.workers,
+                                                     files_from=files_from), REPO):
         print(f"=== warm: exit {code} decides nothing; the passes run cold", flush=True)
 
 
@@ -214,13 +218,13 @@ def _node_lane() -> tuple[int, str]:
     # Named, never silent; another version means no copy of the pin was found (bundled, prepared or carried).
     print(f"=== node: {node} v{version}" + (f", not the reviewed Node {pinned}" if pinned and version != pinned
                                             else ""), flush=True)
-    argv = [node, "--test", NODE_TEST_TIMEOUT_FLAG, f"--test-concurrency={_workers()}", *files]
-    return _run("node", argv, REPO / WEB_DIR, node), node
+    return _run("node", lambda admitted: [node, "--test", NODE_TEST_TIMEOUT_FLAG,
+                                          f"--test-concurrency={admitted.workers}", *files], REPO / WEB_DIR, node), node
 
 
 def _selected(args, evidence) -> int:
     from ouroboros.preflight_inventory import inventory_problem, launch_args, read_inventory, selection_passes
-    from ouroboros.preflight_probe import install_worker_probe, probe_dir
+    from ouroboros.preflight_probe import probe_dir, record_admission, write_worker_probe
     from ouroboros.test_selection import select_tests
 
     try:
@@ -254,10 +258,12 @@ def _selected(args, evidence) -> int:
     completed = False
     os.environ["PYTHONPATH"] = os.pathsep.join(filter(None, (str(probe_dir(root)), previous)))
     try:
-        probe = install_worker_probe(root)
+        probe = write_worker_probe(root)  # its admission is the one its pass reserves
         for spec in selection_passes(selection, probe_module=probe, temp_root=root) if code == 0 or args.keep_going else []:
             command = [sys.executable, "-m", "pytest", *launch_args(spec.args),
                        "--ci-evidence-dir", str(root / spec.label)]
+            if probe in command:
+                command = lambda admitted, command=command: record_admission(root, admitted) or command  # noqa: E731
             code = _run(spec.label, command, REPO, *carried)
             inventory, problem = read_inventory(root, spec.label)
             record["inventory"][spec.label] = inventory

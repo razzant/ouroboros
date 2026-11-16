@@ -892,7 +892,8 @@ class SettingsMeta(SettingsNetworkMeta, SettingsTiming, total=False):
     restart_state: SettingsRestartState
     connections: list[Dict[str, Any]]  # every API connection as the picker shows it (provider_connections.connections_meta)
     main_connection_choice: list[str]  # the connections an unauthored Main waits to be chosen among (server_runtime)
-    known_spend_gaps: list[str]  # what spends money the limits cannot count: no known price (pricing.known_spend_gaps)
+    known_spend_gaps: list[str]  # what spends money the limits cannot count: no known price (pricing.spend_coverage)
+    partly_counted_spend: list[Dict[str, str]]  # {name, condition}: counted only under a price condition (the same)
 
 
 class SettingsSaveResponse(SettingsReceipt, total=False):
@@ -1419,6 +1420,7 @@ class OnboardingSubagentsPreviewResponse(TypedDict):
     model_settings: Dict[str, Any]  # the model setting keys the draft would save
     available_subagents: Dict[str, Any]
     known_spend_gaps: List[str]  # what the draft's limits cannot count, as GET /api/settings names it after a save
+    partly_counted_spend: List[Dict[str, str]]  # what they count only under a price condition, the same way
     source: str
     diagnostics: list[Dict[str, Any]]
 

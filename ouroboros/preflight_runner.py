@@ -1324,13 +1324,21 @@ def _run_hermetic_pytest(
     selection, subject, inventory, lease = None, None, {}, None
     try:
         from ouroboros.test_evidence import DURATIONS_POINTER, EVIDENCE_POINTER
-        from ouroboros.test_parallelism import reserve
+        from ouroboros.test_parallelism import WaitStopped, reserve
+        from ouroboros.tools.shell_process import turn_control_reader
         (temp_root / EVIDENCE_POINTER).write_text(str(evidence["path"]), encoding="utf-8")
         if (durations := _durations_target(ctx)) is not None:  # every session of this gate keeps it current
             (temp_root / DURATIONS_POINTER).write_text(str(durations), encoding="utf-8")
         # One reservation under the ledger's lock: the admission and this run's row, which stays leased in the
-        # host ledger until the run ends, whatever the verdict.
-        admitted, lease = reserve("hermetic gate")
+        # host ledger until the run ends, whatever the verdict. A wait for critical memory pressure comes first:
+        # its dated readings on the gate's stderr, the owner's words on the progress line; Stop ends it, no verdict.
+        progress = getattr(ctx, "emit_progress_fn", None) or (lambda _text: None)
+        try:
+            admitted, lease = reserve("hermetic gate", say=lambda text: print(
+                f"PREFLIGHT_MEMORY_WAIT {text}", file=sys.stderr, flush=True),
+                tell=lambda text: progress(f"Tests preflight {text}"), stop=turn_control_reader(ctx))
+        except WaitStopped as stopped:
+            return f"⚠️ PRE_PUSH_TEST_ERROR: {stopped}; no tests ran"
         # Install before compiling specs: -p must name the actual nonce module.
         probe_module = install_worker_probe(temp_root, admitted)
         evidence["workers"] = recorded_admission(temp_root)

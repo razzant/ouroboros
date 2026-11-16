@@ -5,7 +5,7 @@ never stops a run: the machine's free memory, and on macOS its kernel's critical
 pressure verdict, is the signal. This is supervision, not an OS memory/PID/
 file-descriptor quota. Rapid growth between samples can outrun it, a host too
 loaded to run its probes skips the stop loudly, and an unreadable macOS pressure
-level reads as normal.
+level is unknown: it stops nothing.
 """
 from __future__ import annotations
 
@@ -117,7 +117,7 @@ def stop_reason(total: int, memory, *, floor: int) -> str:
         return ""
     if memory.available_bytes < memory.reserve_bytes:
         return "machine under its reserve and tree past its admitted size"
-    if memory.pressure:
+    if memory.pressure is True:
         return "kernel reports critical memory pressure and tree past its admitted size"
     return ""
 

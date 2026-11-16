@@ -620,8 +620,10 @@ export function createComposerOwnerControls({ row, byId, apiFetch, saveEffortRan
         if (!(room > 0) || !wraps()) return;  // not laid out (the unit-test DOM), or the line holds
         // A capsule wider than the line is held to it (max-width): its own content's width is what must give way.
         const natural = (kid) => Math.max(widthOf(kid), Number(kid.scrollWidth) || 0);
-        // A gap stands between every child the row lays out, an empty slot (the chips') included.
-        const laidOut = () => Array.from(row.children || []).filter((kid) => (kid.getClientRects?.().length ?? 1) > 0).length;
+        // A gap stands between every child the row lays out, an empty one included; the chips' slot, empty or not, gives
+        // the row its gap back (style.css: its negative start margin), so the chips take only the room the capsules leave.
+        const laidOut = () => Array.from(row.children || []).filter((kid) => (kid.getClientRects?.().length ?? 1) > 0
+            && !kid.hasAttribute?.('data-composer-chips')).length;
         const over = () => shownKids().reduce((sum, kid) => sum + natural(kid), 0)
             + px(rowStyle?.columnGap) * Math.max(0, laidOut() - 1) - room + 1;  // 1 px of slack
         const valueWidth = (capsule) => widthOf(capsule.el.querySelector('.chat-capsule-value'));

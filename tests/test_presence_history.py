@@ -26,6 +26,7 @@ from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.place_arrivals import reading_key
 from ouroboros.presence_bindings import conversation_key
 from ouroboros.presence_runner import _stable_numeric_id, presence_turn_task_id
+from tests.conversation_carrier_support import lone_host_world as lone_host_world  # noqa: F401 -- fixture
 
 KEY = conversation_key("chat", "a", "r", "")
 CHAT = _stable_numeric_id("presence-conversation", KEY)
@@ -54,7 +55,7 @@ def body(*records, import_id="imp_test"):
 
 
 @pytest.fixture
-def room(tmp_path, monkeypatch):
+def room(tmp_path, monkeypatch, lone_host_world):  # its Hosts serve alone over tmp_path
     place = p.connect_place(tmp_path, connector="bridge", provider="chat", account_id="a", conversation_id="r",
                             wakes=["mention"])
     monkeypatch.setattr("ouroboros.presence_admission.focus_enabled", lambda _root: True)
@@ -743,6 +744,7 @@ def test_a_stored_order_cursor_after_the_first_import_asks_for_a_fresh_read(room
         assert [row["text"] for row in fresh["messages"]][0] == "message 1000"
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over tmp_path; its runner leaves with it
 def test_a_live_capture_under_an_earlier_binding_is_judged_by_its_frozen_identity(tmp_path, monkeypatch):
     """The Hub's case. A migrated place keeps its legacy binding id, so importing an event captured live
     under that binding answers ``duplicate, custody: live``. A room reconnected as a new place has a new

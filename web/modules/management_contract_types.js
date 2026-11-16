@@ -715,6 +715,7 @@
  * @property {*=} processing
  * @property {boolean=} use_local
  * @property {ModelPrice=} price  OpenRouter rows only, when the catalog states a whole token price (llm_pricing.openrouter_catalog_price)
+ * @property {string=} price_condition  DeepSeek rows whose published entry prices them only off-peak in USD: `off_peak_usd`
  */
 
 /**

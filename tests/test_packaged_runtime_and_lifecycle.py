@@ -898,7 +898,7 @@ def test_cancelling_a_subagent_rescues_its_partial_result(monkeypatch, tmp_path)
     )
     worker = types.SimpleNamespace(wid=0, proc=proc, busy_task_id="live-salvage", reaping=False)
     monkeypatch.setattr(workers, "WORKERS", {0: worker}, raising=False)
-    monkeypatch.setattr(workers, "respawn_worker", lambda wid: None, raising=False)
+    monkeypatch.setattr(workers, "respawn_worker", lambda wid, **_kwargs: None, raising=False)
     monkeypatch.setattr(
         "ouroboros.platform_layer.kill_pid_tree",
         lambda *a, **k: state.__setitem__("alive", False),
@@ -1005,7 +1005,7 @@ def test_cancelling_a_subagent_preserves_the_full_output_on_the_canonical_drive(
     )
     worker = types.SimpleNamespace(wid=0, proc=proc, busy_task_id=task_id, reaping=False)
     monkeypatch.setattr(workers, "WORKERS", {0: worker}, raising=False)
-    monkeypatch.setattr(workers, "respawn_worker", lambda wid: None, raising=False)
+    monkeypatch.setattr(workers, "respawn_worker", lambda wid, **_kwargs: None, raising=False)
     monkeypatch.setattr(
         "ouroboros.platform_layer.kill_pid_tree",
         lambda *a, **k: state.__setitem__("alive", False),

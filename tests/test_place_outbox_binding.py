@@ -275,3 +275,60 @@ def test_opaque_primary_lookup_keeps_declared_destination_hold(client, tmp_path,
     assert not place_guard.dispatch_refusal(ctx, name, args, ext_tool=tool)
     assert bind(client, conversation_id="").json()["allowed"]
     assert check(client, captured, conversation_id="").json()["allowed"]
+
+
+_V1_KEYS = {"version", "connector", "provider", "account_id", "conversation_id", "thread_id", "place_id", "connected_revision"}
+
+
+@pytest.mark.parametrize("account_wide", [True, False], ids=["account-wide", "narrow-only"])
+def test_an_exact_binding_has_no_account_or_unknown_fallback(client, tmp_path, account_wide):
+    """match=exact: an account-wide Paused place or an unknown address inside narrow places is no binding of an extra
+    address constraint; no naming place is a confirmed unbound v1 snapshot (allowed), or place_not_connected under
+    require_place. Without the parameter the scope lookup answers as before (negative control)."""
+    if account_wide:
+        places.connect_place(tmp_path, connector="connector", provider="service", account_id="C", state="paused")
+    places.connect_place(tmp_path, connector="connector", provider="service", account_id="C", conversation_id="other",
+                         state="silent")
+    scope = bind(client).json()
+    assert not scope["allowed"] and scope["code"] == ("place_paused" if account_wide else "place_unattributable")
+    exact = bind(client, match="exact").json()
+    assert (exact["allowed"], exact["state"], exact["binding"]["place_id"]) == (True, "unbound", "")
+    assert set(exact["binding"]) == _V1_KEYS, "the snapshot stays v1 byte for byte"
+    assert check(client, exact["binding"], match="exact").json()["allowed"]
+    required = bind(client, match="exact", require_place="true").json()
+    assert (required["allowed"], required["binding"], required["code"]) == (False, None, "place_not_connected")
+
+
+def test_an_exact_casefold_binding_meets_a_place_connected_before_delivery(client, tmp_path):
+    """A Paused place naming the address in another case, connected after the unbound bind and before delivery, holds
+    the exact_casefold check; ``exact`` keeps the stored spelling (the consumer checks with the mode it bound)."""
+    captured = bind(client, match="exact_casefold").json()
+    assert captured["allowed"] and captured["binding"]["place_id"] == ""
+    places.connect_place(tmp_path, connector="connector", provider="service", account_id="", conversation_id="THREAD",
+                         state="paused")
+    held = check(client, captured["binding"], match="exact_casefold").json()
+    assert (held["allowed"], held["code"]) == (False, "place_paused")
+    assert check(client, captured["binding"], match="exact").json()["allowed"]
+
+
+def test_an_exact_binding_rechecks_its_place_by_the_exact_predicate(client, tmp_path):
+    """A bound naming place is rechecked as naming the conversation by its own primary or destination scope: renamed
+    away it is a scope change even beside an account-wide Active place; disconnect keeps its own code."""
+    places.connect_place(tmp_path, connector="connector", provider="service", account_id="C")
+    named = places.connect_place(tmp_path, connector="connector", provider="service", account_id="C",
+                                 conversation_id="thread")
+    captured = bind(client, match="exact").json()
+    assert captured["allowed"] and captured["binding"]["place_id"] == named.place_id
+    assert check(client, captured["binding"], match="exact").json()["allowed"]
+    places._write(tmp_path, named.place_id, lambda row: replace(row, conversation_id="elsewhere"))
+    changed = check(client, captured["binding"], match="exact").json()
+    assert (changed["allowed"], changed["code"]) == (False, "place_scope_changed")
+    places.edit_place(tmp_path, named.place_id, "disconnect", author="owner")
+    assert check(client, captured["binding"], match="exact").json()["code"] == "place_disconnected"
+
+
+@pytest.mark.parametrize("values", [{"match": "fuzzy"}, {"match": "exact", "conversation_id": ""},
+                                    {"match": "exact_casefold", "conversation_id": ""}])
+def test_an_unknown_mode_or_an_exact_one_without_its_conversation_is_rejected(client, values):
+    response = bind(client, **values)
+    assert response.status_code == 400 and response.json()["code"] == "place_binding_invalid"

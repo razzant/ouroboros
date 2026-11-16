@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.13
+version: 1.4.15
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -70,18 +70,82 @@ question carry ordinary references.
 
 Mirrored messages, files, cards and their updates leave through one outbox that
 survives restarts (`outbox/` in this skill's state): each is saved before it is sent
-or waits, and nothing that could not be saved is sent. One that never left this
+or waits, and nothing that could not be saved is sent; what waits is bounded (500
+messages, 256 MiB), and one that does not fit is not sent. One that never left this
 computer, because Telegram or its proxy could not be reached, waits there and goes out
 by itself when Telegram answers, as does one Telegram's flood control asked to send
 later; while the outbox runs, nothing mirrored after it overtakes it, and a long
 message continues from its first part that did not arrive. When the answer is lost
 after a request was sent (a timeout, a dropped connection, a server error), the
 message or edit may already be on the phone, so nothing is sent again for it. One
-still waiting after a day is dropped. Delivery, in this skill's Telegram settings,
-counts what waits and what recently may not have arrived, was refused or dropped,
-never its words, and says when the outbox cannot save. Completion notices keep their
-own retry; the bot's replies to commands, typing and `/panic` are sent once, as
-before.
+still waiting after a day is no longer sent, nor one that mirroring settings changed to
+leave out while it waited. Delivery, in this skill's Telegram settings, says what waits and
+whether the outbox can save; Delivery issues lists each recent one whose delivery was not
+confirmed (without a clear answer it may still have arrived), never its words: when, what,
+from which room, how many parts arrived, what happened, and where its content is: in the
+app, or kept on this computer as its only copy (a document whose task file is gone keeps its
+message and the file's reference). Progress, routing and subagent notes are never kept. Kept
+copies have no bound of their own, so no only copy is dropped to make room: their list starts
+with the space they take (they can fill the disk, and a message a full disk cannot save is not
+sent), and a saved file the outbox could not remove is listed there too. A kept copy is never
+sent again and stays until the owner ticks the box and presses Delete copies, which deletes
+exactly the ids its own field lists (names are never read back); one kept later stays, and a
+deleted copy's outcome stays listed. After a deletion that field is empty until the page is
+opened again. Completion notices keep their own retry; the bot's replies to commands, typing
+and `/panic` are sent once, as before.
+
+Before a body rollback or skill downgrade to native Telegram 1.4.14 or older,
+export needed kept copies with the recipe below and verify the saved artifacts.
+The older outbox does not honor `held` and can delete these only copies; rollback
+does not guarantee their retention.
+
+To give the owner a kept copy, save it as this task's file: never send it through
+Telegram, `send_file`, `send_photo` or `send_video`, and never paste a kept message's words
+into a reply. Run the script below with `run_script(script=…, cwd="task_drive", args=["<id>",
+"<name>"], outputs=["<name>"])`: `<id>` as Kept copies lists it (a record id or a `stray-` handle),
+`<name>` a plain file name. By default it saves the file's bytes regardless of extension,
+including `.txt`; a message without a file saves its words as UTF-8. To choose explicitly,
+append `"bytes"` or `"words"` as the third argument. `words` saves the message text or a
+photo's, video's or file's caption, not the file content. A reference-only file refuses
+byte extraction; its caption needs explicit `words`. Output reports the file name, size,
+SHA-256 and `words`: true when words were saved, false for file bytes. Give the owner the
+file's address `/api/tasks/<task id>/artifacts/<name>`. Your words with that address are
+mirrored as usual; the copy is not. Run it from a task whose `runtime_data` is this
+installation's (its `task_drive` is `runtime_data/task_drives/<task id>`).
+
+<!-- telegram-kept-copy-recipe -->
+```python
+import base64, hashlib, json, pathlib, sys
+copy_id, name = sys.argv[1], sys.argv[2]
+outbox = pathlib.Path.cwd().resolve().parents[1] / "state" / "skills" / "telegram" / "outbox"
+handle = lambda path: "stray-" + hashlib.sha256(path.name.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+found = [path for path in outbox.glob("*.event.json") if copy_id in (path.name[:-len(".event.json")], handle(path))]
+if pathlib.Path(name).name != name or len(found) != 1:
+    sys.exit(f"No kept copy {copy_id!r} in {outbox}, or {name!r} is not a plain file name.")
+event = json.loads(found[0].read_bytes())
+blob = next((event[key] for key in ("image_base64", "video_base64", "file_base64") if event.get(key) is not None), None)
+mode = sys.argv[3] if len(sys.argv) > 3 else ("bytes" if blob is not None or event.get("file_ref") else "words")
+if mode not in ("bytes", "words"):
+    sys.exit("Choose bytes or words as the third argument.")
+if mode == "bytes" and blob is None:
+    sys.exit(f"This copy holds no bytes, only its task file's reference: {json.dumps(event['file_ref'])}"
+             if event.get("file_ref") else "This copy holds no file bytes; use words for its message.")
+options = [o if isinstance(o, dict) else {"label": o} for o in event.get("options") or []]
+notice = event.get("completion_notice") if isinstance(event.get("completion_notice"), dict) else {}
+relay = event.get("relay") if isinstance(event.get("relay"), dict) else {}
+quotes = [quote.get("text") for quote in relay.get("quotes") or [relay] if isinstance(quote, dict)]
+words = [*quotes, event.get("text") or event.get("question") or event.get("title"), event.get("caption"),
+         notice.get("detail"), notice.get("review_gate"), notice.get("salvage"),
+         *(" — ".join(filter(None, (str(o.get("label") or ""), str(o.get("detail") or "")))) for o in options),
+         event.get("stake"), event.get("assumption"), event.get("host_facts"),
+         *(f"{a.get('label', '')} — {a.get('url', '')}" for a in event.get("actions") or [] if isinstance(a, dict))]
+text = "\n".join(str(word) for word in words if word)
+data = base64.b64decode(blob, validate=True) if mode == "bytes" else text.encode("utf-8")
+pathlib.Path(name).write_bytes(data)
+print(json.dumps({"file": name, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest(),
+                  "words": mode == "words"}))
+```
+<!-- /telegram-kept-copy-recipe -->
 
 A derived reference map that cannot be saved only warns, blocking no owner message
 or later outbound part. Completion notifications

@@ -225,6 +225,7 @@
  * @property {{kind:string,name:string,label:string,builtin:boolean,enabled:boolean,configured:boolean,source:string,id:string,display:string}[]=} connections Every API connection as the picker shows it.
  * @property {string[]=} main_connection_choice The connections an unauthored Main waits to be chosen among.
  * @property {string[]=} known_spend_gaps What spends money the limits cannot count: roles whose route has no known price.
+ * @property {Array<{name: string, condition: string}>=} partly_counted_spend What they count only under a price condition (`off_peak_usd`, `usd`).
  */
 
 /**

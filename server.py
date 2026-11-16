@@ -14,6 +14,10 @@ import uuid
 # settled; an explicit value wins, and APP_ROOT alone never silently leaves historical memory (#1239).
 from ouroboros.launch_roots import enter_direct, same_location  # noqa: E402 — standard library only
 os.environ.update(enter_direct(os.path.dirname(os.path.abspath(__file__))))
+# Protect Python import diagnostics too. Only the forkserver's preload stays thread-free (it forks
+# every pool child); a spawned child, the event-bus manager's included, relays from here.
+from ouroboros.process_logging import _install_output_relay, preloading_forkserver  # noqa: E402
+_install_output_relay(start_thread=not preloading_forkserver())
 from ouroboros.utils import read_json_dict as read_json_dict, utc_now_iso  # noqa: E402
 from typing import Any, Dict, Optional
 

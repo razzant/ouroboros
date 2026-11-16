@@ -6,9 +6,9 @@ share. A reading carries the host reserve (``config.HOST_MEMORY_RESERVE_FRACTION
 room above it; each caller keeps its decision. Only macOS's fixed physical total is cached per process.
 
 macOS: ``hw.memsize``, free + inactive + speculative pages from ``vm_stat``, and the kernel's
-pressure level, of which only critical counts. Linux: ``/proc/meminfo`` within every memory limit
-on this process's own cgroup path, v2 and v1 alike (inside a container MemTotal and MemAvailable
-are the host's). Windows: ``psutil``; Job object and commit limits are not read. ``None`` means
+pressure level, of which only critical counts (unreadable: unknown). Linux: ``/proc/meminfo`` within
+every memory limit on this process's own cgroup path, v2 and v1 alike (inside a container MemTotal and
+MemAvailable are the host's). Windows: ``psutil``; Job object and commit limits are not read. ``None`` means
 unknown: an unsupported platform, a failed probe, or a limit that exists but cannot be read.
 """
 from __future__ import annotations
@@ -34,7 +34,9 @@ _UNLIMITED = 2 ** 62
 class MemorySnapshot:
     total_bytes: int
     available_bytes: int
-    pressure: bool = False  # the kernel itself reports memory pressure (macOS)
+    # The macOS kernel's own verdict: True critical, False not (normal, warn; Linux and Windows read none),
+    # None when the level could not be read: unknown, never normal, and no consumer reads it as critical.
+    pressure: Optional[bool] = False
 
     @property
     def reserve_bytes(self) -> int:
@@ -55,16 +57,16 @@ def _native_output(argv: Sequence[str]) -> str:
                           encoding="utf-8", timeout=2).stdout
 
 
-def _darwin_pressure() -> bool:
+def _darwin_pressure() -> Optional[bool]:
     """The kernel's own critical verdict (levels: 1 normal, 2 warn, 4 critical). Free + inactive
     + speculative barely moves under pressure: XNU keeps refilling the inactive queue with
     anonymous pages that it then compresses. Warn is routine on a busy 8 GB Mac running a
-    healthy battery, so only critical counts. An unreadable level reads as normal, silently;
-    the free-memory reading still applies."""
+    healthy battery, so only critical counts. An unreadable level is None (unknown); the
+    free-memory reading still applies."""
     try:
         return int(_native_output(["/usr/sbin/sysctl", "-n", "kern.memorystatus_vm_pressure_level"]).strip()) >= 4
     except (OSError, ValueError, subprocess.SubprocessError):
-        return False
+        return None
 
 
 @lru_cache(maxsize=1)
@@ -141,7 +143,7 @@ def _cgroup_limits(root: Path) -> list:
 
 def physical_memory() -> Optional[MemorySnapshot]:
     """Read total and reclaimable physical memory using native OS facilities."""
-    pressure = False
+    pressure: Optional[bool] = False
     try:
         if sys.platform == "win32":
             import psutil  # The packaged Windows runtime includes psutil.
@@ -154,7 +156,7 @@ def physical_memory() -> Optional[MemorySnapshot]:
             pages = {name.strip(): int(value.strip().rstrip("."))
                      for name, value in (line.split(":", 1) for line in vm.splitlines()[1:] if ":" in line)}
             # Admission counts inactive pages as room, anonymous ones included, which
-            # overstates it under pressure; the overload stop also reads the kernel's
+            # overstates it under pressure, so every consumer also reads the kernel's
             # verdict. Purgeable is already inside active/inactive, so it is not added.
             available = page_size * sum(pages[name] for name in
                                         ("Pages free", "Pages inactive", "Pages speculative"))

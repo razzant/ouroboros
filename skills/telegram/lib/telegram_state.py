@@ -13,6 +13,7 @@ import httpx
 from ouroboros.utils import iter_jsonl_objects, truncate_review_artifact
 
 from ..scripts.telegram_settings import load_settings
+from .telegram_api import OUTBOUND_JOURNAL
 from .telegram_i18n import Index
 
 
@@ -380,7 +381,10 @@ def _set_silent_msg(api, bot: str, chat_id: int, message_id: int) -> None:
 
 
 def _clear_silent_msg(api, chat_id: int) -> None:
-    """A new turn or a non-text message ends this chat's progress run, whichever bot tracked it."""
+    """A new turn or a non-text message ends this chat's progress run, whichever bot tracked it; the outbox's
+    decision run (``probing``) sends nothing, so it ends nothing."""
+    if getattr(OUTBOUND_JOURNAL.get(), "probing", False):
+        return
     state = _load_silent_state(api)
     tracked = [key for key in state if key == str(chat_id) or key.endswith(f":{chat_id}")]
     for key in tracked:

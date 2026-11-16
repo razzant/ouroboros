@@ -191,12 +191,15 @@ def v2(tmp_path, monkeypatch):
     from starlette.testclient import TestClient
     from ouroboros import agent as agent_module, loop, places
     from ouroboros.gateway import host_service
+    from ouroboros.presence_carrier import set_presence_runner
     from ouroboros.presence_runner import run_presence_turn
     from ouroboros.settings_integrity import task_settings_snapshot
+    from tests.conversation_carrier_support import host_lane, join_host_lane_carriers
     from tests.test_host_service_api import _seed_token
 
     root = tmp_path / "data"
     root.mkdir()
+    host_lane(monkeypatch, root)  # a Host serving alone: no supervisor queue of its own
     # The production agent runs. Installation boot, its heartbeat thread, the authority-source scan and the
     # settings hot reload (which would replace this environment) are setup, not what these tests decide.
     monkeypatch.setattr(agent_module.OuroborosAgent, "_log_worker_boot_once", lambda *_a: None)
@@ -254,6 +257,8 @@ def v2(tmp_path, monkeypatch):
             h.terminal.set()
             h.startup.set()
             wait_until(lambda: not h.host.presence_turns.live(), "every author ended")
+            join_host_lane_carriers()  # its carriers settle after the waiters: that tail stays in this world
+    set_presence_runner(root, None)
 
 
 def wait_until(predicate, what, timeout=BARRIER):
