@@ -100,7 +100,8 @@ def _apply_round_route_overrides(ctx: Any, tools: ToolRegistry, messages: List[D
         from ouroboros.primary_route_observation import record_primary_return_request
         record_primary_return_request(ctx, model, use_local, role)
     if ((model, use_local) != previous or role  # a view that still fits is never rewritten for an effort alone
-            or effort_lengthens_request(str(getattr(context_fit_plan, "provider", "") or ""), route[2], effort)):
+            or effort_lengthens_request(str(getattr(context_fit_plan, "provider", "") or ""),
+                getattr(context_fit_plan, "start_reasoning_effort", route[2]), effort)):
         context_fit_plan, active_context_mode = _loop()._rebind_context_fit_plan(
             context_fit_plan, tools, messages, model=model, use_local=use_local, preferred_mode=preferred_mode,
             start_mode=active_context_mode, tool_schemas=tool_schemas, reasoning_effort=effort,

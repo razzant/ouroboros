@@ -249,7 +249,7 @@ _WHOLE_EDGE: dict = {}  # the searched window by its exact capture; every case p
 def test_a_cold_continuation_fits_its_start_in_the_effort_it_resumes_on(tmp_path, monkeypatch, carrier, acting, pending):
     """A restored task fits the next ordinary send's selected effort, including a pending override.
     Budget tails keep the old acting route until that send; memory is not folded for a different request shape."""
-    from ouroboros import budget_pause, capability_evidence as ce, context_fit as cf, loop, memory_view as mv
+    from ouroboros import budget_pause, capability_evidence as ce, context_fit as cf, loop, loop_routes, memory_view as mv
     from ouroboros import working_checkpoint as wc
     from ouroboros.delegate_recovery import _write_restart_transaction
     from tests import _memory_view_synthetic as syn
@@ -343,12 +343,19 @@ def test_a_cold_continuation_fits_its_start_in_the_effort_it_resumes_on(tmp_path
     for name in ("_emit_live_log", "_emit_typing_start", "_emit_progress", "_capture_mutation_baseline"):
         monkeypatch.setattr(agent, name, lambda *a, **kw: None)
     monkeypatch.setattr(agent, "_run_delegate_preflight", lambda _logs, _task, dispatch: (dispatch, False))
-    fitted, rebound, tails, sent = [], [], [], []
+    fitted, rebound, tails, sent, ordinary_rebinds = [], [], [], [], []
     rebind, finish_tail = loop._rebind_context_fit_plan, loop._finish_tool_round_budget
+    ordinary = loop_routes._apply_round_route_overrides
 
     def restored_fit(*args, **kwargs):
         rebound.append(kwargs.get("reasoning_effort", getattr(args[1]._ctx, "active_effort", "")))
         return rebind(*args, **kwargs)
+
+    def ordinary_fit(*args, **kwargs):
+        before = len(rebound)
+        result = ordinary(*args, **kwargs)
+        ordinary_rebinds.append(len(rebound) - before)
+        return result
 
     def tool_tail(call, *args, **kwargs):
         tails.append((call.active_effort, call.tools._ctx.active_effort_override))
@@ -366,6 +373,7 @@ def test_a_cold_continuation_fits_its_start_in_the_effort_it_resumes_on(tmp_path
     monkeypatch.setattr(agent_module, "build_llm_messages", start_fit)
     monkeypatch.setattr(loop, "call_llm_with_retry", dispatch)
     monkeypatch.setattr(loop, "_rebind_context_fit_plan", restored_fit)
+    monkeypatch.setattr(loop_routes, "_apply_round_route_overrides", ordinary_fit)
     monkeypatch.setattr(loop, "_finish_tool_round_budget", tool_tail)
     main = SimpleNamespace(default_model=lambda: sol)  # the route the restored task follows stays its acting one
     with model_wait.task_model_wait_scope(task=task, drive_root=tmp_path, event_queue=None, worker_slot_held=True):
@@ -378,9 +386,10 @@ def test_a_cold_continuation_fits_its_start_in_the_effort_it_resumes_on(tmp_path
     [(request, effort)] = sent  # fitted in the effort it resumes on, never the one the task started on: memory whole
     expected = pending or acting
     print("COLD_EFFORT", json.dumps({"carrier": carrier, "acting": acting, "pending": pending, "fitted": fitted,
-        "rebound": rebound, "tails": tails, "sent": effort,
+        "rebound": rebound, "ordinary_rebinds": ordinary_rebinds, "tails": tails, "sent": effort,
         "steps": ctx.context_fit_plan.max_projection.memory_facts["floor"]["steps"]}))
     assert (result, fitted, effort) == ("continued", [expected], expected)
+    assert ordinary_rebinds and not any(ordinary_rebinds)  # the pending shape was already fitted on restore
     if carrier != "fresh":
         assert rebound and all(value == expected for value in rebound)
     if carrier in {"owner", "legacy", "exact_tool", "working_post_batch", "working_resumed_tool"}:

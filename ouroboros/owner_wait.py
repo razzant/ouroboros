@@ -197,6 +197,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
     model_wait = getattr(ctx, "model_wait_context", None)
     model_state = model_wait.continuation_state() if model_wait is not None else {}
     from ouroboros.settings_integrity import captured_cognition
+    from ouroboros.model_slots import acting_model_role
 
     return {
         "task_id": ctx.task_id, "task_attempt": int(getattr(ctx, "task_attempt", None) or 1),
@@ -213,8 +214,7 @@ def continuation_state(ctx: Any, messages: list, trace: dict, usage: dict,
         "nanny_activity": {key: getattr(ctx, key, None) for key in (
             "_nanny_metered_progress", "_nanny_delegate_baseline",
         )},
-        "context_model_role": getattr(ctx, "_restored_context_model_role", "") or getattr(
-            getattr(ctx, "context_fit_plan", None), "model_role", ""),
+        "context_model_role": acting_model_role(ctx),
         # The task's own start (mode, cause): a restore's new fit is not it (``context_fit.restored_start``).
         "context_start": list(getattr(getattr(ctx, "context_fit_plan", None), "start", None) or ("", "")),
         # Exposure facts gate automatic compaction; a resumed task keeps them, and the journal boundary of its first
@@ -1163,8 +1163,6 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
 
     ctx = tools._ctx
     restore_cognition(state.get("cognition"))
-    # The next ordinary fit may preview another role; the saved actor still owns any forced tail.
-    ctx._restored_context_model_role = state.get("context_model_role") or ""
     # Missing old observations are unknown, not this new process's startup seed.
     # None is the known fresh state; an empty mark has no historical anchor.
     for key in ("_nanny_metered_progress", "_nanny_delegate_baseline"):
@@ -1224,7 +1222,9 @@ def restore_continuation_state(tools: Any, state: dict, messages: list, trace: d
     ctx._route_binding = None  # the first round compares to the restored acting route (route_choice.round_route)
     from ouroboros.owner_model import restore_current
 
-    restore_current(ctx, messages)
+    applied = restore_current(ctx, messages)
+    # Only a newer durable owner act moves the saved actor; pending tool choices belong to the next ordinary call.
+    ctx._restored_context_model_role = (ctx.active_role_override if applied else state.get("context_model_role")) or ""
     candidate = state.get("delivery_candidate")
     ctx._delivery_candidate = DeliveryCandidate(**{key: value for key, value in candidate.items()
         if key != "repair_attempted"}) if candidate else None

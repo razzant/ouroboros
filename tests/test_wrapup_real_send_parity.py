@@ -365,7 +365,7 @@ def _forced_plan(mode="max", window=128_000):
     projections = [ContextFitProjection(mode=selected, system_content_json=json.dumps(selected + " policy"),
         estimated_tokens=10, calibrated_tokens=10, calibration_ratio=1.0) for selected in ("max", "low")]
     return ContextFitPlan(core_sha256="a" * 64, preferred_mode=mode, initial_mode=mode,
-        model="openai/test-model", provider="openai", route_fp="route-a", status="confirmed", stale=False,
+        model="openai/test-model", provider="openrouter", route_fp="route-a", status="confirmed", stale=False,
         window_tokens=window, output_reserve_tokens=65_536, user_content_json=json.dumps("go"),
         max_projection=projections[0], low_projection=projections[1])
 
