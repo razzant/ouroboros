@@ -36,7 +36,6 @@ from __future__ import annotations
 from ouroboros.text_sentences import first_sentence
 
 import dataclasses
-import datetime
 import functools
 import json
 import logging
@@ -83,24 +82,8 @@ def _mapping(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
-def _minute(value: Any) -> str:
-    try:
-        moment = datetime.datetime.fromisoformat(str(value))
-    except ValueError:
-        return str(value)
-    if moment.tzinfo is not None:
-        moment = moment.astimezone(datetime.timezone.utc)
-    return moment.strftime("%Y-%m-%d %H:%M")
-
-
-def _period(span: Any, note: str = "") -> str:
-    """``start → end`` of a source time span, minutes in UTC, then ``note`` (a ``Period``'s: a block's period is
-    labelled as the block's); a span with unknown bounds says so."""
-    span = _mapping(span)
-    if not span.get("start") and not span.get("end"):
-        return "period unknown"
-    text = f"{_minute(span.get('start') or '?')} → {_minute(span.get('end') or '?')}"
-    return (text + " (incomplete)" if span.get("incomplete") else text) + note
+# One display of a stored moment for every reader (``memory_inventory.minute``); the old names stay for callers.
+_minute, _period = memory_inventory.minute, memory_inventory.period_text
 
 
 def room_labeler(root: pathlib.Path) -> Callable[..., str]:
@@ -1244,7 +1227,7 @@ def _status_lines(status: Mapping[str, Any], refusals: Tuple[Dict[str, Any], ...
         return []
     lines = [f"Story status: the helper retelling is folded {status['folded']} of {status['total']} blocks; "
              f"{status['open_records']} retold records are still open ({status['open_rows']} rows, "
-             f"{status['open_chars']} chars of retelling; future folds use helper route {status['helper_route']})."]
+             f"{status['open_chars']} chars; future folds use helper route {status['helper_route']})."]
     for refusal in refusals:  # the retelling's own id is not the helper's answer
         read = (f"its answer: read_file(root='runtime_data', path='{refusal['path']}')" if refusal.get("path")
                 else "its answer was not retained")
