@@ -112,6 +112,18 @@ def _block(css: str, head: str) -> str:
     return css[start:pos - 1]
 
 
+def test_mains_name_yields_to_its_count_and_mark_in_a_narrow_card():
+    """Wide system fonts must not send Main's mark out of the Project rows' column (DESIGN, Status marks)."""
+    css = _read("web/style.css")
+    narrow = _block(css, "@container ourocard (max-width: 200px) {")
+    name = _block(narrow, ".nav-ouro-name {")
+    assert "flex: 1 1 0;" in name and "min-width: 0;" in name
+    assert "text-overflow: ellipsis;" in name and "overflow: hidden;" in name and "white-space: nowrap;" in name
+    label = _block(narrow, ".nav-ouro-line1 > .nav-row-label {")
+    assert "order: 4;" in label and "flex-basis: 100%;" in label
+    assert "flex: 0 0 18px;" in _block(css, ".nav-ouro-line1 > .nav-mark-slot {")
+
+
 def test_a_section_gives_the_places_control_up_only_where_a_page_replaced_its_list():
     """In the stack layout a section's page is one row, Back and its name, where the places control stood. From 40rem
     a section holds its list beside the page and the first-level page has no Back: there the places control is the

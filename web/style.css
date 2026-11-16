@@ -528,7 +528,8 @@ html[data-layout="stack"] .resize-handle { display: none; }
    The phone's 293px drawer has that room; 282px and 270px columns need the second line. */
 @container ourocard (max-width: 200px) {
     .nav-ouro-line1 { flex-wrap: wrap; row-gap: 0; }
-    .nav-ouro-name { flex: 1 1 auto; }
+    /* A wide system face or 99+ leaves less room for the name, never a new line for the mark. */
+    .nav-ouro-name { flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
     .nav-ouro-line1 > .nav-row-label { order: 4; flex-basis: 100%; }
 }
 /* the count stands just before the mark, a step before it, and the mark keeps the rows' own column */
