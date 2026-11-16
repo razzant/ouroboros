@@ -22,14 +22,29 @@ _IMPORTED = _ARRIVAL + " AND json_extract(body, '$.historical_import') IS NOT NU
 # its stored position. ``dialogue_room_reading`` keys these very expressions; ``reading_key`` mirrors them.
 READING_TIME = "COALESCE(json_extract(body,'$.source_order.time'),ts)"
 READING_ORDER = "COALESCE(json_extract(body,'$.source_order.order'),-1)"
+def _room_seek(place):
+    """The captured rooms of the place ``place`` names (a parameter or a column), through the room index."""
+    return (f"SELECT chat_id FROM dialogue INDEXED BY dialogue_place_rooms WHERE {_ARRIVAL} AND {_PLACE}={place} "
+            "AND chat_id IS NOT NULL")
+
+
 # A place's captured rooms: the loose scan of ``dialogue_place_rooms`` (one seek per room) inside ONE statement that
 # answers one row. Each row a cursor steps hands the interpreter lock over and takes it back, and on a busy server a
 # take waits up to a switch interval: a statement per room made a place with a thousand rooms cost seconds.
-_ROOM_SEEK = (f"SELECT chat_id FROM dialogue INDEXED BY dialogue_place_rooms WHERE {_ARRIVAL} AND {_PLACE}=?1 "
-              "AND chat_id IS NOT NULL")
+_ROOM_SEEK = _room_seek("?1")
 _PLACE_ROOMS = (f"WITH RECURSIVE room(chat_id) AS (SELECT ({_ROOM_SEEK} ORDER BY chat_id LIMIT 1) UNION ALL "
                 f"SELECT ({_ROOM_SEEK} AND chat_id>room.chat_id ORDER BY chat_id LIMIT 1) FROM room "
                 "WHERE chat_id IS NOT NULL) SELECT json_group_array(chat_id) FROM room WHERE chat_id IS NOT NULL")
+# Every place's captured rooms in one statement: a loose scan of the places, then of each place's rooms, through the
+# same index (``place_room_chats``).
+_NEXT_PLACE = f"SELECT {_PLACE} FROM dialogue INDEXED BY dialogue_place_rooms WHERE {_ARRIVAL} AND {_PLACE}"
+_ALL_PLACE_ROOMS = (
+    f"WITH RECURSIVE place(id) AS (SELECT ({_NEXT_PLACE} IS NOT NULL ORDER BY {_PLACE} LIMIT 1) UNION ALL "
+    f"SELECT ({_NEXT_PLACE}>place.id ORDER BY {_PLACE} LIMIT 1) FROM place WHERE place.id IS NOT NULL), "
+    f"room(place_id, chat_id) AS (SELECT place.id, ({_room_seek('place.id')} ORDER BY chat_id LIMIT 1) FROM place "
+    f"WHERE place.id IS NOT NULL UNION ALL SELECT room.place_id, ({_room_seek('room.place_id')} AND "
+    "chat_id>room.chat_id ORDER BY chat_id LIMIT 1) FROM room WHERE room.chat_id IS NOT NULL) "
+    "SELECT json_group_array(chat_id) FROM room WHERE chat_id IS NOT NULL")
 # A place's newest arrival, and its newest 50 for the account candidates (``account_candidates``).
 _RECENT = f"FROM dialogue INDEXED BY dialogue_place_recent WHERE {_ARRIVAL} AND {_PLACE}=? ORDER BY ts DESC"
 _NEWEST = f"SELECT ts {_RECENT} LIMIT 1"
@@ -247,24 +262,18 @@ def history_import_rooms(root, chat_ids):
 
 def place_room_chats(root):
     """Every room holding captured arrivals: a loose scan of their index, one seek per place and per
-    room, whatever the rooms hold. Main never shows an arrival (``room_membership``), so its
-    conversation reads leave these rooms out (``gateway.history_paging.room_lens``). A Main read never
-    builds the index: until a place read or an import has (``presence_history.record_history``), none
-    is left out and membership alone keeps arrivals out of Main."""
+    room, whatever the rooms hold, in one statement after the index check (``_ALL_PLACE_ROOMS``). Main
+    never shows an arrival (``room_membership``), so its conversation reads leave these rooms out
+    (``gateway.history_paging.room_lens``). A Main read never builds the index: until a place read or an
+    import has (``presence_history.record_history``), none is left out and membership alone keeps
+    arrivals out of Main."""
     if not dialogue_store.present(root):
         return set()
-    rooms, place = set(), None
     with dialogue_store.transaction(root, write=False) as conn:
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='dialogue_place_rooms'").fetchone() is None:
-            return rooms
-        while True:
-            row = conn.execute(f"SELECT {_PLACE} FROM dialogue INDEXED BY dialogue_place_rooms WHERE {_ARRIVAL} AND "
-                               f"{_PLACE} {'IS NOT NULL' if place is None else '>?'} ORDER BY {_PLACE} LIMIT 1",
-                               () if place is None else (place,)).fetchone()
-            if row is None:
-                return rooms
-            place = row[0]
-            rooms.update(_place_rooms(conn, place))
+            return set()
+        held = conn.execute(_ALL_PLACE_ROOMS).fetchone()[0]
+    return {int(chat) for chat in json.loads(held or "[]")}
 
 
 def _open_counts(root, places):
