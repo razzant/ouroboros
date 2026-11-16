@@ -79,6 +79,14 @@ test('Telegram sections keep a visible drawer control and one title baseline ins
     assert.match(telegram, /> \.app-page-leading \{[^}]*display: flex;/);
     assert.match(telegram, /:is\(\.app-page-title, \.app-page-lead-title\) \{/);
     assert.doesNotMatch(telegram, /> \.app-page-leading \{ display: none;/);
+    // A page's name takes the host row's one title slot: a page alone, and two panes of an automatic view; a list
+    // alone (the automatic view in one column) keeps the place's name.
+    const hide = (view) => `.section-place[data-section-view="${view}"] > .app-page-header .app-page-title { display: none; }`;
+    const two = telegram.slice(telegram.indexOf('@container sectionplace (min-width: 40rem) {'));
+    assert.ok(telegram.indexOf('@container sectionplace (min-width: 40rem) {') > 0 && two.slice(0, two.indexOf('\n}')).includes(hide('auto')),
+        'two panes of the automatic view hide the place\'s title under the page\'s name');
+    assert.ok(telegram.includes(hide('page')));
+    assert.equal(telegram.split(hide('auto')).length, 2, 'only inside the two-pane query');
 });
 
 test('page headers retain their toolbar contract with an optional chrome recipe', () => {
