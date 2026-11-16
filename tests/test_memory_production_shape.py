@@ -108,7 +108,7 @@ def test_a_correction_stands_signed_under_the_records_words_wherever_the_record_
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="root0001", current_chat_id=1)
     listed = _memory_read(ctx, room_id=made.alpha)
     header = next(line for line in listed.split("\n") if line.startswith(f"[part {made.corrected}; "))
-    assert "helper (nanny, task nan00001)" in header and f"revision {made.addition} (corrected by mind (root t1))" in header
+    assert "helper (nanny, task nan00001)" in header and f"revision {made.addition} (corrected by mind (root, task t1))" in header
     assert listed.index(original) < listed.index(line) < listed.index(shape.ADDITION)
     # The fallback writer folds the acting text: a later part over this one starts from both.
     unit = mf.FallbackUnit(kind="part", room_id=made.alpha, key="k", member_ids=(made.corrected,))
@@ -203,7 +203,8 @@ def test_a_part_is_dated_and_ordered_by_its_rooms_own_rows_not_by_its_block(tmp_
     later = mv.capture_memory_view(tmp_path, task, mv.view_spec_for_task(task, tmp_path))
     assert _dated(mv.render_story(later), both) == "2026-09-01 00:00 → 2026-09-02 00:03 (partly block period)"
     assert mi.record_period(store, store.get(both), units) == mi.Period(
-        {"start": "2026-09-01T00:00:00+00:00", "end": "2026-09-02T00:03:00+00:00", "incomplete": False}, 0, "mixed")
+        {"start": "2026-09-01T00:00:00+00:00", "end": "2026-09-02T00:03:00+00:00", "incomplete": False}, 0, "mixed",
+        ("block", "rows"))
     room = mv.render_room(later)
     assert f"#### part {main_part} — 2026-09-01 00:00 → 2026-09-01 00:05 — under part {both}" in room
     assert f"#### part {quiet} — 2026-09-02 00:00 → 2026-09-02 00:03 (block period) — under part {both}" in room
