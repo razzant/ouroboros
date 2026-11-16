@@ -148,7 +148,7 @@ def event_bus_exitcode() -> Optional[int]:
     return getattr(proc, "exitcode", None) if proc is not None else None
 
 
-def get_event_q(*, create: bool = True):
+def get_event_q(*, create: bool = True, drive_root=None, stop_requested=None):
     """Return the process-lifetime supervisor event bus, creating it lazily.
 
     Worker-pool generations are replaceable; the producers that publish onto
@@ -159,7 +159,11 @@ def get_event_q(*, create: bool = True):
     with ``create=False``; they never create an undrained child-local bus.
     Every call, the cached return included, reads the manager process's exit
     code first and raises ``EventBusLost`` once it is set: the bus is whole or
-    it is over, and nothing is respawned onto a dead one.
+    it is over, and nothing is respawned onto a dead one. Boot may supply an explicit
+    custody/log root before workers.init, plus a stop predicate rechecked under this lock.
+    A failed attempt never published its queue, so no producer holds it: the next creating
+    call ends that manager first (``_end_manager``) and only then starts another; one whose
+    process does not exit stays owned for shutdown, and creation refuses until Restart.
     """
     global _EVENT_Q, _EVENT_Q_MANAGER, _EVENT_Q_GENERATION
     with _EVENT_Q_LOCK:
@@ -172,6 +176,10 @@ def get_event_q(*, create: bool = True):
             return _EVENT_Q
         if not create:
             raise RuntimeError("supervisor event bus is not attached")
+        if stop_requested is not None and stop_requested():
+            raise RuntimeError("supervisor event bus preparation stopped")
+        if _EVENT_Q_MANAGER is not None and not _end_manager(_EVENT_Q_MANAGER, ""):
+            raise RuntimeError("supervisor event bus: an earlier attempt's manager did not exit; Restart ends it")
         # A raw multiprocessing.Queue has an asynchronous feeder and its
         # pipe can be corrupted when a worker is force-killed mid-frame.
         # A manager-backed queue serializes synchronously in the producer
@@ -182,9 +190,14 @@ def get_event_q(*, create: bool = True):
         from supervisor.event_observation import EventQueueManager
 
         _EVENT_Q_MANAGER = EventQueueManager(ctx=mp.get_context("spawn"))
+        root = pathlib.Path(drive_root) if drive_root is not None else DRIVE_ROOT
+        _EVENT_Q_MANAGER._ouroboros_drive_root = root
+        started, cpu = time.monotonic(), time.thread_time()
         _EVENT_Q_MANAGER.start(initializer=_ignore_stop_signals)
-        _EVENT_Q = _EVENT_Q_MANAGER.Queue()
-        _EVENT_Q_GENERATION = f"{os.getpid()}:{uuid.uuid4().hex[:12]}"
+        if stop_requested is not None and stop_requested():
+            _EVENT_Q_MANAGER._process.kill()  # no extra wait on Panic; the normal owner joins it
+            raise RuntimeError("supervisor event bus preparation stopped")
+        manager_wall, manager_cpu = time.monotonic() - started, time.thread_time() - cpu
         try:
             from ouroboros.process_custody import record_process
 
@@ -192,7 +205,7 @@ def get_event_q(*, create: bool = True):
             manager_pid = int(getattr(manager_proc, "pid", 0) or 0)
             if manager_pid:
                 record_process(
-                    DRIVE_ROOT,
+                    root,
                     pid=manager_pid,
                     cmd="multiprocessing SyncManager",
                     purpose="supervisor_event_queue_manager",
@@ -201,15 +214,21 @@ def get_event_q(*, create: bool = True):
                 )
         except Exception:
             log.warning("Failed to custody-track event queue manager", exc_info=True)
+        started, cpu = time.monotonic(), time.thread_time()
+        _EVENT_Q = _EVENT_Q_MANAGER.Queue()
+        queue_wall, queue_cpu = time.monotonic() - started, time.thread_time() - cpu
+        _EVENT_Q_GENERATION = f"{os.getpid()}:{uuid.uuid4().hex[:12]}"
         try:
             append_jsonl(
-                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                root / "logs" / "supervisor.jsonl",
                 {
                     "ts": utc_now_iso(),
                     "type": "event_queue_generation_started",
                     "generation": _EVENT_Q_GENERATION,
                     "server_pid": os.getpid(),
                     "start_method": "spawn",
+                    "manager_start_wall_seconds": manager_wall, "manager_start_cpu_seconds": manager_cpu,
+                    "queue_create_wall_seconds": queue_wall, "queue_create_cpu_seconds": queue_cpu,
                 },
             )
         except Exception:
@@ -231,12 +250,19 @@ def shutdown_event_q() -> None:
         _EVENT_Q = None
         _EVENT_Q_MANAGER = None
         _EVENT_Q_GENERATION = ""
-    if manager is None:
-        return
+    if manager is not None:
+        _end_manager(manager, generation)
+
+
+def _end_manager(manager: Any, generation: str) -> bool:
+    """End one manager and journal it; True once its process is confirmed gone (or never started).
+
+    The teardown's stop and the retirement of a failed, never-published attempt (``generation``
+    empty) share it. A process alive after kill and join stays the caller's, never forgotten."""
     proc = getattr(manager, "_process", None)
     exitcode_before = getattr(proc, "exitcode", None) if proc is not None else None
     try:
-        manager.shutdown()
+        manager.shutdown()  # absent on an attempt whose start failed first: nothing to ask
     except Exception:
         log.debug("Event queue manager shutdown failed", exc_info=True)
     killed = False
@@ -245,11 +271,12 @@ def shutdown_event_q() -> None:
         proc.join(5)
         killed = True
     try:
-        append_jsonl(DRIVE_ROOT / "logs" / "supervisor.jsonl", {
+        append_jsonl(getattr(manager, "_ouroboros_drive_root", DRIVE_ROOT) / "logs" / "supervisor.jsonl", {
             "ts": utc_now_iso(), "type": "event_queue_generation_stopped", "generation": generation,
             "exitcode_before_shutdown": exitcode_before, "killed": killed})
     except Exception:
         log.debug("Failed to record the event queue generation's end", exc_info=True)
+    return proc is None or not proc.is_alive()
 
 
 def event_queue_generation() -> str:

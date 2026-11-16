@@ -4,6 +4,7 @@ History imports keep their own narrower contract (``presence_history``)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from typing import Any, Mapping, Sequence
 
 from ouroboros.dialogue_store import thread_references
@@ -85,6 +86,35 @@ def outside_origin(admission: PresenceAdmission, event: Any) -> bool:
 
 _EVENT_KEYS = frozenset({"source_event_id", "provider", "account_id", "conversation_id", "thread_id",
                          "conversation_key", "actor", "conversation", "message", "text"})
+_REPLY_TARGET_KEYS = frozenset({"conversation", "effect", "match", "thread"})
+
+
+def reply_targets(message: Any) -> tuple[dict[str, str], ...] | None:
+    """``message.reply_targets``: the further literal addresses an automatic reply to this message reaches, as the
+    connector knows them (``[]``: none); None when absent, a message from a connector that sends none (the legacy
+    boundary). Each is ``{conversation, effect: "write", match: "scope"|"exact"|"exact_casefold", thread?}``: an id,
+    never a selector, met in the reply's own route (the reply place's connector, its retained destination's provider
+    and account, never the source event's). Anything else is ``ValueError``, never read as absent."""
+    from ouroboros.places import MATCHES
+    from ouroboros.tool_effects import EFFECT_WRITE
+
+    if not isinstance(message, Mapping) or "reply_targets" not in message:
+        return None
+    raw, where = message["reply_targets"], "event.message.reply_targets"
+    if not isinstance(raw, list):
+        raise ValueError(f"{where} must be a list of addresses")
+    found = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, Mapping) or not {"conversation", "effect", "match"} <= set(item) <= _REPLY_TARGET_KEYS:
+            raise ValueError(f"{where}[{index}] holds conversation, effect and match, and optionally thread")
+        if any(not isinstance(item.get(key, ""), str) for key in ("conversation", "thread")) or not item["conversation"].strip():
+            raise ValueError(f"{where}[{index}]: conversation is a non-empty string id, thread a string")
+        if item["effect"] != EFFECT_WRITE or item["match"] not in MATCHES:
+            raise ValueError(f"{where}[{index}]: effect is {EFFECT_WRITE!r} and match is {' or '.join(MATCHES)}")
+        thread = item.get("thread", "").strip()
+        found.append({"conversation": item["conversation"].strip(), "effect": EFFECT_WRITE, "match": item["match"],
+                      **({"thread": thread} if thread else {})})
+    return tuple({json.dumps(entry, sort_keys=True): entry for entry in found}.values())
 
 
 def parse_presence_event(payload: Any, *, vouched_facts: Any = (), staged_files: Any = None,
@@ -124,6 +154,10 @@ def parse_presence_event(payload: Any, *, vouched_facts: Any = (), staged_files:
         source_order(payload["message"])
     except ValueError as exc:
         raise PresenceEventInvalid("presence_payload_invalid", "event.message.source_order", message=str(exc)) from None
+    try:  # an automatic reply's further addresses: absent is the legacy boundary, malformed never reads as absent
+        reply_targets(payload["message"])
+    except ValueError as exc:
+        raise PresenceEventInvalid("presence_payload_invalid", "event.message.reply_targets", message=str(exc)) from None
     provider, account_id, conversation_id, thread_id = presence_event_origin(payload).values()
     event = PresenceTurnEvent(
         source_event_id=str(payload["source_event_id"] or "").strip(),

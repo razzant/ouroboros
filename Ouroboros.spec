@@ -70,12 +70,13 @@ if _bundle_linux_gtk:
 # macOS does not code-signing-kill it. The build scripts guarantee its presence
 # in CI/release builds; for ad-hoc dev builds we warn-and-continue (rather than
 # hard-fail) so a local PyInstaller run without node still produces an app —
-# node-runtime skills simply fall back to PATH node there.
+# where the reviewed Node pin governs the host, node-runtime skills there wait
+# for the pin's Node, which the app's boot prepares (a ~53 MB download); never PATH.
 if os.path.isdir('node-standalone'):
     _extra_datas.append(('node-standalone', 'node-standalone'))
 else:
     print('WARNING: node-standalone/ not found — bundled node will be absent and '
-          'node-runtime skills will rely on PATH node. Run '
+          'node-runtime skills will wait for the pinned Node the app downloads at boot. Run '
           'scripts/download_node_standalone.sh (or .ps1) before PyInstaller for a release build.')
 
 if os.path.isdir('ripgrep-standalone'):

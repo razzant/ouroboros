@@ -493,6 +493,11 @@ export class WS {
         return this.ws?.readyState === WebSocket.OPEN;
     }
 
+    /** Whether a socket of this page has opened: the `previouslyConnected` its next open carries. */
+    previouslyConnected() {
+        return this._wasConnected;
+    }
+
     // Every subscription returns its disposer (UI resource lifecycle, P3): a
     // chat instance collects these and releases them in destroy(). Listeners
     // are a Set per event — insertion order is preserved, and subscribing the

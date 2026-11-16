@@ -39,8 +39,33 @@ def reply_carrier(metadata) -> dict:
             "destination": event.get("destination") or {}}
 
 
-def reply_hold(root, metadata, task_id, text: str) -> str:
-    """Current host facts only: never generate or buy another safety check on replay."""
+def reply_addresses(metadata, anchor=None) -> tuple:
+    """The selected input's further reply addresses as ``{"source_event_id", "reply_targets"}`` (its
+    ``message.reply_targets``), and why they cannot be read (``""`` when they can). ``anchor`` is this turn's selected
+    input (``presence_continuation.reply_anchor``); None reads the one kept at completion (``presence_reply_anchor``);
+    none at all (``{}``, a promoted or legacy turn's form) is the waking event itself, while a given anchor without its
+    ``source_event_id`` and ``message`` cannot be read and holds the reply, never falling back. A selected message
+    naming none is the legacy boundary, ``(None, "")``: another message's set is never borrowed."""
+    from ouroboros.presence_events import reply_targets
+    if anchor is None:
+        anchor = metadata.get("presence_reply_anchor")
+    if anchor is None or anchor == {}:
+        presence = metadata.get("presence") if isinstance(metadata.get("presence"), dict) else {}
+        anchor = presence.get("event") if isinstance(presence.get("event"), dict) else {}
+    elif not isinstance(anchor, dict) or not isinstance(anchor.get("message"), dict) or not anchor.get("source_event_id"):
+        return None, "the reply's selected anchor names no source_event_id and message"
+    try:
+        found = reply_targets(anchor.get("message") if isinstance(anchor.get("message"), dict) else {})
+    except ValueError as exc:
+        return None, str(exc)
+    if found is None:
+        return None, ""
+    return {"source_event_id": str(anchor.get("source_event_id") or ""), "reply_targets": [dict(row) for row in found]}, ""
+
+
+def reply_hold(root, metadata, task_id, text: str, *, anchor=None) -> str:
+    """Current host facts only: never generate or buy another safety check on replay. The reply's further addresses
+    (``reply_addresses`` of ``anchor``) are resolved now, as its dispatch would meet them."""
     carrier = reply_carrier(metadata)
     if not carrier and text:
         from pathlib import Path
@@ -59,24 +84,36 @@ def reply_hold(root, metadata, task_id, text: str) -> str:
     if not carrier or not text:
         return ""
     from ouroboros.consciousness_authority import is_observe_origin
+    from ouroboros.place_guard import reply_address_hold
     try:
         place = get_place(root, carrier["place_id"])
         state, label = place.state, place.label
     except PlaceError as exc:
         if exc.code != "place_not_found":
             raise
-        state, label = "disconnected", carrier["place_id"]
+        place, state, label = None, "disconnected", carrier["place_id"]
     message = (f"Reply held: {label} is {state.title()}" if state in {"silent", "paused", "disconnected"}
                else "Reply held: autonomy is Advises" if is_observe_origin(metadata) else "")
+    addresses, problem = reply_addresses(metadata, anchor)
+    if not message and place is not None:
+        message = (f"Reply held: the addresses it reaches cannot be read ({problem})" if problem
+                   else reply_address_hold(root, place, carrier["destination"], addresses))
     if message:
-        digest = _reply_digest(carrier, text)
+        digest = _reply_digest(carrier, text, addresses)
         record_notice(root, place_id=carrier["place_id"], conversation_key=carrier["conversation_key"],
                       task_id=task_id, text=message, identity=f"{task_id}:{digest}:held", held_text=text)
     return message
 
 
-def _reply_digest(carrier, text):
-    subject = {"text": text, "destination": carrier["destination"], "place_id": carrier["place_id"]}
+def _reply_subject(carrier, text, addresses=None) -> dict:
+    """The automatic reply as Safety and its digest see it: its words, retained destination and place, and, when its
+    selected input names further addresses, that input's id and full set (``reply_addresses``)."""
+    return {"text": text, "destination": carrier["destination"], "place_id": carrier["place_id"],
+            **({"reply_anchor": addresses} if addresses is not None else {})}
+
+
+def _reply_digest(carrier, text, addresses=None):
+    subject = _reply_subject(carrier, text, addresses)
     return hashlib.sha256(json.dumps(subject, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -100,29 +137,47 @@ def project_output(root, metadata, task_id, output):
     return dict(output)
 
 
+def _door_effect(name: str, tool, effect_name: str):
+    """The effect that makes ``name`` a door of ``effect_name`` under the declaration ``tool`` binds, else None: its
+    targets all lie within one conversation identity (account, conversation, thread; a gesture's message too) and it
+    names a conversation argument. Its groups may write or read elsewhere, but words or a gesture of a group must land
+    in that same identity."""
+    from ouroboros.tool_effects import EFFECT_GESTURE, EFFECT_MESSAGE, effect_of
+
+    effect = effect_of(name, ext_tool=tool)
+    # A gesture acts on one message, so its door must name the argument carrying that message's id.
+    gesture = effect.effect == EFFECT_GESTURE
+    return effect if (effect.declared and effect.effect == effect_name and effect.conversation
+                      and (effect.message or not gesture)
+                      and set(effect.targets) <= {"account_id", effect.conversation, effect.thread,
+                                                  *((effect.message,) if gesture else ())}
+                      and all(group.effect not in (EFFECT_MESSAGE, EFFECT_GESTURE)
+                              or (group.conversation == effect.conversation and group.thread in ("", effect.thread)
+                                  and group.account in ("", "account_id")) for group in effect.touches)) else None
+
+
 def _conversation_effect_tools(connector: str, effect_name: str) -> list:
-    """The connector's declared tools of one effect whose targets all lie within one conversation identity (account,
-    conversation, thread; a gesture's message too) and that name a conversation argument. Read from the published
-    declarations the dispatcher uses; no connector is named here."""
+    """The connector's declared doors of one effect (``_door_effect``), read from the published declarations the
+    dispatcher uses now; no connector is named here."""
     from ouroboros import extension_registry_state as registry
-    from ouroboros.tool_effects import EFFECT_GESTURE, effect_of
 
     if not connector:
         return []
     with registry._lock:
         tools = [(name, dict(tool)) for name, tool in registry._tools.items()
                  if isinstance(tool, dict) and tool.get("skill") == connector]
-    found = []
-    for name, tool in tools:
-        effect = effect_of(name, ext_tool=tool)
-        # A gesture acts on one message, so its door must name the argument carrying that message's id.
-        gesture = effect.effect == EFFECT_GESTURE
-        if (effect.declared and effect.effect == effect_name and effect.conversation
-                and (effect.message or not gesture)
-                and set(effect.targets) <= {"account_id", effect.conversation, effect.thread,
-                                            *((effect.message,) if gesture else ())}):
-            found.append((name, effect))
-    return found
+    return [(name, effect) for name, tool in tools if (effect := _door_effect(name, tool, effect_name)) is not None]
+
+
+def _ran_as(call, connector: str, effect_name: str, today: dict):
+    """The door of ``effect_name`` a recorded call ran as: judged by the declaration it ran with
+    (``tool_effects.retained_descriptor``); a row recorded before calls kept one reads ``today``'s doors."""
+    from ouroboros.tool_effects import retained_descriptor
+
+    name, ran_with = str(call.get("tool") or ""), retained_descriptor(call)
+    if ran_with is None:
+        return today.get(name)
+    return _door_effect(name, ran_with, effect_name) if ran_with["skill"] == connector else None
 
 
 def conversation_send_tools(connector: str) -> list:
@@ -170,12 +225,12 @@ def riding_sends(ctx, calls) -> list:
     connector's declared send or gesture tool addressing this conversation, or its gesture tool naming the waking
     message exactly (``_gesture_on_waking_message``). A refused or failed call is ``is_error`` and stays a result."""
     from ouroboros.place_guard import call_place_facts
+    from ouroboros.tool_effects import EFFECT_GESTURE, EFFECT_MESSAGE, retained_descriptor
 
     metadata = getattr(ctx, "task_metadata", {}) or {}
     carrier = reply_carrier(metadata)
     connector = str((metadata.get("presence") or {}).get("transport_skill") or "")
-    gestures = dict(conversation_gesture_tools(connector))
-    tools = {name for name, _effect in conversation_send_tools(connector)} | set(gestures)
+    sends, gestures = dict(conversation_send_tools(connector)), dict(conversation_gesture_tools(connector))
     delivered = (getattr(ctx, "_presence_completion", None) or {}).get("outcome") == "tool_delivered"
     riding = []
     for call in calls or []:
@@ -187,13 +242,18 @@ def riding_sends(ctx, calls) -> list:
             if {tuple(pair) for pair in receipts} <= confirmed_delivery_receipts(ctx):  # receipts the host matched to this conversation
                 riding.append(call)
             continue
-        if not carrier or call.get("tool") not in tools:
+        if not carrier:
+            continue
+        # Judged by the declaration the call ran with, so a later publication never reinterprets what it did.
+        send, gesture = (_ran_as(call, connector, kind, today) for kind, today in ((EFFECT_MESSAGE, sends),
+                                                                                    (EFFECT_GESTURE, gestures)))
+        if send is None and gesture is None:
             continue
         args = call.get("args") if isinstance(call.get("args"), dict) else {}
-        facts = call_place_facts(ctx, str(call["tool"]), args)
+        facts = call_place_facts(ctx, str(call["tool"]), args, ext_tool=retained_descriptor(call))
         rows = facts.get("places") or []
         if (any(carrier["conversation_key"] in (row.get("conversation_keys") or ()) for row in rows)
-                or (call["tool"] in gestures and _gesture_on_waking_message(metadata, gestures[call["tool"]], args)
+                or (gesture is not None and _gesture_on_waking_message(metadata, gesture, args)
                     and _waking_event_place(ctx, metadata, connector) == carrier["place_id"])):
             riding.append(call)
     return riding
@@ -318,7 +378,7 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
     if not carrier:
         return True, ""
     from ouroboros.tool_access import canonical_data_root
-    from ouroboros.presence_continuation import _handoff_ref, selection_for
+    from ouroboros.presence_continuation import _handoff_ref, reply_anchor, selection_for
     records = records_only_now(ctx)
     if records and text and not quiet:
         from ouroboros.loop_messages import OWNER_REPLY_OWED_REFUSAL, owner_reply_owed
@@ -334,9 +394,13 @@ def prepare_focus_reply(ctx, text: str, *, quiet: bool = False) -> tuple[bool, s
     root = canonical_data_root(ctx)
     held = ""
     if not quiet and text:
-        subject = {"text": text, "destination": carrier["destination"], "place_id": carrier["place_id"]}
-        digest = _reply_digest(carrier, text)
-        held = reply_hold(root, metadata, ctx.task_id, text)
+        # The selected input this reply answers names its further addresses: the hold, Safety and the digest read
+        # the same anchor and full set.
+        anchor = reply_anchor(ctx, metadata)
+        addresses, _problem = reply_addresses(metadata, anchor)
+        subject = _reply_subject(carrier, text, addresses)
+        digest = _reply_digest(carrier, text, addresses)
+        held = reply_hold(root, metadata, ctx.task_id, text, anchor=anchor)
         if held:
             ctx._focus_reply_hold = held
         elif getattr(ctx, "_focus_checked_reply", None) != digest:
@@ -537,12 +601,14 @@ def _routeless_note(ctx, limit_ctx, text: str, origin: str) -> str:
         return ""
     label, source = _source_conversation(metadata["presence"])
     confirmed = this_turn_sends(ctx, carrier["conversation_key"])["confirmed"]
-    # A gesture is no words, so it leaves this lineage silent, but the mind sees what it did beside the fact.
+    # A gesture is no words, so it leaves this lineage silent, but the mind sees what it did beside the fact, each
+    # call read by the declaration it ran with (``_ran_as``).
+    from ouroboros.tool_effects import EFFECT_GESTURE
     gestures = dict(conversation_gesture_tools(connector))
-    made = [f"{row['tool']} on message {(row.get('args') or {}).get(gestures[row['tool']].message, '?')}"
+    made = [f"{row['tool']} on message {(row.get('args') or {}).get(gesture.message, '?')}"
             + (" (failed)" if row.get("is_error") else "")
             for row in (getattr(limit_ctx, "llm_trace", None) or {}).get("tool_calls") or []
-            if isinstance(row, dict) and row.get("tool") in gestures]
+            if isinstance(row, dict) and (gesture := _ran_as(row, connector, EFFECT_GESTURE, gestures)) is not None]
     note = (f"{ROUTELESS_MARK} Nobody receives this text: no connector reads this run's final in {label} ({why}), and "
             f"the host sends nothing for you. People there hear only what a connector tool sends: {', '.join(doors)} "
             f"(source route {source}). Confirmed sent there by this run: {confirmed}. Gestures you made there, which "

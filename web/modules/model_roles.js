@@ -74,18 +74,28 @@ export function modelSourceGroups({ sources = [], providers = [], connections = 
 // A window source as the owner says it: where the value comes from, and who says another value.
 const WINDOW_SOURCES = { user_setting: ['set in Settings', 'Settings say'], owner_ack: ['your confirmation', 'your confirmation says'],
     provider_metadata: ['from the server', 'the server says'], local_health: ['the local serving window', 'the local server says'] };
+// A size refusal's window by how its number was known (the projection's `basis`, `context_window.WindowLimit.basis`).
+// `exact_local_count`: a local instance counted the request Ouroboros refused before sending, no server answered;
+// `anchored_estimate`: Ouroboros derived it from a numberless refusal, an anchored estimate of the refused request or a
+// declared total the refusal confirmed. A projection that names no basis, or one not in this table, claims none.
+const REFUSAL_BASES = { provider_stated: 'stated by the provider in a refusal',
+    exact_local_count: 'derived from an exact local count before sending',
+    anchored_estimate: 'derived from a refusal that stated no number', unrecorded: 'from an earlier refusal, basis not recorded' };
+const sourceWords = (window) => (window.source !== 'refusal' ? WINDOW_SOURCES[window.source]?.[0] || window.source
+    : Object.hasOwn(REFUSAL_BASES, window.basis) ? REFUSAL_BASES[window.basis] : 'from a refusal, basis unknown');
 const tokenWords = (n) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n));
 
 /** The route's window in owner words, from the projection's typed fields (never catalogue arithmetic): the window,
- *  where it comes from, the usable input, a source that disagrees and an old confirmation no longer used; the
- *  observation stamps stay in the projection's record. */
+ *  where it comes from (a refusal's number: stated by the provider, derived, or its basis not recorded), the usable
+ *  input, a source that disagrees and an old confirmation no longer used; the observation stamps stay in the
+ *  projection's record. */
 export function modelContextNote(preview) {
     const window = preview?.window;
     if (!window?.tokens) return 'Context limit not known for this route.';
     const usable = Number.isFinite(window.usable) ? window.usable : window.tokens - (window.reserve || 0);
     const other = window.contradiction;
     const retired = Number(window.retired_ack?.window_tokens) || 0;
-    return `Window ${tokenWords(window.tokens)} tokens (${WINDOW_SOURCES[window.source]?.[0] || window.source}) · ${tokenWords(usable)} usable for input`
+    return `Window ${tokenWords(window.tokens)} tokens (${sourceWords(window)}) · ${tokenWords(usable)} usable for input`
         + (other ? ` · ${WINDOW_SOURCES[other.source]?.[1] || `${other.source} says`} ${tokenWords(other.tokens)}` : '')
         + (retired ? ` · old confirmation ${tokenWords(retired)} not used` : '');
 }

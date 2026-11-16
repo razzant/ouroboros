@@ -292,6 +292,31 @@ test('a disconnect clears the pending post-open retry', async () => {
     }
 });
 
+// What rooms read through room_retire.js: the `previouslyConnected` the next open carries, false until a socket of
+// this page opened (a failed attempt is none), then true across its drops.
+test('previouslyConnected() is false until a socket opened, then holds through a drop', async () => {
+    installEnv([{ body: { sha: 'abc' } }]);
+    const ws = new WS('ws://unused');
+    const opens = [];
+    ws.on('open', (msg) => opens.push(msg.previouslyConnected));
+    try {
+        assert.equal(ws.previouslyConnected(), false);
+        ws.connect();
+        FakeSocket.instances[0].onclose();  // the first attempt fails
+        assert.equal(ws.previouslyConnected(), false, 'a failed attempt is no connection');
+        ws.connect();
+        const socket = FakeSocket.instances[1];
+        socket.readyState = FakeSocket.OPEN;
+        socket.onopen();
+        socket.readyState = FakeSocket.CLOSED;
+        socket.onclose();
+        assert.equal(ws.previouslyConnected(), true, 'down after an open: the next open is a reconnect');
+        assert.deepEqual(opens, [false]);
+    } finally {
+        await teardown(ws);
+    }
+});
+
 // ---------------------------------------------------------------------------
 // _scheduleUiRecovery: probe decisions, fuse, race bail, queue survival.
 // ---------------------------------------------------------------------------

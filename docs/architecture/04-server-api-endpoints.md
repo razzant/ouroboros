@@ -37,6 +37,8 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | GET | `/api/skills/{skill}/review-history/{job_id}` | the skill's ledger record, else a legacy `review_history.jsonl` tail |
 | POST | `/api/owner/skills/{skill}/attest-review` | owner-only skip of the LLM review; deterministic preflight still runs |
 | POST | `/api/skills/{skill}/grants` | |
+| GET | `/api/skills/{skill}/mcp-connect` | |
+| POST | `/api/skills/{skill}/mcp-connect` | |
 | POST | `/api/skills/{skill}/reconcile` | |
 | GET | `/api/marketplace/clawhub/search` | |
 | GET | `/api/marketplace/clawhub/installed` | |
@@ -183,11 +185,13 @@ Files routes: `gateway/files.py::file_browser_routes()` (envelopes/parity: §11)
 | POST | `/api/services/kept/{launch_id}/stop` | `reason`; one launch, fresh outcome |
 | POST | `/api/storage/free/cancel` | stop preview/run; freed stays freed |
 | GET | `/api/evolution-data` | |
-| GET | `/api/projects` | 200 rows; `all=1` all; `id` (active/deleting) or `chat_id` (active): one room (missing → none; unreadable → error) |
+| GET | `/api/projects` | |
 | POST | `/api/projects` | |
 | POST | `/api/projects/from-task` | |
 | POST | `/api/projects/{project_id}/update` | |
 | POST | `/api/projects/{project_id}/delete` | |
+| GET | `/api/projects/{project_id}/folder` | |
+| POST | `/api/projects/{project_id}/folder` | |
 | GET | `/api/fs/dirs` | |
 | GET | `/api/chat/history` | |
 | GET | `/api/chat/search` | |

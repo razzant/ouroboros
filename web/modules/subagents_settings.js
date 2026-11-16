@@ -29,12 +29,13 @@ import { CODECS, CONFIRMS, bindSettingRows, doorSign, outcomeLine, paintWithRow,
 import { registerSettingsPage } from './settings_pages.js';
 import { rowById, rowsOf } from './settings_rows.js';
 import { revealNewRow } from './ui_helpers.js';
+import { createHint } from './ui_hint.js';
 import { setResult, setRowMeta } from './ui_primitives.js';
 import { effortLabel } from './effort_levels.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { currentLanguage, dictionaryRevision } from './i18n.js';
 
-export const MAX_AVAILABLE_SUBAGENTS = 26;
+export const MAX_AVAILABLE_SUBAGENTS = 50;  // = ouroboros/configured_subagents.py MAX_CONFIGURED_SUBAGENTS
 const KEY = 'OUROBOROS_SUBAGENTS';
 export const SUBAGENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/;
 export const ALLOW_EMPTY_REVIEW_POOL = 'allow_empty_review_pool';
@@ -203,6 +204,10 @@ function rowErrors(row, index, ids, rows = null, inherited = '') {
 
 const listLevelErrors = (setting) => (setting.items.length > MAX_AVAILABLE_SUBAGENTS
     ? [`Available subagents supports at most ${MAX_AVAILABLE_SUBAGENTS} rows.`] : []);
+// A full list holds Add and Duplicate (aria-disabled: still reached by mouse, finger and keyboard) and the one hint of
+// each (DESIGN "Hints") says why in one shared fact: switched-off rows hold their places too.
+const atLimit = (state) => Boolean(state?.loaded) && (state.setting?.items?.length || 0) >= MAX_AVAILABLE_SUBAGENTS;
+const held = (state) => (atLimit(state) ? ' aria-disabled="true"' : '');
 
 /** The rows that review: marked Reviewer and switched on, in catalog order. */
 export function reviewPoolRows(setting) {
@@ -530,7 +535,7 @@ function subagentHeadHtml(row, state, index, list = false) {
                 </div>
                 <div class="available-subagent-actions">
                     <label class="available-subagent-reviewer"><input class="ui-checkbox" type="checkbox" data-subagent-field="review_eligible" aria-label="Subagent ${ordinal} reviews"${row.review_eligible === true ? ' checked' : ''}> Reviewer</label>${recheckMarkHtml(row, ordinal)}
-                    <button type="button" class="btn btn-default" data-subagent-duplicate aria-label="Duplicate Subagent ${ordinal}">Duplicate</button>
+                    <span class="ui-hint-host" data-full-hint><button type="button" class="btn btn-default" data-subagent-duplicate aria-label="Duplicate Subagent ${ordinal}"${held(state)}>Duplicate</button></span>
                     <button type="button" class="btn btn-default" data-subagent-remove aria-label="Remove Subagent ${ordinal}">Remove</button>
                 </div>
             </div>
@@ -632,7 +637,7 @@ function agentPageHtml(row, state, index, live) {
             <div class="ui-action-row"><button type="button" class="btn btn-save" data-editor-save>Save</button>
                 ${live ? `<button type="button" class="btn btn-default" data-editor-discard${state.dirty ? '' : ' hidden'}>Discard changes</button>` : ''}
                 <span class="ui-result" data-editor-result role="status" aria-live="polite"></span></div>`)}
-            <div class="ui-action-row settings-foot">${live ? '<button type="button" class="btn btn-default" data-subagent-duplicate>Duplicate</button>' : ''}
+            <div class="ui-action-row settings-foot">${live ? `<span class="ui-hint-host" data-full-hint><button type="button" class="btn btn-default" data-subagent-duplicate${held(state)}>Duplicate</button></span>` : ''}
                 <button type="button" class="btn ${live ? 'btn-danger' : 'btn-default'}" data-subagent-remove data-editor-remove>${live ? 'Remove' : 'Discard'}</button></div>
         </div>`;
 }
@@ -687,6 +692,8 @@ export function createAvailableSubagentsEditor({
     const getDoc = typeof doc === 'function' ? doc : () => doc;
     const getWin = typeof win === 'function' ? win : () => win;
     let disposeChoosers = () => {};
+    let hints = [];
+    const disposeHints = () => { hints.forEach((hint) => hint.destroy()); hints = []; };
     const state = {
         loaded: false, destroyed: false, parseError: '', setting: { enabled: true, items: [] }, source: '', diagnostics: [],
         dirty: false, saveAttempted: false, baseline: baseline === 'generated' ? 'generated' : 'saved', automatic: false,
@@ -1066,7 +1073,6 @@ export function createAvailableSubagentsEditor({
         const pool = reviewPoolSummary(state, Boolean(page));
         const intent = editorIntent(state);
         const items = state.setting.items;
-        const full = !state.loaded || items.length >= MAX_AVAILABLE_SUBAGENTS;
         const unloaded = '<div class="available-subagents-empty">The saved configuration could not be loaded, so this editor will not replace it.</div>';
         const facts = `<div class="available-subagents-source" data-subagents-read-problem ${readProblem ? '' : 'hidden'}>${escapeHtml(readProblem)}</div>
             <div data-subagents-diagnostics class="available-subagents-diagnostics" ${diagnostics.length ? '' : 'hidden'}>${escapeHtml(diagnostics.join(' · '))}</div>`;
@@ -1099,7 +1105,7 @@ export function createAvailableSubagentsEditor({
             const html = `<section class="ui-card settings-card">
                 <div class="settings-card-head"><h3 class="settings-card-title agents-card-title">${items.length} agent${items.length === 1 ? '' : 's'}</h3>
                     <span class="ui-result" data-entry-result role="status" aria-live="polite"></span>
-                    <div class="ui-section-actions"><button type="button" class="btn btn-default btn-sm" data-subagent-add ${full ? 'disabled' : ''}>Add agent</button></div></div>
+                    <div class="ui-section-actions"><span class="ui-hint-host" data-full-hint><button type="button" class="btn btn-default btn-sm" data-subagent-add ${state.loaded ? '' : 'disabled'}${held(state)}>Add agent</button></span></div></div>
                 <div class="agents-filters">${FILTERS.filter(([key]) => key === 'all' || key === state.filter || count(key)).map(([key, label]) =>
                     `<button type="button" class="filter-chip${key === state.filter ? ' active' : ''}" data-agents-filter="${key}" aria-pressed="${key === state.filter}">${label} ${count(key)}</button>`).join('')}</div>
                 ${state.source === 'undecided' || state.automatic ? `<p class="available-subagents-source" data-agents-automatic>Automatic: this list follows your Main model and accounts. Your first change here saves it as yours.</p>` : ''}
@@ -1107,8 +1113,7 @@ export function createAvailableSubagentsEditor({
                 <div class="settings-rows">${!state.loaded ? unloaded : heads || `<p class="available-subagents-empty">${items.length ? 'No agent here.'
                     : 'No agents yet, so the main model is the one agent. Add one to choose others.'}</p>`}</div>
                 ${below}
-                <p class="available-subagents-source">A change applies to new tasks: a task that is already running keeps the reviewers it started with.${
-                    items.length >= MAX_AVAILABLE_SUBAGENTS ? ` The list holds at most ${MAX_AVAILABLE_SUBAGENTS} agents.` : ''}</p>
+                <p class="available-subagents-source">A change applies to new tasks: a task that is already running keeps the reviewers it started with.</p>
             </section>`;
             if (html === state.html) return true;  // nothing in view changed (a status tick, the pool read): focus and listeners stay
             container.innerHTML = state.html = html;
@@ -1127,7 +1132,7 @@ export function createAvailableSubagentsEditor({
                 <span class="available-subagents-count">${items.length}/${MAX_AVAILABLE_SUBAGENTS}</span>
                 <span class="available-subagents-count" data-review-pool-count>${escapeHtml(pool.count)}</span>
                 <span class="settings-inline-status available-subagents-intent" data-subagents-intent data-tone="${intent.tone}" title="${escapeHtml(intent.title)}">${intent.label}</span>
-                <button type="button" class="btn btn-default" data-subagent-add ${full ? 'disabled' : ''}>Add subagent</button>
+                <span class="ui-hint-host" data-full-hint><button type="button" class="btn btn-default" data-subagent-add ${state.loaded ? '' : 'disabled'}${held(state)}>Add subagent</button></span>
             </div>
             ${above}
             <div class="available-subagents-list">
@@ -1178,6 +1183,7 @@ export function createAvailableSubagentsEditor({
         if (scroller) scroller.scrollTop = top;
         bindRows(container);
         disposeChoosers = bindModelChoosers(container);
+        bindFullHints(container);
         restoreFocus(container, focused);
         renderValidation();
         setResult(container.querySelector('[data-entry-result], [data-editor-result]'), state.result || {});
@@ -1185,6 +1191,23 @@ export function createAvailableSubagentsEditor({
         if (added) { reveal = ''; revealRow(added._uiKey); }
         else if (listView && reveal === '+' && state.loaded && !items.length) { reveal = ''; container.querySelector('[data-subagent-add]')?.focus(); }
         return true;
+    }
+
+    // At the limit each held Add and Duplicate carries the one hint (ui_hint.js) in its host, all saying the one fact,
+    // inside the box that clips it: the Settings page's scroller, or onboarding's collapse (overflow hidden).
+    function bindFullHints(container) {
+        disposeHints();
+        if (!atLimit(state)) return;
+        const said = { text: `The list holds at most ${MAX_AVAILABLE_SUBAGENTS} ${page ? 'agents' : 'subagents'}, including those switched off.`,
+            rule: 'Remove one to add another.' };
+        for (const host of container.querySelectorAll?.('[data-full-hint]') || []) {
+            const hint = createHint(host, { doc: getDoc(), boundary: host.closest?.('.settings-page, .wizard-collapse'), dismissOutside: true });
+            hint.say(said);
+            host.querySelector('button')?.setAttribute('aria-describedby', hint.el.id);
+            for (const type of ['pointerenter', 'focusin', 'click']) host.addEventListener(type, () => hint.show());
+            for (const type of ['pointerleave', 'focusout']) host.addEventListener(type, () => hint.hide());
+            hints.push(hint);
+        }
     }
 
     // Reveal the new row after the painter restores previous focus.
@@ -1330,6 +1353,7 @@ export function createAvailableSubagentsEditor({
         Object.assign(state, { destroyed: true, previewGeneration: state.previewGeneration + 1 });
         getWin()?.removeEventListener?.('ouro:language-changed', onLanguageChanged);
         disposeChoosers();
+        disposeHints();
         for (const disposer of ['statusDisposer', 'catalogDisposer']) { state[disposer]?.(); state[disposer] = null; }
     }
 

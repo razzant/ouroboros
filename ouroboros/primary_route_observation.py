@@ -219,6 +219,65 @@ def route_facts_text(tool_ctx, *, model: str, use_local: bool, role: str, failed
             f"{f' (its engine dated a reset at {reset})' if reset else ''}.{meaning}{error} {answer} {before} {_SPARE_CLOSING}")
 
 
+#: How the host recognised a size refusal, in the continuing request's facts (``failed_attempt_facts``).
+_BASIS_WORDS = {"typed": "a typed size code", "frozen": "its wording", "status_413": "HTTP 413 alone"}
+
+
+def failed_attempt_facts(usage: dict, model: str, use_local: bool, *, fresh: bool = True) -> str:
+    """What the host knows of the attempt that just failed on ``model``, for the request that continues the round;
+    read while ``usage`` still holds that attempt's own stamp and measurement (a candidate's fit replaces them).
+
+    Who refused and when, the status, each party's own sentence and typed codes (an engine's typed fields stay
+    fields: no sentence is invented), the refused request's size as the host measured it with the window on
+    record, and what the host did. Never a cause the host did not establish, a unit the provider did not state,
+    advice, or the printed exception. "" unless the last failure row is this route's own (``fresh``:
+    ``loop_transport.fallback_reason_text``)."""
+    from ouroboros.loop_transport import _DIAGNOSTIC_POINTER, _OWNER_QUOTE_LIMIT, _failure_words
+
+    failure, answer = usage.get("_last_llm_failure") or {}, usage.get("_last_llm_provider_answer") or {}
+    if not fresh or failure.get("model") != model:
+        return ""
+    # The round's own verdict: the seam may have recognised size after the row was written (``cited_limit_refusal``).
+    kind = str(usage.get("_last_llm_error_kind") or failure.get("failure_code") or "")
+    fields = usage.get("_last_llm_provider_fields") or {}
+    words, codes = {}, {}
+    for who, text, history in answer.get("said") or ():  # the current path, and the quoted sentence wherever it stood
+        if not history or text == answer.get("sentence"):
+            words.setdefault(who, {})[text[:_OWNER_QUOTE_LIMIT] + ('" [cut here] "' if len(text) > _OWNER_QUOTE_LIMIT else "")] = None
+    for who, code in answer.get("codes") or ():
+        codes.setdefault(who, []).append(code)
+    said = [f'{who or "the provider"} said "{" / ".join(texts)}"' + (f' (code {", ".join(codes[who])})' if who in codes else "")
+            for who, texts in words.items()]
+    said += [f'its {label} was "{fields[key]}"' for key, label in (("code", "typed error code"), ("parameter", "parameter"))
+             if isinstance(fields.get(key), str) and fields[key].strip()]
+    estimate, raw, window = (usage.get(f"_context_{name}") for name in ("prompt_estimate", "raw_input_tokens", "window"))
+    density = ("at the density of this conversation's own last accepted request"
+               if usage.get("_context_anchor_input_tokens") is not None else "density not measured on this conversation")
+    size = (f" That request: input estimated {int(estimate):,} tokens from about {int(raw or 0) * 4:,} characters "
+            f"({density}), reply allowance {int(usage.get('_context_reply_allowance_tokens') or 0):,}"
+            f"{'; ' + window['text'] if isinstance(window, dict) and window.get('text') else ''}." if estimate else "")
+    if kind == "context_overflow":
+        basis = (f"a cited {answer['limit']:,} equal to the {answer.get('limit_kind')} limit of {answer.get('declaration')}"
+                 if answer.get("limit") else _BASIS_WORDS.get(str(answer.get("basis") or ""), "its own measurement"))
+        did = f"The host read it as a size refusal by {basis}; that route gave no answer."
+    else:
+        did = f"The host filed it as {_failure_words(kind)}, established no size cause and changed nothing in the request for it."
+    return (f"[ATTEMPT FACTS] The attempt before this request, on {model}{' (local)' if use_local else ''}, ended without "
+            f"a usable answer at {failure.get('ts') or 'an unrecorded time'}{' with HTTP ' + str(failure['status_code']) if failure.get('status_code') else ''}"
+            f"{': ' + '; '.join(said) if said else '; it carried no sentence the host can quote'}.{size} {did}"
+            + (f" {_DIAGNOSTIC_POINTER}" if "[cut here]" in "".join(said) else ""))
+
+
+def tell_failed_attempt(messages: list, facts: str, asked: str) -> dict | None:
+    """Put the previous attempt's ``facts`` into the request that continues on ``asked``, before its fit and send;
+    the row, which a failed candidate takes back out of a transcript it shared, or None without facts."""
+    if not facts:
+        return None
+    messages.append({"role": "user", "content": f"{facts} The host now asks {asked} with this view as it stands. "
+                                                "Facts, not an instruction."})
+    return messages[-1]
+
+
 def refusal_words(usage: dict, msg: dict) -> dict:
     """A content refusal's own words as its reply carried them: the OpenAI-compatible message's ``refusal``, else the
     native ``stop_details`` explanation, and the native category; what the reply did not carry is left out."""

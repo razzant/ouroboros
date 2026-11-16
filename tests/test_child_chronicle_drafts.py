@@ -273,7 +273,7 @@ def test_the_view_and_memory_read_name_a_childs_draft_by_the_child_and_lights_by
     child_line = next(line for line in listing.split("\n") if line.startswith(f"[page {child_draft['node_id']}"))
     light_line = next(line for line in listing.split("\n") if line.startswith(f"[page {light_draft.record['id']}"))
     assert "; helper (child, task kid00001); accepted;" in child_line
-    assert "; helper (helper draft, not lived); draft;" in light_line and "child" not in light_line
+    assert "; helper (fallback_page; helper draft, not lived); draft;" in light_line and "child" not in light_line
 
 
 def test_draft_signer_names_a_delegated_focus_and_otherwise_light():

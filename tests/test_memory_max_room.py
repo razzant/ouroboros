@@ -7,6 +7,8 @@ import pytest
 
 from ouroboros import capability_evidence as ce, context_fit as cf, memory_floor as mf, memory_view as mv
 from ouroboros.context_view_facts import memory_facts
+from ouroboros.llm_messages import project_wire_messages
+from ouroboros.tool_policy import select_tool_schemas
 from tests import _memory_view_synthetic as syn
 
 
@@ -43,8 +45,8 @@ def test_a_roomy_window_holds_max_and_names_the_measured_parts(monkeypatch):
     assert fact["unfolded"] and fact["unfolded"] <= fact["story"]  # 40 pages, none in a part or account yet
     assert dict(fact["parts"])["books"] > dict(fact["parts"])["knowledge, scratchpad and runtime facts"] and "tool schemas" not in dict(fact["parts"])
     line = memory_facts(plan, "max")  # every start, Max held too: the measure part by part, no advice
-    assert line.startswith("Max room at the start: window 2,000,000; books, core, knowledge, scratchpad, runtime facts, "
-                           "assignment, reply reserve and work room")
+    assert line.startswith("Max room in this captured build: window 2,000,000; books, core, knowledge, scratchpad, runtime facts, "
+                           "connections, assignment, reply reserve and work room")
     assert f"(books {dict(fact['parts'])['books']:,}, " in line and f"tool schemas {fact['schemas']:,}; " in line
     assert f"story {fact['story']:,} (40 pages no part or account holds yet, {fact['unfolded']:,} tokens, most in " in line
     assert f"beside a Max room of {fact['allowance']:,}; Max held;" in line
@@ -71,6 +73,19 @@ def test_memory_or_schemas_that_take_the_books_room_are_measured_without_advice(
     selected = mf.select_view(plan, "low", [])
     assert selected.low_projection.memory_facts["max_room"] == fact
     assert "The host's measure of this start" in selected.low_projection.system_content_json
+
+
+def test_reprojected_restore_names_its_captured_build_not_an_unknown_original_start(monkeypatch):
+    built = _start(_core(), 2_000_000, monkeypatch)
+    restored = cf.restored_start(built, None)
+    moved = restored.reproject_for_route(window_tokens=128_600, known_window=True, ratio=1.0,
+        output_reserve=built.output_reserve_tokens, tool_schemas=[], start_mode=restored.initial_mode, admitted=True)
+    assert moved.start == cf.UNKNOWN_START
+    assert _fact(moved) == _fact(built)  # the retained room belongs to the capture, not the new route
+    assert moved.window_tokens == 128_600
+    text = memory_facts(moved, moved.initial_mode)
+    assert "Max room in this captured build: window 2,000,000" in text
+    assert "Max room at the start" not in text
 
 
 def test_a_route_whose_window_cannot_hold_the_books_floor_is_a_disclosed_fact(monkeypatch):
@@ -103,6 +118,77 @@ def test_a_directly_required_book_at_the_max_boundary_never_lowers_the_start(mon
     blocks = [block["text"] for block in json.loads(held.max_projection.system_content_json)]
     assert any(text.startswith("## DEVELOPMENT.md\n") for text in blocks)
     assert "Start room is smaller than requested: this task's directly required handbook takes" in blocks[-1]
+
+
+WIDE = [{"type": "function", "function": {"name": "read_file", "description": "Read a fixture.", "parameters": {
+    "type": "object", "properties": {f"field_{i}": {"type": "string", "description": "A fixture value."} for i in range(4000)}}}}]
+# Small schemas a custom catalog can carry (``openai_chat_custom``: one this wide exceeds its description limit).
+SMALL = [{"type": "function", "function": {"name": f"tool_{i}", "description": "Do one small fixture thing.", "parameters": {
+    "type": "object", "properties": {"path": {"type": "string", "description": "A path."}}, "required": ["path"]}}}
+    for i in range(60)]
+
+
+def _wide_start(window, monkeypatch, *, provider="test", effort="", tools=WIDE):
+    """A start whose call schemas outweigh its memory: one schema of 4,000 fields beside a whole small book."""
+    snap = syn.snapshot(room_facts=syn.room("1"), conversations=[], story=syn.pages(1, 300))
+    snap = dataclasses.replace(snap, spec=dataclasses.replace(snap.spec, work_room_levels=2))
+    core = cf.ContextCore("Core", "BIBLE", "# Architecture\n\n" + "Full book. " * 2000, "", "Identity", "Facts",
+                          '"Assignment"', False, memory_view_json=mv.snapshot_json(snap))
+    monkeypatch.setattr(cf, "_route_calibration_ratio", lambda *_a, **_kw: 1.0)
+    return cf.build_context_fit_plan(None, core, {"id": "wide01", "chat_id": 1}, preferred_mode="max", tool_schemas=tools,
+        reasoning_effort=effort, route_resolver=lambda *_a, **_kw: (
+            {"provider": provider, "model": "test"}, ce.CapabilityEvidence(window, "confirmed", "metadata", "wide-route")))
+
+
+def test_the_first_window_holding_max_is_where_the_request_it_sends_fits(monkeypatch):
+    """Max holds exactly where the request this start sends (messages and schemas in the one count a round measures,
+    nothing host-only), its reply reserve and work room fit; one token of window less stays Low. 15.11.2026: the
+    schemas, priced apart with separator spaces, read about 5,000 tokens over this request and started it Low."""
+    lo, hi = 150_000, 260_000
+    while lo < hi:
+        mid = (lo + hi) // 2
+        lo, hi = (lo, mid) if _wide_start(mid, monkeypatch).initial_mode == "max" else (mid + 1, hi)
+    held, short = _wide_start(hi, monkeypatch), _wide_start(hi - 1, monkeypatch)
+    fact, over = _fact(held), _fact(short)
+    sent = list(select_tool_schemas(WIDE, context_mode="max").schemas)
+    messages = held.messages_for("max")
+    request = cf.estimate_context_prompt_tokens(messages, sent)
+    assert request == cf.estimate_context_prompt_tokens(project_wire_messages(messages), sent)  # the wire's count
+    assert held.initial_mode == "max" and fact["need"] == request + fact["reserve"] + fact["work"] <= hi
+    assert held.projected_tokens_with_tools("max", sent) == request  # density 1: a route's projection reads the same
+    assert fact["schemas"] == cf.tool_schema_tokens(sent) == math.ceil(len(json.dumps(
+        sent, ensure_ascii=False, sort_keys=True, separators=(",", ":"))) / 4)
+    assert short.initial_mode == "low" and over["cause"] == "crowded" and over["need"] > over["window"] == hi - 1
+    assert short.core == held.core and short.output_reserve_tokens == held.output_reserve_tokens  # one window apart
+
+
+def test_a_direct_openai_reasoning_start_measures_the_shape_it_sends(monkeypatch):
+    """Direct OpenAI with reasoning sends the schemas as its custom catalog (``openai_chat_dispatch``): a start told
+    that effort measures the longer shape the first round will send and names it as the schemas' part."""
+    plain = _wide_start(2_000_000, monkeypatch, provider="openai", tools=SMALL)
+    reasoning = _wide_start(2_000_000, monkeypatch, provider="openai", effort="high", tools=SMALL)
+    sent = list(select_tool_schemas(SMALL, context_mode="max").schemas)
+    assert plain.max_projection.system_content_json == reasoning.max_projection.system_content_json  # the same view
+    for plan, effort in ((plain, ""), (reasoning, "high")):
+        fact, shape = _fact(plan), {"provider": "openai", "reasoning_effort": effort}
+        assert fact["need"] == cf.estimate_context_prompt_tokens(plan.messages_for("max"), sent, **shape) + (
+            fact["reserve"] + fact["work"])
+        assert fact["schemas"] == cf.tool_schema_tokens(sent, **shape)
+    assert _fact(reasoning)["schemas"] > _fact(plain)["schemas"] and _fact(reasoning)["need"] > _fact(plain)["need"]
+
+
+def test_the_connections_map_is_a_part_of_its_own_beside_the_assignment(monkeypatch):
+    """The connections map Max shows beside the core (``section_floor._system_blocks``) is its own measured part; the
+    assignment part keeps only the task's messages. 15.11.2026: a real map of 213,668 characters read as assignment."""
+    connections = ("## Connections\n\n" + "- mcp_fixture: one server's tool line\n" * 400, "## Connections\n\nmcp_fixture")
+    bare = _start(_core(), 2_000_000, monkeypatch)
+    mapped = _start(dataclasses.replace(_core(), connections=connections), 2_000_000, monkeypatch)
+    bare_parts, mapped_parts = dict(_fact(bare)["parts"]), dict(_fact(mapped)["parts"])
+    assert bare.initial_mode == mapped.initial_mode == "max" and "connections" not in bare_parts
+    assert any(connections[0] in block["text"] for block in json.loads(mapped.max_projection.system_content_json))
+    assert mapped_parts["connections"] == mf.view_tokens(connections[0]) > 2_000
+    assert abs(mapped_parts["assignment"] - bare_parts["assignment"]) <= 1  # the map's separator and rounding only
+    assert f"connections {mapped_parts['connections']:,}" in memory_facts(mapped, "max")
 
 
 def test_no_fact_without_a_known_window_or_the_owners_max(tmp_path, monkeypatch):

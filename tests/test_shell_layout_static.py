@@ -112,6 +112,25 @@ def _block(css: str, head: str) -> str:
     return css[start:pos - 1]
 
 
+def test_folded_rings_leave_each_others_touch_reach():
+    css = _read("web/style.css")
+    rings = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] {')
+    assert "--composer-glyph-gap: max(var(--composer-row-gap), calc(var(--touch-target-min) - var(--composer-control-height)));" in rings
+    assert "column-gap: var(--composer-glyph-gap);" in rings
+    # The chips slot gives back that same wider gap, or a folded row with chips would wrap onto a second line.
+    chips = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips {')
+    assert "margin-inline-start: calc(-1 * var(--composer-glyph-gap));" in chips
+    lead = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips::before {')
+    assert "width: calc(var(--composer-glyph-gap) - 6px);" in lead
+
+
+def test_logs_use_the_space_below_clear_for_the_long_filter_word():
+    css = _read("web/style.css")
+    logs = _block(css, "@container dashboard (max-width: 27.75rem) {")
+    assert "grid-column: 4; grid-row: 1;" in _block(logs, ".logs-filters > .logs-inline-clear {")
+    assert "grid-column: 3 / -1;" in _block(logs, ".logs-filters > .filter-chip:nth-child(6) {")
+
+
 def test_a_section_gives_the_places_control_up_only_where_a_page_replaced_its_list():
     """In the stack layout a section's page is one row, Back and its name, where the places control stood. From 40rem
     a section holds its list beside the page and the first-level page has no Back: there the places control is the

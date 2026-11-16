@@ -551,9 +551,9 @@ def test_one_harness_plus_distinct_main_and_light_normally_yields_three_real_act
 
 
 def test_roster_cap_overflow_omits_the_seat_with_a_diagnostic():
-    """The 26-row cap leaves no room to mint: there is no inline lane to fall
+    """A full catalog (MAX_CONFIGURED_SUBAGENTS rows) leaves no room to mint: there is no inline lane to fall
     back to any more, so the seat is OMITTED and says so in diagnostics —
-    honest disclosure, never a silent drop (and never a 27th row)."""
+    honest disclosure, never a silent drop (and never a row past the cap)."""
     from ouroboros.configured_subagents import (
         MAX_CONFIGURED_SUBAGENTS,
         ROUTE_KIND_API_MODEL,

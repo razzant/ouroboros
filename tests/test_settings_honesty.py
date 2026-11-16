@@ -282,7 +282,7 @@ def test_failed_task_start_reload_is_disclosed_loudly(monkeypatch):
 def test_corrupt_settings_file_is_disclosed_not_silently_defaulted(monkeypatch, tmp_path):
     """load_settings falls back to defaults+env on a malformed settings.json
     instead of raising — exactly the silence the wrapper exists to break. The
-    wrapper probes the file itself, so the common corruption case is loud."""
+    task-start reader is strict under its lock, so the common corruption case is loud."""
     from ouroboros import config as cfg
     from ouroboros import subagent_runtime
 
@@ -293,7 +293,7 @@ def test_corrupt_settings_file_is_disclosed_not_silently_defaulted(monkeypatch, 
     subagent_runtime.apply_task_start_settings_or_disclose("task-9", emit)
     assert len(events) == 1
     assert events[0]["type"] == "task_start_settings_reload_failed"
-    assert "JSONDecodeError" in events[0]["error"]
+    assert "SettingsDocumentUnknown" in events[0]["error"]
 
 
 def test_missing_settings_file_is_a_legitimate_defaults_install(monkeypatch, tmp_path):

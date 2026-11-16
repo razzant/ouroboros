@@ -15,7 +15,6 @@ fail-closed on a registry it cannot read.
 
 from __future__ import annotations
 
-import os
 import pathlib
 import types
 
@@ -34,6 +33,12 @@ from ouroboros.skill_loader import save_enabled
 from ouroboros.utils import atomic_write_json
 
 from tests._shared import clean_extension_runtime_state
+from tests._extension_dispatch_harness import _restore_server_pid  # noqa: F401  (autouse fixture applies on import)
+from tests._extension_dispatch_harness import as_server as _as_server
+from tests._extension_dispatch_harness import batch as _batch
+from tests._extension_dispatch_harness import brief_place as _brief_place
+from tests._extension_dispatch_harness import settings_and_repo as _settings_and_repo
+from tests._extension_dispatch_harness import supervisor as _supervisor
 from tests._extension_loader_shared import _prepare_extension
 from tests._extension_loader_shared import (  # noqa: F401  (autouse fixture applies on import)
     _clear_loader_state,
@@ -47,19 +52,6 @@ _PROBE_PLUGIN = (
 # Imports cleanly in the publisher and raises in the adopter — the shape that
 # would let a worker's local failure demote a globally healthy skill.
 _BROKEN_PLUGIN = "raise RuntimeError('this extension never imports')\n"
-
-
-@pytest.fixture(autouse=True)
-def _restore_server_pid():
-    original = os.environ.get("OUROBOROS_SERVER_PROCESS_PID")
-    yield
-    init_server_process_pid(int(original) if original else -1)
-    if original is None:
-        os.environ.pop("OUROBOROS_SERVER_PROCESS_PID", None)
-
-
-def _as_server() -> None:
-    init_server_process_pid(os.getpid())
 
 
 def _as_worker() -> None:
@@ -84,13 +76,6 @@ def _published_by_a_server_that_loaded_it(tmp_path: pathlib.Path, name: str = "g
     surface = extension_loader.extension_surface_name(name, "echo")
     assert extension_loader.get_tool(surface) is not None
     return loaded, repo_root, drive_root, surface, empty_generation, loaded_generation
-
-
-def _settings_and_repo(monkeypatch, repo_root: pathlib.Path) -> None:
-    from ouroboros import config
-
-    monkeypatch.setattr(config, "load_settings", lambda: {})
-    monkeypatch.setattr(config, "get_skills_repo_path", lambda: str(repo_root))
 
 
 # ---------------------------------------------------------------------------
@@ -182,21 +167,6 @@ def _live_worker_behind_an_update(tmp_path, monkeypatch):
                         lambda *a, **kw: (reloads.append("reload"), real_reload(*a, **kw))[1])
     registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
     return registry, drive_root, surface, reloads
-
-
-def _batch(registry, drive_root, *calls):
-    from ouroboros.loop_tool_execution import execute_tool_batch
-
-    logs = drive_root / "logs"
-    logs.mkdir(parents=True, exist_ok=True)
-    results, control = execute_tool_batch(list(calls), registry, logs, "genprobe-task", None, {})
-    assert control is None
-    starts = {}
-    for line in (logs / "tools.jsonl").read_text(encoding="utf-8").splitlines():
-        row = __import__("json").loads(line)
-        if row.get("type") == "tool_call_started":
-            starts[row["tool_call_id"]] = row
-    return results, starts
 
 
 def _call(call_id, surface, message="hi"):
@@ -371,41 +341,6 @@ _SPEAKER_PLUGIN = (
 _SPEAKS = "tools:\n  - name: say\n    effect: message\n    target: channel\n    conversation: channel\n"
 
 
-def _supervisor(monkeypatch, verdict="SAFE", runtime="advanced"):
-    """The real Safety path; only the physical model call is recorded and answers ``verdict`` (an exception: no answer)."""
-    import json
-
-    from ouroboros import safety
-    from tests._safety_fixtures import reset_safety_stores
-
-    prompts: list[str] = []
-    reset_safety_stores()
-    monkeypatch.setattr(safety, "_SAFETY_STORM_UNTIL", 0)
-    monkeypatch.setattr(safety, "_CHAIN_STORMS", {})
-    monkeypatch.setattr(safety, "_resolve_safety_routing", lambda: (False, False, None))
-    monkeypatch.setattr(safety, "get_safety_model", lambda: "fixture/checker")
-    monkeypatch.setattr(safety, "get_safety_mode", lambda *_a: "full")
-    monkeypatch.setattr(safety, "get_runtime_mode", lambda: runtime)
-    monkeypatch.setattr(safety, "_emit_durable_safety_event", lambda *_a, **_k: None)
-
-    def model(**kwargs):
-        prompts.append(kwargs["user_prompt"])
-        if isinstance(verdict, Exception):
-            raise verdict
-        return {"content": json.dumps({"status": verdict, "reason": "fixture verdict"})}, {}
-
-    monkeypatch.setattr(safety, "_safety_model_call", model)
-    return prompts
-
-
-def _brief_place(prompt):
-    """The ``subject.place`` host facts of one Supervisor prompt."""
-    import json
-
-    evidence = prompt.split("Host evidence (provenance is not consent):\n", 1)[1].split("\nProposed tool call:\n", 1)[0]
-    return json.loads(evidence)["subject"]["place"]
-
-
 def _speaker_call(tmp_path, monkeypatch, *, replacement="message", then=None, out_of_process=False):
     """Bind a real message connector's call to one Active place, then before it dispatches publish a reviewed
     replacement declaring ``replacement`` (None: no replacement) and run ``then(drive_root, place)``."""
@@ -469,12 +404,14 @@ def test_a_bound_message_handler_keeps_its_speech_refusal_across_a_replacement(
 
 @pytest.mark.parametrize("replacement", ["read", "write"])
 def test_a_checked_bound_handler_runs_with_its_own_route_in_the_brief(tmp_path, monkeypatch, replacement):
-    """The Safety brief describes the handler that runs, never the replacement's declaration read by name."""
+    """The Safety brief, and the destination facts written after the call, describe the handler that runs, never the
+    replacement's declaration read by name: its words reached Room two, so that place's facts trail its own text."""
     prompts = _supervisor(monkeypatch, "SAFE")
 
     result, place = _speaker_call(tmp_path, monkeypatch, replacement=replacement)
 
-    assert result["is_error"] is False and result["result"] == "said hi in C2", result
+    assert result["is_error"] is False and result["result"] == (
+        "said hi in C2\n\n[DESTINATION] Room two: your human's notes for this place: none"), result
     facts = _brief_place(prompts[0])
     assert (facts["effect"], facts["declared"], facts["targets"]) == ("message", True, {"channel": ["C2"]}), facts
     assert [row["place_id"] for row in facts["places"]] == [place.place_id]

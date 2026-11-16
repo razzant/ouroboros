@@ -66,7 +66,7 @@ from ouroboros.chronicle_import import LEGACY_ROOM_ID, row_lineage
 from ouroboros.chronicle_quotes import SPEAKERS
 from ouroboros.chronicle_lead import LEAD_RULE
 from ouroboros.chronicle_store import (DELEGATED_FOCUS_ROLES, STORY_KINDS, ChronicleStore, PublishResult, capture,
-                                       draft_signer, source_time_span, verify_quotes)
+                                       source_time_span, verify_quotes)
 from ouroboros.dialogue_provenance import (memory_row_header, quote_words, recorded_finality, render_row_text,
                                           row_author, stamp_summary, wordless_reaction)
 from ouroboros.knowledge import focus_signature
@@ -657,18 +657,6 @@ def _chronicle_write(ctx: Any, kind: str = "", room_id: Any = None, text: str = 
 
 # --- memory_read: rendering ----------------------------------------------------------------------
 
-def _author_label(author: Any) -> str:
-    author = author if isinstance(author, dict) else {}
-    kind = str(author.get("kind") or "unknown")
-    if kind == "mind":
-        focus = author.get("focus") if isinstance(author.get("focus"), dict) else {}
-        return f"mind ({focus.get('role') or 'focus not recorded'} {author.get('task_id') or ''})".replace(" )", ")")
-    if kind == "helper" and isinstance(author.get("focus"), dict):  # a delegated child's or nanny's draft
-        return f"helper ({draft_signer(author)})"
-    detail = author.get("attribution") or author.get("operation") or author.get("writer") or ""
-    return f"{kind} ({detail})" if detail else kind
-
-
 def _span(span: Any) -> str:
     span = span if isinstance(span, dict) else {}
     if not span.get("start") and not span.get("end"):
@@ -708,8 +696,12 @@ def _covers_summary(record: Dict[str, Any], period: Optional[memory_inventory.Pe
         meta = record.get("metadata") or {}
         where = f"raw_range {raw['pos'][0]}–{raw['pos'][1]}" if raw.get("status") == "exact" and raw.get("pos") else (
             "raw_range unknown" if raw else "")
-        label = meta.get("label") or meta.get("legacy_type") or ""
-        return "; ".join(part for part in (str(label), where, str(meta.get("legacy_range_text") or "")) if part)
+        moved = bool(meta.get("transfer"))  # the words a transfer brought are data here (memory_inventory.quoted)
+        label, told = (memory_inventory.quoted(value) if moved and value else str(value or "") for value in (
+            meta.get("label") or meta.get("legacy_type"), meta.get("legacy_range_text")))
+        stated = ("" if not moved else f"stated period {_span(meta['stated_period'])}"
+                  if meta.get("stated_period") else "period not stated by its source")
+        return "; ".join(part for part in (label, where, told, stated, memory_inventory.transfer_words(record)) if part)
     if kind == "note":
         return f"task {record.get('task_id') or ''}"
     return ""
@@ -741,7 +733,7 @@ def _target_label(target: Any) -> str:
 
 def _record_header(record: Dict[str, Any], period: Optional[memory_inventory.Period] = None, told: str = "") -> str:
     parts = [f"{record.get('kind')} {record.get('id')}", f"room {record.get('room_id')}",
-             _author_label(record.get("author"))]
+             memory_inventory.record_byline(record)]
     if record.get("kind") == "mark":
         parts += [f"scope {record.get('scope')}", f"target {_target_label(record.get('target_ref'))}",
                   f"visibility {record.get('visibility')}"]
@@ -759,7 +751,7 @@ def _record_header(record: Dict[str, Any], period: Optional[memory_inventory.Per
         parts.append(f"told in my story by account {told}")
     fixes = record.get("corrections") or []
     if fixes:  # the acting revision is the last correction's, signed by its own author, not the record's
-        parts.append(f"revision {record.get('revision')} (corrected by {_author_label(fixes[-1].get('author'))})")
+        parts.append(f"revision {record.get('revision')} (corrected by {memory_inventory.author_byline(fixes[-1].get('author'))})")
     elif record.get("revision"):
         parts.append(f"revision {record['revision']}")
     parts.append(f"seq {record.get('sequence')}")
@@ -959,7 +951,7 @@ def _node_document(store: ChronicleStore, record: Dict[str, Any], revision: str 
     elif kind == "part":
         sections.append("members: " + ", ".join(covers.get("member_ids") or []))
     elif kind == "account":
-        sections.append(f"written {str(record.get('ts') or '')[:10]} by {_author_label(record.get('author'))} over "
+        sections.append(f"written {str(record.get('ts') or '')[:10]} by {memory_inventory.author_byline(record.get('author'))} over "
                         f"{len(record.get('sources') or [])} sources (each after the text); nothing sealed or folded; "
                         "shown in the common view only by my selection (chronicle_write kind=selection)")
     elif kind == "selection":
@@ -995,7 +987,7 @@ def _node_document(store: ChronicleStore, record: Dict[str, Any], revision: str 
             f"shown={other.get('shown')}; replaces {len(other.get('replaces') or [])}: "
             + (", ".join(other.get("replaces") or []) or "nothing") + "; " if other["kind"] == "selection"
             else "") + str(other.get("reason") or "")
-        sections.append(f"{other['kind']} {other['id']} by {_author_label(other.get('author'))} (seq {other['sequence']}):\n"
+        sections.append(f"{other['kind']} {other['id']} by {memory_inventory.author_byline(other.get('author'))} (seq {other['sequence']}):\n"
                         f"{body}")
     for quote in record.get("quotes") or []:
         sections.append(f"quote ({quote.get('speaker')}, {quote.get('address')}): {quote.get('text')}")
@@ -1010,7 +1002,10 @@ def _node_document(store: ChronicleStore, record: Dict[str, Any], revision: str 
     if kind == "account":
         sections += [_source_section(src) for src in (shown.get("sources") or record.get("sources") or [])]
     meta = record.get("metadata") or {}
-    if meta.get("legacy_source_ref"):
+    if meta.get("legacy_source_ref") and meta.get("transfer"):  # its source's own address, not a retelling read here
+        sections.append("recorded legacy_source_ref of its source, not read here: "
+                        + json.dumps(meta["legacy_source_ref"], sort_keys=True))
+    elif meta.get("legacy_source_ref"):
         sections.append("retelling source: memory_read(source_ref="
                         + json.dumps(meta["legacy_source_ref"], ensure_ascii=False, sort_keys=True) + ")")
     for ref in record.get("source_refs") or []:

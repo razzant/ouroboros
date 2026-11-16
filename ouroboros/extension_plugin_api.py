@@ -627,14 +627,24 @@ class PluginAPIImpl:
             raise ExtensionRegistrationError("companion command must be declared in manifest")
         if expected_runtime in {"python", "python3"} and cmd[0] in {"python", "python3"}:
             cmd = [sys.executable, *cmd[1:]]
-        # T14 node symmetry with the python rewrite above; the bundled-first
-        # precedence and its PATH-override carve-out live in node_runtime.
-        cmd = skill_node_argv(spec, expected_runtime, cmd)
         if not is_server_process():
             with _lock:
                 self._require_open_locked()
                 self._stage_companion_name_locked(f"worker-skip:{clean_name}")
             return
+        # T14 node symmetry with the python rewrite above, here where the server spawns it; the precedence and its
+        # PATH-override carve-out live in node_runtime. Under a pin not prepared yet the companion waits: this start
+        # asks for it, and the prepared Node re-queues this extension (``server_boot.requeue_waiting_extensions``).
+        from ouroboros.node_runtime import NodeRuntimeUnavailable, NpmLauncherRefused, pinned_node_wait
+
+        try:
+            cmd = skill_node_argv(spec, expected_runtime, cmd)
+        except NodeRuntimeUnavailable as exc:
+            if pinned_node_wait()[1] and not isinstance(exc, NpmLauncherRefused):
+                from ouroboros.server_boot import request_pinned_node
+
+                request_pinned_node()
+            raise ExtensionRegistrationError(f"companion {clean_name!r}: {exc}") from exc
         supervisor = get_global_supervisor()
         if supervisor is None:
             raise ExtensionRegistrationError("companion supervisor is not initialized")
@@ -1031,8 +1041,8 @@ class PluginAPIImpl:
             return {key: settings[key] for key in self._readable_settings_keys(keys, document) if key in settings}
 
     def _require_api_generation(self, method: str) -> None:
-        """2.4 methods need a 2.x negotiation: every declared 2.x minimum negotiates the host's 2.4, so in
-        practice a field-less legacy (1.3) payload is the one refused them."""
+        """2.4 methods need a 2.x negotiation: every declared 2.x minimum negotiates the host's current 2.x, so
+        in practice a field-less legacy (1.3) payload is the one refused them."""
         try:
             major, minor = (int(part) for part in self._plugin_api_generation.split(".", 1))
         except ValueError:

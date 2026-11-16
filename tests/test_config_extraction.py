@@ -118,6 +118,7 @@ _ADDED_OWNERS = {
     "MODEL_ROLE_SETTINGS": model_slots,
     "normalize_model_role_options": model_slots,
     "model_role_option": model_slots,
+    "acting_model_role": model_slots,
     "task_model_binding": model_slots,
     "route_binding": model_slots,
     "apply_model_role_override": model_slots,

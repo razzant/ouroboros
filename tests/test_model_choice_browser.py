@@ -219,6 +219,12 @@ def _capsule_walk(page, tag: str, *, finger: bool = False) -> None:
     still(unfolded, closed, "the sources unfolded")
     placed(unfolded, "the sources unfolded")
     assert unfolded["fold"]["expanded"] == "true" and unfolded["sources"] >= 5, (tag, "Main, then the sources", unfolded)
+    # The floating sheet owns its non-action text too: a press there neither closes it nor picks a model.
+    press(".ui-popup.model-sheet .model-tier-scope")
+    page.wait_for_timeout(200)
+    kept = page.evaluate(_ROW)
+    still(kept, closed, "a press inside the sheet")
+    placed(kept, "a press inside the sheet")
 
     page.fill(".ui-popup.model-sheet .chat-model-query", "model-1")
     page.wait_for_function("() => document.querySelectorAll('.ui-popup.model-sheet .chat-model-row').length >= 60", timeout=10_000)

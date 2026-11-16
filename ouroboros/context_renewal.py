@@ -157,8 +157,10 @@ def renew_after_refusal(limit_ctx: Any, tools: Any) -> bool:
     root = limit_ctx.drive_root or limit_ctx.drive_logs.parent
     schemas = getattr(limit_ctx, "tool_schemas", None)
     density = usage.get("_context_measurement_density") or 1.0
+    plan = getattr(tools._ctx, "context_fit_plan", None)
     def measure(rows):
-        return math.ceil(estimate_context_prompt_tokens(rows, schemas) * density)
+        return math.ceil(estimate_context_prompt_tokens(rows, schemas, provider=getattr(plan, "provider", ""),
+            reasoning_effort=getattr(limit_ctx, "active_effort", "")) * density)
     capacity = usage.get("_context_capacity_total_tokens")
     reserve = usage.get("_context_response_reserve_tokens") or 0
     book = int(usage.get("_context_required_book_tokens") or 0)

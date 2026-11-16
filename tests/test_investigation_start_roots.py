@@ -82,7 +82,7 @@ class Engine:
 
 def _consumer(tmp_path, monkeypatch, access, *, workspace=None, metadata=None):
     """A non-acting child whose configured session row captured ``access``."""
-    from ouroboros import claudexor_daemon, config
+    from ouroboros import claudexor_daemon
     from ouroboros.contracts.task_constraint import TaskConstraint
     from ouroboros.tools import delegate
     from ouroboros.tools.registry import ToolContext
@@ -94,7 +94,7 @@ def _consumer(tmp_path, monkeypatch, access, *, workspace=None, metadata=None):
     monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(tmp_path / "snaps"))
     row = {"subagent_id": "checker", "name": "Checker", "recommended_use": "Investigation start roots",
            "access": access, "effort": "low", "route": {"kind": "agent_session", "target_id": "some-route=weak-model"}}
-    monkeypatch.setattr(config, "runtime_settings", lambda: {
+    monkeypatch.setattr("ouroboros.settings_integrity.runtime_catalog_settings", lambda *, settings_reader=None: {
         "OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": [row]})})
     engine = Engine()
     monkeypatch.setattr(claudexor_daemon, "ensure_owned_gateway", lambda: engine)

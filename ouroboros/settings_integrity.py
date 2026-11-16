@@ -53,9 +53,9 @@ def _projected_keys() -> set[str]:
 
 
 # The values this process tree projected (``config.apply_settings_to_env``) for the keys whose absence takes a
-# proposal — the model slots and the never-configured factory catalog — handed down with the environment: a read
-# of a key the document does not set tells this tree's own echo from an operator's variable, so an absent slot
-# keeps following the configured access and an absent catalog its factory (owner 2A).
+# proposal — the model slots; the never-configured factory catalog rides no environment any more — handed down
+# with it: a read of a key the document does not set tells this tree's own echo from an operator's variable, so an
+# absent slot keeps following the configured access and an absent catalog its factory (owner 2A).
 PROJECTED_PROPOSALS_ENV = "OUROBOROS_PROJECTED_PROPOSALS"
 
 
@@ -100,6 +100,9 @@ def note_proposal_projection(environ, before: Mapping) -> None:
     except where it kept or respelled an operator's own variable (``operator_variables`` of ``before``): our echo
     must never turn the operator's choice into a proposal the next read replaces.
 
+    A proposal key no projection exports any more (the catalog: ``SETTINGS_KEYS_NOT_EXPORTED_TO_ENV``) keeps no echo:
+    an earlier mirror leaves ``environ`` only while its value matches our echo or recorded projection digest.
+
     Every other projected value is ours by digest (``PROJECTED_SETTINGS_ENV``) when this projection wrote it, when
     it is what the settings document itself sets (a launcher or an earlier release may have mirrored it there with
     no record), or when an earlier projection's record already held it; any other variable stays the operator's."""
@@ -107,16 +110,21 @@ def note_proposal_projection(environ, before: Mapping) -> None:
     from ouroboros.server_runtime import MODEL_SLOT_KEYS
     from ouroboros.settings_defaults import settings_env_keys
 
-    keys = (*MODEL_SLOT_KEYS, SUBAGENTS_SETTING)
+    keys, exported = (*MODEL_SLOT_KEYS, SUBAGENTS_SETTING), set(settings_env_keys())
     echo, operator = projected_proposals(environ), operator_variables(before, keys)
+    ours = projected_settings(before)
     for key in keys:
         after = environ.get(key)
+        if key not in exported and after is not None and (
+                after == echo.get(key) or ours.get(key) == _value_digest(after)):
+            environ.pop(key)
+            after = None
         if after is None or key in operator or (after == before.get(key) and after != echo.get(key)):
             echo.pop(key, None)
         else:
             echo[key] = after
     environ[PROJECTED_PROPOSALS_ENV] = json.dumps(echo, sort_keys=True)
-    ours, document, record = projected_settings(before), _document_keys(), {}
+    document, record = _document_keys(), {}
     for key in settings_env_keys():
         value = environ.get(key)
         if value is None:
@@ -484,6 +492,27 @@ def runtime_settings(*, settings_reader=None) -> dict:
 
     live_settings_overlay(settings)  # route keys read the document as it is now (route_choice)
     return effective_settings(settings)  # an old snapshot never widens what the deployment manages
+
+
+def runtime_catalog_settings(*, settings_reader=None) -> dict:
+    """``runtime_settings`` for a reader of the subagent catalog, which rides no environment
+    (``SETTINGS_KEYS_NOT_EXPORTED_TO_ENV``): the task's catalog where its snapshot holds one, else the document read
+    strictly — a present document that cannot be read is ``SettingsDocumentUnknown``, for each reader to say in its
+    terms, never defaults that read as a factory, empty or Main-only pool. A snapshot holds none after a failed
+    task-start reload with no earlier catalog to keep (``subagent_runtime.apply_task_start_settings_or_disclose``)."""
+    from ouroboros import config
+    from ouroboros.configured_subagents import SUBAGENTS_SETTING
+
+    snapshot = _TASK_SETTINGS.get()
+    if snapshot is not None and SUBAGENTS_SETTING in snapshot.settings:
+        return runtime_settings(settings_reader=settings_reader)
+    reader = settings_reader or config.load_settings
+    live = reader(strict=True) if _reads_strictly(reader) else reader()
+    settings = runtime_settings(settings_reader=lambda: live)
+    # Recover only the missing catalog; the task's other next-task choices stay frozen.
+    if SUBAGENTS_SETTING in live:
+        settings[SUBAGENTS_SETTING] = copy.deepcopy(live[SUBAGENTS_SETTING])
+    return settings
 
 
 def task_settings_snapshot(settings: dict, environ: dict) -> TaskSettingsSnapshot:

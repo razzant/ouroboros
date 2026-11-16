@@ -360,7 +360,7 @@ def _fresh_start_consumer(monkeypatch, drive, target, task_id, access="readonly"
     row = {"subagent_id": "investigation-fixture", "name": "Fixture",
            "recommended_use": "Regression consumer", "access": access, "effort": "low",
            "route": {"kind": "agent_session", "target_id": "some-route=weak-model"}}
-    monkeypatch.setattr(config, "runtime_settings", lambda: {
+    monkeypatch.setattr("ouroboros.settings_integrity.runtime_catalog_settings", lambda *, settings_reader=None: {
         "OUROBOROS_SUBAGENTS": json.dumps({"enabled": True, "items": [row]})})
     monkeypatch.setattr(claudexor_daemon, "ensure_owned_gateway", lambda: Gateway())
     ctx = ToolContext(repo_dir=target, drive_root=drive)

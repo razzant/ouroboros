@@ -310,10 +310,12 @@ def _recorded_terminal(task_id: str, results_root: Any) -> bool:
     try:
         from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
         from ouroboros.task_store import exists, stable_finals
-        root = _wt._data_dir(results_root)  # a recurring GC asking about an owner with no record reads no document
+        root = _wt._data_dir(results_root)
+        if not exists(root, task_id):  # a recurring GC asking about an owner with no record asks no body row
+            return False
         if stable_finals(root, [task_id]).get(str(task_id)):
             return True
-        record = load_effective_task_result(root, task_id, materialize_artifacts=False) if exists(root, task_id) else {}
+        record = load_effective_task_result(root, task_id, materialize_artifacts=False)
         return (record or {}).get("status") in FINAL_STATUSES
     except Exception:
         log.debug("candidate owner status unavailable for %s", task_id, exc_info=True)
@@ -821,8 +823,18 @@ def process_environment(ctx: Any, work_dir: Any, *, source=None) -> Optional[Dic
         else:
             declare_scratch(env_root, "body-process", owner=json.dumps({
                 "task_id": str((bound or {}).get("task_id") or getattr(ctx, "task_id", "") or ""), "copy": str(candidate)}))
-        return isolated_environment(env_root, candidate,
-                                    source=runtime_environ() if source is None else source)
+        env = isolated_environment(env_root, candidate,
+                                   source=runtime_environ() if source is None else source)
+        if source is None:  # a process on this host; an executor's container runs its own runtime, never a host path
+            from ouroboros.config import DATA_DIR
+            from ouroboros.node_runtime import carry_pinned_node, forward_playwright_node
+
+            # The serving installation's pinned Node as one carried executable, never its store: the candidate's
+            # lookups find it by its record (``claudexor_node_seed.generation_roots``), a nested safe_test keeps it.
+            # An operator's literal driver stays the driver's, unmarked, even when it equals that executable.
+            forward_playwright_node(env)
+            carry_pinned_node(env, str(DATA_DIR))
+        return env
     except Exception as exc:
         log.warning("candidate process environment unavailable", exc_info=True)
         raise CandidateRefused(

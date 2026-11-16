@@ -25,6 +25,7 @@ from ouroboros.configured_subagents import (
     SOURCE_INVALID,
     SOURCE_LEGACY_MIGRATED,
     SOURCE_UNDECIDED,
+    SUBAGENTS_SETTING,
     configured_subagents_fingerprint,
     resolve_configured_subagents,
     resolve_roster_selector,
@@ -84,6 +85,16 @@ def effective_runtime_subagent_settings(settings: Mapping[str, Any]) -> dict[str
         # setting, so retaining the raw disk value here would undo normalization.
         effective[key] = runtime_setting(key, "")
     return effective
+
+
+def runtime_subagent_settings(*, settings_reader=None) -> dict[str, Any]:
+    """One catalog view for facts, inspection and selection, with a typed unknown refusal."""
+    from ouroboros.settings_integrity import SettingsDocumentUnknown, runtime_catalog_settings
+
+    try:
+        return effective_runtime_subagent_settings(runtime_catalog_settings(settings_reader=settings_reader))
+    except SettingsDocumentUnknown as exc:
+        raise SubagentSelectionError("subagent_catalog_unknown", f"{SUBAGENTS_SETTING} is unknown: {exc}") from exc
 
 
 def offered_subagents(settings: Mapping[str, Any]) -> ConfiguredSubagentsResolution:
@@ -184,14 +195,15 @@ def subagents_availability(settings: Mapping[str, Any]) -> str:
 def current_model_visible_subagent_catalog() -> dict[str, Any]:
     """Read the current normalized settings and return the stable catalog."""
 
-    from ouroboros.config import runtime_settings
     from ouroboros.settings_integrity import effective_subagents_mode
 
+    try:
+        settings = runtime_subagent_settings()
+    except SubagentSelectionError as exc:
+        return {"source": "unknown", "error": exc.detail}
     if effective_subagents_mode() == "off":
         return {}
-    return model_visible_subagent_catalog(
-        effective_runtime_subagent_settings(runtime_settings())
-    )
+    return model_visible_subagent_catalog(settings)
 
 
 _REVIEW_RULES = {
@@ -317,7 +329,8 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None, *,
     ``seat_id`` is the stored row id the records carry. Every row retains its model, effort and delivery.
     ``source`` is ``structured`` (a non-empty pool), ``empty`` (a readable catalog
     with no marked row — a loud, configured fact whose one seat is the Main model reviewing alone,
-    ``main_self_review: true``) or ``error`` (a malformed catalog or a refused migration). A seat without a
+    ``main_self_review: true``), ``error`` (a malformed catalog or a refused migration), or ``unknown``
+    (an unreadable document with no frozen catalog). A seat without a
     catalog row (the Main seat) is named by its ``seat_id``. Stable for the task (cache-marked prefix B).
 
     What every settled review on the install changes — each seat's measured price (``cost_hint``), its
@@ -326,7 +339,7 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None, *,
     the task's recent ledger records (:func:`review_records_block`). These facts never rank seats or
     change routing; a pool without seats appends nothing."""
     from ouroboros import reviewer_slot_config as rs
-    from ouroboros.config import get_runtime_mode, resolve_data_dir, runtime_settings, task_settings_scope
+    from ouroboros.config import get_runtime_mode, resolve_data_dir, task_settings_scope
     from ouroboros.configured_subagents import SUBAGENTS_SETTING, parse_configured_subagents
     from ouroboros.provider_models import model_has_credentials_in_settings
     from ouroboros.review_execution import ReviewRouteKind
@@ -335,15 +348,18 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None, *,
     from ouroboros.runtime_mode_policy import runtime_mode_at_least
 
     with task_settings_scope(snapshot) if snapshot is not None else contextlib.nullcontext():
-        settings = effective_runtime_subagent_settings(runtime_settings())
-        state = rs.review_pool_state(settings.get(SUBAGENTS_SETTING))
+        try:
+            settings = runtime_subagent_settings()
+            state = rs.review_pool_state(settings.get(SUBAGENTS_SETTING))
+        except SubagentSelectionError as exc:
+            settings, state = {}, {"state": "unknown", "error": exc.detail}
         source, error = state["state"], state["error"]
         pool: list[dict[str, Any]] = []
         activity: list[dict[str, Any]] = []
         slots: list[Any] = []
         without_credentials: list[str] = []
         recent = rs.reviewer_slot_last_executions()
-        if source != "error":
+        if source not in {"error", "unknown"}:
             try:
                 raw = settings.get(SUBAGENTS_SETTING)
                 roster = parse_configured_subagents(raw) if str(raw or "").strip() else None
@@ -378,7 +394,7 @@ def review_facts_block(snapshot: Optional[TaskSettingsSnapshot] = None, *,
                 seat["measured"] = measured
         # No marked row: the seats built are the one Main seat (``review_pool_slots``).
         main_alone = state["state"] == "empty" and bool(slots)
-        migration = _review_migration_facts(settings)
+        migration = _review_migration_facts(settings) if source != "unknown" else {}
         if migration.get("error") and source != "error":
             source, error = "error", migration["error"]
         unanswerable = source == "structured" and coupling_unanswerable(slots)
@@ -430,6 +446,9 @@ def subagent_catalog_section(catalog: Mapping[str, Any]) -> str:
     from ouroboros.section_floor import HostSection
 
     heading = "## Available subagents\n\n"
+    if catalog.get("error"):
+        return HostSection("subagents", heading + json.dumps(catalog, ensure_ascii=False),
+                           heading + f"source={catalog.get('source')}; {catalog['error']}")
     rows = [f"- {row.get('subagent_id', '?')}: {row.get('route_class', '?')}, effort {row.get('effort', '?')}"
             + (", reviews" if row.get("review_eligible") else "")
             + ("\n  recommended_use: " + row["recommended_use"] if row.get("recommended_use") else "")
@@ -555,7 +574,7 @@ def apply_task_start_settings() -> TaskSettingsSnapshot:
     try:
         with SETTINGS_ENV_LOCK:
             effective, _changed, _keys = apply_runtime_provider_defaults(
-                config.load_settings_lock_held(_settings_lock_held=fd is not None))
+                config.load_settings_lock_held(_settings_lock_held=fd is not None, strict=True))
             projected = dict(os.environ)
             config.apply_settings_to_env(effective, environ=projected)
             snapshot = task_settings_snapshot(effective, projected)
@@ -573,10 +592,15 @@ def apply_task_start_settings_or_disclose(task_id: str, emit_live_log: Any) -> T
     configuration with nobody told. The task itself stays runnable
     (fail-open), but the breakage becomes a visible live-log fact.
 
-    The common corruption case is probed explicitly: ``load_settings`` falls
-    back to defaults+env on an unreadable or malformed settings.json instead
-    of raising, which would keep exactly the silence this wrapper exists to
-    break. A MISSING file is legitimate (defaults-only install), not a fault.
+    Admission reads strictly under the settings lock: an unreadable or malformed
+    document never freezes defaults. A MISSING file is a legitimate defaults-only
+    install, not a fault.
+
+    The catalog rides no environment: the previous view keeps a variable the
+    environment still carries (an operator's, or an earlier projection's), else it
+    holds no catalog and its readers read the document strictly
+    (``settings_integrity.runtime_catalog_settings``) — never the shipped blank,
+    which reads as no catalog configured.
     """
     from ouroboros.settings_integrity import task_settings_snapshot
 
@@ -586,16 +610,11 @@ def apply_task_start_settings_or_disclose(task_id: str, emit_live_log: Any) -> T
         previous_env = dict(os.environ)
     previous_settings = dict(SETTINGS_DEFAULTS)
     previous_settings.update({key: previous_env.get(key, "") for key in settings_env_keys()})
+    previous_settings.pop(SUBAGENTS_SETTING)
+    if SUBAGENTS_SETTING in previous_env:
+        previous_settings[SUBAGENTS_SETTING] = previous_env[SUBAGENTS_SETTING]
     previous = task_settings_snapshot(previous_settings, previous_env)
     try:
-        from ouroboros import config as _config
-
-        try:
-            raw_settings_text = _config.SETTINGS_PATH.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            raw_settings_text = None
-        if raw_settings_text is not None:
-            json.loads(raw_settings_text)
         return apply_task_start_settings()
     except Exception as exc:
         import logging
@@ -1028,9 +1047,7 @@ def current_subagent_alternatives(exclude_id: str = "") -> list[dict[str, Any]]:
     """Project the current saved choices without ranking or probing them."""
 
     try:
-        from ouroboros.config import runtime_settings
-
-        settings = effective_runtime_subagent_settings(runtime_settings())
+        settings = runtime_subagent_settings()
         resolution = resolve_configured_subagents(settings)
         config = resolution.config
         if config is None or not config.enabled:
@@ -1252,13 +1269,11 @@ def exact_start(ctx: Any, prompt: str, spec: Optional[dict[str, Any]] = None) ->
                 "A fresh delegated start requires subagent_id; only retry_of replays without it.",
             )
         if selected_id:
-            from ouroboros.config import runtime_settings
-
             from ouroboros.supervisor_route import work_tier
 
             # A fresh helper without a tier of its own takes the work's, Main's included (owner 13.11); a
             # continuation keeps the tier its session was captured with.
-            live_settings = effective_runtime_subagent_settings(runtime_settings())
+            live_settings = runtime_subagent_settings()
             selected_snapshot, _legacy = select_subagent_snapshot(
                 live_settings, subagent_id=selected_id, work_tier=work_tier(ctx, live_settings),
             )

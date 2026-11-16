@@ -13,7 +13,7 @@ import socket
 import threading
 import time
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -23,6 +23,8 @@ import uvicorn
 from cloudflare_tunnel import (
     CLOUDFLARED_VERSION,
     CloudflaredError,
+    CreationPacing,
+    CreationRateLimited,
     QuickTunnel,
     ensure_cloudflared,
 )
@@ -69,6 +71,12 @@ _INITIAL_PARENT_PID = os.getppid()
 _PARENT_PID_ENV = "OUROBOROS_PARENT_PID"
 _RETRY_BASE_SEC = (1.0, 2.0, 4.0, 8.0, 15.0, 30.0, 60.0)
 _STABLE_READY_RESET_SEC = 300.0
+# A fresh Quick Tunnel connector needs time to register with the edge; three
+# 2-second probes killed healthy tunnels and burned the creation quota (each
+# rotation costs one creation). Answers inside the grace are not counted.
+_VERIFY_GRACE_SEC = 120.0
+_VERIFY_PROBE_INTERVAL_SEC = 2.0
+_VERIFY_CONFIRMED_BAD = 3
 _CORE_HEALTH_INTERVAL_SEC = 30.0
 _PUBLIC_HEALTH_INTERVAL_SEC = 45.0
 _MENU_HEALTH_INTERVAL_SEC = 300.0
@@ -442,12 +450,27 @@ class _GenerationContext:
     status: RuntimeStatus
     stop_event: asyncio.Event
     server_task: asyncio.Task[None]
+    pacing: CreationPacing = field(default_factory=CreationPacing)
 
 
 def _retry_delay(failure_count: int) -> float:
     index = max(0, min(int(failure_count) - 1, len(_RETRY_BASE_SEC) - 1))
     base = _RETRY_BASE_SEC[index]
     return min(60.0, max(0.1, base * random.uniform(0.8, 1.2)))
+
+
+def _exposure_drift(settings_observer: TelegramSettingsObserver, owner: int) -> _GenerationResult | None:
+    """What ends a generation's wait: Off, another owner, or exposure no longer safe or readable."""
+    if not miniapp_enabled(settings_observer.state_dir):
+        return _GenerationResult.DISABLED
+    try:
+        if settings_observer.owner_chat_id() != owner:
+            return _GenerationResult.OWNER_CHANGED
+        if not settings_observer.safe_for_exposure(owner):
+            return _GenerationResult.SETTINGS_BLOCKED
+    except TelegramSettingsError:
+        return _GenerationResult.SETTINGS_BLOCKED
+    return None
 
 
 async def _wait_or_stop(
@@ -667,17 +690,12 @@ async def _wait_for_public_verification(
     stop_event: asyncio.Event,
     server_task: asyncio.Task[None],
 ) -> _GenerationResult | None:
+    # One deadline on the event loop's clock (time.monotonic), set as the URL arrives and never by a probe.
+    grace_until = time.monotonic() + _VERIFY_GRACE_SEC
     confirmed_bad = 0
     while True:
-        if not miniapp_enabled(settings_observer.state_dir):
-            return _GenerationResult.DISABLED
-        try:
-            if settings_observer.owner_chat_id() != owner:
-                return _GenerationResult.OWNER_CHANGED
-            if not settings_observer.safe_for_exposure(owner):
-                return _GenerationResult.SETTINGS_BLOCKED
-        except TelegramSettingsError:
-            return _GenerationResult.SETTINGS_BLOCKED
+        if (drift := _exposure_drift(settings_observer, owner)) is not None:
+            return drift
         outcome = await probe_public_gateway_once(
             public_url,
             tunnel,
@@ -689,7 +707,15 @@ async def _wait_for_public_verification(
             return None
         if outcome is PublicProbeOutcome.TUNNEL_EXITED:
             return _GenerationResult.RECONNECT
-        if outcome is PublicProbeOutcome.UNHEALTHY_RESPONSE:
+        if outcome is PublicProbeOutcome.UNHEALTHY_RESPONSE and time.monotonic() < grace_until:
+            # The edge takes a while to route a brand-new connector: registration lag, not a broken tunnel.
+            if status.reason_code != "public_marker_pending":
+                status.transition(
+                    "verifying",
+                    "The new public endpoint is still registering with the Cloudflare edge.",
+                    reason_code="public_marker_pending",
+                )
+        elif outcome is PublicProbeOutcome.UNHEALTHY_RESPONSE:
             confirmed_bad += 1
             status.transition(
                 "verifying",
@@ -697,7 +723,7 @@ async def _wait_for_public_verification(
                 reason_code="public_marker_unhealthy",
                 attempt=confirmed_bad,
             )
-            if confirmed_bad >= 3:
+            if confirmed_bad >= _VERIFY_CONFIRMED_BAD:
                 return _GenerationResult.RECONNECT
         else:
             status.transition(
@@ -705,7 +731,7 @@ async def _wait_for_public_verification(
                 "This machine cannot currently observe the public tunnel; it will not rotate blindly.",
                 reason_code="public_observer_unavailable",
             )
-        await _wait_or_stop(2.0, stop_event, server_task=server_task)
+        await _wait_or_stop(_VERIFY_PROBE_INTERVAL_SEC, stop_event, server_task=server_task)
 
 
 async def _sync_menu_until_confirmed(
@@ -767,27 +793,14 @@ async def _sync_menu_until_confirmed(
             return _GenerationResult.MENU_BLOCKED
         except TelegramMenuRejectedError:
             return _GenerationResult.TELEGRAM_BLOCKED
-        except TelegramMenuTransportError as exc:
+        except (TelegramMenuTransportError, asyncio.TimeoutError) as exc:
             if not miniapp_enabled(settings_observer.state_dir):
                 return _GenerationResult.DISABLED
             failures += 1
             delay = _retry_delay(failures)
             status.transition(
                 "syncing_menu",
-                _safe_error(exc),
-                reason_code="menu_transport_unavailable",
-                attempt=failures,
-                next_retry_at_epoch=int(time.time() + delay),
-            )
-            await _wait_or_stop(delay, stop_event, server_task=server_task)
-        except asyncio.TimeoutError:
-            if not miniapp_enabled(settings_observer.state_dir):
-                return _GenerationResult.DISABLED
-            failures += 1
-            delay = _retry_delay(failures)
-            status.transition(
-                "syncing_menu",
-                "Telegram menu operation timed out.",
+                "Telegram menu operation timed out." if isinstance(exc, asyncio.TimeoutError) else _safe_error(exc),
                 reason_code="menu_transport_unavailable",
                 attempt=failures,
                 next_retry_at_epoch=int(time.time() + delay),
@@ -885,7 +898,7 @@ async def _monitor_generation(
                     confirmed_bad += 1
                     degraded_reasons.discard("public_observer_unavailable")
                     degraded_reasons.add("public_marker_unhealthy")
-                    if confirmed_bad >= 3:
+                    if confirmed_bad >= _VERIFY_CONFIRMED_BAD:
                         return (
                             _GenerationResult.RECONNECT,
                             loop.time() - ready_since >= _STABLE_READY_RESET_SEC,
@@ -993,6 +1006,31 @@ async def _wait_blocked_state(
             continue
 
 
+async def _wait_out_creation_limit(context: _GenerationContext) -> _GenerationResult | None:
+    """Ask Cloudflare for no Quick Tunnel before a confirmed creation limit's deadline (``CreationPacing``).
+
+    Off, the owner and exposure are read before each short wait and again after the last one, so no request follows
+    a change made meanwhile; stop and a failed sidecar end it at once, and the heartbeat keeps the one published
+    deadline fresh. None when no deadline is pending, or once it has passed with nothing changed."""
+    pacing = context.pacing
+    announced = False
+    while (remaining := pacing.remaining()) > 0:
+        if (drift := _exposure_drift(context.settings_observer, context.owner)) is not None:
+            return drift
+        if not announced:
+            announced = True
+            context.status.transition(
+                "reconnecting",
+                "Cloudflare is rate limiting Quick Tunnel creation for this network; this companion requests no new "
+                "tunnel before the planned time unless this computer's clock is changed meanwhile.",
+                reason_code="cloudflare_rate_limited",
+                attempt=pacing.limits,
+                next_retry_at_epoch=pacing.until_epoch,
+            )
+        await _wait_or_stop(min(remaining, _MONITOR_TICK_SEC), context.stop_event, server_task=context.server_task)
+    return _exposure_drift(context.settings_observer, context.owner) if announced else None
+
+
 async def _run_tunnel_generations(
     binary: Path,
     state_dir: Path,
@@ -1037,6 +1075,12 @@ async def _run_tunnel_generations(
             if binary_result is _GenerationResult.DISABLED:
                 return binary_result
             binary = binary_result
+        paced = await _wait_out_creation_limit(context)
+        if paced in {_GenerationResult.OWNER_CHANGED, _GenerationResult.DISABLED}:
+            return paced
+        if paced is not None:
+            blocked = paced
+            continue
         tunnel = QuickTunnel(binary, state_dir, sidecar_port)
         result = _GenerationResult.RECONNECT
         stable_ready = False
@@ -1061,6 +1105,7 @@ async def _run_tunnel_generations(
                 )
             except asyncio.TimeoutError as exc:
                 raise CloudflaredError("Tunnel startup operation timed out.") from exc
+            context.pacing.url_allocated()
             sidecar.set_public_url(public_url)
             status.transition(
                 "verifying",
@@ -1106,6 +1151,8 @@ async def _run_tunnel_generations(
         except (CloudflaredError, CompanionError, PublicGatewayError) as exc:
             if isinstance(exc, (ShutdownRequested, SidecarStoppedError)):
                 raise
+            if isinstance(exc, CreationRateLimited):
+                context.pacing.limit_confirmed()
             if not miniapp_enabled(settings_observer.state_dir):
                 result = _GenerationResult.DISABLED
             else:
@@ -1134,6 +1181,8 @@ async def _run_tunnel_generations(
         failures = 0 if stable_ready else failures + 1
         if not miniapp_enabled(settings_observer.state_dir):
             return _GenerationResult.DISABLED
+        if context.pacing.remaining():
+            continue  # a confirmed creation limit is waited out before the next request, with every input re-read
         delay = _retry_delay(max(1, failures))
         status.transition(
             "reconnecting",
@@ -1251,6 +1300,7 @@ async def run() -> int:
     status: RuntimeStatus | None = None
     singleton_fd: int | None = None
     sidecar_failures = 0
+    pacing = CreationPacing()  # this process's creation limit, kept across Off/On, owners and sidecar restarts
 
     loop = asyncio.get_running_loop()
     for signum in (signal.SIGTERM, signal.SIGINT):
@@ -1390,6 +1440,7 @@ async def run() -> int:
                         status=status,
                         stop_event=stop_event,
                         server_task=server_task,
+                        pacing=pacing,
                     )
                     result = await _run_tunnel_generations(
                         binary,

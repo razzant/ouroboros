@@ -591,6 +591,9 @@ def _shell_env_for_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> dict:
     if isolated is not None:
         return isolated
     env = runtime_environ()
+    from ouroboros.node_runtime import forward_playwright_node
+
+    forward_playwright_node(env)
     try:
         system_repo = pathlib.Path(getattr(ctx, "repo_dir")).resolve(strict=False)
         wd = pathlib.Path(work_dir).resolve(strict=False)

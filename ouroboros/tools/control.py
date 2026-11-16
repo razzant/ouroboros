@@ -225,6 +225,30 @@ def _project_tool_entries() -> List[ToolEntry]:
                 "oldest_first": {"type": "boolean", "default": False, "description": "List by last_active_at from oldest to newest."},
             }},
         }, _list_projects),
+        ToolEntry("manage_project_folder", {
+            "name": "manage_project_folder",
+            "description": (
+                "Read or repair a Project's working folder, where its new work starts; the owner's Project menu has "
+                "the same door (Working folder…). action='view' (default) is read-only: the registered folder, what "
+                "one look found (usable; missing; unusable; unset: no choice made, the first started task would "
+                "provision one; none: the recorded No folder), the changes that state offers with what each means "
+                "for the room's queued work, and expected. A change needs that expected and a reason. 'clear' records "
+                "No folder: new work uses its own temporary area and nothing provisions a folder until one is chosen. "
+                "'choose' attaches path, an existing folder that outlasts its tasks. Offered only where the room has "
+                "no usable default (missing, unusable, unset; choose also over No folder): a folder in place is not "
+                "moved here. Nothing is created, copied, restored or deleted. Admitted work keeps the folder it was "
+                "admitted with, through Resume and Continue; only work moved into the room that has not restarted "
+                "since takes the new default at its next start. The host tells nobody of a change: say what you "
+                "changed and why."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "project_id": {"type": "string"},
+                "action": {"type": "string", "enum": ["view", "clear", "choose"], "default": "view"},
+                "path": {"type": "string", "default": "", "description": "choose: absolute path of an existing folder; never a host working copy, Ouroboros's own repository or data."},
+                "expected": {"type": "string", "default": "", "description": "A change: view.expected as last read; a choice that moved since refuses as stale."},
+                "reason": {"type": "string", "default": "", "description": "A change: why, kept on its receipt."},
+            }, "required": ["project_id"], "additionalProperties": False},
+        }, _manage_project_folder, safety_policy="skip"),  # view reads; changes: safety.CHECKED_ACTIONS
     ]
 
 
@@ -577,6 +601,7 @@ from ouroboros.tools.control_routing import (  # noqa: E402, F401 -- intentional
     _finish_swarm_handoff,
     _close_project,
     _list_projects,
+    _manage_project_folder,
     _start_task,
 )
 from ouroboros.tools.control_runtime import (  # noqa: E402, F401 -- intentional public re-exports

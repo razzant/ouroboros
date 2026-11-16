@@ -127,7 +127,7 @@ def test_wrapper_retains_only_unresolved_custody(candidate, monkeypatch, tmp_pat
                            output=str(output), drive_root=str(drive), no_isolated_checkout=False,
                            preflight_reviewer="api-scout")
     monkeypatch.setattr(runner, "_parse_args", lambda: args)
-    monkeypatch.setattr(runner, "_prepare_review_configuration", lambda args: (None, {}))
+    monkeypatch.setattr(runner, "_prepare_review_configuration", lambda args: (None, {}, runner._review_view()))
     monkeypatch.setattr("ouroboros.tools.review_change.run_review_change",
                         lambda *a, **kw: pytest.fail("wrapper must not pay before cycle admission"))
     created: list[Path] = []

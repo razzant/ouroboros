@@ -117,6 +117,7 @@ class ContextFitPlan:
     account_pin: str = ""  # the profile the role pins ("": Auto, where an answer naming no route names no account)
     window_evidence: Tuple[str, str] = ("", "")  # the start's ``capability_evidence.window_evidence``, for its receipt
     start_tool_schemas_json: Optional[str] = None  # what the start fit priced (``null``: none); None: not captured
+    start_reasoning_effort: str = ""  # effort paired with this frame's provider for next-start pricing; ``start`` keeps history
     # The start fit's own mode and why it is below the owner's (``memory_floor.start_cause``): every reprojection
     # and route rebind keeps it, while ``initial_mode`` follows the current selection. ("", ""): not a built start;
     # ``UNKNOWN_START``: a restored task whose continuation did not carry its start (``restored_start``).
@@ -128,10 +129,12 @@ class ContextFitPlan:
                             refused_tokens: int = 0, select_mode: Optional[str] = None,
                             measured_input_tokens: Optional[int] = None, start_work: bool = False,
                             slack_tokens: int = 0, room_if_narrowed: bool = False,
-                            admitted: bool = False) -> "ContextFitPlan":
+                            admitted: bool = False, reasoning_effort: str = "") -> "ContextFitPlan":
         """Fit shown bytes; the prepared envelope's raw estimate includes its signed size difference.
 
         The measurement belongs to this candidate, includes tools and excludes the reply; withholding an image can shrink it.
+        It is the estimator's one count of messages and tools in the shape this plan's provider and the next send's
+        ``reasoning_effort`` give them, the count a round measures (``context_measurement.measure_main_fit``).
         A requested saving alone does not establish pressure on held owner words or notes.
         ``slack_tokens`` asks room beyond the measured or refused excess: memory and ordinary host forms may pay it,
         a whole-or-outline section never (``memory_floor._host_steps``).
@@ -175,10 +178,10 @@ class ContextFitPlan:
             shown = self.projection(start)
             names = [schema["function"]["name"] for schema in tool_schemas or []]
             sent = select_tool_schemas(tool_schemas or [], context_mode=start, schema_names=names).schemas
-            raw = (_request_tokens(json.loads(shown.system_content_json),
-                                   shown.user_content_json or self.user_content_json,
-                                   supplementary_messages_json=self.core.supplementary_messages_json,
-                                   current_messages=current_messages) + tool_schema_tokens(list(sent)))
+            raw = _request_tokens(json.loads(shown.system_content_json), shown.user_content_json or self.user_content_json,
+                                  supplementary_messages_json=self.core.supplementary_messages_json,
+                                  current_messages=current_messages, tools=list(sent), provider=self.provider,
+                                  reasoning_effort=reasoning_effort)
             overhead = int(measured_input_tokens) - raw if measured_input_tokens is not None else 0
             request = math.ceil((raw + overhead) * ratio)
             request += context_mode_limits(start, self.preferred_mode, output_reserve, **reserve_args)[1]
@@ -198,7 +201,7 @@ class ContextFitPlan:
                     tool_schemas=tool_schemas, working_reserve_tokens=self.working_reserve_tokens,
                     window_tokens=frame, known_window=known_window, output_reserve=output_reserve, ratio=ratio,
                     window_record=own, admitted=admitted,  # each mode's frame is read off the window (its reserve differs)
-                    envelope_overhead_tokens=overhead,
+                    envelope_overhead_tokens=overhead, provider=self.provider, reasoning_effort=reasoning_effort,
                     start_work=start_work,
                     resident=True, current_messages=current_messages,  # actual running tail, enable_tools included
                     kept={mode: memory_floor.kept_level(snapshot, self.projection(mode).memory_facts) if snapshot else None
@@ -276,19 +279,10 @@ class ContextFitPlan:
         provider: str = "",
         reasoning_effort: str = "",
     ) -> int:
-        """Calibrated physical prompt projection after schemas are available."""
-        projection = self.projection(mode)
-        if not (
-            str(provider or "").strip().lower() == "openai"
-            and str(reasoning_effort or "").strip().lower() not in {"", "none"}
-            and tools
-        ):
-            return int(
-                (projection.estimated_tokens + tool_schema_tokens(tools))
-                * projection.calibration_ratio
-            )
+        """Calibrated physical prompt projection after schemas are available: the estimator's one count of this
+        mode's messages and ``tools`` in their longest shape for ``provider`` and ``reasoning_effort``."""
         return int(estimate_context_prompt_tokens(self.messages_for(mode), tools, provider=provider,
-                                                  reasoning_effort=reasoning_effort) * projection.calibration_ratio)
+                                                  reasoning_effort=reasoning_effort) * self.projection(mode).calibration_ratio)
 
 @dataclass(frozen=True)
 class ContextCore:
@@ -424,17 +418,48 @@ def seal_task_transcript(messages: List[Dict[str, Any]], min_prefix_tokens: int 
         boundary["cache_control"] = {"type": "ephemeral"}
 
 
-def tool_schema_tokens(tools: Optional[List[Dict[str, Any]]]) -> int:
-    """chars/4 estimate of the TOOL-SCHEMA segment of a prompt.
+def _compact_json(value: Any) -> str:
+    """The request estimator's one serialization (``estimate_context_prompt_tokens``): compact, keys sorted."""
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _custom_ladder(provider: str, reasoning_effort: str) -> bool:
+    """Whether a send on ``provider`` at ``reasoning_effort`` may take direct OpenAI reasoning's custom ladder."""
+    return (str(provider or "").strip().lower() == "openai"
+            and str(reasoning_effort or "").strip().lower() not in {"", "none"})
+
+
+def effort_lengthens_request(provider: str, before: str, after: str) -> bool:
+    """Whether a send's move from effort ``before`` to ``after`` can lengthen the request a fit priced: only opening
+    the custom ladder adds a shape beside the canonical one (``_request_shapes``); any other move keeps or drops it."""
+    return _custom_ladder(provider, after) and not _custom_ladder(provider, before)
+
+
+def _request_shapes(messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]], provider: str,
+                    reasoning_effort: str) -> Tuple[Tuple[Any, Any], ...]:
+    """Every ``(messages, tools)`` shape this route may send: direct OpenAI reasoning adds its custom ladder.
+    Other routes read canonical data without borrowing the public helper's owned deep copies."""
+    if _custom_ladder(provider, reasoning_effort):
+        from ouroboros.openai_chat_dispatch import direct_openai_context_projections
+
+        return direct_openai_context_projections(messages, tools, provider=provider, reasoning_effort=reasoning_effort)
+    return ((messages, [dict(item) for item in tools or []]),)
+
+
+def tool_schema_tokens(tools: Optional[List[Dict[str, Any]]], *, provider: str = "", reasoning_effort: str = "") -> int:
+    """chars/4 estimate of the TOOL-SCHEMA segment of a prompt: the ``tools`` member as the request estimator
+    serializes it, in its longest shape for this provider and effort (``_request_shapes``).
 
     One seam for every consumer that has to account for the schemas: they are sent
     on the wire beside ``messages``, so any measure built from the transcript alone
     silently omits them (~148K chars / ~37K tokens on the submarine traces — enough
-    to make an emergency-compaction trigger fire a whole tool envelope late).
+    to make an emergency-compaction trigger fire a whole tool envelope late). The
+    density witness calibrates the compact count (``MAIN_DENSITY_BASIS``); separator
+    spaces priced the same schemas about 3% above it (15.11.2026).
     """
     if not tools:
         return 0
-    return estimate_tokens(json.dumps(tools, ensure_ascii=False, sort_keys=True, default=str))
+    return max(estimate_tokens(_compact_json(shape)) for _rows, shape in _request_shapes([], tools, provider, reasoning_effort))
 
 
 def bounded_prompt_tokens_for_payload(prompt_payload: Dict[str, Any], fallback_chars: int) -> int:
@@ -486,7 +511,6 @@ def estimate_context_prompt_tokens(
         custody_private_key,
     )
     from ouroboros.context_budget import HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, IMAGE_BLOCK_CHAR_EQUIVALENT
-    from ouroboros.openai_chat_dispatch import direct_openai_context_projections
 
     def project(value: Any) -> Any:
         if isinstance(value, dict):
@@ -513,33 +537,25 @@ def estimate_context_prompt_tokens(
     from ouroboros.review_history_view import REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY
     from ouroboros.tool_result_record import TOOL_RESULT_RECORD_KEY
 
-    # These top-level host receipts remain canonical but are absent from sends.
+    from ouroboros.llm_messages import HOST_ONLY_MESSAGE_KEYS, STABLE_PREFIX_BLOCKS_KEY
+
+    # These top-level host receipts remain canonical but are absent from sends (the leading system message's stable
+    # block count included: every send copy pops it, so the density witness never counted it).
     # Do not strip same-named keys inside native payloads or user/tool arguments.
     hidden = {HOST_CONTEXT_KIND_KEY, HOST_TEXT_SHA_KEY, REVIEW_HISTORY_MESSAGE_KEY, REVIEW_CONTEXT_INDEX_KEY,
-              TOOL_RESULT_RECORD_KEY}
-    from ouroboros.llm_messages import HOST_ONLY_MESSAGE_KEYS
+              TOOL_RESULT_RECORD_KEY, STABLE_PREFIX_BLOCKS_KEY}
     messages = [{key: value for key, value in message.items() if key not in hidden} for message in messages]
     messages = [{**message, "content": [
         {key: value for key, value in block.items() if key not in HOST_ONLY_MESSAGE_KEYS}
         if isinstance(block, dict) else block for block in message["content"]]}
         if isinstance(message.get("content"), list) else message for message in messages]
-    # Only this route/effort can use the custom/function ladder. Other estimates
-    # read canonical data without borrowing the public helper's owned deep copies.
-    if (str(provider or "").strip().lower() == "openai"
-            and str(reasoning_effort or "").strip().lower() not in {"", "none"}):
-        projections = direct_openai_context_projections(
-            messages, tools, provider=provider, reasoning_effort=reasoning_effort,
-        )
-    else:
-        projections = ((messages, [dict(item) for item in tools or []]),)
 
     def serialized(projected_messages: Any, projected_tools: Any) -> str:
-        text = json.dumps({"messages": project(projected_messages), "tools": projected_tools}, ensure_ascii=False,
-                          sort_keys=True, separators=(",", ":"), default=str)
+        text = _compact_json({"messages": project(projected_messages), "tools": projected_tools})
         counted("request_serializations", key=hash(text))
         return text
 
-    longest = max(len(serialized(*projection)) for projection in projections)
+    longest = max(len(serialized(*shape)) for shape in _request_shapes(messages, tools, provider, reasoning_effort))
     return longest if chars else max(1, (longest + 3) // 4)
 
 
@@ -666,9 +682,14 @@ class RouteQuestion:
     using it would show less memory than the selected view, or none (``narrowed_by_window``, a refused start).
     """
 
-    def __init__(self, task: Dict[str, Any], resolver: Optional[Callable[..., Tuple[Dict[str, Any], Any]]] = None):
+    def __init__(self, task: Dict[str, Any], resolver: Optional[Callable[..., Tuple[Dict[str, Any], Any]]] = None,
+                 *, route_fields: Optional[Dict[str, Any]] = None):
         from ouroboros import context
 
+        # A cold start previews its next send without rewriting the original task. Keep
+        # that projection on every read, including the horizon guard's repeat.
+        self.route_fields = dict(route_fields or {})
+        task = {**task, **self.route_fields}
         self.resolver, self.early, self.work = resolver or context._context_fit_route, False, {}
         self.key, self.asked_key, self.answer, self.error = _route_key(task), None, None, None
         self.asked = threading.Event()
@@ -689,6 +710,7 @@ class RouteQuestion:
             self.asked.set()
 
     def __call__(self, task: Dict[str, Any], *, allow_fetch: bool) -> Tuple[Dict[str, Any], Any]:
+        task = {**task, **self.route_fields}
         key, self.key, self.early = self.key, None, False  # used once: any later call asks its own question
         if allow_fetch and key is not None and _route_key(task) == key:
             timed("fit.route_wait", self.asked.wait)
@@ -703,6 +725,7 @@ class RouteQuestion:
     def again(self, task: Dict[str, Any]) -> Tuple[Dict[str, Any], Any]:
         """The same question at the fit's usual point (the horizon guard). When the early answer came from a read that
         failed, the question is read anew: the failure that read wrote in this build answers nothing here."""
+        task = {**task, **self.route_fields}
         early, self.early = self.answer, False
         failed = isinstance(early, tuple) and len(early) == 2 and getattr(early[1], "read", "") == "failed"
         return timed("fit.route", self.resolver, {**task, "route_read_again": True} if failed else task, allow_fetch=True)
@@ -764,12 +787,21 @@ def _request_tail(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return messages[1:] if messages and messages[0].get("role") == "system" else messages
 
 
-def _request_tokens(system_content: List[Dict[str, Any]], user_content_json: str, *,
-                    supplementary_messages_json: str = "[]", current_messages: Optional[List[Dict[str, Any]]] = None,
-                    chars: bool = False) -> int:
+def _request_rows(system_content: List[Dict[str, Any]], user_content_json: str, supplementary_messages_json: str = "[]",
+                  current_messages: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     tail = (_request_tail(current_messages) if current_messages is not None else
             [{"role": "user", "content": json.loads(user_content_json)}, *json.loads(supplementary_messages_json)])
-    return estimate_context_prompt_tokens([{"role": "system", "content": system_content}, *tail], chars=chars)
+    return [{"role": "system", "content": system_content}, *tail]
+
+
+def _request_tokens(system_content: List[Dict[str, Any]], user_content_json: str, *,
+                    supplementary_messages_json: str = "[]", current_messages: Optional[List[Dict[str, Any]]] = None,
+                    chars: bool = False, tools: Optional[List[Dict[str, Any]]] = None, provider: str = "",
+                    reasoning_effort: str = "") -> int:
+    """The request estimator's one count of this view: its messages and, given ``tools``, their schemas."""
+    return estimate_context_prompt_tokens(_request_rows(system_content, user_content_json, supplementary_messages_json,
+                                                        current_messages), tools, provider=provider,
+                                          reasoning_effort=reasoning_effort, chars=chars)
 
 
 class MinimumViewUnfit(ValueError):
@@ -807,7 +839,9 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
                       select: Optional[str] = None, kept_sections: Optional[Mapping[str, Iterable[Mapping]]] = None,
                       working_reserve_tokens: Optional[int] = None, window_record: Optional[WindowRecord] = None, work_room_levels: int = 1,
                       envelope_overhead_tokens: int = 0, start_work: bool = False, slack: int = 0, retain: Any = None,
-                      admitted: bool = False) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
+                      admitted: bool = False, provider: str = "", reasoning_effort: str = "",
+                      sized: Optional[Tuple[List[Dict[str, Any]], List[Dict[str, Any]], int]] = None,
+                      ) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
     """Select books once, choose memory in one walk. Unsent book forms share the selected memory, not another budget.
 
     Every automatic choice reads the ordinary view of this capture; a directly required handbook joins it last with
@@ -816,6 +850,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     ``retain``: how a host step captures its section (default ``section_floor.retain_section``).
     Each mode's frame is the record's ``total_equivalent`` (a start keeps the whole reply reserve), or with
     ``admitted`` its admitted line (``WindowRecord.admitted``: a view the work holds, in whatever mode it is fitted again).
+    A request is the estimator's one count of its messages and schemas in this ``provider``'s and effort's longest
+    shape; ``sized`` is the start's whole request as its density was sized, ``(rows, schemas, characters)``.
     """
     from dataclasses import replace
     from ouroboros import memory_floor as floor
@@ -840,8 +876,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     held = (kept or {}).get(start or preferred) or FULL_VIEW
     story_before, room_before = (story_chars(snapshot, held), room_chars(snapshot, held)) if snapshot else (0, 0)
 
-    # One serialization per request shape; a host section's shorter form and a memory text then add or take only
-    # their own characters (JSON escapes per character, and these texts are embedded verbatim).
+    # One serialization per request shape, its schemas inside; a host section's shorter form and a memory text then add
+    # or take only their own characters (JSON escapes per character, and these texts are embedded verbatim).
     shapes, text_chars = {}, {}
     def escaped(text):
         if text not in text_chars:
@@ -850,15 +886,17 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     def measure(selected, sent, addressed, story=0, room=0):  # ``story``, ``room``: the memory texts' characters
         key = (selected, sent.chosen, bool(story), bool(room))
         if key not in shapes:  # one-letter memory texts hold the shape; only presence changes separators and blocks
-            counted("request_forms")
-            whole = _request_tokens(_system_blocks(core, governance[form[selected]], "s" if story else "", "r" if room else "",
-                mode=selected, addressed={}), user_content_json, supplementary_messages_json=core.supplementary_messages_json,
-                current_messages=current_messages, chars=True)
-            shapes[key] = whole - bool(story) - bool(room), tool_schema_tokens(list(sent.schemas))
-        base, schemas = shapes[key]
+            rows = _request_rows(_system_blocks(core, governance[form[selected]], "s" if story else "", "r" if room else "",
+                mode=selected, addressed={}), user_content_json, core.supplementary_messages_json, current_messages)
+            whole = sized[2] if sized is not None and sized[:2] == (rows, list(sent.schemas)) else None  # sized once
+            if whole is None:
+                counted("request_forms")
+                whole = estimate_context_prompt_tokens(rows, list(sent.schemas), provider=provider,
+                                                       reasoning_effort=reasoning_effort, chars=True)
+            shapes[key] = whole - bool(story) - bool(room)
         full = {part.section_id: part.full_text for part in sections[selected]}
         forms = sum(escaped(short) - escaped(full[name]) for name, short in addressed.items())
-        return max(1, (base + forms + story + room + 3) // 4) + schemas + envelope_overhead_tokens
+        return max(1, (shapes[key] + forms + story + room + 3) // 4) + envelope_overhead_tokens
     asked = (saving or {}).get(start or preferred, 0)  # the shown request's saving, in estimator tokens
     original_fixed = measure(start or preferred, select_tool_schemas(tool_schemas or [], context_mode=mode,
         schema_names=names), section_views(sections[start or preferred], previous))
@@ -936,8 +974,8 @@ def _view_projections(core: ContextCore, governance: Mapping[str, Tuple[Any, ...
     minimum, need = ordinary_need() if (kept is None or start_work) and mode == "max" else (floor.NO_VIEW, 0)
     room_fact = floor.max_room_fact(snapshot, rendered_texts(core, section_views(sections[mode], receipts)),
         render_governance(governance[form[mode]], section_views(sections[mode], receipts)), story=floor.tokens_of(minimum.story_chars),
-        fixed=fixed, ratio=ratio, schemas=tool_schema_tokens(list(sent.schemas)), window=window, reserve=reserve,
-        work=work(), allowance=allowances["margin"]) if (kept is None or start_work) and mode == "max" else None
+        fixed=fixed, ratio=ratio, schemas=tool_schema_tokens(list(sent.schemas), provider=provider, reasoning_effort=reasoning_effort),
+        window=window, reserve=reserve, work=work(), allowance=allowances["margin"]) if (kept is None or start_work) and mode == "max" else None
     if room_fact:
         room_fact.update(need=need, story=floor.tokens_of(minimum.story_chars), room=floor.tokens_of(minimum.room_chars))
     if room_fact and floor.max_room_lost(room_fact):
@@ -1014,9 +1052,8 @@ def _whole_request(core, governance, mode, tool_schemas):
     snapshot = snapshot_from_json(core.memory_view_json) if core.memory_view_json else None
     story, room = (story_chars(snapshot), room_chars(snapshot)) if snapshot else (0, 0)
     form = "low" if core.compact_reference_docs or mode == "nano" else mode
-    messages = [{"role": "system", "content": _system_blocks(core, governance[form], "s" if story else "", "r" if room else "", mode)},
-                {"role": "user", "content": json.loads(core.user_content_json)},
-                *json.loads(core.supplementary_messages_json)]
+    messages = _request_rows(_system_blocks(core, governance[form], "s" if story else "", "r" if room else "", mode),
+                             core.user_content_json, core.supplementary_messages_json)
     return messages, list(select_tool_schemas(tool_schemas or [], context_mode=mode).schemas), story + room - bool(story) - bool(room)
 
 
@@ -1051,8 +1088,10 @@ def build_context_fit_plan(
     preferred_mode: str,
     route_resolver: Callable[..., Tuple[Dict[str, Any], Any]],
     tool_schemas: Optional[List[Dict[str, Any]]] = None,
+    reasoning_effort: str = "",
 ) -> ContextFitPlan:
-    """Capture route facts, choose books and fit one start view."""
+    """Capture route facts, choose books and fit one start view, measured in the shape the route's provider and the
+    first send's ``reasoning_effort`` give the request (``_request_shapes``)."""
     preferred = str(preferred_mode or "max").strip().lower()
     if preferred not in {"low", "max", "nano"}:
         preferred = "max"
@@ -1076,10 +1115,12 @@ def build_context_fit_plan(
             return ask()
         except Exception:
             log.debug("Context-fit route evidence unavailable; preserving Max", exc_info=True)
-            return _failed_route_evidence(task)
+            # A cold start asks about its next send; the original task may name another route.
+            return _failed_route_evidence({**task, **getattr(route_resolver, "route_fields", {})})
 
     def frame(route: Dict[str, Any], evidence: Any) -> SimpleNamespace:
-        """What the start walk reads of one route answer: reserves, the window record and the density."""
+        """What the start walk reads of one route answer: reserves, the window record, the density and the request's
+        shape (``_request_shapes``: its provider matters only where it opens the custom ladder)."""
         # Keep the fit projection tied to the physical dispatch contract instead of duplicating its output reservation.
         output_reserve = main_output_reserve_tokens(use_local=bool(route.get("use_local")), evidence=evidence)
         route_facts = getattr(evidence, "route_facts", {}) or {}
@@ -1092,7 +1133,8 @@ def build_context_fit_plan(
         window_record = resolve_window(evidence, reserve, bound=bound, observation_fp=scope)
         provider = str(route.get("provider") or "")
         if provider not in sized:  # the whole request measured once per provider, however many answers are framed
-            sized[provider] = estimate_context_prompt_tokens(rows, schemas, provider=provider, chars=True)
+            sized[provider] = estimate_context_prompt_tokens(rows, schemas, provider=provider,
+                                                             reasoning_effort=reasoning_effort, chars=True)
         sendable = min(max(1, (sized[provider] + memory_chars + 3) // 4), window_record.usable or math.inf)
         ratio = 1.0 if window_basis == "estimator" else _route_calibration_ratio(
             None, str(evidence.route_fp or ""), str(route["model"] or ""), sendable, view_kind=view_kind)
@@ -1100,13 +1142,16 @@ def build_context_fit_plan(
         return SimpleNamespace(route=route, evidence=evidence, output_reserve=output_reserve, working_reserve=working_reserve,
                                window_basis=window_basis, bound=bound, window_record=window_record, ratio=ratio,
                                known_window=window_record.usable is not None,
-                               walked=(limits, window_record.usable is not None, output_reserve, working_reserve, ratio))
+                               walked=(limits, window_record.usable is not None, output_reserve, working_reserve, ratio,
+                                       _custom_ladder(provider, reasoning_effort)))
 
     def walk(state: SimpleNamespace) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str, Dict[str, Any]]:
+        provider = str(state.route.get("provider") or "")
         view_args = dict(
             preferred=preferred, tool_schemas=tool_schemas, window_tokens=state.window_record.total_equivalent,
             known_window=state.known_window, output_reserve=state.output_reserve, window_record=state.window_record,
-            working_reserve_tokens=state.working_reserve)
+            working_reserve_tokens=state.working_reserve, provider=provider, reasoning_effort=reasoning_effort,
+            sized=(rows, schemas, sized[provider]))
 
         def fit(user_content_json: str) -> Tuple[Dict[str, Tuple[List[Dict[str, Any]], Dict]], str]:
             return _view_projections(core, governance, user_content_json, **view_args, ratio=state.ratio,
@@ -1221,6 +1266,7 @@ def build_context_fit_plan(
         route_base_url=str(route.get("base_url") or ""), account_pin=str(route.get("account_pin") or ""),
         window_evidence=window_evidence(evidence, window_record),
         core=core, start_tool_schemas_json=json.dumps(tool_schemas, ensure_ascii=False, sort_keys=True),
+        start_reasoning_effort=reasoning_effort,
         start=(initial_mode, "" if initial_mode == preferred else start_cause(contents[initial_mode][1])),
     )
 

@@ -1,7 +1,8 @@
 """Settings › Agents in a REAL render: every agent is named by its route, never by a stored id, for one row and
-for the full 26, at desk and phone width; a Duplicate is an unsaved agent whose page names its twin; a repeated
-review; a switched-off reviewer; the last reviewer's question. Controlled API responses; no runtime, no model
-calls."""
+for the full 50 (whose held Add and Duplicate say why in their hint, in Settings and in onboarding, through a scroll
+and a touch), at desk, the owner's window and phone width; a Duplicate is an unsaved agent whose page names its twin;
+a repeated review; a switched-off reviewer; the last reviewer's question. Controlled API responses; no runtime, no
+model calls."""
 from __future__ import annotations
 
 import pytest
@@ -15,7 +16,10 @@ subscription_ui = roles.subscription_ui
 role_ui = roles.role_ui
 
 EFFORTS = ("", "low", "medium", "high", "xhigh")
-MAX_ROWS = 26
+MAX_ROWS = 50
+FULL = "The list holds at most 50 agents, including those switched off. Remove one to add another."
+FULL_SETUP = FULL.replace("agents", "subagents")
+OFF = (7, MAX_ROWS - 1)  # switched off, and still two of the 50
 REPEAT = "another independent run of the same model, not a different reviewer"
 
 
@@ -36,12 +40,21 @@ def _roster(count):
     return rows
 
 
-def _configure(ui, count, marked=()):
+def _configure(ui, count=MAX_ROWS, marked=()):
     roles.configure_mixed(ui)
     rows = _roster(count)
     for index in marked:
         rows[index]["review_eligible"] = True
     ui["settings"].update(OUROBOROS_SUBAGENTS={"enabled": True, "items": rows})
+    return rows
+
+
+def _configure_full(ui):
+    """The full 50 with two switched off, for Settings and for onboarding's preview."""
+    rows = _configure(ui)
+    for index in OFF:
+        rows[index]["enabled"] = False
+    ui["fixture"]["preview"]["available_subagents"] = ui["settings"]["OUROBOROS_SUBAGENTS"]
     return rows
 
 
@@ -57,13 +70,13 @@ def _level(page, path="agents"):
     return settings_page(page, path)
 
 
-@pytest.mark.parametrize("width", [1360, 390])
+@pytest.mark.parametrize("width,height", [(1360, 900), (1100, 750), (390, 844)])
 @pytest.mark.parametrize("count", [1, MAX_ROWS])
-def test_every_agent_is_named_by_its_route_at_any_roster_size(role_ui, count, width):
+def test_every_agent_is_named_by_its_route_at_any_roster_size(role_ui, count, width, height):
     ui = role_ui
     marked = tuple(range(0, count, 3))
     rows = _configure(ui, count, marked)
-    ui["page"].set_viewport_size({"width": width, "height": 900})
+    ui["page"].set_viewport_size({"width": width, "height": height})
     page = roles.open_agents(ui)
     level = _level(page)
     heads = level.locator("[data-entry-id]")
@@ -80,11 +93,202 @@ def test_every_agent_is_named_by_its_route_at_any_roster_size(role_ui, count, wi
     assert heads.locator("[data-entry-switch]").evaluate_all("els => els.every(e => e.checked)")
     add = level.locator("[data-subagent-add]")
     assert add.is_disabled() is (count == MAX_ROWS)
-    assert ("The list holds at most 26 agents." in text) is (count == MAX_ROWS)
+    assert "holds at most" not in text, "no line of the page says the limit: the held control's hint does"
+    if count == MAX_ROWS:  # a held Add: the mouse shows its one hint, inside the window
+        _shows_why(page, level, add, f"roster-handles-full-add-hint-{width}")
     heads.nth(count - 1).scroll_into_view_if_needed()
     assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
     assert level.evaluate("el => el.scrollWidth <= el.clientWidth + 1")
     roles.capture(page, f"roster-handles-{count}-rows-{width}")
+    if count == MAX_ROWS:  # the last agent's page: its held Duplicate says the same, and only its hint says it
+        form = roles.open_agent(ui, rows[-1]["subagent_id"], fresh=False)
+        duplicate = form.locator("[data-subagent-duplicate]")
+        duplicate.scroll_into_view_if_needed()
+        _shows_why(page, form, duplicate, f"roster-handles-full-duplicate-hint-{width}", keyboard=True)
+
+
+def _shows_why(page, scope, control, shot, keyboard=False):
+    """A held control (aria-disabled, never disabled) shows its one hint to the mouse or the keyboard: the shared fact
+    of the full list, inside the window, as the control's description; nothing else in ``scope`` says it."""
+    hint = scope.locator("[data-full-hint] .ui-hint")
+    assert control.get_attribute("aria-disabled") == "true" and control.get_attribute("disabled") is None
+    assert hint.count() == 1 and hint.is_hidden() and control.get_attribute("aria-describedby") == hint.get_attribute("id")
+    control.focus() if keyboard else control.hover()
+    hint.wait_for(state="visible")
+    assert " ".join(hint.inner_text().split()) == FULL
+    box, view = hint.bounding_box(), page.viewport_size
+    assert box["x"] >= 0 and box["y"] >= 0 and box["x"] + box["width"] <= view["width"] and box["y"] + box["height"] <= view["height"]
+    _unclipped(hint)
+    roles.capture(page, shot)
+
+
+def _unclipped(hint):
+    assert hint.evaluate("""el => {
+        const r = el.getBoundingClientRect();
+        for (let a = el.parentElement; a; a = a.parentElement) {
+            const c = getComputedStyle(a), b = a.getBoundingClientRect();
+            if (/(auto|scroll|hidden|clip)/.test(c.overflowY) &&
+                (r.top < b.top + a.clientTop - 1 || r.bottom > b.top + a.clientTop + a.clientHeight + 1)) return false;
+            if (/(auto|scroll|hidden|clip)/.test(c.overflowX) &&
+                (r.left < b.left + a.clientLeft - 1 || r.right > b.left + a.clientLeft + a.clientWidth + 1)) return false;
+        }
+        return [.15, .5, .85].every(f => el.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height * f)));
+    }"""), "the full explanation must be visible through every clipping ancestor"
+
+
+@pytest.mark.parametrize("width,height", [(1100, 750), (390, 844)])
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_full_add_hint_follows_the_settings_scroll_boundary(role_ui, width, height, theme):
+    ui = role_ui
+    _configure(ui, MAX_ROWS)
+    page = ui["page"]
+    page.set_viewport_size({"width": width, "height": height})
+    page.add_init_script(f"localStorage.setItem('ouroboros.theme', '{theme}')")
+    roles.open_agents(ui)
+    level = _level(page)
+    add = level.locator('[data-subagent-add]')
+    add.focus()
+    hint = level.locator('[data-full-hint] .ui-hint')
+    hint.wait_for(state='visible')
+    # Scroll an already open hint to the independently reproduced clipping edge.
+    add.evaluate("e => { const s=e.closest('[data-settings-page]'); s.scrollTop += Math.max(0, e.getBoundingClientRect().top-s.getBoundingClientRect().top-40); }")
+    page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+    assert hint.is_visible()
+    _unclipped(hint)
+    assert ' '.join(hint.inner_text().split()) == FULL
+    roles.capture(page, f'roster-add-scroll-{width}-{theme}')
+    # New focus at that same edge also places it within the scroller.
+    add.evaluate('e => e.blur()')
+    _shows_why(page, level, add, f'roster-add-refocus-{width}-{theme}', keyboard=True)
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+@pytest.mark.parametrize("action", ["add", "duplicate"])
+def test_full_hints_dismiss_after_an_outside_touch_and_page_return(role_ui, theme, action):
+    """Real browser touch emulation, not native iOS: a tap never leaves a limit hint covering the rows."""
+    ui = role_ui
+    _configure_full(ui)
+    page = ui["new_page"](has_touch=True, is_mobile=True, viewport={"width": 390, "height": 844})
+    ui["page"] = page
+    page.add_init_script(f"localStorage.setItem('ouroboros.theme', '{theme}')")
+    roles.open_agents(ui)
+    assert _level(page).locator('[data-agents-filter="off"]').inner_text().strip() == f"Off {len(OFF)}"
+    scope = roles.open_agent(ui, 'fast-scout', fresh=False) if action == 'duplicate' else _level(page)
+    control = scope.locator(f'[data-subagent-{action}]')
+    control.scroll_into_view_if_needed()
+    control.tap(force=True)  # aria-disabled explains the limit but accepts a touch.
+    hint = scope.locator('[data-full-hint] .ui-hint')
+    hint.wait_for(state='visible')
+    _unclipped(hint)
+    roles.capture(page, f'roster-touch-{action}-open-{theme}')
+    # The page heading is outside the hint host and does not save or change a row.
+    page.locator('#page-settings .app-page-header').tap(position={"x": 150, "y": 15})
+    roles.capture(page, f'roster-touch-{action}-outside-{theme}')
+    dismissed = hint.is_hidden()
+    if action == 'add':
+        roles.open_agent(ui, 'fast-scout', fresh=False)
+    page.locator('#page-settings .app-page-header').get_by_role('button', name='Back to Agents', exact=True).tap()
+    level = _level(page)
+    assert level.locator('[data-entry-id]').count() == MAX_ROWS
+    assert level.locator('.ui-hint:visible').count() == 0
+    roles.capture(page, f'roster-touch-{action}-return-{theme}')
+    assert dismissed, 'an outside touch must dismiss the hint before leaving the page'
+    assert _roster_posts(ui) == 0, 'showing and dismissing the limit writes nothing'
+
+
+def _setup_agents(ui):
+    """Onboarding's Models step with its Subagents section open; returns its held Add."""
+    page = ui["page"]
+    page.goto(ui["url"] + "/onboarding")
+    page.wait_for_selector("#quick-start-btn:not([hidden])")
+    page.click("#next-btn")
+    page.wait_for_selector('[data-model-role="main"]')
+    page.locator('[data-collapse="subagents"] > summary').click()
+    add = page.locator("#onboarding-available-subagents [data-subagent-add]")
+    add.wait_for(state="visible")
+    return add
+
+
+def _setup_full(page, add):
+    """The setup list counts all 50 and holds Add, two of them switched off."""
+    rows = page.locator("#onboarding-available-subagents .available-subagent-row")
+    assert rows.count() == MAX_ROWS
+    assert page.locator("#onboarding-available-subagents .available-subagents-count").first.inner_text().strip() == f"{MAX_ROWS}/{MAX_ROWS}"
+    switches = rows.locator('[data-subagent-field="enabled"]').evaluate_all("els => els.map(e => e.checked)")
+    assert [index for index, on in enumerate(switches) if not on] == list(OFF)
+    assert add.get_attribute("aria-disabled") == "true" and add.get_attribute("disabled") is None
+
+
+def _frames(page):
+    page.evaluate("() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))")
+
+
+@pytest.mark.parametrize("width,height", [(1100, 750), (390, 844)])
+def test_setup_full_hint_stays_in_the_window_through_a_document_scroll(role_ui, width, height):
+    """Onboarding scrolls the document, not a Settings scroller: an open hint is placed again as its control nears the
+    top, so its explanation never passes the window (the reviewer's reproduction: 50 rows, Add 40 px from the top)."""
+    ui = role_ui
+    _configure_full(ui)
+    page = ui["page"]
+    page.set_viewport_size({"width": width, "height": height})
+    add = _setup_agents(ui)
+    _setup_full(page, add)
+    add.evaluate("e => window.scrollBy(0, e.getBoundingClientRect().top - 350)")
+    add.focus()
+    hint = page.locator("#onboarding-available-subagents [data-full-hint] .ui-hint").first
+    hint.wait_for(state="visible")
+    assert " ".join(hint.inner_text().split()) == FULL_SETUP
+    _unclipped(hint)
+    add.evaluate("e => window.scrollBy(0, e.getBoundingClientRect().top - 40)")
+    _frames(page)
+    assert page.evaluate("window.scrollY") > 0 and abs(add.bounding_box()["y"] - 40) <= 2
+    box, view = hint.bounding_box(), page.viewport_size
+    assert hint.is_visible() and hint.get_attribute("data-side") == "below", hint.get_attribute("data-side")
+    assert box["y"] >= 0 and box["y"] + box["height"] <= view["height"], box
+    _unclipped(hint)
+    roles.capture(page, f"setup-full-hint-scrolled-{width}")
+    # Scrolled back down the window, it is placed again and still whole.
+    add.evaluate("e => window.scrollBy(0, e.getBoundingClientRect().top - 350)")
+    _frames(page)
+    assert hint.is_visible()
+    _unclipped(hint)
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+def test_setup_full_hint_dismisses_after_an_outside_touch_and_a_return(role_ui, theme):
+    """Real browser touch emulation, not native iOS: in onboarding too a tap outside dismisses the limit hint, and
+    after leaving the step and returning the held Add shows it again and a tap outside dismisses it again."""
+    ui = role_ui
+    _configure_full(ui)
+    page = ui["new_page"](has_touch=True, is_mobile=True, viewport={"width": 390, "height": 844})
+    ui["page"] = page
+    page.add_init_script(f"localStorage.setItem('ouroboros.theme', '{theme}')")
+    add = _setup_agents(ui)
+    _setup_full(page, add)
+    hint = page.locator("#onboarding-available-subagents [data-full-hint] .ui-hint").first
+    count = page.locator("#onboarding-available-subagents .available-subagents-count").first
+    for visit in ("first", "return"):
+        add.scroll_into_view_if_needed()
+        add.tap(force=True)  # aria-disabled explains the limit but accepts a touch
+        hint.wait_for(state="visible")
+        assert " ".join(hint.inner_text().split()) == FULL_SETUP
+        _unclipped(hint)
+        roles.capture(page, f"setup-touch-open-{visit}-{theme}")
+        count.tap()  # beside Add, outside its hint host; it changes nothing
+        _frames(page)
+        assert hint.is_hidden(), f"an outside touch dismisses the hint ({visit})"
+        roles.capture(page, f"setup-touch-outside-{visit}-{theme}")
+        _setup_full(page, add)
+        if visit == "first":  # leave the step for the one before it (the synthetic Main holds Continue) and return
+            page.locator("#back-btn").tap()
+            page.wait_for_selector("#quick-start-btn:not([hidden])")
+            page.locator("#next-btn").tap()
+            page.wait_for_selector('[data-model-role="main"]')
+            if not page.locator('[data-collapse="subagents"]').evaluate("el => el.open"):
+                page.locator('[data-collapse="subagents"] > summary').tap()
+            add.wait_for(state="visible")
+            assert page.locator("#onboarding-available-subagents .ui-hint:visible").count() == 0
+    assert not any(path == "/api/onboarding/complete" for path, _ in ui["posts"])
 
 
 def test_duplicate_is_an_unsaved_agent_whose_page_names_its_twin_until_the_engine_changes(role_ui):
@@ -108,6 +312,13 @@ def test_duplicate_is_an_unsaved_agent_whose_page_names_its_twin_until_the_engin
     assert copy.locator('[data-subagent-field="enabled"]').get_attribute("role") is None
     assert copy.locator("[data-editor-remove]").inner_text().strip() == "Discard"
     roles.capture(page, "roster-handles-duplicate-draft")
+
+    back.click()
+    form = _level(page, "agents/fast-scout")
+    form.locator("[data-subagent-duplicate]").wait_for(state="visible")
+    assert _roster_posts(ui) == 0
+    form.locator("[data-subagent-duplicate]").click()
+    copy = _level(page, "agents/new").locator("[data-subagent-row]")
 
     copy.locator("[data-editor-save]").click()
     assert "runs the same engine as" in copy.locator("[data-subagents-validation]").text_content()

@@ -250,7 +250,7 @@ def _settings_client(monkeypatch):
 def test_an_unrelated_settings_save_leaves_a_never_configured_catalog_to_the_read(install, monkeypatch, posted):
     """Settings posts the catalog it loaded with every save. Posted back unchanged (as read, or as the page's
     object) or not at all, a never-configured install's factory catalog stays off the document, so a later Main
-    and access change moves it: at the next task start, and in this process's own projection, which
+    and access change moves it: at the next task start, and in the canonical settings view, which
     ``GET /api/review-pool`` reads. No catalog fetch checks its ids for an owner's typo: nobody typed them."""
     from ouroboros.gateway import settings as settings_mod
 
@@ -267,7 +267,8 @@ def test_an_unrelated_settings_save_leaves_a_never_configured_catalog_to_the_rea
         assert response.status_code == 200, response.text
         assert SUBAGENTS not in json.loads(install.read_text(encoding="utf-8"))
         assert client.get("/api/settings").json()["_meta"]["available_subagents"]["automatic"] is True
-    assert _pool_targets(dict(os.environ)) == [OPENAI[0]] and checked == []
+    assert SUBAGENTS not in os.environ
+    assert _pool_targets(None) == [OPENAI[0]] and checked == []
     assert _pool_targets(_task_start().settings) == [OPENAI[0]]
 
 
@@ -892,15 +893,19 @@ def test_unauthored_slots_follow_an_access_change_after_the_process_projected_th
     assert _task_start().settings["OUROBOROS_MODEL"] == "anthropic::claude-operator-main"
 
 
-def test_a_projected_factory_catalog_follows_an_access_change_and_an_operator_catalog_still_wins(install, monkeypatch):
-    """The task start projects the never-configured factory catalog into the process environment (and so
-    into every child); that echo is no operator catalog, so an owner access change moves the panel on the
-    next task start. An operator's catalog in the environment still wins, and a saved empty one stays."""
+@pytest.mark.parametrize("catalog", [None, ""], ids=["absent", "blank"])
+def test_a_factory_catalog_follows_an_access_change_and_an_operator_catalog_still_wins(install, monkeypatch, catalog):
+    """A never-configured catalog follows access without an environment copy. Blank keeps the same
+    proposal semantics as absence; an operator's catalog still wins, and a saved empty list stays."""
     from ouroboros.gateway.owner_settings import _owner_update_settings, fields_on_saved_document
 
-    _write(install, {"ANTHROPIC_API_KEY": "sk-ant-present-key"})
+    document = {"ANTHROPIC_API_KEY": "sk-ant-present-key"}
+    if catalog is not None:
+        document[SUBAGENTS] = catalog
+    _write(install, document)
     assert _pool_targets(_task_start().settings) == [ANTHROPIC[0]]
-    assert os.environ.get(SUBAGENTS), "projected (conftest restores the environment)"
+    assert SUBAGENTS not in os.environ
+    assert _pool_targets(None) == [ANTHROPIC[0]]
     _owner_update_settings(fields_on_saved_document({"OPENROUTER_API_KEY": "sk-or-present-key"}),
                            allow_safety_lowering=True)
     assert _pool_targets(_task_start().settings) == list(OPENROUTER_REVIEW_DEFAULTS["triad"])
