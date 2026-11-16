@@ -14,14 +14,26 @@ from pathlib import Path
 
 import pytest
 
-from ouroboros import headless, maintenance, maintenance_jobs, process_custody, session_scratch, task_custody
-from ouroboros import workspace_executor
+from ouroboros import (
+    headless,
+    maintenance,
+    maintenance_jobs,
+    process_custody,
+    session_scratch,
+    task_custody,
+    workspace_executor,
+)
 from ouroboros.artifacts import registered_task_artifact
 from ouroboros.launch_custody import stop_kept_service
 from ouroboros.task_results import write_task_result
-from ouroboros.tools import kept_service_outputs as kept, services, shell_outputs
+from ouroboros.tools import kept_service_outputs as kept
+from ouroboros.tools import services, shell_outputs
 from ouroboros.tools.kept_service_outputs import (
-    KeptDeclarationUnreadable, capture_kept_service_outputs, declaration_path, owed_declarations, owed_output_hold,
+    KeptDeclarationUnreadable,
+    capture_kept_service_outputs,
+    declaration_path,
+    owed_declarations,
+    owed_output_hold,
     unconsumed_declaration,
 )
 from ouroboros.tools.registry import ToolContext
@@ -32,6 +44,7 @@ from tests._launch_stop_shared import _PATIENCE, _end, _executor_ctx, write_scri
 from tests._store_shared import seed_result
 from tests.test_launch_stop import EXITING_WRITER, _kept_view, _queue_view, _registry, _start_late_writer, _wait_report
 from tests.test_session_scratch_release import OVER, _record, _started
+from tests.test_session_service_directories import _synthetic_temp_parent  # noqa: F401 -- this run's own scratch
 
 REPORT = b"report written after its task ended\n"
 READY = {"log_contains": "READY", "timeout_sec": 20}
@@ -259,7 +272,7 @@ def test_owed_outputs_in_an_allocated_scratch_wait_for_their_capture_and_then_re
         assert maintenance.run_job(data, "custody_trash")["state"] == "done"
         job = maintenance_jobs.job(data, "custody_trash")
         [hold] = job["holds"]
-        assert hold["class"] == "kept_service_capture_owed" and str(scratch) in hold["example"], hold
+        assert hold["class"] == "kept_service_capture_owed" and str(scratch.parent) in hold["example"], hold
         assert (scratch / "report.txt").read_bytes() == REPORT, "the owed bytes outlive the release"
         [entry] = (data / "state" / "custody_trash").iterdir()
         assert entry.name.startswith("task-1+scratch-"), entry

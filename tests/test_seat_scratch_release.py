@@ -18,7 +18,9 @@ from pathlib import Path
 
 import pytest
 
-from ouroboros import owner_keep, review_checking as rc, review_checking_prune as rp, task_custody
+from ouroboros import owner_keep, task_custody
+from ouroboros import review_checking as rc
+from ouroboros import review_checking_prune as rp
 from ouroboros.review_session_preparation import seat_service_directories
 from ouroboros.subagents import delegated_run_shape
 from ouroboros.workspace_preflight import OPEN_SCRATCH_DIR, SESSION_SCRATCH_DIRNAME
@@ -39,7 +41,7 @@ def _seated(root: Path, source, operation: str, task: str = TASK, access: str = 
     (scratch / "env" / "pyvenv.cfg").write_text("home = /usr\n", encoding="utf-8")
     home = rc.seat_dir(root, task, operation)
     record = home / SESSION_SCRATCH_DIRNAME / f"seat-{home.name}" / "scratch.json"
-    assert json.loads(record.read_text(encoding="utf-8"))["path"] == str(scratch)
+    assert json.loads(record.read_text(encoding="utf-8"))["path"] == str(scratch.parent)
     return area, scratch, record
 
 
@@ -115,7 +117,7 @@ def test_the_owners_keep_holds_the_seats_copy_and_scratch_and_names_the_scratch(
     area, scratch, record = _seated(root, source, "op-kept")
     seed_result(root, TASK, {"status": "running"})
     places, _unknown, pins = owner_keep.inventory(root, TASK, {"status": "running", "task_id": TASK})
-    assert str(scratch) in places and pins[str(scratch)] == str(record)
+    assert str(scratch.parent) in places and pins[str(scratch.parent)] == str(record)
     assert owner_keep.set_owner_keep(root, TASK, keep=True, source={"basis": "test"})["keep"] is True
     receipt = rc.terminal_seat_evidence(root, TASK, "op-kept", {"summary": {"state": "succeeded"}})
     assert receipt["status"] == "retained" and area.is_dir() and record.is_file() and _trash(root) == []

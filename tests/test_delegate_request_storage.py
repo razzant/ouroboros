@@ -273,18 +273,34 @@ def test_missing_pending_body_keeps_snapshot_and_orphan_recovery_without_a_post(
     assert custody.pending_invocations(tmp_path) == [] and custody.open_snapshot_ids(tmp_path) == set()
 
 
-@pytest.mark.parametrize("prior", ["absent", "refused", "corrupt"])
-def test_skill_review_retries_distinguish_known_pending_from_absent_or_refused(tmp_path, fake_route, prior):
+@pytest.mark.parametrize("prior", ["absent", "refused", "fenced", "corrupt"])
+def test_skill_review_retries_distinguish_known_pending_from_absent_or_refused(tmp_path, fake_route, prior,
+                                                                              monkeypatch):
+    """``refused`` is an engine 400 answering the POST: as unknown as a lost reply (#3138), so the retry replays
+    its recorded start under the same key. Only a start fenced before its POST (``fenced``) is definitely refused,
+    and its retry starts anew, like an ``absent`` token."""
+    from ouroboros import review_execution
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
+    from ouroboros.owner_pause import OwnerPauseRefused
     from ouroboros.review_execution import ReviewRouteUnavailable
     from tests._review_session_route_shared import _run_session_directly
 
     state = {"pending_invocation_id": "absent-token"} if prior == "absent" else {}
-    if prior != "absent":
+    if prior == "fenced":
+        real, fences = review_execution.run_operation, []
+
+        def fence_once(*args, **kwargs):
+            if not fences:
+                fences.append(1)
+                raise OwnerPauseRefused("owner_pause_fenced")
+            return real(*args, **kwargs)
+        monkeypatch.setattr(review_execution, "run_operation", fence_once)
+    elif prior != "absent":
         fake_route.start_error = ClaudexorUnavailable(
             "fixture_refused" if prior == "refused" else "daemon_unreachable",
             "fixture initial transport outcome", status_code=400 if prior == "refused" else 0)
-        with pytest.raises(ClaudexorUnavailable):
+    if prior != "absent":
+        with pytest.raises((ClaudexorUnavailable, ReviewRouteUnavailable)):
             _run_session_directly(tmp_path, surface="skill_review", slot_id="skill-slot", retry_state=state)
         row = _start_rows(tmp_path)[0]
         token = row["invocation_id"]
@@ -304,10 +320,10 @@ def test_skill_review_retries_distinguish_known_pending_from_absent_or_refused(t
     else:
         _run_session_directly(tmp_path, surface="skill_review", slot_id="skill-slot", retry_state=state)
         keys = [key for gateway in fake_route.instances for key in gateway.start_keys]
-        if prior == "intact":
+        if prior in ("intact", "refused"):
             assert keys == [token, token]
-        else:
-            assert keys[-1] != token and len(keys) == (1 if prior == "absent" else 2)
+        else:  # absent: no record; fenced: definitely refused before any POST, so only the new start was sent
+            assert keys[-1] != token and len(keys) == 1
 
 
 def test_pending_scan_only_reads_blobs_for_surviving_invocations(tmp_path, monkeypatch):
@@ -421,7 +437,8 @@ def test_pending_recovery_keeps_row_tier_separate_from_execution(tmp_path, monke
     engine = Engine()
     assert custody.record_start_requested(tmp_path, invocation_id='pending-tier', task_id='owner',
         selected_subagent_id='fixture-row', route='some-route', project_id='prj-existing', project_owned=False,
-        handshake_store_id=engine.store_identity, idempotency_key='pending-tier',
+        handshake_store_id=engine.store_identity, daemon_store_id=engine.store_identity,
+        idempotency_key='pending-tier',  # receipt-bound replay; this fixture varies only the row's tier
         request={'prompt': 'Fixture inspection', 'model': 'fixture-model', 'access': 'readonly',
                  'mode': 'ask', 'processingPreference': 'fast'}, processing={'requested': 'fast'},
         **({'row_processing': configured} if configured is not None else {}))
@@ -443,10 +460,10 @@ def test_pending_recovery_keeps_row_tier_separate_from_execution(tmp_path, monke
         txn.put_row('custody_open', 'invocation:pending-tier', cached)
     pending = custody.pending_invocations(tmp_path)[0]
     result = _recover_pending_invocation(tmp_path, engine, pending)
-    if refused:
-        assert result['action'] == 'invocation_retired'
+    if refused:  # an answered replay retires nothing (#3138); its row keeps the attempt's facts
+        assert (result['action'], result['reason']) == ('invocation_retained', 'start_refusal_unproven')
         event = next(row for row in custody.custody_rows(tmp_path) if row['type'] == custody.START_FAILED)
-        assert event.get('row_processing') == configured
+        assert event.get('row_processing') == configured and event['definite'] is False
         assert event['processing_preference'] == 'fast'
     else:
         recovered = custody.replay(tmp_path)[engine.run_id]
@@ -463,12 +480,12 @@ def test_pending_recovery_keeps_row_tier_separate_from_execution(tmp_path, monke
 
 
 @pytest.mark.parametrize("own", ["economy", ""])  # a row's own tier; a row without one ('' = its decided default)
-@pytest.mark.parametrize("recovery", ["retry", "reconcile", "reconcile_refused"])
+@pytest.mark.parametrize("recovery", ["retry", "reconcile", "reconcile_retained"])
 def test_a_session_start_carries_its_rows_own_tier_from_the_real_producer_through_a_lost_ack(
         tmp_path, monkeypatch, own, recovery):
     """``_delegate_start`` writes the row's own tier on START_REQUESTED beside the run's (a work's Fast), never into
-    the engine request; a lost acknowledgement recovered by ``retry_of`` or the reconcile sweep keeps it on STARTED or
-    START_FAILED, so the history files the run under its row, not under the work's tier."""
+    the engine request; an explicit retry or positive noncreating sweep lookup keeps it on STARTED.
+    A sweep with no accepting-store proof retains the original UNKNOWN attempt and its row's tier."""
     import tests._delegated_transport_shared as shared
     from ouroboros.delegate_custody_reconcile import _recover_pending_invocation
     from ouroboros.gateways import claudexor as gateway
@@ -489,8 +506,8 @@ def test_a_session_start_carries_its_rows_own_tier_from_the_real_producer_throug
             keys.append((copy.deepcopy(body), idempotency_key))
             if len(keys) == 1:
                 raise gateway.ClaudexorUnavailable("daemon_unreachable", "fixture accepted start then lost reply")
-            if recovery == "reconcile_refused":
-                raise gateway.ClaudexorUnavailable("fixture_refused", "not started", status_code=400)
+            if recovery != "retry":
+                pytest.fail("a lost identity-less start cannot be replayed automatically")
             return {"runId": self.run_id}
 
     real = shared._transport_snapshot
@@ -514,14 +531,23 @@ def test_a_session_start_carries_its_rows_own_tier_from_the_real_producer_throug
         assert retried["status"] == "started" and keys[1] == (body, token), "byte-identical replay"
         assert all(row.get("row_processing") == own for row in _start_rows(tmp_path))
     else:
-        result = _recover_pending_invocation(tmp_path, stub, custody.pending_invocations(tmp_path)[0])
-        assert keys[1] == (body, token)
-        if recovery == "reconcile_refused":
-            assert result["action"] == "invocation_retired"
+        if recovery == "reconcile":
+            stub.operations = lambda: [{"method": "POST", "path": "/v2/runs/lookup"}]
+            def lookup(sent, *, idempotency_key):
+                assert (sent, idempotency_key) == (body, token)
+                return {"status": "found", "storeId": "fixture-store", "handle": {
+                    "jobId": "accepted-job", "runId": stub.run_id, "state": "running"}}
+            stub.lookup_run = lookup
+        result = _recover_pending_invocation(tmp_path, stub, custody.pending_invocations(tmp_path)[0],
+                                             may_read=recovery == "reconcile")
+        assert len(keys) == 1, "an unknown identity-less start is read, never automatically re-POSTed"
+        if recovery == "reconcile_retained":
+            assert (result["action"], result["reason"]) == ("invocation_retained", "invocation_store_unproven")
             failed = next(row for row in custody.custody_rows(tmp_path) if row["type"] == custody.START_FAILED
                           and row.get("invocation_id") == token)
             assert failed["row_processing"] == own and failed["processing_preference"] == "fast"
-    if recovery != "reconcile_refused":
+            assert failed["definite"] is False and custody.invocation_record(tmp_path, token)["state"] == "pending"
+    if recovery != "reconcile_retained":
         entry = custody.replay(tmp_path)[stub.run_id]
         assert (entry.row_processing, entry.processing_preference) == (own, "fast")
         record_session_execution(tmp_path, entry, {"summary": {"state": "succeeded"}}, {})

@@ -30,6 +30,7 @@ from typing import Any, Callable, Dict, Iterable, Iterator, List, NamedTuple, Op
 
 from ouroboros import room_messages, shared_values, store, store_empty, store_timing
 from ouroboros.store import StoreBusy, StoreError, StoreLost, StoreMigrating, TIER_ENFORCED, TIER_NAME
+from ouroboros.store_capture import capture
 from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -1270,10 +1271,15 @@ def room(root: Any, chat_id: int) -> Optional[Dict[str, Any]]:
     return None if record is None else dict(record)
 
 
+_ROOM_COLUMNS = ("chat_id", "revision", "last_seq", "read_revision", "activity_at")
+
+
 def rooms(root: Any) -> List[Dict[str, Any]]:
-    """Every room the store knows (its revision, last chat row and activity), by chat id."""
+    """Every room the store knows (its revision, last chat row and activity), by chat id, captured in one
+    step (``store_capture``): rows stepped one by one hand the interpreter lock over once per room."""
     with transaction(root, write=False) as conn:
-        return [dict(record) for record in conn.execute("SELECT * FROM rooms ORDER BY chat_id")]
+        captured = capture(conn, f"SELECT {', '.join(_ROOM_COLUMNS)} FROM rooms", columns=_ROOM_COLUMNS)
+    return captured.rows(key=lambda room: room["chat_id"])
 
 
 def mark_room_read(root: Any, chat_id: int, revision: int) -> Dict[str, Any]:

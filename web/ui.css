@@ -1016,7 +1016,8 @@ details.ui-disclosure > :not(summary) { margin-top: var(--space-2); }
    A place that has pages draws one list of them, and the place's box decides the layout. The place element is
    `.section-place` (the container `sectionplace`); in it, `.section-shell[data-section-view]` holds the list's column
    `.section-rail` and the page's column `.section-pane`, and the header's lead `.section-lead` follows the same
-   columns. Narrower than 40rem one column shows the list ("home") or the page ("page"); from 40rem an open page stands
+   columns. Narrower than 40rem one column shows the list ("home", or "auto" until a page is chosen) or the page
+   ("page"); from 40rem an open page stands
    beside the list, which becomes the rail: `--section-rail-w` wide, a property both the shell's grid and the header's
    lead read, so each column has its name in the band over it. The list is `.section-list` > `.section-group` (an
    optional `.section-group-title`) > `.section-rows` (a card of rows on a phone) > `.section-row`: a glyph, the page's
@@ -1057,7 +1058,7 @@ details.ui-disclosure > :not(summary) { margin-top: var(--space-2); }
 html[data-layout="stack"] .section-rail { padding-inline: 12px; }
 .section-pane { display: grid; min-width: 0; min-height: 0; }
 .section-shell[data-section-view="page"] > .section-rail,
-.section-shell[data-section-view="home"] > .section-pane { display: none; }
+.section-shell:is([data-section-view="home"], [data-section-view="auto"]) > .section-pane { display: none; }
 
 /* The header's lead: the shell's own columns. Over the list stands what the place puts there (Settings: its search
    field), over a page `(‹) <page>` in the header's one title style. One column: the list's part over the list, Back
@@ -1071,7 +1072,7 @@ html[data-layout="stack"] .section-rail { padding-inline: 12px; }
 }
 .section-lead-col { display: flex; align-items: center; gap: var(--space-2); min-width: 0; }
 .section-lead-page > .shell-back[hidden] { display: none; }
-.section-place[data-section-view="home"] .section-lead-page,
+.section-place:is([data-section-view="home"], [data-section-view="auto"]) .section-lead-page,
 .section-place[data-section-view="page"] .section-lead-rail { display: none; }
 
 .section-list { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
@@ -1105,13 +1106,6 @@ html[data-layout="stack"] .section-rail { padding-inline: 12px; }
 @media (hover: hover) { .section-row:hover { background: var(--tone-quiet-hover); } }
 .section-row:active { filter: var(--press); }
 .section-row:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; }
-/* The chosen page of a place is the soft crimson with its ink (owner 13.11: a selection is always red; roles differ by
-   the shade, never a grey or black plate). The solid crimson marks the place itself (the sidebar's chosen row) and the
-   primary action; the soft crimson marks everything else that is chosen: the open page of a place, a tab, an option,
-   a segment, a filter. A list that stands alone (one column: a phone, a narrow window) marks no row: there is no page beside it
-   to be the chosen one. */
-.section-shell[data-section-view="page"] .section-row:is([aria-current="page"], [aria-selected="true"]) { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); box-shadow: none; }
-.section-shell[data-section-view="page"] .section-row:is([aria-current="page"], [aria-selected="true"]) :is(.section-row-title, .section-row-answer, .section-row-end, .section-row-glyph) { color: var(--tone-crimson-soft-ink); }
 /* The glyph stands bare at every width (a tile under it is another system's list item): 20 px in a one-column list,
    where the rows are a finger tall, 18 px in the rail. */
 .section-row-glyph {
@@ -1134,33 +1128,44 @@ html[data-layout="stack"] .section-rail { padding-inline: 12px; }
    The rail draws no scrollbar (between the panes a bar reads as a rule line); its scroll-edge fade says that more
    waits. */
 @container sectionplace (min-width: 40rem) {
-    .section-shell[data-section-view="page"] { grid-template-columns: var(--section-rail-w) minmax(0, 1fr); }
-    .section-shell[data-section-view="page"] > .section-rail {
+    /* The chosen page of a place is the soft crimson with its ink (owner 13.11: a selection is always red; roles differ by
+       the shade, never a grey or black plate). The solid crimson marks the place itself (the sidebar's chosen row) and the
+       primary action; the soft crimson marks everything else that is chosen: the open page of a place, a tab, an option,
+       a segment, a filter. A list that stands alone (one column: a phone, a narrow window) marks no row: there is no page beside it
+       to be the chosen one. */
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) .section-row:is([aria-current="page"], [aria-selected="true"]) { background: var(--tone-crimson-soft); color: var(--tone-crimson-soft-ink); box-shadow: none; }
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) .section-row:is([aria-current="page"], [aria-selected="true"]) :is(.section-row-title, .section-row-answer, .section-row-end, .section-row-glyph) { color: var(--tone-crimson-soft-ink); }
+
+    /* An automatic page yields to its list below this query, without waiting for JavaScript to hear the resize. */
+    .section-shell[data-section-view="auto"] > .section-pane { display: grid; }
+    .section-place[data-section-view="auto"] .section-lead-page { display: flex; }
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) { grid-template-columns: var(--section-rail-w) minmax(0, 1fr); }
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) > .section-rail {
         display: block;
         padding-inline: var(--section-rail-start) var(--section-rail-end);
         scrollbar-width: none;
     }
-    .section-shell[data-section-view="page"] > .section-rail::-webkit-scrollbar { display: none; }
-    .section-place[data-section-view="page"] .section-lead {
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) > .section-rail::-webkit-scrollbar { display: none; }
+    .section-place:is([data-section-view="page"], [data-section-view="auto"]) .section-lead {
         grid-template-columns: calc(var(--section-rail-w) - var(--section-rail-start) - var(--section-rail-end)) minmax(0, 1fr);
         column-gap: calc(var(--section-rail-end) + var(--space-4));
         margin-inline-start: calc(var(--section-rail-start) - var(--page-header-padding-x));
     }
-    .section-place[data-section-view="page"] .section-lead-rail { display: flex; }
+    .section-place:is([data-section-view="page"], [data-section-view="auto"]) .section-lead-rail { display: flex; }
     /* One band even while a drawer-width window holds two panes: the 44px places control and its gap take room
        from the rail's lead, keeping the page's name over its cards. The section name remains for readers. */
     html[data-layout="stack"] .section-place > .app-page-header { grid-template-areas: "leading lead lead"; }
     html[data-layout="stack"] .section-place > .app-page-header > .app-page-title-block { display: contents; }
     html[data-layout="stack"] .section-place > .app-page-header .app-page-title-row { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
     html[data-layout="stack"] .section-place > .app-page-header .app-page-lead { grid-area: lead; min-height: var(--touch-target-min); }
-    html[data-layout="stack"] .section-place[data-section-view="page"] .section-lead {
+    html[data-layout="stack"] .section-place:is([data-section-view="page"], [data-section-view="auto"]) .section-lead {
         grid-template-columns: calc(var(--section-rail-w) - var(--section-rail-end) - var(--space-3) - 44px - var(--space-2)) minmax(0, 1fr);
         margin-inline-start: 0;
     }
-    .section-shell[data-section-view="page"] > .section-rail .section-list { gap: var(--space-4); }
-    .section-shell[data-section-view="page"] > .section-rail .section-group { gap: var(--space-1); }
-    .section-shell[data-section-view="page"] > .section-rail .section-group-title { padding-inline: var(--space-2); }
-    .section-shell[data-section-view="page"] > .section-rail .section-rows {
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) > .section-rail .section-list { gap: var(--space-4); }
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) > .section-rail .section-group { gap: var(--space-1); }
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) > .section-rail .section-group-title { padding-inline: var(--space-2); }
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) > .section-rail .section-rows {
         --card-pad: 0px;
         gap: 2px;
         padding: 0;
@@ -1170,13 +1175,13 @@ html[data-layout="stack"] .section-rail { padding-inline: 12px; }
     }
     /* A row is as tall with its answer as without it (the name's line, the answer's line, their 2px and the 5px
        insets), so rows do not move as answers arrive. */
-    .section-shell[data-section-view="page"] .section-row {
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) .section-row {
         column-gap: 0;
         min-height: calc(var(--type-body) * var(--line-title) + 2px + var(--type-meta) * var(--line-meta) + 10px);
         padding: 5px var(--space-2);
         border-radius: var(--radius-inner);
     }
-    .section-shell[data-section-view="page"] .section-row-glyph {
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) .section-row-glyph {
         width: 18px;
         height: 18px;
         margin-inline-end: 10px;
@@ -1184,14 +1189,14 @@ html[data-layout="stack"] .section-rail { padding-inline: 12px; }
         background: transparent;
         color: var(--text-secondary);
     }
-    .section-shell[data-section-view="page"] .section-row-glyph > svg { width: 18px; height: 18px; }
-    .section-shell[data-section-view="page"] .section-row:is([aria-current="page"], [aria-selected="true"], :hover) .section-row-glyph { color: inherit; }
-    .section-shell[data-section-view="page"] .section-row-title { overflow-wrap: normal; word-break: normal; }
-    .section-shell[data-section-view="page"] .section-row-answer { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-    .section-shell[data-section-view="page"] .section-row-end { gap: var(--space-1); }
-    .section-shell[data-section-view="page"] .section-row[data-section-out] .section-row-end,
-    .section-shell[data-section-view="page"] .section-row-end:has(> .status-mark:not([hidden])) { margin-inline-start: var(--space-1); }
-    .section-shell[data-section-view="page"] .section-row:not([data-section-out]) .section-row-end > svg { display: none; }
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) .section-row-glyph > svg { width: 18px; height: 18px; }
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) .section-row:is([aria-current="page"], [aria-selected="true"], :hover) .section-row-glyph { color: inherit; }
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) .section-row-title { overflow-wrap: normal; word-break: normal; }
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) .section-row-answer { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) .section-row-end { gap: var(--space-1); }
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) .section-row[data-section-out] .section-row-end,
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) .section-row-end:has(> .status-mark:not([hidden])) { margin-inline-start: var(--space-1); }
+    .section-shell:is([data-section-view="page"], [data-section-view="auto"]) .section-row:not([data-section-out]) .section-row-end > svg { display: none; }
 }
 
 /* The primary slot (DESIGN principle 4: the crimson is the one primary action of a place). The containers that have

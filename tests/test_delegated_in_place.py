@@ -23,6 +23,7 @@ from tests._delegated_transport_shared import (  # noqa: F401 -- autouse transpo
     _owned_gateway_uses_each_test_transport,
 )
 from tests.test_delegate_continuation import _settle, _start
+from tests.test_session_service_directories import _synthetic_temp_parent  # noqa: F401 -- this run's own scratch
 
 IN_PLACE = {"workspace_kind": "git", "strategy": "in_place"}
 REFUSED = "workspace_in_place_unavailable"
@@ -229,7 +230,7 @@ def test_a_full_access_in_place_run_is_named_its_own_disposable_scratch_and_gran
     held = custody.replay(tmp_path)["run-1"]
     [record] = _in_place_owners(ctx).glob("*/scratch.json")
     assert record.parent.name == f"in-place-{held.invocation_id}"
-    scratch = pathlib.Path(json.loads(record.read_text(encoding="utf-8"))["path"])
+    scratch = pathlib.Path(json.loads(record.read_text(encoding="utf-8"))["path"]) / "w"
     assert scratch.is_dir() and not any(scratch.iterdir()) and _target(ctx) not in scratch.parents
     binding = request["instructions"].split("\n\nDELEGATED IN-PLACE BINDING", 1)[1]
     assert f"outside every Git working tree, in {scratch}, this run's disposable scratch, {DISPOSABLE_SCRATCH}." in binding

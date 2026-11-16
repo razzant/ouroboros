@@ -9,9 +9,11 @@ serving process; nothing scans the temp root, follows a link or sweeps by age. A
 producer marked retained (``test_environment.RETENTION_MARKER``) keeps its record as a visible
 hold, ``producer_retained``, in its own trash entry until the marker is gone; a kept service's
 declared outputs there no complete capture consumed hold it the same way (``kept_service_capture_owed``);
-a valid record whose real ``obs-*`` directory has another device/inode (a reboot can renumber a device)
-is held there as ``identity_unverified``, never deleted or repaired. This module reads, judges and releases
-records; allocation and the custody pass over finished tasks stay in ``workspace_preflight``.
+new records name an ``obs-*`` container with an ordinary nonce marker beside its empty ``w/`` workspace.
+The exact recorded address and marker identify it across reboot or whole-folder restoration, not device/inode;
+restored contents inherit its holder and cleanup. Legacy records keep their original device/inode check and
+are never upgraded. Unverified identity is held, never repaired. This module owns allocation and identity;
+``workspace_preflight`` serializes preparation and runs the custody pass over finished tasks.
 """
 from __future__ import annotations
 
@@ -21,16 +23,18 @@ import logging
 import os
 import pathlib
 import stat
+import tempfile
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from ouroboros import work_domain
+from ouroboros.test_environment import SCRATCH_CONTAINER_MARKER as SCRATCH_MARKER, SCRATCH_WORKSPACE
 
 log = logging.getLogger(__name__)
 
 # The hold a producer's retention marker puts on a scratch: the marker's own words are its example.
 PRODUCER_RETAINED = "producer_retained"
-# The hold on a record whose scratch is a real directory under another device/inode (``ScratchIdentityMismatch``).
+# A real container whose nonce (or legacy device/inode) cannot be confirmed (``ScratchIdentityMismatch``).
 IDENTITY_UNVERIFIED = "identity_unverified"
 # A seat-keyed record (``review_session_preparation.seat_service_directories``) is held by its seat's copy.
 SEAT_OPEN = "seat_open"
@@ -62,13 +66,15 @@ def work_session_scratch(execution: pathlib.Path) -> pathlib.Path:
     import secrets
 
     parent = pathlib.Path(work_domain.staging_path("scratch"))
-    work_domain.make_dirs(parent)
+    work_domain.make_dirs(parent, mode=0o755)
     for _attempt in range(8):
         path = parent / f"obs-{secrets.token_hex(4)}"
         if _overlaps(path, execution):
             raise ValueError(f"{path} overlaps the execution tree {execution}")
         try:
-            work_domain.make_dir(path)
+            work_domain.make_dir(path, mode=0o755)
+        except work_domain.WorkDomainUnsettled:
+            raise  # an unconfirmed allocation is not an available name to retry
         except OSError:
             continue
         if work_domain.kind(path) != "dir":
@@ -93,53 +99,178 @@ def work_download_caches(execution: pathlib.Path) -> List[pathlib.Path]:
 
 
 class ScratchIdentityMismatch(ValueError):
-    """A valid record names an allowed ``obs-*`` path that is a real directory, but under another
-    device/inode than recorded (a reboot can renumber a device): ownership unverified, never repaired."""
+    """A valid record names a real allowed container, but its identity cannot be confirmed.
 
-    def __init__(self, record: pathlib.Path, path: pathlib.Path, recorded: List[int], found: List[int]):
+    Legacy records compare device/inode; schema 2 requires its nonce marker, with no inode fallback.
+    """
+
+    def __init__(self, record: pathlib.Path, path: pathlib.Path, recorded: Any, found: Any, *, basis: str = "dev, ino"):
         self.record, self.path, self.recorded, self.found = record, path, recorded, found
-        super().__init__(f"{path} is not the recorded scratch directory: recorded identity {recorded}, found {found}"
+        self.basis = basis
+        kind = "" if basis == "dev, ino" else f"{basis} "
+        super().__init__(f"{path} is not the recorded scratch directory: recorded {kind}identity {recorded}, found {found}"
                          f" ({record})")
 
 
-def recorded_scratch(record: pathlib.Path) -> pathlib.Path:
-    """Resolve only this host-created short directory, never a link or a replacement inode.
-
-    ``ValueError`` for a record that is a link, malformed (its path or ``[dev, ino]`` included), names a
-    path outside the scratch parents or not an ``obs-*`` directory, or not a real directory;
-    ``ScratchIdentityMismatch`` (a ``ValueError``) only when all of that holds but the directory's
-    device/inode differs from the recorded ones; ``FileNotFoundError`` only when the recorded directory
-    is gone. A record that cannot be read is ``OSError``, a vanished one included: it proves nothing of
-    its scratch."""
+def _scratch_record(record: pathlib.Path) -> Dict[str, Any]:
     if record.is_symlink():
         raise ValueError(f"{record} is not a real ownership record")
     try:
-        row = json.loads(record.read_text(encoding="utf-8"))
+        return json.loads(record.read_text(encoding="utf-8"))
     except FileNotFoundError:
         raise OSError(f"scratch ownership record vanished before it was read: {record}") from None
-    path, recorded = pathlib.Path(row["path"]), row["identity"]
-    if not (isinstance(row["path"], str) and isinstance(recorded, list) and len(recorded) == 2
-            and all(type(part) is int for part in recorded)):
+
+
+def _marker_matches(path: pathlib.Path, nonce: str) -> str:
+    """Empty when the regular nofollow marker contains exactly this nonce, else the observed problem.
+
+    Both paths use existing confined opens: a work path descends from its mapping's anchor, never the
+    link/permission fallback of ``work_domain.read_bytes``. Size and read are bounded to the marker's 33 bytes.
+    """
+    from ouroboros.confined_files import open_regular_file
+
+    expected = (nonce + "\n").encode("ascii")
+    marker = path / SCRATCH_MARKER
+    try:
+        with contextlib.ExitStack() as held:
+            spelling = work_domain.work_spelling(marker)
+            if spelling:
+                directory, name = held.enter_context(work_domain._confined_parent(spelling))
+                stream, seen = directory.open(name)
+            else:
+                stream, seen = open_regular_file(path, SCRATCH_MARKER)
+            with stream:
+                if seen.st_size != len(expected):
+                    return "wrong size"
+                return "" if stream.read(len(expected) + 1) == expected else "different nonce"
+    except OSError as exc:
+        return f"unreadable ({type(exc).__name__})"
+
+
+def _recorded_scratch(record: pathlib.Path, row: Dict[str, Any]) -> pathlib.Path:
+    if not isinstance(row["path"], str):
+        raise ValueError(f"{record} records no scratch path")
+    path = pathlib.Path(row["path"])
+    version = row.get("schema_version", 1)
+    if type(version) is not int or version not in (1, 2):
+        raise ValueError(f"{record} has an unknown scratch schema")
+    recorded = row.get("nonce") if version == 2 else row["identity"]
+    if version == 2:
+        if not (isinstance(recorded, str) and len(recorded) == 32
+                and all(part in "0123456789abcdef" for part in recorded)):
+            raise ValueError(f"{record} records no scratch nonce")
+    elif not (isinstance(recorded, list) and len(recorded) == 2 and all(type(part) is int for part in recorded)):
         raise ValueError(f"{record} records no scratch path and device/inode identity")
     if path.parent not in scratch_parents() or not path.name.startswith("obs-"):
         raise ValueError(f"{record} does not name a session scratch directory")
     seen = work_domain.lstat(path)  # a missing temporary directory is a gap, never silently re-created
-    if not stat.S_ISDIR(seen.st_mode):
+    if not stat.S_ISDIR(seen.st_mode) or (version == 2 and getattr(seen, "st_file_attributes", 0) & 0x400):
         raise ValueError(f"{path} is not the recorded scratch directory")
-    if [seen.st_dev, seen.st_ino] != recorded:
+    if version == 2:
+        problem = _marker_matches(path, recorded)
+        if problem:
+            raise ScratchIdentityMismatch(record, path, recorded, problem, basis="marker")
+    elif [seen.st_dev, seen.st_ino] != recorded:
         raise ScratchIdentityMismatch(record, path, recorded, [seen.st_dev, seen.st_ino])
     return path
 
 
+def recorded_scratch(record: pathlib.Path) -> pathlib.Path:
+    """Read-only identity check returning the recorded container, never its granted workspace.
+
+    Invalid records/paths raise ``ValueError``, unreadable records ``OSError``, a real container with
+    unverified identity ``ScratchIdentityMismatch``. Only a missing container raises ``FileNotFoundError``:
+    a missing/linked/special/oversized nonce marker never means the container is absent. No record or marker
+    is repaired, touched or upgraded, even when a legacy record still matches.
+    """
+    return _recorded_scratch(record, _scratch_record(record))
+
+
+def _workspace(container: pathlib.Path) -> pathlib.Path:
+    """The empty workspace on allocation, or the same real workspace on reuse; no link/junction is granted."""
+    path = container / SCRATCH_WORKSPACE
+    try:
+        seen = work_domain.lstat(path)
+    except FileNotFoundError:
+        if work_domain.is_work(path):
+            work_domain.make_dir(path)
+        else:
+            path.mkdir()
+        seen = work_domain.lstat(path)
+    if not stat.S_ISDIR(seen.st_mode) or getattr(seen, "st_file_attributes", 0) & 0x400:
+        raise ValueError(f"{path} is not a real scratch workspace")
+    return path
+
+
+def prepare_session_scratch(record: pathlib.Path, execution: pathlib.Path) -> pathlib.Path:
+    """Under the caller's preparation lock: reuse its recorded workspace or allocate a schema-2 container.
+
+    Publish only after container -> marker -> empty workspace. Failed preparation rolls back only those
+    known names of this fresh, ungranted allocation, never a previous container. A missing legacy directory
+    may allocate anew, but a mismatch never upgrades or adopts it. Restoration with the same nonce at the
+    same address deliberately inherits the old holder and cleanup, including files added after restoration.
+    """
+    from ouroboros.test_environment import git_ancestor, new_scratch_identity, session_scratch_parent, write_scratch_marker
+    from ouroboros.utils import atomic_write_json
+    from ouroboros.workspace_preflight import _owned_directory
+
+    if os.path.lexists(record):
+        row = _scratch_record(record)
+        try:
+            path = _recorded_scratch(record, row)
+        except FileNotFoundError:
+            pass  # OS aging may have removed it; a literal retry never prepares again
+        else:
+            if git_ancestor(path) is not None or _overlaps(path, execution):
+                raise ValueError(f"{path} overlaps a Git working tree or the execution root")
+            return _workspace(path) if row.get("schema_version") == 2 else path
+    managed = work_domain.managed()
+    parent = pathlib.Path(work_domain.staging_path("scratch")) if managed else session_scratch_parent().resolve()
+    if not managed and git_ancestor(parent) is not None:
+        raise ValueError(f"{parent} is inside a Git working tree")
+    path = work_session_scratch(execution) if managed else pathlib.Path(tempfile.mkdtemp(prefix="obs-", dir=parent))
+    row = new_scratch_identity(path)
+    marker, nonce = path / SCRATCH_MARKER, row["nonce"]
+    try:
+        if managed:
+            # A work user may differ from the service UID. This new, non-secret marker must be readable
+            # through the service's confined open too, without a work-domain cat/link fallback.
+            work_domain.write_file(marker, (nonce + "\n").encode("ascii"), mode=0o644)
+        else:
+            _owned_directory(parent, (path.name,), execution)
+            write_scratch_marker(path, nonce)
+        workspace = _workspace(path)
+        if managed and (problem := _marker_matches(path, nonce)):
+            raise ValueError(f"new scratch marker is not readable by its owner: {problem}")
+        atomic_write_json(record, row, fsync=True)
+    except work_domain.WorkDomainUnsettled:
+        raise  # its writer may still be using this new container; custody must settle it, not a rollback
+    except Exception:
+        # No session received this new allocation: remove only our two known children, then the empty container.
+        if managed:
+            if work_domain.kind(path / SCRATCH_WORKSPACE) == "dir":
+                work_domain.remove_empty_dir(path / SCRATCH_WORKSPACE)
+            work_domain.remove(marker)
+            work_domain.remove_empty_dir(path)
+        else:
+            with contextlib.suppress(FileNotFoundError):
+                (path / SCRATCH_WORKSPACE).rmdir()
+            with contextlib.suppress(FileNotFoundError):
+                marker.unlink()
+            path.rmdir()
+        raise
+    return workspace
+
+
 def identity_hold(record: pathlib.Path, exc: ScratchIdentityMismatch) -> Dict[str, Any]:
-    """The ``identity_unverified`` hold on a record whose scratch has another device/inode: the scratch
+    """The ``identity_unverified`` hold on an unconfirmed marker or legacy device/inode: the scratch
     and its record stay as they are (another run may still use that directory), since the record's time.
     The example leads with what a bounded hold note must keep: the scratch, both identities, then the
     record's key (its holder entry is renamed by the handoff; ``scratch_records`` names the file)."""
     since = None
     with contextlib.suppress(OSError):
         since = record.lstat().st_mtime
-    example = f"{exc.path} [dev, ino] {exc.recorded} != {exc.found}; record {record.parent.name}"
+    example = f"{exc.path} [{exc.basis}] {exc.recorded} != {exc.found}; record {record.parent.name}"
     return {"class": IDENTITY_UNVERIFIED, "example": example, "since": since,
             "recorded_identity": exc.recorded, "found_identity": exc.found}
 
@@ -249,8 +380,8 @@ def release_session_scratch(drive: pathlib.Path, *, owed: Any = ()) -> List[Dict
 
     Returns the records whose scratch stays in place, each with ``owner`` (the record's folder) and
     ``path``: a kept service's outputs still owed a capture (``_capture_owed_hold``), a producer retention
-    marker's (``retention_hold``, #2708) and a real ``obs-*`` directory whose device/inode differs from its
-    valid record's (``identity_hold``; neither it nor its markers are touched). The caller keeps each as a
+    marker's (``retention_hold``, #2708) and a real ``obs-*`` container whose identity its valid record cannot
+    confirm (``identity_hold``; neither it nor its markers are touched). The caller keeps each as a
     visible hold, never deleting its record with the entry; the other records are still released. An
     unreadable or malformed record, a foreign, linked or non-directory path, or an incomplete removal is
     ``OSError``: the entry and its pointer wait for the next pass. No temp-root scan, arbitrary symlink
@@ -444,7 +575,7 @@ def scratch_records(data_root: Any, live: Any = None, *, include_holds: bool = T
     """Every session scratch ownership record of the install, for Storage's ``session_scratch`` place:
     ``holder`` (one of ``HOLDERS``), ``task_id``, ``key``, ``record`` (the file), ``path`` (the scratch,
     validated as ``recorded_scratch`` does: ``valid`` False and ``problem`` when it names a foreign
-    path, a replaced inode or a link; ``missing`` when the directory is gone), ``hold`` (the typed
+    path, an unconfirmed identity or a link; ``missing`` when the container is gone), ``hold`` (the typed
     reason it is kept: ``task_hold`` words, ``seat_open``, ``owner_keep``, ``producer_retained``,
     ``identity_unverified`` with ``recorded_identity``/``found_identity``, never ``valid``, any holder;
     ``""`` when its release is due or under way) and ``since`` (ISO, the record's time, or the
@@ -523,6 +654,7 @@ __all__ = [
     "has_record",
     "identity_hold",
     "owner_records",
+    "prepare_session_scratch",
     "recorded_scratch",
     "release_seat_scratch",
     "release_session_scratch",

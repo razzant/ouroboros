@@ -18,8 +18,7 @@ def test_part_input_carries_each_members_period_status_and_signer(tmp_path):
     draft = mf.build_writer_input(tmp_path, store, unit, budget_tokens=None)
     assert 'nanny, task nan00001' in draft.prompt
     assert 'status accepted' in draft.prompt
-    assert '2026-09-01T00:02:00+00:00' in draft.prompt
-    assert '2026-09-01T00:05:00+00:00' in draft.prompt
+    assert 'period 2026-09-01 00:02 → 2026-09-01 00:05' in draft.prompt
     assert shape.ADDITION in draft.prompt
     # Creation time is not the period covered; a missing period stays unknown.
     pending = store.publish_page(room_id=made.alpha, text='Unaccepted account.',

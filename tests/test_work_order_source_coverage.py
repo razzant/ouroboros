@@ -186,12 +186,13 @@ def test_orphaned_pending_recovery_preserves_partial_source_gate(tmp_path, monke
         route="claude",
         work_order_fingerprint=request["complete_sha256"],
         work_order_coverage="partial",
-        work_order_source_request=request,
+        work_order_source_request=request, daemon_store_id="fixture-store",
     )
     record = custody.pending_invocations(tmp_path)[0]
     monkeypatch.setattr(custody, "_reconcile_one", lambda *_args, **_kwargs: {"ok": True})
 
     class Gateway:
+        store_identity = "fixture-store"  # receipt-bound; the test varies the partial-source gate
         def start_run(self, _request, *, idempotency_key=""):
             assert idempotency_key == "source-invocation"
             return {"runId": "source-recovered"}
