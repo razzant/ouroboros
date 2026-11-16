@@ -845,10 +845,13 @@ class OuroborosAgent:
         from ouroboros.context_timing import collector_rests, measured_sections
         from ouroboros.owner_wait import context_start_route
 
+        # A live call's native session answers the fit's route question: read as an attribute, so the executor
+        # inventory sees this door (tests/test_executor_inventory.py).
+        turn = self._realtime_turn if getattr(self, "_realtime_turn", None) is not None else None
         with collector_rests(), measured_sections():  # each section's wall and CPU time rides on the build's context_memory_view receipt
             route_resolver, effort = context_start_route(ctx, task, saved_start,
                 _initial_effort_for(task, str(task.get("type") or "").lower()),
-                resolver=getattr(getattr(self, "_realtime_turn", None), "resolve_route", None))
+                resolver=getattr(turn, "resolve_route", None))
             messages, cap_info = build_llm_messages(
                 env=self.env,
                 memory=self.memory,
