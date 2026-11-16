@@ -6230,6 +6230,9 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 .logs-kinds[data-scroll-end] { --tab-fade-end: var(--space-4); }
 .logs-kinds[data-scroll-start] { --tab-fade-start: var(--space-4); }
 .logs-clear-list { flex: none; color: var(--text-secondary); }
+/* A two-pane stack window holds the rail in the header's one row: the strip lends its chips' shadow room outside it, so
+   the row keeps the controls' height. */
+html[data-layout="stack"] #page-dashboard .logs-kinds { margin-block: calc(-1 * var(--space-2)) calc(-1 * var(--space-5)); }
 @container sectionplace (max-width: calc(40rem - 0.02px)) {
     html[data-layout="stack"] #page-dashboard .app-page-header[data-controls] .section-lead-page {
         display: grid;
