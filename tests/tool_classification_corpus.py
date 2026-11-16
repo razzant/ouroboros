@@ -325,7 +325,7 @@ _PRODUCER_SHAPES = (
     # precise than "unknown" and is NOT the adapter's answer for the same text.
     ("unknown_tool_extension_down", "ext_1_demo_screenshot", "⚠️ Unknown tool: 'ext_1_demo_screenshot': its extension is not live for this task right now. Nothing was executed.\nNo tool in ext_1_demo is currently callable in this task.", "EXTENSION_UNAVAILABLE", (("dynamic_provider", True),)),
     ("protected_write", "write_file", "⚠️ CORE_PROTECTION_BLOCKED: runtime_mode='advanced' refuses to write protected core path: ouroboros/safety.py. Switch to runtime_mode='pro' and let the normal triad + scope review cover the protected core/contract/release change before commit.", "CORE_PROTECTION_BLOCKED", ()),
-    # ouroboros/mcp_client.py (MCPNameResolution.refusal) — the unavailable facts
+    # ouroboros/mcp_catalog.py (MCPNameResolution.refusal) — the unavailable facts
     # publish one code from different first lines, which only a shape can express;
     # a catalog miss is the caller's unknown tool (#1262), the registry's own
     # unknown-tool code published under the MCP marker.

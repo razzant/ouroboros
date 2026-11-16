@@ -643,6 +643,7 @@ Files produced by tasks are covered in §6.
 
 **What is installed:**
 - `GET /api/extensions` (`ExtensionsIndexResponse`) lists every installed skill (`InstalledSkill`) and what is live. It makes no network call.
+- A skill row's `mcp_servers` (`[]` if none declared, absent on identity-collision rows) gives `{id, title, conflict, bound, configured, tool_count, listed, error, notes}`: `conflict`, another row claims the id; `bound`, this skill owns the row; `configured`, binding and MCP are on; `listed`/`tool_count`, last listing; `error`, refusal or failed listing; `notes`, successful listing diagnostics.
 - `GET /api/extensions/{skill}/manifest` and `/settings_section` read one skill.
 - `GET /api/skills/daemons` lists companion processes.
 
@@ -658,6 +659,7 @@ Files produced by tasks are covered in §6.
 - **Delete:** `POST /api/skills/{skill}/delete` unloads an external or self-authored skill and removes its payload and state; a repeat answers 404. `deleted_state` confirms state removal.
 - **Publication check:** `POST /api/skills/{skill}/publish-preflight` is read-only; every status answers the same shape, and `state: "hard_block"` is a refusal. An optional body `{destination: {source_id, mode}}` (`SkillPublishPreflightRequest`; mode `origin`, `entry` or `new_entry`) picks where it would go; the answer's `repository` is that destination (default: where the skill came from, else the hub). Missing publication prerequisites may answer `409` before the skill is looked up; read `reason_code`, not an assumed `404` for an unknown name.
 - **Reconcile:** `POST /api/skills/{skill}/reconcile` brings one extension's live state in line with its saved state.
+- **Connect tools:** `GET /api/skills/{skill}/mcp-connect` previews the declared rows, what runs, the `other_servers` turning MCP on starts and its `settings_digest`, writing nothing. `POST` (`SkillMcpConnectRequest`) confirms with that digest, `expected_content_hash` (the preview’s `content_hash`) and `confirm_other_servers: true` if any. A changed document or revision, conflict, unready skill or policy refuses with `saved: false`; under `Prefer: respond-async` an unsettled confirm is `SkillMcpConnectPending`: unconfirmed, follow its job.
 
 **Required by a deployment.** Under a policy file that requires extensions, `GET /api/extensions` adds `deployment: {when_unmet, required}` (each requirement as the server process observes it: `state`, `reason`, `detail`, the observing `process`; a missing package included), and a required skill's row carries its own `deployment` row. Its switch and removal are the organization's: Off, delete, uninstall, update, a same-name install and a repair task answer 403 `code: managed_by_deployment` before any effect; Review, attest and grant stay the employee's. No answer carries a value the file fixes.
 
@@ -890,7 +892,7 @@ A package-manager copy may only advise: display the vendor sentence, never run i
 - `POST /api/local-model/test` runs two real completions; a failed probe is still 200. `POST /api/local-model/stop` stops it (and an install in progress) and is safe to repeat.
 
 **MCP servers:**
-- `GET /api/mcp/status` lists the configured servers and their last listed tools; it makes no network call.
+- `GET /api/mcp/status` lists the configured servers and their last listed tools; it makes no network call. Server rows add `skill` (owning skill, else `""`) and `skill_error` (why its binding is unavailable, else `""`); configuration-error rows omit both.
 - `POST /api/mcp/refresh` lists one server's tools (`{server_id}`) or every server's (`{}`); it is safe to repeat.
 - `POST /api/mcp/sign-in` runs one step of a remote server's sign-in: `{action: "begin", server_id}` returns the provider's `url` and the `redirect_uri` it returns to (an owner's own app adds `client_id`, `client_secret`); `{action: "complete", state, code|error, iss}` (or `returned_url`, the address the browser stopped on) finishes it and lists the server; `{action: "sign_out", server_id}` forgets the tokens, with `revoked` saying what the provider confirmed. A refusal is 200 with `ok: false`, `code: "MCP_AUTH_REQUIRED"` and its `reason`.
 - `POST /api/mcp/test` connects once to a draft server (`{server}`, with `server_id` to fill masked secrets from that saved server) and saves nothing. A failed test is 200 with `ok: false`.
