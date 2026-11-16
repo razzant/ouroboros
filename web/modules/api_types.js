@@ -764,6 +764,7 @@
  * @property {boolean=} init_git
  * @property {string=} git_url
  * @property {boolean=} with_workspace
+ * @property {boolean=} no_folder  // records the choice to keep none; absent, the first promoted task provisions one
  */
 
 /** @typedef {Object} ProjectClosure
@@ -780,6 +781,7 @@
  * @property {boolean=} pinned  // absent on legacy rows means unpinned
  * @property {number=} chat_id
  * @property {string=} working_dir
+ * @property {{at: string, by: string}=} no_folder  // the recorded choice to keep no folder, until one is chosen
  * @property {string=} provenance   // attached | cloned | genesis | none (historical fact)
  * @property {string=} clone_url
  * @property {string=} trusted_at

@@ -31,7 +31,8 @@ from tests.test_onboarding_complete_endpoint import (
     LIVE_SNAPSHOT,
     onboarding as onboarding,  # explicit fixture re-export: the real wizard endpoint over a tmp settings file
 )
-from tests.test_review_pool_migration import N1_DOC, SLOTS, SUBAGENTS, anton_document, api_row, catalog, session_row
+from tests.test_review_pool_migration import (N1_DOC, SLOTS, SUBAGENTS, anton_document, api_row, catalog,
+                                           full_lanes_document, session_row)
 
 MAIN = "claudexor::codex=default"
 MODEL_CATALOG = [{"value": MAIN, "is_default": True, "input_modalities": ["text", "image"]}]
@@ -39,8 +40,7 @@ NOTICE = "review_pool_migration_notice"
 
 
 @pytest.fixture(autouse=True)
-def _fresh_seam(monkeypatch):
-    monkeypatch.setattr(cs, "MAX_CONFIGURED_SUBAGENTS", 26)
+def _fresh_seam():
     m._MIGRATIONS_SEEN.clear()
     yield
     m._MIGRATIONS_SEEN.clear()
@@ -259,6 +259,38 @@ def test_a_retained_n1_receipt_stays_byte_historical_after_the_triad_refresh(boo
     current = set(settings_defaults.OPENROUTER_REVIEW_DEFAULTS["triad"]) - set(PREVIOUS_TRIAD)
     assert current and not any(model.encode() in retained for model in current)
     assert json.loads(path.read_text(encoding="utf-8")) == N1_DOC, "a read writes nothing"
+
+
+def test_a_migration_the_26_row_release_refused_replays_under_the_shipped_ceiling_keeping_its_receipt(boot, monkeypatch):
+    """The 26-row release refused a document whose catalog and lanes together make 27 rows (only a hand-edited or
+    environment catalog gets there: the lane era's own held at most 10): its snapshot, record and one owner message
+    say so, and the lanes stayed. The upgraded process reads the same document and the migration fits the shipped
+    ceiling: the rows that run follow it, while the retained receipt stays byte-historical (as the triad refresh
+    above) — never rewritten, no second message — and a read writes nothing."""
+    root, sent = boot
+    path = root / "settings.json"
+    document = full_lanes_document(11)
+    path.write_text(json.dumps(document), encoding="utf-8")
+    monkeypatch.setattr(cfg, "SETTINGS_PATH", path)
+    with monkeypatch.context() as previous_release:
+        previous_release.setattr(cs, "MAX_CONFIGURED_SUBAGENTS", 26)
+        server_maintenance._startup_review_pool_notice(cfg.load_settings_lock_held(_settings_lock_held=False))
+        (refused,) = cfg.review_pool_migrations_seen()
+    (snapshot_file,) = _snapshots(root)
+    retained, records = snapshot_file.read_bytes(), server_maintenance.review_pool_migration_records()
+    assert refused.error.endswith("27 rows; the maximum is 26") and refused.error.encode() in retained
+    assert len(_notices(sent)) == 1 and [record["outcome"] for record in records.values()] == ["error"]
+
+    m._MIGRATIONS_SEEN.clear()  # the upgraded process reads the same document
+    settings = cfg.load_settings_lock_held(_settings_lock_held=False)
+    server_maintenance._startup_review_pool_notice(settings)
+    (replayed,) = cfg.review_pool_migrations_seen()
+    assert replayed.input_sha256 == refused.input_sha256 and not replayed.error
+    assert SLOTS not in settings and settings[SUBAGENTS] == replayed.catalog_after
+    assert len(json.loads(settings[SUBAGENTS])["items"]) == 27
+    assert _snapshots(root) == [snapshot_file] and snapshot_file.read_bytes() == retained
+    assert server_maintenance.review_pool_migration_records() == records and len(_notices(sent)) == 1
+    assert json.loads(path.read_text(encoding="utf-8")) == document, "a read writes nothing"
 
 
 @pytest.mark.parametrize("main, extra", [

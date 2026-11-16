@@ -165,14 +165,46 @@ def test_strict_parser_rejects_ambiguous_or_lossy_shapes(payload, match):
         parse_configured_subagents(payload)
 
 
-def test_maximum_twenty_six_is_real_and_row_precise():
-    """PR-3 (contract §1.1): the roster ceiling is 26 — the pool's seats live
-    on the same list as the delegation rows, so the former 10 would not hold a
-    full install (factory review rows + harness rows + the owner's own)."""
-    assert MAX_CONFIGURED_SUBAGENTS == 26
-    parse_configured_subagents(_config(*(_row(f"row-{i}") for i in range(26))))
-    with pytest.raises(ValueError, match=f"maximum is {MAX_CONFIGURED_SUBAGENTS}"):
-        parse_configured_subagents(_config(*(_row(f"row-{i}") for i in range(27))))
+def _distinct_rows(count):
+    """Valid rows on distinct engines with the fields an owner sets: session rows with an account pin and access,
+    API reviewers with packet delivery and a factory origin, a processing tier; every third switched off; the
+    last with a longest stable id and multilingual guidance."""
+    rows = []
+    for i in range(count):
+        row = (_row(f"row-{i}", route={"kind": "agent_session", "target_id": f"codex=model-{i}",
+                                       "credential_profile_id": f"pin-{i % 4}" if i % 4 else ""}, access="workspace_write")
+               if i % 2 else
+               _row(f"row-{i}", route={"kind": "api_model", "target_id": f"openai/model-{i}"}, review_eligible=True,
+                    delivery="packet", minted_from="factory_default", processing_preference="economy"))
+        del row["name"]  # retired: parsed, never written back
+        rows.append({**row, **({"enabled": False} if i % 3 == 2 else {})})
+    if rows:
+        rows[-1].update(subagent_id="z" * 64, recommended_use="Последняя строка: 長い説明 — kept whole.",
+                        effort="high", review_eligible=True)
+    return rows
+
+
+@pytest.mark.parametrize("list_enabled", [True, False])
+@pytest.mark.parametrize("count", [26, 27, 49, 50, 51])
+def test_the_ceiling_is_fifty_saved_rows_off_or_on_and_row_precise(count, list_enabled):
+    """The one ceiling of the catalog and of a review wave is 50 saved rows (it was 26: the 10 helper
+    rows plus the 16 former review-lane seats the pool took in). A switched-off row and a list switched
+    off count; one row past it refuses the whole value, never a value cut to 50. At the edge the value
+    round-trips whole: ids, order, routes, access, effort, marks and guidance; JS holds the same number."""
+    assert MAX_CONFIGURED_SUBAGENTS == 50
+    js = (Path(__file__).resolve().parents[1] / "web" / "modules" / "subagents_settings.js").read_text(encoding="utf-8")
+    assert f"export const MAX_AVAILABLE_SUBAGENTS = {MAX_CONFIGURED_SUBAGENTS};" in js
+    payload = _config(*_distinct_rows(count), enabled=list_enabled)
+    if count > MAX_CONFIGURED_SUBAGENTS:
+        with pytest.raises(ValueError, match=f"has {count} rows; maximum is {MAX_CONFIGURED_SUBAGENTS}$"):
+            parse_configured_subagents(payload)
+        return
+    parsed = parse_configured_subagents(payload)
+    canonical = serialize_configured_subagents(parsed)
+    again = parse_configured_subagents(canonical)
+    assert again == parsed and json.loads(canonical) == payload and serialize_configured_subagents(again) == canonical
+    assert [row.subagent_id for row in again.items] == [row["subagent_id"] for row in payload["items"]]
+    assert sum(row.enabled is False for row in again.items) == count // 3 and again.enabled is list_enabled
 
 
 # --- PR-3 package A: review-pool fields on the catalog row -----------------------

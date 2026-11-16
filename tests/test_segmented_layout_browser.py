@@ -47,21 +47,29 @@ _MEASURE = """([name, selector]) => {
   group.dataset.strip = name;
   row.dataset.stripRow = name;
   const style = getComputedStyle(group), fill = group.querySelector(':scope > .ui-segment-fill');
+  const ink = document.createElement('canvas').getContext('2d');
   const buttons = [...group.querySelectorAll('.ui-segment')].map((button) => {
     const rect = button.getBoundingClientRect(), look = getComputedStyle(button);
+    ink.font = look.font;
     const range = document.createRange();
     range.selectNodeContents(button);
     const text = range.getBoundingClientRect();
     return {...box(rect), width: rect.width, label: button.textContent.trim(), text: box(text),
             lines: new Set([...range.getClientRects()].map((line) => Math.round(line.top))).size,
             // The width of its word on one line, with the option's own padding and border.
-            word: text.width + px(look.paddingLeft) + px(look.paddingRight) + px(look.borderLeftWidth) + px(look.borderRightWidth),
+            word: ink.measureText(button.textContent.trim()).width + px(look.letterSpacing) * button.textContent.trim().length
+              + px(look.paddingLeft) + px(look.paddingRight) + px(look.borderLeftWidth) + px(look.borderRightWidth),
             touch: px(look.getPropertyValue('--touch-target-min')),
             chosen: button.matches('.active, [aria-checked="true"], [aria-pressed="true"]'),
             fill: button.matches('.active, [aria-checked="true"]') && fill ? getComputedStyle(fill).backgroundColor : look.backgroundColor, overflows: button.scrollWidth > button.clientWidth + 1};
   });
+  const separators = [...group.children].filter(el => !el.matches('.ui-segment, .ui-segment-fill') && el.getClientRects().length);
+  const inset = px(style.paddingLeft) + px(style.paddingRight) + px(style.borderLeftWidth) + px(style.borderRightWidth);
+  const needed = buttons.reduce((sum, b) => sum + Math.max(b.touch, b.word), inset)
+    + separators.reduce((sum, el) => sum + el.getBoundingClientRect().width, 0)
+    + px(style.columnGap) * (buttons.length + separators.length - 1);
   const doc = document.scrollingElement;
-  return {name, ...box(group.getBoundingClientRect()), track: style.backgroundColor, overflowX: style.overflowX,
+  return {name, needed, inset, ...box(group.getBoundingClientRect()), track: style.backgroundColor, overflowX: style.overflowX,
           spills: group.scrollWidth > group.clientWidth + 1, buttons, backing: fill ? box(fill.getBoundingClientRect()) : null,
           row: {left: rowBox.left + px(rowStyle.borderLeftWidth) + px(rowStyle.paddingLeft),
                 right: rowBox.right - px(rowStyle.borderRightWidth) - px(rowStyle.paddingRight)},
@@ -73,6 +81,10 @@ _MEASURE = """([name, selector]) => {
 _STILL = "*, *::before, *::after { transition: none !important; }"
 _SETTLE = """async (theme) => {
   document.documentElement.dataset.theme = theme;
+  // A section's entry can still scale its content after the tab click. Measure its resting boxes, not viewport
+  // coordinates against unscaled CSS padding halfway through that motion; the looping work marks do not delay it.
+  await Promise.all(document.getAnimations().filter(a => Number.isFinite(a.effect?.getComputedTiming().endTime))
+    .map(a => a.finished.catch(() => {})));
   await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
 }"""
 # The strip in the middle of its scroller, with the words above it in its row: a tall section is cut, never the strip.
@@ -123,6 +135,8 @@ def _transparent(colour: str) -> bool:
 
 def _check(strip: dict, count: int, *, desk: bool) -> list[str]:
     name, buttons, problems = strip["name"], strip["buttons"], []
+    available = strip["row"]["right"] - strip["row"]["left"]
+    fits = strip["needed"] <= available + 0.5
     if len(buttons) != count:
         problems.append(f"{len(buttons)} options, expected {count}")
     allowed = sorted(f"--segment-fill-{edge}" for edge in "xywh") if strip["backing"] else []
@@ -143,6 +157,8 @@ def _check(strip: dict, count: int, *, desk: bool) -> list[str]:
             problems.append(f"{label!r} leaves its option: text {text}, option {button}")
         if button["left"] < strip["left"] - 0.5 or button["right"] > strip["right"] + 0.5:
             problems.append(f"{label!r} sticks out of the track")
+        if name != "skills-trust" and button["word"] <= available - strip["inset"] and button["lines"] != 1:
+            problems.append(f"{label!r} breaks its words although its whole option fits a line")
     chosen = [button for button in buttons if button["chosen"]]
     if len(chosen) != 1:
         problems.append(f"{len(chosen)} chosen options")
@@ -153,9 +169,11 @@ def _check(strip: dict, count: int, *, desk: bool) -> list[str]:
             problems.append(f"the chosen option ({chosen[0]['fill']}) looks like another ({shown})")
         if strip["backing"] and any(abs(strip["backing"][edge] - chosen[0][edge]) > 0.5 for edge in strip["backing"]):
             problems.append(f"the chosen option's fill is misplaced: {strip['backing']} versus {chosen[0]}")
-    if desk and name in DRAWN:
-        if len({round(button["top"]) for button in buttons}) != 1:
-            problems.append("wraps on the desk")
+    # DESIGN:432–437: the strip wraps, never scrolls. The section's rail leaves less room even on a desktop
+    # (3347); system faces have different widths. Keep the one-line and word-width checks wherever they fit.
+    if fits and len({round(button["top"]) for button in buttons}) != 1:
+        problems.append(f"wraps despite {strip['needed']:.1f}px of words fitting its {available:.1f}px row")
+    if desk and name in DRAWN and fits:
         for button in buttons:
             if abs(button["width"] - max(button["touch"], button["word"])) > 1:
                 problems.append(f"{button['label']!r} is {button['width']:.1f}px wide, its word {button['word']:.1f}px")
@@ -246,10 +264,7 @@ def test_every_strip_fits_its_row_and_shows_its_choice(direct_server_with_data, 
 
                 if seen != set(STRIPS):
                     problems.append(f"{engine} {viewport['width']}: never found {sorted(set(STRIPS) - seen)}")
-                # The negative control: the desk keeps every strip on one line; at 320 px one does wrap, so the wrap
-                # path is what the checks above measured there.
-                if desk and wrapped:
-                    problems.append(f"{engine} desk: {sorted(wrapped)} wrap")
+                # The negative control: at 320 px one drawn strip wraps, so the wrap path was measured too.
                 if not desk and not wrapped & DRAWN:
                     problems.append(f"{engine} 320: no drawn strip wraps, so the wrap was never measured")
                 page.close()

@@ -1576,7 +1576,7 @@ textarea.ui-control { resize: vertical; }
     box-sizing: border-box;
     width: max-content;
     max-width: min(28rem, calc(100vw - 4 * var(--space-2)));
-    max-width: min(28rem, 100cqi);
+    max-width: min(28rem, 100cqi, var(--ui-hint-span, 28rem));  /* --ui-hint-span: a boundary's room (ui_hint.js) */
     max-height: var(--ui-hint-room, none);
     padding: var(--space-2) var(--space-3);
     border: 1px solid transparent;
@@ -1614,6 +1614,11 @@ textarea.ui-control { resize: vertical; }
 }
 .ui-hint-action:focus-visible { outline: 2px solid var(--focus-accent-border); outline-offset: 2px; border-radius: var(--radius-inner); }
 .ui-hint:not([hidden]) { animation: ui-hint-in var(--motion-fade) var(--ease-sheet); }
+/* A button that says why it is held: its host places the hint; held (aria-disabled), it still takes the mouse, the
+   finger and the keyboard that show the hint, and reads as unavailable like a disabled button. */
+.ui-hint-host { position: relative; display: inline-flex; }
+.ui-hint-host > .btn[aria-disabled="true"] { cursor: not-allowed; opacity: var(--control-disabled-opacity); box-shadow: none; filter: none; }
+.ui-hint-host > .btn-default[aria-disabled="true"]:hover { background: var(--surface-capsule); }
 @keyframes ui-hint-in { from { opacity: 0; transform: translateY(3px); } }
 @media (prefers-reduced-motion: reduce) {
     .ui-hint:not([hidden]) { animation: none; }

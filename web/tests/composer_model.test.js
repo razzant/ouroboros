@@ -394,6 +394,18 @@ test('a Pin chooses nothing: it writes the pins alone, keeps the sheet open, and
     refused.controls.destroy();
 });
 
+test('a touch inside the floating Model list keeps its sheet and chooses nothing', async () => {
+    const r = room();
+    await r.open();
+    const sheet = r.sheet();
+    assert.equal(sheet.parentNode, r.doc.body, 'the sheet is outside the composer flow');
+    r.doc.fire('pointerdown', { target: r.list(), pointerType: 'touch' });
+    assert.equal(r.sheet(), sheet);
+    assert.equal(r.el.dataset.sheetOpen, 'true');
+    assert.deepEqual([r.modelPosts(), r.tierPosts()], [[], []]);
+    r.controls.destroy();
+});
+
 test('a tier press saves the room\'s own tier at once and keeps the sheet open; Send waits for it', async () => {
     const r = room({ tiers: { main: 'fast', default: 'standard' } });
     await r.open();

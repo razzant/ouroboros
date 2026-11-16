@@ -21,6 +21,7 @@ from ouroboros.composer_cognition import (ensure_project_cognition, main_cogniti
 from ouroboros.contracts.schema_versions import with_schema_version
 from ouroboros.project_facts import project_display_name, sanitize_project_id
 from ouroboros.project_closure import apply_closed, select_projects
+from ouroboros.project_sources import apply_folder, require_durable_folder
 from ouroboros.store import StoreBusy, open_store
 from ouroboros.store_capture import capture
 from ouroboros.store_hot_facts import CHAT_VERSION
@@ -1063,7 +1064,8 @@ def create_project(
     origin: str = "owner",
     admission_basis: Optional[dict] = None,
 ) -> Dict[str, Any]:
-    """Register an active room with deterministic chat id and an optional folder.
+    """Register an active room with deterministic chat id and an optional folder; a NEW row never
+    names a host-managed temporary copy (``TemporaryCopyRefused``), a replay returns its row as it is.
     The unpersisted ``created`` flag distinguishes this registration from replay."""
     pid = sanitize_project_id(project_id)
     if not pid:
@@ -1081,6 +1083,7 @@ def create_project(
                         f"{existing.get('lifecycle')} project"
                     )
                 return {**existing, "created": False}
+        require_durable_folder(working_dir, drive_root=drive_root)  # a new row only, before _save
         entry = {
             "id": pid,
             "name": _validated_name(name, pid),
@@ -1109,12 +1112,14 @@ def update_project(
 ) -> Optional[Dict[str, Any] | tuple[Dict[str, Any], bool]]:
     """Update metadata, including ``closed={at, by, note}`` or None to reopen.
     Provenance/clone_url/trusted_at are historical attach facts, not live Git data.
-    ``only_if_empty`` compares under the writer lock; ``return_changed`` also returns whether it wrote."""
+    ``only_if_empty`` compares under the writer lock (a recorded ``no_folder`` is a set folder choice);
+    ``return_changed`` also returns whether it wrote. The folder's own rules (a temporary copy, an
+    unchosen folder over ``no_folder``) raise from ``apply_folder``, writing nothing."""
     pid = sanitize_project_id(project_id)
     if not pid:
         return None
     allowed = {
-        "name", "pinned", "closed", "working_dir", "last_active_at", "provenance", "clone_url", "trusted_at",
+        "name", "pinned", "closed", "working_dir", "no_folder", "last_active_at", "provenance", "clone_url", "trusted_at",
         # Retained legacy activity fact; current activity comes from dialogue rooms.
         "thread_activity_seen",
         # Durable pointer to the project's newest finalized task result
@@ -1132,15 +1137,16 @@ def update_project(
                 continue
             original = dict(entry)
             for key, value in updates.items():
-                if key not in allowed or (key in only_if_empty and str(entry.get(key) or "").strip()):
+                if key not in allowed or key in only_if_empty and (
+                        str(entry.get(key) or "").strip() or key == "working_dir" and "no_folder" in entry):
                     continue
                 if key == "name":
                     value = _validated_name(value, str(entry.get("id") or ""))
                 if key == "pinned" and type(value) is not bool:
                     raise ValueError("pinned must be a boolean")
-                if key == "working_dir" and value != entry.get(key):
-                    entry["routing_generation"] = int(entry.get("routing_generation") or 0) + 1
-                if key == "closed":
+                if key in ("working_dir", "no_folder"):  # before _save: a refusal writes nothing
+                    apply_folder(entry, key, value, chosen="no_folder" in updates, drive_root=drive_root)
+                elif key == "closed":
                     apply_closed(entry, value)
                 else:
                     entry[key] = value
@@ -1391,13 +1397,13 @@ def reconcile_projects(drive_root: Any) -> int:
 
 def ensure_project_workspace(drive_root: Any, project_id: str, repo_dir: Any,
                              *, return_project: bool = False, admission_basis: Optional[dict] = None) -> Any:
-    """Choose the existing folder or provision only while the folder is empty.
+    """Choose the existing folder, or provision one only while the row names none and no ``no_folder``.
 
     Preparation callers can consume the exact chosen row with return_project;
     reading again after provisioning would lose an intervening rebind/ABA.
     """
     entry = create_project(drive_root, project_id, admission_basis=admission_basis)
-    if not str(entry.get("working_dir") or "").strip():
+    if not str(entry.get("working_dir") or "").strip() and "no_folder" not in entry:
         try:
             from ouroboros.genesis_project import provision_genesis_project
 

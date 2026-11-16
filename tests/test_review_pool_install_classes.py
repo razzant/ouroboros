@@ -27,7 +27,6 @@ from types import SimpleNamespace
 
 import pytest
 
-import ouroboros.configured_subagents as cs
 import ouroboros.review_substrate as substrate
 from ouroboros import config as cfg
 from ouroboros import review_ledger
@@ -127,8 +126,7 @@ def _answering_substrate(served: list[dict]):
 
 
 @pytest.fixture(autouse=True)
-def _migration_state(monkeypatch):
-    monkeypatch.setattr(cs, "MAX_CONFIGURED_SUBAGENTS", 26)
+def _migration_state():
     m._MIGRATIONS_SEEN.clear()
     cfg._RETIREMENT_NOTICE_SEEN.clear()
     yield
