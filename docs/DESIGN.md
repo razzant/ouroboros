@@ -3475,10 +3475,10 @@ location reveals its folder without widening the rail. Section headings follow
 “A section with pages”; a Project shows its name.
 An empty band draws nothing. Its scroller reaches the window's top; its first row starts below the macOS band,
 which stays the window's (owner 22.10). Widgets cards pass under it with crisp edges (owner 20.10); moving content
-fades by principle 9. Empty band space still drags the window. In stack layout the header row is at most 56 px: one
-leading control (the picture on a room or section list, the round Back when owed), destination name, status, then a
-room's consciousness chip and Panic. Tabs or filters occupy one line below; Logs fades its rail short of Clear,
-with no outer events panel on a phone. A short row drops the status word whole after its start step, keeping its mark; Main's title ellipsizes before
+fades by principle 9. Empty band space still drags the window. In stack layout the header is one row of 44px controls,
+a page's 18px below a browser's top: one leading control (the picture on a room or section list, the round Back when
+owed), destination name, status, then a room's consciousness chip and Panic. Tabs or filters occupy one line below;
+chip rails run to the page's edges (a desk's Logs fades its rail short of Clear), with no outer events panel on a phone. A short row drops the status word whole after its start step, keeping its mark; Main's title ellipsizes before
 its chip or Panic yields.
 A Project's name keeps one line inside its capsule, at the controls' size and weight (`--type-body`, 600), and ends
 in an ellipsis, so its capsule keeps the bar's height (owner 2026-11-01, A·14; it replaces the second line of

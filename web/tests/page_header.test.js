@@ -12,7 +12,12 @@ test('Skills keeps its return and tabs at the leading edge, with one extra line 
     assert.match(css, /html\[data-layout="docked"\] #page-skills > \.app-page-header\[data-lead\] \{[^}]*grid-template-areas: "back tabs toolbar";\s*gap: 0 var\(--space-2\);/,
         'Back stands 8px before the tabs, its own grid cell, so changing actions cannot shrink or move it');
     assert.match(css, /#page-skills \.skills-scroll \{ padding-top: 0; \}/);
-    assert.match(css, /#page-skills > \.app-page-tabs \{ padding-bottom: 0; \}/);
+    assert.match(css, /#page-skills > \.app-page-tabs \{ padding-bottom: var\(--space-2\); \}/,
+        'a phone keeps 10px between the tabs and the search, as Telegram does');
+    assert.match(css, /#page-skills > \.app-page-tabs:not\(\[hidden\]\) \{ display: flex; align-items: flex-start; gap: var\(--space-2\); \}/);
+    assert.match(css, /#page-skills > \.app-page-tabs > \.btn \{ margin-top: var\(--space-2\); \}/,
+        'Update stands level with the tabs, which start below the strip\'s shadow room');
+    assert.doesNotMatch(css, /#page-skills > \.app-page-tabs[^{]*\{[^}]*align-items: center/, 'centred on the strip\'s box it stood 4px high');
     assert.match(css, /#page-skills > \.app-page-tabs > \.app-tab-strip \{[\s\S]*?margin-bottom: calc\(-1 \* var\(--space-4\)\);/,
         'the strip lends its shadows space without a blank row before the search');
     const narrow = css.slice(css.indexOf('html[data-layout="docked"] #page-skills > .app-page-header[data-lead]'), css.indexOf('.skills-search-chrome {'));
@@ -41,6 +46,11 @@ test('a section band has the same inset without native chrome and one leading ed
     assert.match(css, /\.app-page-header\[data-return\] > \.app-page-title-block \{ display: flex;/, 'an ordinary leading return keeps its actual sibling');
     assert.match(css, /\.app-page-lead \.app-tab-strip \{[^}]*padding: 10px 0 26px;/);
     assert.match(css, /section-rail \{\s*padding-top: calc\(var\(--page-header-row-h\) \+ var\(--space-3\)\)/);
+    // A phone's page row stands at the same inset (18px below a browser's top), under a system band when there is
+    // one; a room keeps its own top, and Telegram's row and a macOS window's lights outrank this rule.
+    assert.match(css, /:where\(html\[data-layout="stack"\]:not\(\[data-window-chrome="integrated"\]\)\) #content > \.page:not\(#page-chat\) > \.app-page-header \{\s*padding-top: max\(calc\(\(var\(--page-header-row-h\) - var\(--control-h-float\)\) \/ 2\), calc\(var\(--chrome-inset\) \+ var\(--inset-top\)\)\);/);
+    assert.match(css, /html\[data-layout="stack"\] \.app-page-header \{[^}]*padding-top: calc\(var\(--chrome-inset\) \+ var\(--inset-top\)\);/,
+        'rooms keep the stack row\'s own top');
 });
 
 test('header actions use the floating control tokens while Back keeps the round glass recipe', () => {

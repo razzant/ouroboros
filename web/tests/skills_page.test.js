@@ -35,6 +35,15 @@ test('search and chips belong to the scrolling list; tabs and actions stay above
     assert.equal(band.contains(page.querySelector('#skills-refresh')), false, 'Refresh stays beside the title');
 });
 
+test('the chip rails start at the column edge, and on a phone run to the page\'s edges as Logs\' rail does', () => {
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.doesNotMatch(css, /\.skills-(filter|category)-strip \{[^}]*margin(-left)?: [^;}]*calc\(-1 \* var\(--space-2\)\)/,
+        'no chip rail starts 8px left of the column');
+    assert.match(css, /\.skills-filter-strip \{ flex-basis: 100%; \}/);
+    assert.match(css, /html\[data-layout="stack"\] \.skills-filter-strip \{ flex-basis: calc\(100% \+ 2 \* var\(--page-header-padding-x\)\); \}/);
+    assert.match(css, /html\[data-layout="stack"\] :is\(\.skills-filter-strip, \.skills-category-strip\) \{[^}]*margin-inline: calc\(-1 \* var\(--page-header-padding-x\)\);\s*padding-inline: var\(--page-header-padding-x\);\s*scroll-padding-inline: var\(--page-header-padding-x\);/);
+});
+
 test('Update counts trusted candidates briefly in the band and keeps the full scope in its accessible name', () => {
     const source = readFileSync(new URL('../modules/skills.js', import.meta.url), 'utf8');
     const button = { setAttribute(key, value) { this[key] = value; } };

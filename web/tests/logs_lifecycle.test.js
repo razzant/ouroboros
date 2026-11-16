@@ -54,6 +54,8 @@ test('the section owns the filter rail and Clear; the list has no sticky chrome'
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
     assert.match(css, /\.logs-kinds\[data-scroll-end\] \{ --tab-fade-end: var\(--space-4\); \}/);
     assert.match(css, /\.logs-kinds\[data-scroll-start\] \{ --tab-fade-start: var\(--space-4\); \}/);
+    assert.match(css, /html\[data-layout="stack"\] #page-dashboard \.logs-kinds \{ grid-area: 2 \/ 1 \/ auto \/ -1; padding: var\(--space-2\) var\(--page-header-padding-x\);\s*margin: 0 calc\(-1 \* var\(--page-header-padding-x\)\); max-width: none; scroll-padding-inline: var\(--page-header-padding-x\); \}/,
+        'a phone\'s rail runs to the page\'s edges, its chips starting at the column, so a hidden chip fades at the edge');
     assert.match(css, /html\[data-layout="stack"\] \.logs-card \{[^}]*background: none;[^}]*box-shadow: none;/);
     assert.ok(mount.querySelector('.logs-card').classList.contains('ui-card'), 'the desk retains the object');
 });

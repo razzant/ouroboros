@@ -4732,6 +4732,12 @@ html[data-layout="stack"] .app-page-header {
     padding-top: calc(var(--chrome-inset) + var(--inset-top));
     column-gap: var(--space-2);
 }
+/* A page's row stands at the bands' one inset, as on a desk (DESIGN "Page header"): 18px below a browser's top, or just
+   under the system's band where the screen has one. A room keeps its own top, Telegram its row, a macOS window the
+   traffic lights' line. */
+:where(html[data-layout="stack"]:not([data-window-chrome="integrated"])) #content > .page:not(#page-chat) > .app-page-header {
+    padding-top: max(calc((var(--page-header-row-h) - var(--control-h-float)) / 2), calc(var(--chrome-inset) + var(--inset-top)));
+}
 html[data-layout="stack"] .chat-page-header {
     flex-wrap: nowrap;
 }
@@ -6233,7 +6239,9 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
     html[data-layout="stack"] #page-dashboard .section-lead-page > .app-page-return { grid-area: 1 / 1; }
     html[data-layout="stack"] #page-dashboard .section-lead-page > [data-dashboard-lead-name] { grid-area: 1 / 2; }
     html[data-layout="stack"] #page-dashboard .logs-filters:not([hidden]) { display: contents; }
-    html[data-layout="stack"] #page-dashboard .logs-kinds { grid-area: 2 / 1 / auto / -1; padding: var(--space-2) 0; margin: 0; }
+    /* The rail runs to the page's edges and keeps the column's inset inside, so a chip it hides fades at the edge. */
+    html[data-layout="stack"] #page-dashboard .logs-kinds { grid-area: 2 / 1 / auto / -1; padding: var(--space-2) var(--page-header-padding-x);
+        margin: 0 calc(-1 * var(--page-header-padding-x)); max-width: none; scroll-padding-inline: var(--page-header-padding-x); }
     html[data-layout="stack"] #page-dashboard .logs-clear-list { grid-area: 1 / 3; }
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header { grid-template-columns: minmax(0, 1fr); grid-template-areas: "lead"; }
     html[data-layout="stack"] #page-dashboard[data-section-view="page"] > .app-page-header .app-page-lead { grid-area: lead; }
@@ -7232,8 +7240,10 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 #page-skills { container: skillspage / inline-size; }
 #page-skills .skills-scroll { padding-top: 0; }
 #page-skills .skills-scroll { padding-inline: var(--page-header-padding-x); }
-#page-skills > .app-page-tabs { padding-bottom: 0; }
-#page-skills > .app-page-tabs:not([hidden]) { display: flex; align-items: center; gap: var(--space-2); }
+#page-skills > .app-page-tabs { padding-bottom: var(--space-2); }
+#page-skills > .app-page-tabs:not([hidden]) { display: flex; align-items: flex-start; gap: var(--space-2); }
+/* Update stands level with the tabs: the strip lends its tabs' shadows room above them too. */
+#page-skills > .app-page-tabs > .btn { margin-top: var(--space-2); }
 #page-skills > .app-page-tabs > .app-tab-strip {
     flex: 1;
     padding-inline: 0;
@@ -7624,12 +7634,15 @@ button.skills-mark { cursor: pointer; min-height: 0; }
 .skills-filter-strip,
 .skills-category-strip { display: flex; flex-wrap: wrap; gap: 2px var(--space-1); min-width: 0; }
 /* On a phone the filters and the categories are one line that scrolls sideways ([data-scroll-x]: the drawer's swipe
-   leaves it to the strip), never a lone chip wrapped onto a second row. Like a tab strip it fades on each side that
-   still hides chips (scroll_fade.js sets the edges), and under a finger its chips take the touch minimum as their own
-   height, since the strip clips a reach. */
+   leaves it to the strip), never a lone chip wrapped onto a second row. As Logs' rail, it runs to the page's edges with
+   the column's inset inside and fades on each side that still hides chips (scroll_fade.js sets the edges); under a
+   finger its chips take the touch minimum as their own height, since the strip clips a reach. */
 html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip) {
     flex-wrap: nowrap;
     overflow-x: auto;
+    margin-inline: calc(-1 * var(--page-header-padding-x));
+    padding-inline: var(--page-header-padding-x);
+    scroll-padding-inline: var(--page-header-padding-x);
     overscroll-behavior-x: contain;
     scrollbar-width: none;
     --strip-fade-start: 0px;
@@ -7645,8 +7658,9 @@ html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip)::-we
 @media (pointer: coarse) {
     html[data-layout="stack"] :is(.skills-filter-strip, .skills-category-strip) { --control-h: var(--touch-target-min); }
 }
-.skills-filter-strip { flex-basis: 100%; margin-left: calc(-1 * var(--space-2)); }
-.skills-category-strip { margin: 0 0 var(--space-3) calc(-1 * var(--space-2)); }
+.skills-filter-strip { flex-basis: 100%; }
+html[data-layout="stack"] .skills-filter-strip { flex-basis: calc(100% + 2 * var(--page-header-padding-x)); }
+.skills-category-strip { margin-bottom: var(--space-3); }
 .skills-category-strip[hidden] { display: none; }
 .filter-chip.skills-category {
     --control-pad-x: var(--space-2);
