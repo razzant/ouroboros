@@ -758,11 +758,51 @@ test('Settings returns survive both layout crossings; a direct page keeps its se
     dashboard.activateTab('storage');
     assert.equal(listBack.hidden, false, 'a page opened directly keeps its own Back in one column');
     listBack.dispatchEvent({ type: 'click' });
-    assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['home', 0], 'the section Back returns to its list');
+    assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['auto', 0], 'the section Back returns to its list');
     window.ouroLayout.layout = 'stack';
     window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout: 'stack' } }));
     assert.equal(slot.children.length, 0, 'leaving the page forgets its Settings return');
     dashboard.destroy();
+});
+
+test('the automatic Dashboard view keeps its focused rail through both width crossings before any callback', (t) => {
+    const { mount, window, document } = setup(t);
+    const content = new NodeStub(); content.id = 'content'; mount.append(content);
+    window.CSS = { supports: () => true };
+    window.ouroLayout = { layout: 'docked' };
+    let width = 1000;
+    const before = { box: NodeStub.prototype.getBoundingClientRect, observer: globalThis.ResizeObserver };
+    NodeStub.prototype.getBoundingClientRect = () => ({ width });
+    const observers = [];
+    globalThis.ResizeObserver = class { constructor(fn) { observers.push(fn); } observe() {} disconnect() {} };
+    t.after(() => { NodeStub.prototype.getBoundingClientRect = before.box; globalThis.ResizeObserver = before.observer; });
+    const dashboard = initDashboard({ state: { activePage: 'dashboard', dashboardActiveSubtab: 'costs' } });
+    const shell = dashboard.page.querySelector('.dashboard-shell');
+    const list = dashboard.page.querySelector('.dashboard-tabs');
+    const row = list.querySelector('[data-dashboard-tab="costs"]');
+    row.focus();
+    try {
+        for (const [layout, pixels] of [['stack', 390], ['docked', 1000], ['stack', 390]]) {
+            width = pixels;
+            assert.deepEqual([dashboard.page.dataset.sectionView, shell.dataset.sectionView], ['auto', 'auto'],
+                'only an explicit page may hide the rail: the container can narrow before either callback');
+            window.ouroLayout.layout = layout;
+            window.dispatchEvent(new CustomEvent('ouro:layout-changed', { detail: { layout } }));
+            assert.equal(dashboard.page.querySelector('.dashboard-tabs'), list, 'the same list stays mounted');
+            assert.equal(document.activeElement, row);
+            observers.forEach(fn => fn([{ target: dashboard.page }]));
+            assert.equal(shell.dataset.sectionView, 'auto', 'the later observer keeps the automatic view');
+        }
+        dashboard.activateTab('costs');
+        for (const pixels of [1000, 390]) {
+            width = pixels;
+            observers.forEach(fn => fn([{ target: dashboard.page }]));
+            assert.equal(shell.dataset.sectionView, 'page', 'an explicit page stays open in either layout');
+        }
+        dashboard.page.querySelector('[data-dashboard-list-back]').dispatchEvent({ type: 'click' });
+        assert.equal(shell.dataset.sectionView, 'auto', 'Back restores the list and its automatic page on a desk');
+        assert.equal(document.activeElement, row);
+    } finally { dashboard.destroy(); }
 });
 
 test('openDashboardTab: back gives the tab its Back, a row is brought into view and focused; another tab or page drops Back', async (t) => {
@@ -960,13 +1000,13 @@ test('in a wide window the Dashboard holds its list beside a page; an engine wit
         return { dashboard, layers, listBack: dashboard.page.querySelector('[data-dashboard-list-back]') };
     };
     const wide = start(true);
-    assert.equal(wide.dashboard.page.dataset.sectionView, 'page', 'two panes: a page stands beside the list at once');
+    assert.equal(wide.dashboard.page.dataset.sectionView, 'auto', 'two panes: a page stands beside the list at once');
     wide.dashboard.activateTab('costs');
     assert.equal(wide.listBack.hidden, true, 'beside its list a page has no Back');
     assert.deepEqual(wide.layers, [], 'and is no layer over it');
     wide.dashboard.destroy();
     const old = start(false);
-    assert.equal(old.dashboard.page.dataset.sectionView, 'home', 'one column: the list first');
+    assert.equal(old.dashboard.page.dataset.sectionView, 'auto', 'one column: the list first');
     old.dashboard.activateTab('costs');
     assert.equal(old.dashboard.page.dataset.sectionView, 'page');
     assert.equal(old.listBack.hidden, false, 'the page that replaced the list leads back to it');
@@ -989,7 +1029,7 @@ test('a root font that moves the two panes\' 40rem repaints the Dashboard: the p
     const state = { activePage: 'dashboard', dashboardActiveSubtab: 'logs' };
     const dashboard = initDashboard({ state, openSettings: () => {} });
     const listBack = dashboard.page.querySelector('[data-dashboard-list-back]');
-    assert.equal(dashboard.page.dataset.sectionView, 'page', '735 px hold the list beside a page at 16 px');
+    assert.equal(dashboard.page.dataset.sectionView, 'auto', '735 px hold the list beside a page at 16 px');
     // The browser's font grows to 20 px: 40rem is 800 px, so the sheets draw one column while the box keeps its width.
     // The pane, which loses the list beside it, says so: the list comes back instead of a page with no way to it.
     font = 20;
@@ -997,7 +1037,7 @@ test('a root font that moves the two panes\' 40rem repaints the Dashboard: the p
     const heard = (box) => observers.find((observer) => observer.seen.includes(box));
     assert.ok(heard(pane), 'the pane is watched');
     heard(pane).fn([{ target: pane }]);
-    assert.equal(dashboard.page.dataset.sectionView, 'home', 'one column shows the list');
+    assert.equal(dashboard.page.dataset.sectionView, 'auto', 'one column shows the list');
     dashboard.activateTab('costs');
     assert.deepEqual([dashboard.page.dataset.sectionView, listBack.hidden], ['page', false], 'a page opened from it leads back');
     // Back to 16 px: the list's rows shrink (the pane alone may not move while the list stands alone), two panes again.
@@ -1029,10 +1069,10 @@ test('a page explicitly chosen beside the Dashboard list survives narrowing, whi
             const back = dashboard.page.querySelector('[data-dashboard-list-back]');
             const resize = value => { width = value; observers.forEach(fn => fn([{ target: dashboard.page }])); };
             resize(390);
-            assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['home', 0], 'automatic landing has not chosen a page');
+            assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['auto', 0], 'automatic landing has not chosen a page');
             // In one column the arrow keys move along the list; only a press (or the keyboard beside it) chooses a page.
             await list.fire('keydown', { target: rows[0], key: 'ArrowDown', preventDefault() {} });
-            assert.deepEqual([state.dashboardActiveSubtab, dashboard.page.dataset.sectionView, layers.size], [rows[1].dataset.dashboardTab, 'home', 0]);
+            assert.deepEqual([state.dashboardActiveSubtab, dashboard.page.dataset.sectionView, layers.size], [rows[1].dataset.dashboardTab, 'auto', 0]);
             await list.fire('keydown', { target: rows[1], key: 'ArrowUp', preventDefault() {} });  // the press below is on the selected row
             assert.equal(state.dashboardActiveSubtab, rows[0].dataset.dashboardTab);
             resize(735);
@@ -1049,7 +1089,7 @@ test('a page explicitly chosen beside the Dashboard list survives narrowing, whi
             assert.deepEqual([dashboard.page.dataset.sectionView, back.hidden, layers.size], ['page', true, 0]);
             resize(390);
             await back.fire('click');
-            assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['home', 0]);
+            assert.deepEqual([dashboard.page.dataset.sectionView, layers.size], ['auto', 0]);
             assert.equal(document.activeElement, chosen, 'Back returns to the chosen row');
         } finally { dashboard.destroy(); }
     });
