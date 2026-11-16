@@ -129,8 +129,9 @@ def declared_token_limits(provider: str, model: str) -> Dict[int, Tuple[str, str
     for tag, row in get_pricing(provider=provider, model=parse_model_route(model).model).items():  # the slug, however the route spells it
         source = getattr(row, "source", {})
         for key, kind in (("max_prompt_tokens", "input"), ("context_length", "total")):
-            if type(source.get(key)) is int and source[key] > 0:
-                limits.setdefault(source[key], (kind, f"the endpoint catalogue ({tag} {key})"))
+            if type(source.get(key)) is int and source[key] > 0 and (
+                    source[key] not in limits or (kind, limits[source[key]][0]) == ("input", "total")):
+                limits[source[key]] = (kind, f"the endpoint catalogue ({tag} {key})")  # an input cap wins: it sheds less
     return limits
 
 

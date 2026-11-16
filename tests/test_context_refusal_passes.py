@@ -122,6 +122,22 @@ def test_a_cited_limit_declared_for_the_route_recognises_size_sizes_the_pass_and
         "number_equals_declared", 983_616, "input", "Alibaba")
     assert answer["declaration"] == "the endpoint catalogue (alibaba max_prompt_tokens)" and "untyped" not in {
         key for key, value in answer.items() if value}
+    # What the round then tells the next candidate and the owner follows the round's verdict, not the first filing.
+    from ouroboros.loop_transport import provider_terminal_fallback_text
+    from ouroboros.primary_route_observation import failed_attempt_facts
+
+    row = {"model": plan.model, "failure_code": "bad_request", "status_code": 400}
+    unread = failed_attempt_facts({**stamped(bracket), "_last_llm_failure": row}, plan.model, False)
+    assert "established no size cause" in unread and "size refusal" not in unread
+    told = failed_attempt_facts({**usage, "_last_llm_error_kind": "context_overflow", "_last_llm_failure": row}, plan.model, False)
+    assert ("read it as a size refusal by a cited 983,616 equal to the input limit of the endpoint catalogue" in told
+            and "established no size cause" not in told and f'Alibaba said "{bracket}"' in told)
+    long = failed_attempt_facts({**stamped("too long " * 100), "_last_llm_failure": row}, plan.model, False)
+    assert long.count("[cut here]") == 1 and "[cut here]" not in told  # a cut sentence says so; a whole one does not
+    terminal = dict(is_context_overflow=True, is_transport_wait=False, waited_sec=0.0, is_deadline_exhausted=False)
+    ended = provider_terminal_fallback_text({**usage, "_last_llm_error_kind": "context_overflow"}, **terminal)
+    assert f'Alibaba said: "{bracket}"' in ended  # the one-route terminal keeps the provider's own sentence
+    assert "said:" not in provider_terminal_fallback_text({"_last_llm_error_kind": "context_overflow"}, **terminal)
     ctx = SimpleNamespace(accumulated_usage=usage, active_context_mode="max", context_fit_plan=plan)
     near = SimpleNamespace(**{**vars(refused), "prompt_tokens_bounded_estimate": 950_000})
     assert lmc._refusal_target(ctx, fit, near) == (0 + 122_952, 122_952)  # under the input cap: only the slack is asked

@@ -322,6 +322,14 @@ def test_endpoint_rows_keep_their_declared_token_limits_beside_the_tariffs(endpo
     rows[1].update(context_length=1_000_000, max_prompt_tokens=None)
     rows[2].update(context_length=262_144)
     limits = declared_token_limits("openrouter", "vendor/tier-model")
+    rows[2].update(max_prompt_tokens=1_000_000)  # one number, a total on an earlier row and an input cap here
+    monkeypatch_rows = {tag: PricingSchedule((1.0, None, None, 2.0), source={key: row[key] for key in (
+        "context_length", "max_prompt_tokens") if row.get(key) is not None}) for tag, row in (("a", rows[0]), ("b", rows[2]))}
+    with patch("ouroboros.pricing.get_pricing", lambda **_route: monkeypatch_rows):
+        both = declared_token_limits("openrouter", "vendor/tier-model")
+    assert both[1_000_000] == ("input", "the endpoint catalogue (b max_prompt_tokens)")  # the input reading sheds less
+    assert both[262_144][0] == "total" and both[983_616][0] == "input"
+    rows[2].update(max_prompt_tokens=None)
     assert limits == {983_616: ("input", "the endpoint catalogue (vendor max_prompt_tokens)"),
                       1_000_000: ("total", "the endpoint catalogue (vendor context_length)"),
                       262_144: ("total", "the endpoint catalogue (vendor/fast context_length)")}

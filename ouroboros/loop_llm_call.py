@@ -276,7 +276,7 @@ def _classify_empty_response(usage: Dict[str, Any], msg: Dict[str, Any]) -> Tupl
     if finish in _STRUCTURED_CONTEXT_OVERFLOW_CODES:
         return "remote_context_overflow", False, True
     body_err = usage.get("provider_error") if isinstance(usage, dict) else None
-    if isinstance(body_err, dict) and is_size_refusal(body_err):  # a refusal under its body's own status
+    if isinstance(body_err, dict) and ((body_err.get("answer") or {}).get("basis") or is_size_refusal(body_err)):  # a refusal under its body's own status
         return "remote_context_overflow", False, True
     if not body_err and finish in OUTPUT_LIMIT_FINISH_REASONS:
         return "llm_empty_response", False, True

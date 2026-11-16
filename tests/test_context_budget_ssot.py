@@ -212,6 +212,8 @@ def test_combined_anthropic_window_rejection_reaches_main(reserve):
     error.body = {"error": {"type": "invalid_request_error", "message": text}}
     assert cb.context_overflow_message(text)
     assert not cb.output_or_body_size_message(text)
+    numberless = "input length and max_tokens exceed context limit"  # the same refusal with its counts left out
+    assert not cb.output_or_body_size_message(numberless) and cb.context_overflow_message(numberless)
     assert classify_llm_exception(error).kind == "context_overflow"
     for output_only in ("max_tokens 65536 exceeds maximum context length 32768",
                         "output tokens exceed context limit", "request body too large"):

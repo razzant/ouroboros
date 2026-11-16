@@ -237,11 +237,13 @@ def failed_attempt_facts(usage: dict, model: str, use_local: bool, *, fresh: boo
     failure, answer = usage.get("_last_llm_failure") or {}, usage.get("_last_llm_provider_answer") or {}
     if not fresh or failure.get("model") != model:
         return ""
-    kind, fields = str(failure.get("failure_code") or ""), usage.get("_last_llm_provider_fields") or {}
+    # The round's own verdict: the seam may have recognised size after the row was written (``cited_limit_refusal``).
+    kind = str(usage.get("_last_llm_error_kind") or failure.get("failure_code") or "")
+    fields = usage.get("_last_llm_provider_fields") or {}
     words, codes = {}, {}
     for who, text, history in answer.get("said") or ():  # the current path, and the quoted sentence wherever it stood
         if not history or text == answer.get("sentence"):
-            words.setdefault(who, {})[text[:_OWNER_QUOTE_LIMIT]] = None
+            words.setdefault(who, {})[text[:_OWNER_QUOTE_LIMIT] + (" [cut here]" if len(text) > _OWNER_QUOTE_LIMIT else "")] = None
     for who, code in answer.get("codes") or ():
         codes.setdefault(who, []).append(code)
     said = [f'{who or "the provider"} said "{" / ".join(texts)}"' + (f' (code {", ".join(codes[who])})' if who in codes else "")

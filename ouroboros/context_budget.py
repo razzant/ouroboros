@@ -248,6 +248,8 @@ def output_or_body_size_message(text: Any) -> bool:
     limit», vLLM's «'max_tokens' … is too large: R. … maximum context length is W tokens and your request has I input
     tokens»): shrinking the input makes the unchanged reply fit. A reply above the window it names is an output limit."""
     low = str(text or "").lower().replace("`", "")
+    if "input length and max_tokens exceed context limit" in low:
+        return False  # shrinking input can make the unchanged output reserve fit
     if not any(marker in low for marker in OUTPUT_OR_BODY_SIZE_MARKERS):
         return False
     from ouroboros.capability_evidence import _parse_ctx_requested

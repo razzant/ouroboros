@@ -936,7 +936,7 @@ def _provider_terminal_text(
             "⚠️ Context-size recovery ended without a fitting request; no further provider call was made. "
             "The recovery passes, the configured fallback and a renewed view could not make it fit"
             f"{f' ({facts})' if facts else ''}. The exact transcript and any files written so far are preserved."
-            + _failure_window_fact(accumulated_usage, overflow=True)
+            + _failure_window_fact(accumulated_usage, overflow=True) + _provider_quote(accumulated_usage)
         )
     if is_transport_wait:
         if unknown:
