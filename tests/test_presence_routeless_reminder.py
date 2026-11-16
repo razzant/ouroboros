@@ -189,7 +189,18 @@ def test_known_reads_and_own_records_keep_the_lineage_silent(room, monkeypatch):
 @pytest.mark.parametrize("batch", ["door_send", "opaque_command", "browser", "handed_to_task"])
 def test_a_call_that_might_have_spoken_suppresses_the_hint(room, monkeypatch, batch):
     """A send through the door, an opaque command, a browser act or words handed to another task may have reached the
-    place: the optional hint stays away and the finish is ordinary. No tool is blocked."""
+    place: the optional hint stays away and the finish is ordinary. Dispatch remains real; browser preparation
+    fails locally so this in-process test never installs or starts a browser."""
+    if batch == "browser":
+        from ouroboros.tools import browser
+
+        preparations = []
+
+        def unavailable_browser(**_kwargs):
+            preparations.append(True)
+            raise RuntimeError("Browser backend unavailable in this offline test.")
+
+        monkeypatch.setattr(browser, "_ensure_playwright_installed", unavailable_browser)
     step = {"door_send": record_send(text=ACK),
             "opaque_command": call("run_command", {"cmd": "echo checked"}),
             "browser": call("browser_action", {"action": "screenshot"}),
@@ -199,6 +210,9 @@ def test_a_call_that_might_have_spoken_suppresses_the_hint(room, monkeypatch, ba
     assert run.trace[NO_SEND_KEY]["sends"] == "possible" and "noted" not in run.trace[NO_SEND_KEY]
     assert [row["text"] for row in run.sent] == ([ACK] if batch == "door_send" else [])
     assert run.stored["result"] == FINAL
+    if batch == "browser":
+        assert preparations == [True], "the real browser handler reached preparation once"
+        assert any(row.get("tool") == "browser_action" and row.get("is_error") for row in run.trace["tool_calls"])
 
 
 def test_a_send_that_times_out_before_its_guard_is_possible_speech(room, monkeypatch):

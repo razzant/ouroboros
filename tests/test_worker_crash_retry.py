@@ -752,7 +752,7 @@ def test_child_terminal_survives_dead_worker_without_retry(tmp_path, monkeypatch
     assert done['type'] == 'task_done' and done['status'] == 'completed'
     assert done['_files_prepared_attempt'] == 3 and done['worker_id'] == 0
     assert W.RUNNING[job['task_id']] is job['meta'], 'normal done ingress owns release'
-    W.respawn_worker.assert_called_once_with(0)
+    W.respawn_worker.assert_called_once_with(0, expected_worker=job["worker"])
     from ouroboros.headless import remove_subagent_task_drive, retry_child_task_refs
 
     retry_child_task_refs(tmp_path, child, job['task_id'])
@@ -958,7 +958,7 @@ def test_retry_queue_transition_is_atomic_and_failure_retains_binding(tmp_path, 
     else:
         recover_confirmed_dead_worker(job)
         assert job['task_id'] not in W.RUNNING
-        W.respawn_worker.assert_called_once_with(0)
+        W.respawn_worker.assert_called_once_with(0, expected_worker=job["worker"])
     assert len(calls) == 1
 
 

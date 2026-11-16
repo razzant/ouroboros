@@ -176,6 +176,8 @@ def test_respawn_installs_the_fresh_slot_booting_through_the_same_seam_with_its_
     assert _wait_for(lambda: len(handed) == 1)
     assert handed[0][0] == {3: fresh} and handed[0][2][0] == 1 and 0 < handed[0][2][1] <= time.time()
 
+    assert workers.respawn_worker(3, ready_attempt=2) is False  # a live replacement is not ours to evict
+    fresh.proc._alive = False
     assert workers.respawn_worker(3, ready_attempt=2) is True
     assert fresh.proc._ouroboros_stop_socket.fileno() == -1  # old Process is still retained here
     assert _wait_for(lambda: len(handed) == 2)
@@ -204,7 +206,10 @@ def seam(pool, monkeypatch, request):
             if slot.proc.pid == pid:
                 slot.proc._alive = False
     monkeypatch.setattr(platform_layer, "kill_pid_tree", kill)
-    monkeypatch.setattr(lifecycle, "respawn_worker", lambda wid, **kw: respawned.append((wid, kw)))
+    def respawn(wid, *, expected_worker, **kw):
+        assert pool.workers.WORKERS[wid] is expected_worker
+        respawned.append((wid, kw))
+    monkeypatch.setattr(lifecycle, "respawn_worker", respawn)
     monkeypatch.setattr(pool.workers, "send_with_budget", lambda chat_id, text, **_k: sent.append((chat_id, text)))
     events = pool.root / "logs" / "events.jsonl"
     if getattr(request, "param", "seeded") != "missing":

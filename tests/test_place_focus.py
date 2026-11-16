@@ -10,6 +10,7 @@ from ouroboros import places as p
 from ouroboros.presence_admission import admit_presence_turn
 from ouroboros.presence_runner import PresenceTurnEvent, _build_task, capture_presence_event, presence_turn_replay
 from ouroboros.place_intake import decide_attention, settle_heard
+from tests.conversation_carrier_support import lone_host_world as lone_host_world  # noqa: F401 -- fixture
 
 
 @pytest.fixture
@@ -386,6 +387,7 @@ def test_focus_ordinary_finish_traverses_reply_check(focus, monkeypatch, silent,
     ("paused", ["mention"], True, True, "silent"),
     ("active", ["mention"], True, False, "retry"),
 ])
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over the focus root
 def test_new_host_payload_captures_before_attention(focus, monkeypatch, state, facts, enabled, available, expected):
     from starlette.testclient import TestClient
     from ouroboros.gateway import host_service
@@ -422,6 +424,7 @@ def test_new_host_payload_captures_before_attention(focus, monkeypatch, state, f
         assert lookup.status_code == 200 and lookup.json()["place_id"] == place.place_id
 
 
+@pytest.mark.usefixtures("lone_host_world")  # its Host serves alone over the focus root
 def test_off_retry_keeps_unknown_attempt_custody(focus, monkeypatch):
     from starlette.testclient import TestClient
     from ouroboros.gateway import host_service

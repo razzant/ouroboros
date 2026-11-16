@@ -1,7 +1,7 @@
 ---
 name: telegram
 description: Owner-only Telegram text bridge and Mini App gateway for the existing Ouroboros interface.
-version: 1.4.14
+version: 1.4.15
 type: extension
 entry: plugin.py
 plugin_api: "2.4"
@@ -94,7 +94,7 @@ deleted copy's outcome stays listed. After a deletion that field is empty until 
 opened again. Completion notices keep their own retry; the bot's replies to commands, typing
 and `/panic` are sent once, as before.
 
-Before a body rollback or skill downgrade to native Telegram 1.4.13 or older,
+Before a body rollback or skill downgrade to native Telegram 1.4.14 or older,
 export needed kept copies with the recipe below and verify the saved artifacts.
 The older outbox does not honor `held` and can delete these only copies; rollback
 does not guarantee their retention.

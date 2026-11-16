@@ -216,6 +216,119 @@ def test_alive_is_written_without_fsync_and_only_on_change(published, monkeypatc
     assert observed["fresh"] and observed["age_sec"] == 0
 
 
+def test_a_pool_count_change_rewrites_the_certificate_and_every_reader_sees_it(published, monkeypatch):
+    """A boot, retirement or reap moves the pool's counts with no row changing: the tick rewrites ``queue.alive``
+    (no fsync), not the queue; readers through ``load_queue_document`` take the certified counts, a raw reader
+    those of the document's own write; a pool fact a reader decides on (no process started) still publishes."""
+    from ouroboros.context_runtime_facts import _queue_context_fact
+    from ouroboros.engine_facts import engine_pool_line
+    from supervisor import pool_admission, worker_pool_lifecycle, workers
+
+    root, now = published
+    pool = {"max_workers": None, "worker_total": 2, "busy_worker_count": 1, "acting_worker_count": 1,
+            "parked_worker_count": 0, "booting_count": 0, "reaping_count": 0, "retiring_count": 0,
+            "assignable_idle_workers": 1, "lane_carrier_total": 1}
+    monkeypatch.setattr(worker_pool_lifecycle, "pool_slot_counts", lambda *_a, **_k: dict(pool))
+    monkeypatch.setattr(workers, "_worker_pool_execution_state", lambda: {"disabled_reason": ""})
+    monkeypatch.setattr(pool_admission, "_FACTS", {})
+    queue.RUNNING["r0"] = {"task": _task("r0"), "attempt": 1, "started_at": now[0] - 10, "last_heartbeat_at": now[0] - 1}
+    assert queue.persist_queue_snapshot("start") is True
+    queue_publication.tick_publisher_started()
+    writes, fsyncs = _writes(monkeypatch)
+    document = (root / "state/queue_snapshot.json").read_bytes()
+    pool.update(worker_total=3, booting_count=1, reaping_count=1)  # a fresh process boots; no row changes
+    assert queue_publication.publish_queue_changes() is True
+    assert [name for name, _ in writes] == ["queue.alive"] and fsyncs == [], "a boot rewrites the certificate only"
+    assert (root / "state/queue_snapshot.json").read_bytes() == document
+    view = queue_observation.load_queue_document(root)
+    assert (view["worker_total"], view["booting_count"], view["reaping_count"]) == (3, 1, 1)
+    assert _queue_context_fact({"budget_drive_root": str(root)})["worker_total"] == 3
+    assert ": owner cap none (the machine's memory is the limit), total 3, " in engine_pool_line(root)
+    writes.clear()
+    assert queue_publication.publish_queue_changes() is True and writes == [], "unchanged counts: nothing written"
+    # Only a certificate naming the document lends it its counts: a raw reader, and every reader while a
+    # publication has revoked it, reads the document's own.
+    assert _read(root, "queue_snapshot.json")["worker_total"] == 2
+    (root / "state/queue.alive").unlink()
+    assert queue_observation.load_queue_document(root)["worker_total"] == 2
+    pool.update(worker_total=0, busy_worker_count=0, acting_worker_count=0, booting_count=0, reaping_count=0,
+                assignable_idle_workers=0, lane_carrier_total=0)  # no process left: availability says no_workers
+    assert queue_publication.publish_queue_changes() is True
+    assert [name for name, _ in writes] == ["queue_snapshot.json", "queue.alive"]
+    assert _read(root, "queue_snapshot.json")["worker_total"] == 0
+
+
+def test_a_tick_measures_the_pool_once_for_its_census_its_document_and_its_certificate(published, monkeypatch):
+    """A second measurement could disagree with the census: one that failed would publish the document as unknown
+    under an observed census, and no later count change would publish it again. A tick measures once."""
+    from supervisor import pool_admission, worker_pool_lifecycle, workers
+
+    root, now = published
+    calls, pool = [], {"max_workers": None, "worker_total": 1, "busy_worker_count": 1, "acting_worker_count": 1,
+                       "parked_worker_count": 0, "booting_count": 0, "reaping_count": 0, "retiring_count": 0,
+                       "assignable_idle_workers": 0, "lane_carrier_total": 1}
+
+    def measured(*_a, **_k):
+        calls.append(1)
+        if len(calls) % 2 == 0:
+            raise RuntimeError("a slot's process closed between two measurements")
+        return dict(pool)
+
+    monkeypatch.setattr(worker_pool_lifecycle, "pool_slot_counts", measured)
+    monkeypatch.setattr(workers, "_worker_pool_execution_state", lambda: {"disabled_reason": ""})
+    monkeypatch.setattr(pool_admission, "_FACTS", {})
+    queue.RUNNING["r0"] = {"task": _task("r0"), "attempt": 1, "started_at": now[0] - 10, "last_heartbeat_at": now[0] - 1}
+    assert queue.persist_queue_snapshot("start") is True
+    queue_publication.tick_publisher_started()
+    queue.RUNNING["r0"]["task"]["focus"] = {"text": "moved"}
+    for _tick in ("publishes: a reported fact moved", "quiet"):
+        calls.clear()
+        assert queue_publication.publish_queue_changes() is True and calls == [1]
+        assert _read(root, "queue_snapshot.json")["pool_observation_status"] == "observed"
+        assert _read(root, "queue.alive")["pool"]["worker_total"] == 1
+    # The server's way: the writer thread certifies the counts the quiet tick measured, without measuring again.
+    queue_publication.start_queue_writer()
+    document, pool["worker_total"] = (root / "state/queue_snapshot.json").read_bytes(), 2
+    calls.clear()
+    assert queue_publication.publish_queue_changes() is True and queue_publication.drain_writer() and calls == [1]
+    assert _read(root, "queue.alive")["pool"]["worker_total"] == 2
+    assert (root / "state/queue_snapshot.json").read_bytes() == document
+
+
+def test_a_refresh_a_later_capture_overtook_leaves_that_captures_newer_counts(published, monkeypatch):
+    """A quiet tick's measurement waits for the writer; a barrier that published a new generation meanwhile certified
+    newer counts, and the older refresh must not put its own back (here they would read as a started pool)."""
+    from supervisor import pool_admission, worker_pool_lifecycle, workers
+
+    root, now = published
+    pool = {"max_workers": None, "worker_total": 2, "busy_worker_count": 0, "acting_worker_count": 0,
+            "parked_worker_count": 0, "booting_count": 0, "reaping_count": 0, "retiring_count": 0,
+            "assignable_idle_workers": 2, "lane_carrier_total": 0}
+    monkeypatch.setattr(worker_pool_lifecycle, "pool_slot_counts", lambda *_a, **_k: dict(pool))
+    monkeypatch.setattr(workers, "_worker_pool_execution_state", lambda: {"disabled_reason": ""})
+    monkeypatch.setattr(pool_admission, "_FACTS", {})
+    queue.RUNNING["r0"] = {"task": _task("r0"), "attempt": 1, "started_at": now[0] - 10, "last_heartbeat_at": now[0] - 1}
+    assert queue.persist_queue_snapshot("start") is True
+    pool["worker_total"] = 3
+    with queue._queue_lock:  # the quiet tick's one measurement, handed to the writer
+        measured, after = queue_publication._pool_counts(), queue_publication._STATE["capture_seq"]
+    pool.update(worker_total=0, assignable_idle_workers=0)  # the pool empties; a barrier publishes that first
+    assert queue.publish_queue_snapshot("barrier") is True
+    assert queue_publication._refresh_alive(measured, after) is True
+    assert _read(root, "queue.alive")["pool"]["worker_total"] == 0
+    assert queue_observation.load_queue_document(root)["worker_total"] == 0
+
+
+def test_an_unknown_document_keeps_its_unknown_counts_under_a_certificate_that_carries_some(tmp_path):
+    """The overlay serves an observed document only: a failed measurement's nulls are never filled in."""
+    (tmp_path / "state").mkdir()
+    (tmp_path / "state/queue_snapshot.json").write_text(json.dumps(
+        {"generation": "g", "running": [], "pending": [], "pool_observation_status": "unknown", "worker_total": None}))
+    (tmp_path / "state/queue.alive").write_text(json.dumps({"generation": "g", "ts": "2026-11-16T00:00:00+00:00",
+                                                           "heartbeats": {}, "pool": {"worker_total": 3}}))
+    assert queue_observation.load_queue_document(tmp_path)["worker_total"] is None
+
+
 def test_publications_follow_changes_not_ticks(published, monkeypatch):
     root, _now = published
     writes, _fsyncs = _writes(monkeypatch)

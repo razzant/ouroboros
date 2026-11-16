@@ -619,26 +619,9 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
                         str(v) for v in row.get("accessProfilesSupported") or []
                     ],
                 }
-                if include_models and projected["id"]:
-                    try:
-                        from ouroboros.gateway.models import account_catalog_models, account_catalog_supported
-
-                        if account_catalog_supported(operations, "/v2/harnesses/:id/models"):
-                            envelope = gateway.harness_model_catalog(projected["id"], view="accounts")
-                            projected["model_catalog"] = envelope
-                            projected["models"] = [
-                                {**model, "credential_profile_id": account.get("credentialProfileId"),
-                                 "availability": account.get("availability"), "problem": account.get("problem"),
-                                 "provenance": source.get("provenance"), "observed_at": source.get("observedAt"),
-                                 "catalog_source": source.get("source")}
-                                for account, source, model in account_catalog_models(envelope)
-                            ]
-                        else:
-                            projected["models"] = gateway.harness_models(projected["id"])
-                    except ClaudexorUnavailable as exc:
-                        projected["models"] = []
-                        projected["models_error"] = exc.code
                 rows.append(projected)
+            if include_models:
+                _attach_model_catalogs(gateway, rows, operations)
             payload["harnesses"] = rows
             profiles = profiles_outcome[1] if profiles_outcome[0] == READ_OK else {}
             # Full Accounts owns this login-eligibility presentation policy. The
@@ -685,6 +668,51 @@ def _read_status_payload(include_models: bool) -> Dict[str, Any]:
         # at its `not_read` default, each carrying the error that kept it unasked.
         payload["_facet_errors"] = {facet: exc.code for facet in payload["reads"]}
     return payload
+
+
+def _attach_model_catalogs(gateway: Any, rows: List[Dict[str, Any]], operations: List[Any]) -> None:
+    """Attach each visible harness's model list, asking for all of them at once.
+
+    They are independent GETs over the gateway's one thread-safe client, like the
+    fan-out in ``_read_status_payload``. A busy daemon answers every request late,
+    so asked one after another the read paid that wait once per harness; asked
+    together it pays it once. The pool is joined before any result is used, so
+    every read ends while the client is open, and the rows are filled in catalog
+    order. A refused read stays that row's ``models_error``; any other failure
+    leaves the status read."""
+    from ouroboros.gateway.models import account_catalog_models, account_catalog_supported
+    from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    targets = [row for row in rows if row["id"]]
+    if not targets:
+        return
+    per_account = account_catalog_supported(operations, "/v2/harnesses/:id/models")
+
+    def read(harness_id: str) -> Any:
+        if per_account:
+            return gateway.harness_model_catalog(harness_id, view="accounts")
+        return gateway.harness_models(harness_id)
+
+    with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+        calls = [(row, pool.submit(read, row["id"])) for row in targets]
+    for row, call in calls:
+        try:
+            result = call.result()
+        except ClaudexorUnavailable as exc:
+            row["models"] = []
+            row["models_error"] = exc.code
+            continue
+        if not per_account:
+            row["models"] = result
+            continue
+        row["model_catalog"] = result
+        row["models"] = [
+            {**model, "credential_profile_id": account.get("credentialProfileId"),
+             "availability": account.get("availability"), "problem": account.get("problem"),
+             "provenance": source.get("provenance"), "observed_at": source.get("observedAt"),
+             "catalog_source": source.get("source")}
+            for account, source, model in account_catalog_models(result)
+        ]
 
 
 def _facet_outcome(

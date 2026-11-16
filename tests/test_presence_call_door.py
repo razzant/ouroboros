@@ -8,6 +8,7 @@ import pytest
 
 from ouroboros import places as p
 from ouroboros import presence_call as door
+from tests.conversation_carrier_support import lone_host_world as lone_host_world  # noqa: F401 -- fixture
 from tests.test_place_focus import focus as focus  # noqa: F401  (fixture)
 
 
@@ -247,7 +248,7 @@ def _wire(source_event_id, **over):
 
 
 @pytest.fixture
-def doors(focus, opened, monkeypatch):
+def doors(focus, opened, monkeypatch, lone_host_world):  # its Host serves alone over the focus root
     from starlette.testclient import TestClient
 
     import ouroboros.presence_events as presence_events

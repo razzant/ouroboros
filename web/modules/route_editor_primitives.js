@@ -7,7 +7,7 @@ import { accountRows, accountName, accountModelUnsupported } from './claudexor_s
 import { formatRelativeAge } from './ui_helpers.js';
 import { API_PROVIDER_LABELS, harnessPresentation } from './harness_presentation.js';
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
-import { fmt, tr, translateString } from './i18n.js';
+import { fmt, tr, translateString, tx } from './i18n.js';
 import { modelChooserHtml, updateModelChooserOptions } from './model_chooser.js';
 
 export const ROUTE_KIND_API_MODEL = 'api_model';
@@ -345,11 +345,43 @@ function routeCatalogItems(route, items = []) {
 /** Said where a route paid by key has no published price that it pays (docs/DESIGN.md "Onboarding density"). */
 export const PRICE_UNKNOWN = 'Price unknown';
 
+// The conditions a published entry prices a call under (`pricing.price_source`): in the limits line, then under a role.
+// `off_peak_usd` prices text input alone: a call carrying an image stays unknown.
+const PRICE_CONDITIONS = { off_peak_usd: 'text only, off-peak, USD only', usd: 'USD only' };
+const ROLE_CONDITIONS = { off_peak_usd: 'Estimated for text, off-peak · USD only' };
+
 /** What the limits cannot count, in the one line said under them (Dashboard › Costs, and the setup wizard's limits
- *  step for its draft): the names `pricing.known_spend_gaps` gives; '' when it names none. */
-export function spendGapsWords(gaps) {
-    const names = (Array.isArray(gaps) ? gaps : []).map((name) => translateString(String(name)));
-    return names.length ? fmt('Not counted: {roles} (price unknown).', { roles: names.join(', ') }) : '';
+ *  step for its draft), from `pricing.spend_coverage`: the names with no known price (`known_spend_gaps`), then
+ *  those counted only under a condition (`partly_counted_spend`); a condition this client does not know is said
+ *  as not counted. '' when neither names any. */
+export function spendGapsWords(gaps, partial = []) {
+    const unknown = (Array.isArray(gaps) ? gaps : []).map((name) => tx(String(name)));
+    const byCondition = new Map();
+    for (const entry of Array.isArray(partial) ? partial : []) {
+        const name = tx(String(entry?.name || ''));
+        const condition = PRICE_CONDITIONS[entry?.condition];
+        if (!condition) unknown.push(name);
+        else byCondition.set(condition, [...(byCondition.get(condition) || []), name]);
+    }
+    const groups = [...byCondition].map(([condition, names]) => `${names.join(', ')} (${tx(condition)})`);
+    return [unknown.length ? fmt('Not counted: {roles} (price unknown).', { roles: unknown.join(', ') }) : '',
+        groups.length ? fmt('Partly counted: {groups}.', { groups: groups.join('; ') }) : ''].filter(Boolean).join(' ');
+}
+
+/** A model's price in a list's or a role line's words: its catalog's published figures (`priceWords`), else the
+ *  condition its published entry prices it under (`ModelCatalogItem.price_condition`: `Estimated for text, off-peak ·
+ *  USD only`, never a figure, since the rate depends on the hour); '' with neither. */
+export function modelPriceWords(item, options = {}) {
+    const condition = ROLE_CONDITIONS[item?.price_condition];
+    return priceWords(item?.price, options) || (condition ? tx(condition) : '');
+}
+
+/** A catalog item as a route that does not pay its stated price sees it: on a Fast or Flex tier (`tiered`) neither
+ *  its figures nor its condition; for a role whose every call carries an image (`media`: Vision), no text-only
+ *  condition. Any other item is returned as it is. */
+export function withoutPrice(item, { tiered = false, media = false } = {}) {
+    if (!item || !(tiered || (media && item.price_condition))) return item;
+    return { ...item, ...(tiered ? { price: null } : {}), price_condition: '' };
 }
 
 // A dollar figure as the catalog states it, to four decimals and in cents at least: $4, $2.50, $0.075.
@@ -412,7 +444,7 @@ export function catalogModelOptions(items = []) {
         if (item?.origin !== 'hint') current.live = true;
         const resolved = item?.resolved_model;
         if (typeof resolved === 'string' && resolved && resolved !== value) current.resolved.add(resolved);
-        current.prices.add(priceWords(item?.price));
+        current.prices.add(modelPriceWords(item));
     }
     return [...values.values()].map(({ value, label, live, resolved, prices }) => {
         const named = resolved.size === 1 ? `${value} → ${[...resolved][0]}` : label;

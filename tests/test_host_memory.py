@@ -58,8 +58,9 @@ def linux(tmp_path, monkeypatch):
 def test_macos_reads_reclaimable_pages_and_only_the_kernels_critical_level(monkeypatch, request):
     """XNU keeps refilling the inactive queue with anonymous pages it then compresses, so free + inactive +
     speculative barely moves under pressure: the kernel's critical level is read too. Warn is routine on a busy
-    small Mac running a healthy battery. An unreadable level leaves the free-memory reading alone; purgeable is
-    already inside active/inactive, so it is not added; an unreadable page table is unknown."""
+    small Mac running a healthy battery. An unreadable level is unknown (None), never normal, and leaves the
+    free-memory reading alone; purgeable is already inside active/inactive, so it is not added; an unreadable
+    page table is unknown."""
     vm = ("Mach Virtual Memory Statistics: (page size of 4096 bytes)\n"
           "Pages free: 2.\nPages inactive: 3.\nPages speculative: 1.\nPages purgeable: 2.\n")
     level = None
@@ -77,12 +78,12 @@ def test_macos_reads_reclaimable_pages_and_only_the_kernels_critical_level(monke
 
     monkeypatch.setattr(host_memory, "sys", SimpleNamespace(platform="darwin"))
     monkeypatch.setattr(host_memory, "_native_output", native)
-    for level, pressure in (("1\n", False), ("2\n", False), ("4\n", True), (None, False)):
+    for level, pressure in (("1\n", False), ("2\n", False), ("4\n", True), ("garbled\n", None), (None, None)):
         assert host_memory.physical_memory() == MemorySnapshot(65536, 24576, pressure), level
     assert calls.count("hw.memsize") == 1
-    assert calls.count("/usr/bin/vm_stat") == calls.count("kern.memorystatus_vm_pressure_level") == 4
+    assert calls.count("/usr/bin/vm_stat") == calls.count("kern.memorystatus_vm_pressure_level") == 5
     vm = vm.replace("Pages free: 2.", "Pages free: 4.")
-    assert host_memory.physical_memory() == MemorySnapshot(65536, 32768)
+    assert host_memory.physical_memory() == MemorySnapshot(65536, 32768, None)  # the level is still unreadable
     vm = "unreadable"
     assert host_memory.physical_memory() is None
 

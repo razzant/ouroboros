@@ -1,7 +1,7 @@
 """Built-in web search's provider wire, without policy: the sources a provider's search answer cites, and
 DeepSeek's Search API (the query as written, one POST, a typed reading of its answer).
 
-DeepSeek wire facts (api-docs.deepseek.com/guides/search, read 2026-11-11 and 2026-11-13; no live send from
+DeepSeek wire facts (api-docs.deepseek.com/guides/search, read 2026-11-11, 2026-11-13 and 2026-11-15; no live send from
 this repository): ``POST {DEEPSEEK_BASE_URL}/tools/search`` with the account's Bearer key. ``query`` holds 1..128
 Unicode characters (code points here) and is not all whitespace; operators such as ``site:``, ``"..."`` and
 ``-term`` are part of it. ``count`` (10) and ``need_content`` (false) keep the provider's defaults. HTTP 200
@@ -11,7 +11,9 @@ summary (for a model), content (empty without need_content), site_name, site_ico
 queries the provider takes or sends ones it refuses with a 400: re-read the guide before changing it.
 
 The caller (``tools/search.py``) owns the client (built never to follow a redirect), its timeout, the key and
-the physical-attempt accounting; nothing here retries, prices a request or picks a key.
+the physical-attempt accounting; nothing here retries, prices a request or picks a key. Billing (guide's
+"Billing", same reads): $0.75 per 1,000 successful requests; billable only an HTTP 200 that produces a result
+(a non-empty ``results``); failures, empty results and timeouts are not billed.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from typing import Any, Dict, List
 from ouroboros.utils import sanitize_tool_result_for_log
 
 QUERY_MAX_CHARS = 128
+_STATUS = "_http_status"  # the answer's HTTP status, beside its payload: host evidence, never shown
 _KEPT = ("site_name", "date", "authority", "rerank_score")  # result metadata beside url, title and snippet
 
 
@@ -120,13 +123,20 @@ def send_search(client: Any, query: str, *, timeout: Any) -> dict:
     results = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(results, list) or not all(isinstance(item, dict) for item in results):
         raise SearchResponseUnreadable(response, "no results array of objects")
-    return payload
+    return {**payload, _STATUS: response.status_code}
 
 
 def search_usage(payload: dict) -> tuple[dict, None, bool]:
-    """The ledger's evidence of one answered search: what the provider bills per (a request) and how many
-    results it returned. The amount stays unknown here; unknown is never free."""
-    return {"cost_basis": "search_request", "cost_evidence": {"results": len(payload["results"])}}, None, False
+    """The ledger's evidence of one answered search: its HTTP status, how many results it returned and its billing
+    outcome: ``results`` (the guide's billable HTTP 200 with results, here only when each result names its page:
+    one request), else why not: ``http_<status>``, ``empty`` (documented as not billed; unreconciled) or
+    ``malformed_results``. No amount here: settlement prices only ``results``, from the pinned quote."""
+    results, status = payload["results"], payload.get(_STATUS)
+    outcome = (f"http_{status}" if status != 200 else "empty" if not results
+               else "results" if all(isinstance(item.get("url"), str) and item["url"].strip() for item in results)
+               else "malformed_results")
+    return {"cost_basis": "search_request", "cost_evidence": {
+        "results": len(results), "http_status": status, "outcome": outcome}}, None, False
 
 
 def search_result(payload: dict) -> dict:

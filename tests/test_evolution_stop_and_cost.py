@@ -204,7 +204,7 @@ def _drive_hard_timeout(tmp_path, monkeypatch, *, evolution_enabled):
 
     fake_worker = SimpleNamespace(busy_task_id="evo1", proc=_FakeProc(), wid=0)
     monkeypatch.setattr(workers_mod, "WORKERS", {0: fake_worker})
-    monkeypatch.setattr(workers_mod, "respawn_worker", lambda wid: None)
+    monkeypatch.setattr(workers_mod, "respawn_worker", lambda wid, **_kwargs: None)
 
     emitted = []
     monkeypatch.setattr(workers_mod, "get_event_q", lambda: SimpleNamespace(put=lambda evt: emitted.append(evt)))
