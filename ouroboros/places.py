@@ -26,6 +26,9 @@ from ouroboros.utils import update_json_locked, utc_now_iso
 PLACES_FILENAME = "places.json"
 STATE_ACTIVE, STATE_SILENT, STATE_PAUSED = "active", "silent", "paused"
 PLACE_STATES = (STATE_ACTIVE, STATE_SILENT, STATE_PAUSED)
+# How an address meets places (``target_place`` says what each mode does; the connector chooses its comparator).
+MATCH_SCOPE, MATCH_EXACT, MATCH_EXACT_CASEFOLD = "scope", "exact", "exact_casefold"
+MATCHES = (MATCH_SCOPE, MATCH_EXACT, MATCH_EXACT_CASEFOLD)
 FACT_DIRECT_MESSAGE = "direct_message"
 FACT_GROUP_DM = "group_dm"
 FACT_MENTION = "mention"
@@ -412,27 +415,50 @@ def account_in_place_scope(place: Place, account_id: str) -> bool:
             or bool(place.destination and place.destination.get("account_id", "") in ("", "*", account_id)))
 
 
-def place_for_target(drive_root: Any, *, connector: str, targets: Mapping[str, list[str]],
-                     conversation: str = "", thread: str = "", provider: str = "") -> tuple[Place | None, bool]:
+def place_for_target(drive_root: Any, *, connector: str, targets: Mapping[str, list[str]], conversation: str = "",
+                     thread: str = "", provider: str = "", match: str = MATCH_SCOPE) -> tuple[Place | None, bool]:
     """Resolve declared target values against stored account/conversation ids.
 
-    Multiple destinations must be checked separately by the dispatch caller. An
-    unresolved value inside an account's place scopes stays unknown. An explicit
-    account outside every applicable scope is an ordinary, unbound tool target.
+    Multiple destinations must be checked separately by the dispatch caller. An unresolved value inside an account's
+    place scopes stays unknown. An explicit account outside every applicable scope is an ordinary, unbound tool
+    target. ``match`` selects the matcher (``target_place``).
     """
-    places = places_of_connector(drive_root, connector)
-    if provider:
-        places = [place for place in places if place.provider == provider]
-    return target_place(places, targets=targets, conversation=conversation, thread=thread)
+    places = [place for place in places_of_connector(drive_root, connector) if not provider or place.provider == provider]
+    return target_place(places, targets=targets, conversation=conversation, thread=thread, match=match)
+
+
+def _named_rank(place: Place, accounts: set, conversations: set, threads: set, fold: bool) -> tuple | None:
+    """How specifically the primary or destination scope naming one of ``conversations`` (casefolded when ``fold``;
+    account and thread exact) matches: its own account (``*`` names none, as ``""``), then thread; None if neither."""
+    destination = place.destination or {}
+    scopes = [(place.account_id, place.conversation_id, place.thread_id),
+              *([tuple(destination.get(key, "") for key in ("account_id", "conversation_id", "thread_id"))] if destination else [])]
+    return max([(account not in {"", "*"}, bool(topic)) for account, room, topic in scopes
+                if room and (room.casefold() if fold else room) in conversations
+                and (not accounts or account in {"", "*"} or account in accounts) and (not topic or topic in threads)],
+               default=None)
 
 
 def target_place(places: list[Place], *, targets: Mapping[str, list[str]],
-                 conversation: str = "", thread: str = "") -> tuple[Place | None, bool]:
+                 conversation: str = "", thread: str = "", match: str = MATCH_SCOPE) -> tuple[Place | None, bool]:
     """Match outbound targets, including declared destinations, in the supplied scopes.
 
     Dispatch loads the connector's current places; a retained outbox also uses
     this matcher to validate its particular bound place. Ingress stays separate.
+    ``match=exact`` (an extra address constraint, never a resource) takes only places whose primary or destination scope
+    names the conversation, which it needs, ranked by that matched scope, a Silent/Paused one first among equals; none
+    is a known absence, never a broad, account-only or unknown fallback (``exact_casefold``: those ids casefolded).
     """
+    if match not in MATCHES:
+        raise ValueError(f"match is {' or '.join(MATCHES)}, not {match!r}")
+    if match != MATCH_SCOPE:
+        fold = match == MATCH_EXACT_CASEFOLD
+        conversations = {key.casefold() if fold else key for key in map(str, targets.get(conversation) or []) if key}
+        if not conversations:
+            raise ValueError("an exact match names its conversation")
+        ranked = [((rank, place.state != STATE_ACTIVE), place) for place in places if (rank := _named_rank(
+            place, set(targets.get("account_id", [])), conversations, set(targets.get(thread or "thread_id", [])), fold))]
+        return max(ranked, key=lambda item: item[0], default=(None, None))[1], True
     if not places:
         return None, True
     values = {str(value) for key, group in targets.items() if key not in {thread, "thread_id", "account_id"}

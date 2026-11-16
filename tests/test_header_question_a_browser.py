@@ -599,7 +599,7 @@ def test_files_location_keeps_every_folder_reachable_in_the_bar(engine_ui, width
 
 @pytest.mark.parametrize('theme', ['light', 'dark'])
 def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme):
-    """A docked 720px window can leave only 160px for Files; use its real resize handle."""
+    """A docked 720px window keeps Files' 320px floor; use its real resize handle."""
     page = _open(engine_ui, 720, 801)
     engine = engine_ui['engine']
     try:
@@ -610,21 +610,21 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
             .map(id => document.getElementById(id)); document.getElementById('files-new-file').focus(); }""")
         handle = page.locator('#primary-sidebar > .resize-handle').bounding_box()
         start_x = handle['x'] + handle['width'] / 2
-        # The sidebar now clamps to its own minimum (owner 14.11); a drag follows the shown box
-        # (DESIGN.md:3228). Keep the same 175px/160px content probes, measured from that actual start.
+        # Owner 14.11; DESIGN "Resizing": drag from the shown box, within the sidebar and room's bounds
+        # (8f5ea4856). Probe just above the room's floor during the drag, then overshoot the sidebar's cap.
         start_width = page.locator('#primary-sidebar').bounding_box()['width']
         page.mouse.move(start_x, handle['y'] + handle['height'] / 2)
         page.mouse.down()
         # Check during the drag as well as after release, without a window resize event.
-        page.mouse.move(start_x + 545 - start_width, handle['y'] + handle['height'] / 2, steps=12)
-        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 175")
+        page.mouse.move(start_x + 385 - start_width, handle['y'] + handle['height'] / 2, steps=12)
+        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 335")
         page.evaluate('() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))')
         setup_browser.capture(page, f'files-sidebar-drag-{engine}-{theme}')
         assert page.locator('#files-breadcrumb').evaluate("el => el.closest('.files-browser-header') !== null")
         assert page.evaluate("document.activeElement === window.__filesNodes[1]")
         page.mouse.move(start_x + 560 - start_width, handle['y'] + handle['height'] / 2)
         page.mouse.up()
-        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 160")
+        page.wait_for_function("Math.round(document.getElementById('content').getBoundingClientRect().width) === 320")
         # Reveal Paste through the real file menu, making the action group wider than the available column.
         page.locator('#files-list .files-entry').filter(has_text='notes.md').click(button='right')
         page.locator('#files-context-menu [data-action="copy"]').click()
@@ -638,7 +638,7 @@ def test_files_navigation_and_actions_survive_sidebar_resizing(engine_ui, theme)
                 return r.width > 0 && r.left >= content.left && r.right <= content.right + 1 && (hit === el || el.contains(hit)); }""")
             control.click(trial=True)
             measured.append({'name': control.inner_text(), 'box': control.bounding_box()})
-        print(json.dumps({'files_narrow_controls': measured, 'engine': engine, 'theme': theme, 'content_width': 160}))
+        print(json.dumps({'files_narrow_controls': measured, 'engine': engine, 'theme': theme, 'content_width': 320}))
         assert page.evaluate('document.scrollingElement.scrollWidth <= innerWidth')
         assert page.locator('#page-files .app-page-header').get_by_role('heading', name='Files', exact=True).count() == 1
         page.locator('#files-new-file').scroll_into_view_if_needed()

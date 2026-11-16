@@ -213,14 +213,26 @@ def test_settings_card_actions_are_reachable_at_content_breakpoints(subscription
         "local_model": {"pending_keys": ["LOCAL_MODEL_PORT"]}}
     page = open_app(subscription_ui, "/#settings")
     card = page.locator("#page-settings [data-settings-card]")
-    card.locator('[data-needs="restart"]').wait_for(state="visible")
+
+    def show_card():
+        # Two panes hold the card in the pane of the list's Ouroboros row, one press away; one column keeps it atop
+        # the list (settings.js placeOverview, DESIGN "Settings"), and no page is opened over it here. Which of the two
+        # stands is set by Settings' resize observer once the new width is laid out, so the row is read a frame later.
+        page.evaluate("() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done)))")
+        overview = page.locator("#page-settings [data-settings-overview-row]")
+        if overview.is_visible() and overview.get_attribute("aria-current") != "page":
+            overview.click()
+        card.locator('[data-needs="restart"]').wait_for(state="visible")
+
+    show_card()
     for width in [640, 641, 760, 768, 980, 981]:
         page.set_viewport_size({"width": width, "height": 600})
         if width <= 640:
             setup_browser.wait_drawer_closed(page)
         for sidebar in [220, 280]:
             page.evaluate("value => document.documentElement.style.setProperty('--sidebar-width',value+'px')", sidebar)
-            # Every line the card lists is on screen with its action: the unread accounts, the restart, the local model.
+            show_card()
+            # Every line the card lists is on screen with its action: the restart and the local model.
             actions = card.locator("[data-needs]:visible [data-need-action]")
             assert actions.count() >= 2, [width, sidebar, actions.count()]
             for index in range(actions.count()):
@@ -254,33 +266,60 @@ def test_short_sidebar_bounds_projects_list_and_cost_cards_keep_their_tables_ins
     page.wait_for_selector(".nav-project-row")
     sidebar = page.locator("#primary-sidebar")
     scrollers = """el => [...el.querySelectorAll('*')].filter(e =>
-        ['auto','scroll'].includes(getComputedStyle(e).overflowY) && e.scrollHeight>e.clientHeight+1).map(e=>e.className)"""
+        ['auto','scroll'].includes(getComputedStyle(e).overflowY) && e.scrollHeight>e.clientHeight+1).map(e=>e.id || e.className)"""
     main_top = lambda: page.locator(".nav-row-main").evaluate("el => el.getBoundingClientRect().top")
-    # Three zones (DESIGN "Shell"): a window this short cannot hold the pinned zones, so the column itself is the
-    # ONE scroller with Main sticky at its top, and the Projects list shows every row in flow (no inner scroller).
-    assert set(sidebar.evaluate(scrollers)) == set(), sidebar.evaluate(scrollers)
-    assert sidebar.evaluate("el => el.scrollHeight > el.clientHeight + 1"), "the column is the fallback scroller"
-    top_before = main_top()
-    sidebar.evaluate("el => { el.scrollTop = el.scrollHeight; }")
-    page.wait_for_timeout(100)
-    assert abs(main_top() - top_before) <= 1, "Main stays pinned while the column scrolls"
-    nav = page.locator('[data-nav-page="settings"]')
-    assert hit_box(nav)["reachable"]
-    setup_browser.capture(page, "shell-sidebar-short-bottom")
+    scroll_to = lambda at: sidebar.evaluate("(el, at) => { el.scrollTop = at; return el.scrollTop; }", at)
+    # Three zones (DESIGN "Shell", "Navigation"): a window this short cannot hold them, so the column itself is the
+    # ONE scroller, the Projects list shows every row in flow (no inner scroller) and the sections stay on the bottom
+    # edge. Where the card, one Project row and the sections still fit between the two bars, Main is pinned at the
+    # top (400 px); a column shorter still lets the card scroll away with the list, one scroll up, since two pinned
+    # bars there would cover every row (320 px; style.css `data-bars-crowd`, PRs #3393 and #3489). Each step waits for
+    # the window to have its size and for two frames, in which the bars' observer (layout.js) has measured it; a page
+    # that draws no frame for 5 s fails there, by a timer.
+    frames = lambda: page.evaluate("""() => new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('no two frames within 5 s')), 5000);
+        requestAnimationFrame(() => requestAnimationFrame(() => { clearTimeout(timer); resolve(); }));
+    })""")
+    settings_reachable = lambda: hit_box(page.locator('[data-nav-page="settings"]'))["reachable"]
+    for height, pinned in [(320, False), (400, True)]:
+        page.set_viewport_size({"width": 844, "height": height})
+        page.wait_for_function("h => window.innerHeight === h", arg=height)
+        frames()
+        assert set(sidebar.evaluate(scrollers)) == set(), (height, sidebar.evaluate(scrollers))
+        assert sidebar.evaluate("el => el.scrollHeight > el.clientHeight + 1"), ("the column is the fallback scroller", height)
+        scroll_to(0)
+        frames()
+        assert settings_reachable(), ("the sections stand on the edge at the top of the column", height)
+        top_before = main_top()
+        scrolled = scroll_to(10 ** 6)
+        frames()
+        moved = top_before - main_top()
+        assert scrolled > 1, ("the column scrolled", height, scrolled)
+        if pinned:
+            assert abs(moved) <= 1, ("Main stays pinned while the column scrolls", height, moved)
+        else:
+            assert abs(moved - scrolled) <= 1, ("the card is the list's top there", height, moved, scrolled)
+        assert settings_reachable(), ("the sections stay on the edge at its bottom", height)
+        setup_browser.capture(page, f"shell-sidebar-short-bottom-{height}")
+        scroll_to(0)
+        frames()
+        assert abs(main_top() - top_before) <= 1, ("Main is back at the top", height)
     # A window tall enough for the zones: the Projects list is the ONE scroller and the column does not scroll.
     page.set_viewport_size({"width": 1280, "height": 720})
-    page.wait_for_timeout(200)
+    page.wait_for_function("h => window.innerHeight === h", arg=720)
+    frames()
     assert set(sidebar.evaluate(scrollers)) == {"nav-projects-list"}, sidebar.evaluate(scrollers)
     assert not sidebar.evaluate("el => el.scrollHeight > el.clientHeight + 1")
     top_before = main_top()
     page.locator("#nav-projects-list").evaluate("el => { el.scrollTop = el.scrollHeight; }")
-    page.wait_for_timeout(100)
+    frames()
     assert abs(main_top() - top_before) <= 1, "Main never scrolls away"
     assert hit_box(page.locator('[data-nav-page="settings"]'))["reachable"]
     page.set_viewport_size({"width": 844, "height": 320})
     page.locator('[data-nav-page="dashboard"]').click()
     page.locator('[data-dashboard-tab="costs"]').click()
-    page.wait_for_function("document.querySelector('#cost-known-limit').textContent==='$25.00 of $200.00'")
+    page.wait_for_function(  # a whole-dollar limit reads in whole dollars (DESIGN "A limit's card")
+        "document.querySelector('#cost-spent').textContent==='$25' && document.querySelector('#cost-of').textContent==='of $200'")
     for width in [390, 641, 768, 981]:
         page.set_viewport_size({"width": width, "height": 600})
         if width <= 640:

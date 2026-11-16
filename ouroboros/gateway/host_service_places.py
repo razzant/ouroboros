@@ -399,7 +399,10 @@ async def _api_presence_place(request: Request) -> JSONResponse:
         operation = request.query_params.get("operation", "")
         if operation:
             from ouroboros.place_guard import outbox_binding_facts
-            if operation not in {"bind", "check"} or request.query_params.get("require_place", "false") not in {"true", "false"}:
+            from ouroboros.places import MATCH_SCOPE, MATCHES
+            match = request.query_params.get("match", MATCH_SCOPE)  # absent: the previous scope lookup
+            if (operation not in {"bind", "check"} or match not in MATCHES
+                    or request.query_params.get("require_place", "false") not in {"true", "false"}):
                 return _presence_error("Invalid place binding operation.", 400, "place_binding_invalid", "rejected")
             try:
                 binding = json.loads(request.query_params.get("binding", "null")) if operation == "check" else None
@@ -409,7 +412,7 @@ async def _api_presence_place(request: Request) -> JSONResponse:
                           ("provider", "account_id", "conversation_id", "thread_id")}
                 result = await host._bounded_host_read(ctx, functools.partial(
                     outbox_binding_facts, ctx.data_dir, skill, target, binding=binding,
-                    require_place=request.query_params.get("require_place") == "true"))
+                    require_place=request.query_params.get("require_place") == "true", match=match))
                 return JSONResponse({"ok": True, **result})
             except ValueError as exc:
                 from ouroboros.places import PlaceError

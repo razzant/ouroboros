@@ -79,19 +79,31 @@ def test_live_off_refuses_schedule_and_session_but_same_task_review_runs(monkeyp
         assert len(started) == 3
 
 
-def test_a_failed_catalog_read_is_unknown_at_both_admission_consumers_then_recovers(monkeypatch):
+@pytest.mark.parametrize("own_tier,expected_tier", [("", "fast"), ("standard", "standard")])
+def test_a_failed_catalog_read_is_unknown_at_both_admission_consumers_then_recovers(monkeypatch, own_tier, expected_tier):
     from ouroboros.settings_integrity import actor_settings_snapshot
     from ouroboros.tools import control_scheduling, delegate
     from ouroboros.tools.registry import ToolContext, ToolRegistry
 
     values = configured()
+    catalog = json.loads(values["OUROBOROS_SUBAGENTS"])
+    for row in catalog["items"]:
+        row["processing_preference"] = own_tier
+    # The selected rows are 49 and 50, read from the document alone; Off rows still count.
+    catalog["items"][:0] = [{"subagent_id": f"spare-{i}", "recommended_use": f"Notes {i}",
+        "enabled": i != 0, "route": {"kind": "api_model", "target_id": f"openai::spare-{i}"}}
+        for i in range(48)]
+    values["OUROBOROS_SUBAGENTS"] = json.dumps(catalog)
+    values["OUROBOROS_PROCESSING_PREFERENCE"] = "economy"
+    save_owner(values)
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
     task = {"id": "parent", "project_id": "alpha"}
     frozen = snapshot(task)
     config.SETTINGS_PATH.write_text('{broken')
     failed = actor_settings_snapshot(runtime.apply_task_start_settings_or_disclose(
         "broken", lambda *a, **k: None), task, config.DATA_DIR)
     ctx = ToolContext(repo_dir=config.REPO_DIR, drive_root=config.DATA_DIR, task_id="parent")
-    ctx.task_metadata = {"project_id": "alpha"}
+    ctx.task_metadata = {"project_id": "alpha", "processing": {"source": "owner", "tier": "fast"}}
     registry = ToolRegistry(repo_dir=config.REPO_DIR, drive_root=config.DATA_DIR)
     registry.set_context(ctx)
     monkeypatch.setattr(delegate, "_delegate_start", lambda *a, **k: pytest.fail("no physical start in this probe"))
@@ -113,7 +125,10 @@ def test_a_failed_catalog_read_is_unknown_at_both_admission_consumers_then_recov
     real_select = runtime.select_subagent_snapshot
 
     def observe(settings, **kwargs):
-        selected.append(real_select(settings, **kwargs)[0]["route"]["target_id"])
+        chosen = real_select(settings, **kwargs)[0]
+        assert len(json.loads(settings["OUROBOROS_SUBAGENTS"])["items"]) == 50
+        assert runtime.run_processing(chosen) == expected_tier
+        selected.append(chosen["route"]["target_id"])
         raise runtime.SubagentSelectionError("probe_stopped_after_selection", "No dispatch")
 
     monkeypatch.setattr(runtime, "select_subagent_snapshot", observe)

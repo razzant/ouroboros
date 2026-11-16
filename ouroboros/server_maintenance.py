@@ -1201,6 +1201,17 @@ def settlement_verdicts(root: pathlib.Path) -> Dict[str, Any]:
     return {key: dict(item) for key, item in value.items() if isinstance(item, dict)} if isinstance(value, dict) else {}
 
 
+def _young_counted(report: Dict[str, Any]) -> Dict[str, Any]:
+    """A layout's prune report as the pass's event carries it: a copy with every field as returned, except that
+    the drives still inside the retention term (the rule, not a hold) leave ``skipped`` for
+    ``younger_than_retention_count``, so the row no longer grows with every young drive on every pass (#3237)."""
+    out = {**report, "younger_than_retention_count": 0}
+    if isinstance(report.get("skipped"), list):
+        out["skipped"] = [item for item in report["skipped"] if item.get("reason") != "younger_than_retention"]
+        out["younger_than_retention_count"] = len(report["skipped"]) - len(out["skipped"])
+    return out
+
+
 def _run_drive_custody_pass(stop_event: Any = None) -> None:
     """The settled canonical mailboxes the loop thread's seam left (unread inputs to carry),
     then settle terminal child and direct drives past retention (a cancelled subagent's at
@@ -1286,7 +1297,8 @@ def _run_drive_custody_pass(stop_event: Any = None) -> None:
                 if skipped.get("reason") not in ("younger_than_retention", "custody_unchanged"):
                     holds.note(skipped.get("reason"), task_id)
         maintenance_jobs.record_pass(root, "drive_settlement", {**maintenance_jobs.pass_report(released, holds, errors),
-                                                                "headless": reports["headless"], "direct": reports["direct"],
+                                                                "headless": _young_counted(reports["headless"]),
+                                                                "direct": _young_counted(reports["direct"]),
                                                                 "mailboxes": mailboxes}, event="headless_task_drive_prune")
 
 

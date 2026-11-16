@@ -30,14 +30,7 @@ from ouroboros.deployment_policy import BODY_STATUS, body_replacement_refusal
 
 
 def _go():
-    """The parent module, read at call time.
-
-    ``supervisor.git_ops`` owns the rebindable module state (``init`` REBINDS
-    REPO_DIR, DRIVE_ROOT and BRANCH_*) and the helpers tests monkeypatch on
-    the parent (``git_capture``, ``_guard_live_repo_destructive_git``, the
-    sibling re-exports). Reading them through the module keeps one binding: a
-    from-import here would freeze the value this module saw at import time.
-    """
+    """Read the parent's rebindable state and monkeypatchable helpers at call time."""
     from supervisor import git_ops
 
     return git_ops
@@ -616,18 +609,22 @@ def sync_runtime_dependencies(reason: str) -> Tuple[bool, str]:
         from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
         from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
 
-        with tracked_start() as publish:
-            proc = publish(contained_popen(
-                subprocess.Popen, cmd, cwd=str(_go().REPO_DIR), **subprocess_new_group_kwargs()
-            ))
-        try:
-            returncode = proc.wait(timeout=120)
-        except subprocess.TimeoutExpired:
-            kill_process_tree(proc)
-            proc.wait(timeout=10)
-            raise
-        finally:
-            retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
+        from ouroboros.process_logging import relayed_child_output
+
+        with relayed_child_output() as output:
+            with tracked_start() as publish:
+                proc = publish(contained_popen(
+                    subprocess.Popen, cmd, cwd=str(_go().REPO_DIR),
+                    stdout=output, stderr=output, **subprocess_new_group_kwargs()
+                ))
+            try:
+                returncode = proc.wait(timeout=120)
+            except subprocess.TimeoutExpired:
+                kill_process_tree(proc)
+                proc.wait(timeout=10)
+                raise
+            finally:
+                retire_tracked(proc)  # a running root, or a dead root's live or unknown tree, stays named
         if returncode != 0:
             raise subprocess.CalledProcessError(returncode, cmd)
         try:

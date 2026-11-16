@@ -283,7 +283,7 @@ def _is_model_owner_post(request: Any) -> bool:
 
     path = urllib.parse.unquote(urllib.parse.unquote(urlparse(str(request.url or "")).path)).rstrip("/")
     parts = path.split("/")
-    return str(request.method or "").upper() == "POST" and (path == "/api/owner/chat-model" or (
+    return str(request.method or "").upper() == "POST" and (path in {"/api/owner/chat-model", "/api/owner/chat-processing"} or (
         len(parts) == 5 and parts[1:3] == ["api", "tasks"] and bool(parts[3]) and parts[4] == "model"))
 
 

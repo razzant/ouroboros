@@ -625,8 +625,11 @@ def _disk(data_dir):
 
 
 def test_stdio_task_session_choice(direct_server_with_data):  # noqa: F811
-    """Opt an existing server in and out through Settings; preserve an imported browser policy."""
+    """Opt an existing server in and out through Settings; preserve an imported browser policy, and a Connect-tools
+    row's skill binding and manifest-owned lifetime through every Save of its neighbours."""
     from playwright.sync_api import expect, sync_playwright
+
+    from ouroboros import mcp_client
 
     url, data_dir = direct_server_with_data['url'], direct_server_with_data['data_dir']
     servers = [
@@ -634,13 +637,42 @@ def test_stdio_task_session_choice(direct_server_with_data):  # noqa: F811
         {'id': 'guarded_browser', 'transport': 'stdio', 'command': 'python3', 'enabled': False,
          'task_session': True, 'browser_policy': True},
         {'id': 'remote', 'transport': 'sse', 'url': 'http://127.0.0.1:9/mcp', 'enabled': False},
+        {'id': 'chrome_browser', 'name': 'Chrome (shared tab)', 'transport': 'stdio', 'skill': 'chrome_browser',
+         'enabled': False, 'task_session': True, 'browser_policy': True},
     ]  # Disabled fixtures never launch a helper or contact an endpoint.
+
+    def still_bound(row):  # the loader reads the saved row as this skill's server, never as a command-less stdio row
+        errors = []
+        cfg = mcp_client.normalize_server_config(row, errors=errors)
+        assert cfg is not None and not errors and cfg.skill == 'chrome_browser', (row, errors)
+        assert not any(row.get(key) for key in ('command', 'args', 'cwd'))
+        assert (row['enabled'], row['task_session'], row['browser_policy']) == (False, True, True)
+
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         page = browser.new_page(viewport={'width': 1440, 'height': 1000})
         page._evidence_engine = 'chromium'
         try:
             _seed(page, url, servers)
+            posts = _settings_posts(page)
+            card = _card(page, 'chrome_browser')
+            # Not installed here: the state says its skill can't run it (the reason is the Error fact), not "not listed yet".
+            expect(card.locator('[data-mcp-state]')).to_have_text('Its skill can’t run it now')
+            assert 'MCP_SKILL_UNAVAILABLE' in _facts(card)['Error']
+            bound_choice = card.locator('[data-mcp-field="task_session"]')
+            expect(bound_choice).to_be_checked()
+            expect(bound_choice).to_be_disabled()  # the skill's reviewed manifest decides it at each start
+            expect(card.locator('[data-mcp-lifetime]')).to_contain_text(
+                'That process may ask Ouroboros’s browser rules about its requests. '
+                'The skill chrome_browser sets this lifetime; each start follows its reviewed files.')
+            expect(card.locator('[data-mcp-field="id"]')).to_have_attribute('readonly', '')
+            expect(card.locator('[data-mcp-field="transport"]')).to_be_disabled()
+            expect(card.locator('[data-mcp-field="command"]')).to_have_count(0)  # the skill derives its launch
+            expect(card.locator('#mcp-3-endpoint')).to_contain_text('The server the skill chrome_browser declares.')
+            _edit(card)
+            expect(card.locator('[data-mcp-field="args"], [data-mcp-field="cwd"], [data-mcp-field="env"]')).to_have_count(0)
+            bound_choice.scroll_into_view_if_needed()
+            _capture(page, 'mcp-skill-bound-lifetime')
             card = _card(page, 'local_browser')
             choice = card.locator('[data-mcp-field="task_session"]')
             expect(choice).not_to_be_checked()
@@ -653,6 +685,9 @@ def test_stdio_task_session_choice(direct_server_with_data):  # noqa: F811
             _capture(page, 'mcp-task-session-on')
             _save(page)
             assert _disk(data_dir)['local_browser']['task_session'] is True
+            bound_row = _disk(data_dir)['chrome_browser']
+            still_bound(bound_row)
+            assert [row.get('skill') for row in posts[-1]['MCP_SERVERS']] == [None, None, None, 'chrome_browser']
             _open_mcp(page, url)
             card = _card(page, 'local_browser')
             expect(choice).to_be_checked()
@@ -660,6 +695,16 @@ def test_stdio_task_session_choice(direct_server_with_data):  # noqa: F811
             choice.uncheck()
             _save(page)
             assert _disk(data_dir)['local_browser']['task_session'] is False
+            assert _disk(data_dir)['chrome_browser'] == bound_row  # a neighbour's Save leaves the binding exactly
+            # What this guards: without its skill the same row is a command-less stdio row the loader refuses.
+            assert mcp_client.normalize_server_config({key: value for key, value in bound_row.items() if key != 'skill'},
+                                                      errors=[]) is None
+            card = _card(page, 'chrome_browser')  # its own Save keeps the binding and writes only what it shows
+            card.locator('[data-mcp-field="name"]').fill('Chrome (my tab)')
+            _save(page)
+            renamed = _disk(data_dir)['chrome_browser']
+            still_bound(renamed)
+            assert renamed['name'] == 'Chrome (my tab)'
             card = _card(page, 'guarded_browser')
             _edit(card)
             guarded = card.locator('[data-mcp-field="task_session"]')

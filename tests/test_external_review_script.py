@@ -751,9 +751,10 @@ def test_operator_preparation_keeps_the_whole_catalog_through_a_settings_save(tm
 
 def test_the_operator_lane_keeps_its_panel_choice_without_exporting_it(tmp_path, monkeypatch):
     """Unpinned, an explicit environment catalog wins over the document's as every key does, and a document without
-    one leaves the Main model reviewing alone, as before; the document's catalog is never exported."""
+    one reviews with the settings read's own (its factory rows), as the runtime does; the catalog is never exported."""
     import scripts.run_external_review as module
     from ouroboros import config as cfg
+    from ouroboros.reviewer_slot_config import review_pool_rows
     from tests.review_pool_rosters import pool_roster, pool_seat
 
     settings = tmp_path / "settings.json"
@@ -778,7 +779,8 @@ def test_the_operator_lane_keeps_its_panel_choice_without_exporting_it(tmp_path,
     assert [row["slot_id"] for row in _resolved_review_config()["pool_slots"]] == ["env"]
     monkeypatch.delenv("OUROBOROS_SUBAGENTS")
     settings.write_text(json.dumps({}))
-    assert _resolved_review_config()["pool_slots"] == []
+    factory = [row.slot_id for row in review_pool_rows()]  # what the runtime reviews with: the factory rows
+    assert factory and [row["slot_id"] for row in _resolved_review_config()["pool_slots"]] == factory
 
 
 @pytest.mark.parametrize("contents", [b"{broken", b"null", b"[]", b"\xff", None])
@@ -817,7 +819,13 @@ def test_wrapper_distinguishes_missing_explicit_and_frozen_catalogs(tmp_path, mo
     monkeypatch.delenv("OUROBOROS_SUBAGENTS", raising=False)
     monkeypatch.setattr(module, "_keys_file", lambda: None)
     module._load_settings_into_env()
-    assert _resolved_review_config()["pool_slots"] == []  # genuinely missing, not an unreadable document
+    factory = [row.slot_id for row in review_pool_rows()]  # genuinely missing: the runtime's factory reviewer rows
+    assert factory and [r["slot_id"] for r in _resolved_review_config()["pool_slots"]] == factory
+    for blank in ({}, {"OUROBOROS_SUBAGENTS": ""}, {"OUROBOROS_SUBAGENTS": None}):  # none of them names one
+        path.write_text(json.dumps(blank))
+        assert [r["slot_id"] for r in _resolved_review_config()["pool_slots"]] == factory
+    path.write_text(json.dumps({"OUROBOROS_SUBAGENTS": pool_roster()}))
+    assert _resolved_review_config()["pool_slots"] == []  # a catalog saved empty is no missing one
     raw = pool_roster(pool_seat("saved", "codex=gpt-saved", kind="agent_session", profile_id="account-a", effort="high"))
     path.write_text(json.dumps({"OUROBOROS_SUBAGENTS": raw}))
     frozen = module._review_view()
@@ -830,6 +838,10 @@ def test_wrapper_distinguishes_missing_explicit_and_frozen_catalogs(tmp_path, mo
     module._load_settings_into_env()
     assert [r["slot_id"] for r in _resolved_review_config()["pool_slots"]] == ["saved"]
     assert os.environ["OUROBOROS_SUBAGENTS"] == raw
+    path.write_text("{}")  # pinned and never configured: its own factory rows, never the inherited catalog above
+    monkeypatch.setenv("OUROBOROS_SETTINGS_SHA256", hashlib.sha256(b"{}").hexdigest())
+    module._load_settings_into_env()
+    assert [r["slot_id"] for r in _resolved_review_config()["pool_slots"]] == factory
 
 
 def test_contributor_policy_preserves_configured_routes(monkeypatch):

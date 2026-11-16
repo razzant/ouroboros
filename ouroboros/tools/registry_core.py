@@ -1012,15 +1012,14 @@ class ToolRegistry:
                                       discovery="list_available_tools" in usable_selectors(self))
         return _replace_tool_result(reason, text="\n".join([reason.text, *guidance]))
 
-    @staticmethod
-    def _mcp_dispatch_resolution(name: str):
+    def _mcp_dispatch_resolution(self, name: str):
         """Adopt current settings/catalogs before timeout, name resolution and Safety."""
         from ouroboros.mcp_client import (
             ensure_configured_from_settings as ensure,
             get_manager,
         )
 
-        ensure()
+        ensure(event_queue=getattr(self._ctx, "event_queue", None))
         return get_manager().resolve_tool_name(name)
 
     def _mcp_name_miss(self, name: str) -> Optional[ToolResult]:

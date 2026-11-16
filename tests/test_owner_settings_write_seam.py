@@ -255,6 +255,25 @@ def test_a_contended_lock_aborts_before_the_precondition_and_the_write(isolated_
     assert not isolated_settings.exists(), "a contended write still touched settings.json"
 
 
+def test_an_incidental_write_keeps_every_unnamed_saved_value_exactly_as_written(isolated_settings):
+    """Connect tools, the tool-timeout setter and other incidental writers name only their keys: a value the read
+    merely re-types (a saved ``false`` for a key whose default is the text ``"true"``) is written back as saved."""
+    from ouroboros.gateway.owner_settings import _owner_update_settings, fields_on_saved_document
+
+    saved = {"OUROBOROS_STARTER_SKILLS_TURN_ON": False, "OUROBOROS_STARTER_SKILLS": "[]", "MCP_ENABLED": False,
+             "MCP_TOOL_TIMEOUT_SEC": "75", "OWNER_UNKNOWN_KEY": {"kept": [1, "two"]}}
+    isolated_settings.write_text(json.dumps(saved), encoding="utf-8")
+    receipt = _owner_update_settings(fields_on_saved_document({"MCP_ENABLED": True}))
+    written = json.loads(isolated_settings.read_text(encoding="utf-8"))
+    assert written == {**saved, "MCP_ENABLED": True}
+    assert written["OUROBOROS_STARTER_SKILLS_TURN_ON"] is False and written["MCP_TOOL_TIMEOUT_SEC"] == "75"
+    assert set(receipt) == {"MCP_ENABLED"}  # no read-seeded default (consciousness coverage) is authored either
+    isolated_settings.write_text(json.dumps({"OUROBOROS_SAFETY_MODE": "light"}), encoding="utf-8")
+    _owner_update_settings(fields_on_saved_document({"MCP_ENABLED": True}))
+    kept = json.loads(isolated_settings.read_text(encoding="utf-8"))
+    assert kept["OUROBOROS_CONSCIOUSNESS_SAFETY_MODE"] == "light"  # a value derived from a saved key still lands
+
+
 def test_the_commit_boundary_is_only_marked_by_a_real_write(isolated_settings):
     from ouroboros.gateway.owner_settings import (
         CommitBoundary,

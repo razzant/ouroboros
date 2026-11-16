@@ -787,6 +787,32 @@ def test_two_catalog_records_of_one_model_show_a_price_only_when_they_agree(monk
     assert item.get("price") == expected and item["name"] == "Vendor: X", "the model stays listed either way"
 
 
+def test_two_records_of_one_model_disagreeing_on_its_price_condition_show_none(monkeypatch):
+    from ouroboros import pricing_catalog
+
+    monkeypatch.setattr(model_catalog_api, "load_settings", lambda: {"DEEPSEEK_API_KEY": "synthetic-key"})
+    said = iter(["off_peak_usd", ""])
+    monkeypatch.setattr(pricing_catalog, "price_condition", lambda _model, **_kwargs: next(said, ""))
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def get(self, url, **_kwargs):
+            return _Response({"data": [{"id": "deepseek-v4-pro"}, {"id": "deepseek-v4-pro"}] if "deepseek" in url else []})
+
+    monkeypatch.setattr(model_catalog_api.httpx, "AsyncClient", Client)
+    payload = json.loads(asyncio.run(model_catalog_api.api_model_catalog(None)).body.decode("utf-8"))
+    [item] = [item for item in payload["items"] if item["value"] == "deepseek::deepseek-v4-pro"]
+    assert "price_condition" not in item and "price" not in item, "no one record's condition is the model's"
+
+
 @pytest.mark.parametrize("pricing, expected", [
     # Most reasoning models bill reasoning as output: the pair is the whole token price.
     ({"prompt": "0.000004", "completion": "0.00002", "internal_reasoning": "0.00002"}, {"input": 4.0, "output": 20.0}),
@@ -820,10 +846,17 @@ def test_a_model_listed_first_without_a_price_keeps_none_when_a_later_record_sta
     assert "price" not in item
 
 
+def known_spend_gaps(settings, subagents=None):
+    """What the limits name as not counted: ``pricing.spend_coverage``'s first list."""
+    from ouroboros.pricing import spend_coverage
+
+    return spend_coverage(settings, subagents)[0]
+
+
 def test_the_limits_name_what_they_cannot_count_and_nothing_where_every_route_has_a_price():
     """Dashboard › Costs says it under the limits: a call on a route without a known price adds nothing to known
     spend (`usage_accounting.paid_admission`), so the limits count without it."""
-    from ouroboros.pricing import known_spend_gaps, price_source
+    from ouroboros.pricing import price_source
 
     routed = {"OUROBOROS_MODEL": "anthropic/claude-opus-5.5", "OUROBOROS_MODEL_LIGHT": "openai::gpt-6-mini",
               "OUROBOROS_MODEL_FALLBACKS": "openai::gpt-6", "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}
@@ -855,7 +888,6 @@ def test_the_spend_gaps_follow_the_runtime_lane_of_each_role(monkeypatch):
     """Each role's route by the one rule the runtime resolves it with (route_choice.following_route, asked over the
     document): a remote role on a direct key is named even beside a local Main, and a local one is not."""
     from ouroboros import search_routes
-    from ouroboros.pricing import known_spend_gaps
 
     local_main = {"OUROBOROS_MODEL": "qwen3-8b", "USE_LOCAL_MAIN": True, "OUROBOROS_WEBSEARCH_BACKEND": "ddgs"}
     assert known_spend_gaps({**local_main, "OUROBOROS_MODEL_VISION": "openai::gpt-6"}) == ["Vision"]

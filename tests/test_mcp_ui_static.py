@@ -237,6 +237,60 @@ console.log(JSON.stringify(snaps));
     assert loaded["unknown-field-kept"][0].configuration_warnings  # kept with the loader's warning, never refused
 
 
+def test_mcp_ui_locks_the_transport_of_a_skill_bound_row_and_refuses_one_off_stdio():
+    """A Connect-tools row is stdio by the loader's rule: its page shows that transport without offering
+    another, while an ordinary row keeps every choice; a bound row saved on another transport is refused
+    by Save exactly as the loader refuses it."""
+    out = _run(r"""
+const BOUND = { id: 'chrome_browser', name: 'Chrome (shared tab)', enabled: true, transport: 'stdio', skill: 'chrome',
+    task_session: true, browser_policy: true };
+const PLAIN = { id: 'plain', enabled: true, transport: 'stdio', command: 'node' };
+const options = (page) => page.field('transport').querySelectorAll('option').map((node) => node.getAttribute('value')
+    + (node.hasAttribute('selected') ? ' selected' : ''));
+let page = await open('tools/chrome_browser', { MCP_SERVERS: [BOUND, PLAIN] });
+assert.ok(page.field('transport').disabled);
+assert.equal(page.field('transport').getAttribute('aria-describedby'), 'mcp-0-endpoint');
+assert.ok(page.field('id').hasAttribute('readonly'));
+assert.deepEqual(options(page), ['stdio selected']);
+assert.equal(page.field('command'), null);  // the skill derives its launch: no command, arguments, folder or environment
+assert.deepEqual(['args', 'cwd', 'env', 'env_from_settings'].map(page.field), [null, null, null, null]);
+assert.match(page.container.querySelector('#mcp-0-endpoint').textContent, /^The server the skill chrome declares\./);
+// The skill's reviewed manifest owns its lifetime: shown, never offered; an ordinary stdio row keeps the owner's choice.
+const session = page.field('task_session');
+assert.ok(session.hasAttribute('checked') && session.disabled);
+assert.match(page.container.querySelector('[data-mcp-lifetime]').textContent, /^One server process serves every call in a task\.[^]* That process may ask Ouroboros’s browser rules about its requests\. The skill chrome sets this lifetime; each start follows its reviewed files\.$/);
+for (const event of ['input', 'change']) {  // a stale or synthetic event cannot change the skill's lifetime
+    await page.tick('task_session', false, event);
+    assert.equal(session.checked, true, event);
+}
+assert.equal(validateMcpSettings().length, 0);
+const snaps = [{ label: 'bound-stdio', refused: [], server: saved() }];
+page = await open('tools/plain', { MCP_SERVERS: [BOUND, PLAIN] });
+assert.ok(!page.field('transport').disabled && !page.field('id').hasAttribute('readonly'));
+assert.deepEqual(options(page), ['streamable_http', 'sse', 'stdio selected']);
+assert.ok(!page.field('task_session').disabled);
+assert.doesNotMatch(page.text(), /sets this lifetime/);
+page = await open('tools/chrome_browser', { MCP_SERVERS: [{ ...BOUND, transport: 'sse', url: 'https://example.test/mcp',
+    task_session: false, browser_policy: false }] });
+assert.equal(page.container.querySelector('[data-mcp-unsupported]').textContent, 'Fields kept but not used: skill');
+const errors = validateMcpSettings();
+assert.equal(errors.length, 1);
+assert.equal(errors[0].input, page.field('transport'));
+assert.match(errors[0].message, /^skill is not used by SSE \(Server-Sent Events\) servers, so the server would not load with it\. /);
+snaps.push({ label: 'bound-sse', refused: errors.map((error) => error.message), server: saved() });
+console.log(JSON.stringify(snaps));
+""")
+    from ouroboros import mcp_client
+
+    snaps = json.loads(out.strip().splitlines()[-1])
+    assert [snap["label"] for snap in snaps] == ["bound-stdio", "bound-sse"]
+    for snap in snaps:  # what the real writer would send, as loaded
+        errors = []
+        loaded = mcp_client.normalize_server_config(snap["server"], errors=errors)
+        assert (loaded is None) == bool(snap["refused"]), (snap, errors)  # Save refuses exactly the drops
+    assert snaps[0]["server"]["skill"] == "chrome" and not any(snaps[0]["server"].get(k) for k in ("command", "args", "cwd"))
+
+
 def test_mcp_test_button_preserves_saved_url_only_credentials():
     """Exercise the registered click handler, not a copy of its payload expression."""
     _run(r"""

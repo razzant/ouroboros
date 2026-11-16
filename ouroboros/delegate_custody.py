@@ -129,6 +129,8 @@ class RunCustody:
     processing_preference: Optional[str] = None
     prompt_cache_ttl: Optional[Dict[str, Any]] = None
     row_effort: Optional[str] = None  # the configured row's pin ('' = Auto); None on rows without one
+    # The configured row's own tier; ``processing_preference`` is what the run asked (a work's, inherited).
+    row_processing: Optional[str] = None
     project_id: str = ""
     project_owned: bool = False
     # #362: a stable user-target registration outlives any single run.

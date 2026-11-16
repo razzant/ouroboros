@@ -11,7 +11,7 @@ import { bindModelChooser, matchingModelOptions, modelChooserHtml, modelOptions,
 import { createModelList } from '../modules/model_list.js';
 import { createModelRolesEditor } from '../modules/model_roles.js';
 import { applyPayload, CODE_PREFIX, setMissTransport } from '../modules/i18n.js';
-import { cacheWriteWords, catalogModelOptions, priceWords, routeModelInputHtml } from '../modules/route_editor_primitives.js';
+import { cacheWriteWords, catalogModelOptions, modelPriceWords, priceWords, routeModelInputHtml, withoutPrice } from '../modules/route_editor_primitives.js';
 import { ElementStub } from './chat_dom_fixture.js';
 import { appendHtml, domDouble } from './dom_double.js';
 
@@ -148,6 +148,62 @@ test('under a role: an OpenRouter model says its price per 1M tokens; every othe
     editor.destroy();
 });
 
+test('a DeepSeek row its published entry prices only for text off-peak in USD says that condition, never a figure; Vision says Price unknown', async () => {
+    assert.equal(modelPriceWords({ price_condition: 'off_peak_usd' }), 'Estimated for text, off-peak · USD only');
+    assert.equal(modelPriceWords(withoutPrice({ price_condition: 'off_peak_usd' }, { media: true })), '', 'a role sending images: none');
+    assert.equal(modelPriceWords({ price: { input: 4, output: 20 }, price_condition: 'off_peak_usd' }, { unit: true }),
+        '$4 in / $20 out per 1M tokens', 'a published figure is said as before');
+    assert.equal(modelPriceWords({ price_condition: 'surge' }), '', 'a condition this client does not know is no price');
+    assert.equal(modelPriceWords(null), '');
+    const { contract } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url), 'utf8'));
+    const { doc } = domDouble();
+    const host = doc.createElement('div');
+    host.id = 'roles';
+    doc.body.append(host);
+    Object.defineProperty(host, 'innerHTML', { set(html) { host.replaceChildren(); appendHtml(host, html); }, get: () => '' });
+    const editor = createModelRolesEditor({ hostId: 'roles', doc, showContext: false, store: { snapshot: {}, accountsKnown: false },
+        catalogFetch: async () => ({ items: [], model_sources: [] }) });
+    editor.load({ DEEPSEEK_API_KEY: 'k', OUROBOROS_MODEL: 'deepseek::deepseek-v4-pro', OUROBOROS_MODEL_LIGHT: 'deepseek::deepseek-chat',
+        OUROBOROS_MODEL_VISION: 'deepseek::deepseek-v4-pro' }, contract);
+    editor.adoptCatalog({ model_sources: [], items: [
+        { provider_id: 'deepseek', id: 'deepseek-v4-pro', value: 'deepseek::deepseek-v4-pro', name: 'deepseek-v4-pro',
+            price_condition: 'off_peak_usd', context_window: 1000000 },
+        { provider_id: 'deepseek', id: 'deepseek-chat', value: 'deepseek::deepseek-chat', name: 'deepseek-chat' }] });
+    await new Promise((resolve) => setImmediate(resolve));
+    const said = (group) => host.querySelectorAll(`[data-model-role-group="${group}"] [data-model-role-status]`)
+        .map((node) => node.textContent);
+    assert.deepEqual(said('main'), ['Estimated for text, off-peak · USD only · 1M window']);
+    assert.deepEqual(said('vision'), ['Price unknown · 1M window'], 'its calls carry images the text tariff never prices');
+    assert.deepEqual(said('light'), ['Price unknown'], 'a retired entry stays unknown');
+    editor.destroy();
+});
+
+test('every list of models says a conditional price the role line says, and drops it where the price is not the one paid', async () => {
+    const pro = { provider_id: 'deepseek', id: 'deepseek-v4-pro', value: 'deepseek::deepseek-v4-pro', name: 'deepseek-v4-pro',
+        price_condition: 'off_peak_usd' };
+    const said = 'Estimated for text, off-peak · USD only';
+    // Settings' suggestions (Models, Agents, the wizard); a Fast/Flex row and Vision drop the condition with the price.
+    assert.equal(catalogModelOptions([pro])[0].meta, said);
+    assert.equal(catalogModelOptions([withoutPrice(pro, { tiered: true })])[0].meta, undefined);
+    assert.equal(catalogModelOptions([withoutPrice(pro, { media: true })])[0].meta, undefined);
+    assert.deepEqual(withoutPrice({ ...OPUS }, { media: true }), OPUS, 'figures stay for Vision; only a text condition goes');
+    assert.deepEqual(withoutPrice(OPUS, { tiered: true }), { ...OPUS, price: null, price_condition: '' });
+    assert.equal(catalogModelOptions([pro, { ...pro, price_condition: '' }])[0].meta, undefined, 'records that disagree: none');
+    // The composer's capsule and the work card's list (buildModelIndex → describeRoute).
+    const index = (options = {}) => buildModelIndex({ catalog: { items: [pro] }, ...options });
+    assert.equal(describeRoute(index(), { model: pro.value }).price, said);
+    for (const tier of ['fast', 'economy', 'ultrafast']) {
+        assert.equal(describeRoute(index(), { model: pro.value }, { tier }).price, '', `a context on ${tier}`);
+    }
+    assert.equal(describeRoute(index(), { model: pro.value }, { tier: 'standard' }).price, said, 'Standard pays it');
+    const split = buildModelIndex({ catalog: { items: [pro, { ...pro, price_condition: 'surge' }] } });
+    assert.equal(describeRoute(split, { model: pro.value }).price, '', 'a row whose records disagree states no condition');
+    // A place's or a circle's Model field.
+    const { modelSuggestions } = await import('../modules/place_sheet.js');
+    assert.equal(modelSuggestions({ items: [pro] }, { tierPriced: false })[0].meta, said);
+    assert.equal(modelSuggestions({ items: [pro] }, { tierPriced: true })[0].meta, undefined);
+});
+
 test('in the composer list a priced model says its price where "paid by key" stood; other rows read as before', () => {
     const index = buildModelIndex({ catalog: { items: [OPUS,
         { provider_id: 'openrouter', id: 'openai/gpt-6', value: 'openai/gpt-6', price: { input: 1.25, output: 10 } },
@@ -156,11 +212,13 @@ test('in the composer list a priced model says its price where "paid by key" sto
     assert.equal(describeRoute(index, { model: OPUS.value }).price, '$4 in / $20 out');
     assert.equal(describeRoute(index, { model: 'openai::gpt-6' }).price, '', 'a direct key states no price');
     assert.equal(describeRoute(index, { model: 'z-ai/glm-5.3' }).facts, 'OpenRouter · paid by key');
-    const markup = (query) => {
+    const markup = (query, { mainRow = 'follow', open = false } = {}) => {
         const [el, input] = [new ElementStub('div'), new ElementStub('input')];
-        const list = createModelList({ el, input, id: 'models', store: { index: () => index, status: () => ({ read: true }) },
-            main: () => ({ model: OPUS.value, use_local: false }), current: () => null, recents: () => [], onRoute() {} });
+        const list = createModelList({ el, input, id: 'models', store: { index: () => index, status: () => ({ read: true }), pins: () => [], isPinned: () => false },
+            main: () => ({ model: OPUS.value, use_local: false }), current: () => null, recents: () => [], mainRow, onRoute() {} });
         list.paint();
+        // A press on `All sources` opens the fold: each source is a row of its own.
+        if (open) for (const listener of el.listeners.get('click') || []) listener({ target: { closest: (selector) => (selector === '.chat-model-row' ? { dataset: { row: 'sources' } } : null) } });
         input.value = query;
         for (const listener of input.listeners.get('input') || []) listener();
         list.destroy();
@@ -174,9 +232,12 @@ test('in the composer list a priced model says its price where "paid by key" sto
         'route|z-ai/glm-5.3': 'OpenRouter · paid by key',
         'route|openai::gpt-6': 'OpenAI · paid by key',
     });
-    // Main's own row and the source rows: the price stands with a model, a source still says how it is paid.
-    assert.deepEqual(markup(''), {
-        [`route|${OPUS.value}`]: 'OpenRouter · $4 in / $20 out',
+    // The price stands with a model (Main's own row in the Main chat); a room's Main row says what it follows; the sources
+    // fold under one row and, opened, each still says how it is paid.
+    assert.deepEqual(markup('', { mainRow: 'main' }), { main: 'OpenRouter · $4 in / $20 out', sources: 'OpenRouter, OpenAI' });
+    assert.deepEqual(markup('', { open: true }), {
+        main: 'Follows Main · claude-opus-5.5',
+        sources: 'OpenRouter, OpenAI',
         'source:openrouter': '3 models · paid by key',
         'source:openai': '1 model · paid by key',
     });
@@ -185,7 +246,7 @@ test('in the composer list a priced model says its price where "paid by key" sto
 
 test('one rule decides where a processing tier prices the call instead of the catalog', async () => {
     const { tierPriced } = await import('../modules/route_editor_primitives.js');
-    assert.deepEqual(['', 'standard', 'fast', 'economy', undefined].map(tierPriced), [false, false, true, true, false]);
+    assert.deepEqual(['', 'standard', 'fast', 'economy', 'ultrafast', undefined].map(tierPriced), [false, false, true, true, true, false]);
 });
 
 test('the Agents chooser of an OpenRouter row shows the price too; a direct key reads as before', () => {
@@ -312,10 +373,12 @@ test('the capsule strip and the Change Main sheet say the price where "paid by k
     // name another tier than the figure's (or none), or where another processing tier prices the call.
     assert.equal(said.cacheWrite, '');
     const cached = { ...OPUS, price: { ...OPUS.price, cache_write: 6.4, cache_write_ttl: '1h' } };
-    const sheet = (options) => describeRoute(buildModelIndex({ catalog: { items: [cached] }, ...options }), { model: OPUS.value }).cacheWrite;
+    const sheet = (options, tier = '') => describeRoute(buildModelIndex({ catalog: { items: [cached] }, ...options }), { model: OPUS.value },
+        { tier }).cacheWrite;
     assert.equal(sheet({ cacheTier: '1h' }), 'Cache write: $6.40 per 1M tokens.');
-    assert.deepEqual([sheet({ cacheTier: '5m' }), sheet({ cacheTier: 'default' }), sheet({}), sheet({ cacheTier: '1h', tierPriced: true })],
-        ['', '', '', '']);
+    assert.equal(sheet({ cacheTier: '1h' }, 'standard'), 'Cache write: $6.40 per 1M tokens.');
+    assert.deepEqual([sheet({ cacheTier: '5m' }), sheet({ cacheTier: 'default' }), sheet({}), sheet({ cacheTier: '1h' }, 'fast'),
+        sheet({ cacheTier: '1h' }, 'economy'), sheet({ cacheTier: '1h' }, 'ultrafast')], ['', '', '', '', '', '']);
     for (const none of [undefined, {}, { cache_write: 0, cache_write_ttl: '1h' }, { cache_write: 0.00001, cache_write_ttl: '1h' },
         { cache_write: -1, cache_write_ttl: '1h' }, { cache_write: '6.4', cache_write_ttl: '1h' }, { cache_write: 6.4 }]) {
         assert.equal(cacheWriteWords(none, '1h'), '', JSON.stringify(none));
@@ -371,22 +434,27 @@ test('the Agents editor paints again for another language, and for its dictionar
     assert.equal(paint(), english, 'the same language and dictionary: nothing to paint again');
 });
 
-test('while Main or the default tier is on Fast or Economy the composer list names no catalog price; on Standard it does', async () => {
-    assert.equal(describeRoute(buildModelIndex({ catalog: { items: [OPUS] }, tierPriced: true }), { model: OPUS.value }).price, '');
+test('where a row\'s context runs on Fast, Ultrafast or Economy the composer list names no catalog price; on Standard it does', async () => {
+    // The catalog's price is Standard's: the context's tier decides (model_list.js asks it per row, `tierOf`).
+    const index = buildModelIndex({ catalog: { items: [OPUS] } });
+    const price = (tier) => describeRoute(index, { model: OPUS.value }, { tier }).price;
+    assert.deepEqual(['', 'standard', 'fast', 'ultrafast', 'economy'].map(price), ['$4 in / $20 out', '$4 in / $20 out', '', '', '']);
     const { createModelCatalogStore } = await import('../modules/model_catalog_store.js');
-    const shown = async (settings) => {
+    const read = async (settings) => {
         const store = createModelCatalogStore({ readCatalog: async () => ({ items: [OPUS] }), readPreferences: async () => ({}),
             readSettings: async () => settings });
         await store.read();
         await store.readConnections();
-        return describeRoute(store.index(), { model: OPUS.value }).price;
+        return { kept: describeRoute(store.index(), { model: OPUS.value }).price, main: store.tierPriced('main'), lead: store.tierPriced('lead') };
     };
-    assert.equal(await shown({}), '$4 in / $20 out');
-    assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'standard' }), '$4 in / $20 out');
-    assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'fast' }), '');
-    assert.equal(await shown({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"economy"}' }), '');
-    // The list serves Main and its rooms alike: a room's new work, a lead, would pay the default tier's price.
-    assert.equal(await shown({ OUROBOROS_PROCESSING_PREFERENCE: 'fast', OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'standard' } }), '');
+    // The window's index keeps the price whatever the tiers; the tiers say where a role pays another tier's.
+    assert.deepEqual(await read({}), { kept: '$4 in / $20 out', main: false, lead: false });
+    assert.deepEqual(await read({ OUROBOROS_PROCESSING_PREFERENCE: 'standard' }), { kept: '$4 in / $20 out', main: false, lead: false });
+    assert.deepEqual(await read({ OUROBOROS_PROCESSING_PREFERENCE: 'fast' }), { kept: '$4 in / $20 out', main: true, lead: true });
+    assert.deepEqual(await read({ OUROBOROS_MODEL_PROCESSING_PREFERENCES: '{"main":"economy"}' }), { kept: '$4 in / $20 out', main: true, lead: false });
+    // A room's new work, a lead, pays the default tier's price whatever Main's own one is.
+    assert.deepEqual(await read({ OUROBOROS_PROCESSING_PREFERENCE: 'fast', OUROBOROS_MODEL_PROCESSING_PREFERENCES: { main: 'standard' } }),
+        { kept: '$4 in / $20 out', main: false, lead: true });
 });
 
 test('a local role says the local model\'s window, never the window of a cloud id its slot still holds', async () => {

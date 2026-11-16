@@ -4,14 +4,16 @@ Two looks, both on the real page of a real server on its own port and data root.
 
 ``test_the_capsule_holds_on_a_large_catalog``: the Model capsule at a pane of 282 px and 581 px, on a 390 px phone and
 on a wide desktop, in Chromium and WebKit. Its catalog is answered by the test (several hundred model ids, twenty-two
-subscription accounts): the smoke server has no engine and no accounts to list. The composer does not move when the
-strip, the search or the list opens; Model keeps its value while its neighbours fold; nothing is wider than the screen.
+subscription accounts): the smoke server has no engine and no accounts to list. A press opens the Model sheet (owner
+12.11 «A»): above the row on a desk, a bottom sheet over a scrim in the stack layout. The composer does not move when
+the sheet opens, its sources unfold or sixty suggestions fill it; Model keeps its value while its neighbours fold;
+nothing is wider than the screen.
 
 ``test_model_choice_on_the_real_server``: nothing of the server is answered. The loopback provider lists its models,
 holds marked calls and refuses one model, so the page shows what the server itself publishes: a room following Main
-and with its own model, the open strip, Search, the Main sheet plain and with its lists, a running card, a queued
-card, the card's popover, a work on a fallback in amber with its three exits, and the arrow of a follower after Main
-changed. Each state is read from the page and pictured at the four widths in both themes for the owner
+and with its own model, the Main chat's open sheet and its field in use, the Main sheet plain and with its lists, a
+running card, a queued card, the card's sheet, a work on a fallback in amber with its three exits, and the arrow of a
+follower after Main changed. Each state is read from the page and pictured at the four widths in both themes for the owner
 (``OUROBOROS_UI_EVIDENCE_DIR``). The circle editor and the place sheet's Model field close the set; a place needs a
 connector the smoke server does not have, so the places list is answered by the test there, as in
 ``test_circle_model_browser``.
@@ -27,10 +29,29 @@ import pytest
 
 from tests import fixtures_mock_llm
 from tests._model_choice_browser import (
-    _CAPSULE, _CARD, MAIN, NEXT_STEP, OTHER, PICKED, SOURCE, Provider, _announce, _capsule_ready, _close_project,
-    _open_project, _post, _state, _work_of,
+    _CAPSULE,
+    _CARD,
+    _SHEET,
+    MAIN,
+    OFFERED,
+    OTHER,
+    PICKED,
+    SOURCE,
+    WORK_SCOPE,
+    Provider,
+    _announce,
+    _capsule_ready,
+    _close_project,
+    _close_sheet,
+    _open_project,
+    _open_sheet,
+    _post,
+    _row,
+    _state,
+    _work_of,
 )
-from tests.test_circle_model_browser import _catalog as _places_catalog, _circle, _place
+from tests.test_circle_model_browser import _catalog as _places_catalog
+from tests.test_circle_model_browser import _circle, _place
 from tests.test_effort_range_browser import _launch
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401 -- fixture
 
@@ -77,7 +98,7 @@ _FACTS_OVER = """() => [...document.querySelectorAll('.chat-model-row-facts')]
     .filter((node) => node.getClientRects().length && node.scrollWidth > node.clientWidth + 0.5)
     .map((node) => node.textContent)"""
 _LIST_GROUPS = """() => {
-    const list = document.querySelector('.ui-popup.chat-model-list .chat-model-rows, .card-model-pop .chat-model-rows');
+    const list = document.querySelector('.ui-popup.model-sheet .chat-model-rows');
     const groups = [{heading: '', models: []}];
     for (const node of list.children) {
         if (node.classList.contains('chat-model-section')) groups.push({heading: node.textContent, models: []});
@@ -85,7 +106,7 @@ _LIST_GROUPS = """() => {
     }
     return groups;
 }"""
-_FACT_LINES = """() => [...document.querySelectorAll('.ui-popup.chat-model-list .chat-model-row')].map(row => {
+_FACT_LINES = """() => [...document.querySelectorAll('.ui-popup.model-sheet .chat-model-row')].map(row => {
     const facts = row.querySelector('.chat-model-row-facts');
     const name = row.querySelector('.chat-model-row-id').getBoundingClientRect();
     const range = document.createRange();
@@ -127,31 +148,52 @@ _ROW = """() => {
     const row = document.querySelector('#page-chat .chat-toolbar-row');
     const model = document.querySelector('#chat-model-mode');
     const shown = (node) => Boolean(node) && node.getClientRects().length > 0 && node.getBoundingClientRect().width > 1;
-    const list = document.querySelector('.ui-popup.chat-model-list');
-    const listBox = list ? list.getBoundingClientRect() : null;
+    const sheet = document.querySelector('.ui-popup.model-sheet');
+    const sheetBox = sheet ? sheet.getBoundingClientRect() : null;
+    const rows = sheet ? [...sheet.querySelectorAll('.chat-model-row')] : [];
+    const fold = sheet?.querySelector('.chat-model-sources');
     return {
         area: box(document.querySelector('#chat-input-area')), field: box(document.querySelector('#chat-input')),
+        // How the field's height was set (chat_input_sizing.js): the selected mode and the written measured height.
+        sizing: `${document.querySelector('#chat-input').dataset.sizing || ''}`
+            + ` ${document.querySelector('#chat-input').style.getPropertyValue('--chat-input-height') || 'unwritten'}`
+            + ` ${getComputedStyle(document.querySelector('#chat-input')).height}`,
         messages: box(document.querySelector('#chat-messages')), row: box(row),
         value: model.querySelector('.chat-capsule-value').textContent, valueShown: shown(model.querySelector('.chat-capsule-value')),
-        glyphs: row.dataset.ownerGlyphs || '', open: model.dataset.open || 'false', search: model.dataset.search || '',
+        glyphs: row.dataset.ownerGlyphs || '', open: model.dataset.sheetOpen || 'false',
         neighbours: [...row.querySelectorAll('.chat-capsule:not(.chat-model-mode)')].map((el) => shown(el.querySelector('.chat-capsule-value, .chat-subagents-value'))),
         wide: document.documentElement.scrollWidth - window.innerWidth,
         out: [...row.querySelectorAll('.chat-capsule')].filter((el) => el.getClientRects().length && el.getBoundingClientRect().right > window.innerWidth + 0.5).map((el) => el.className),
-        rows: list ? list.querySelectorAll('.chat-model-row').length : 0,
-        factsOver: list ? [...list.querySelectorAll('.chat-model-row-facts')]
+        rows: rows.length, first: rows.slice(0, 2).map((node) => node.dataset.row),
+        main: rows[0] ? [rows[0].querySelector('.chat-model-row-id')?.textContent, rows[0].querySelector('.chat-model-row-tag')?.textContent || ''] : null,
+        fold: fold ? { expanded: fold.getAttribute('aria-expanded'), names: fold.querySelector('.chat-model-row-facts').textContent } : null,
+        sources: sheet ? sheet.querySelectorAll('.chat-model-source').length : 0,
+        factsOver: sheet ? [...sheet.querySelectorAll('.chat-model-row-facts')]
             .filter((node) => node.scrollWidth > node.clientWidth + 0.5).map((node) => node.textContent) : [],
-        listInside: listBox ? listBox.left >= -0.5 && listBox.right <= window.innerWidth + 0.5 && listBox.top >= -0.5 && listBox.bottom <= window.innerHeight + 0.5 : null,
-        listOverRow: listBox ? listBox.bottom <= row.getBoundingClientRect().top + 1 : null,
+        sheetInside: sheetBox ? sheetBox.left >= -0.5 && sheetBox.right <= window.innerWidth + 0.5 && sheetBox.top >= -0.5 && sheetBox.bottom <= window.innerHeight + 0.5 : null,
+        sheetOverRow: sheetBox ? sheetBox.bottom <= row.getBoundingClientRect().top + 1 : null,
+        bottom: sheet ? sheet.dataset.sheet === 'bottom' : null, scrim: Boolean(document.querySelector('.model-sheet-scrim')),
+        layout: document.documentElement.dataset.layout, inField: Boolean(sheet) && document.activeElement === sheet.querySelector('.chat-model-query'),
     };
 }"""
 
 
-def _capsule_walk(page, tag: str) -> None:
+def _capsule_walk(page, tag: str, *, finger: bool = False) -> None:
+    press = page.tap if finger else page.click
+
     def still(now: dict, was: dict, what: str) -> None:
         assert now["area"] == was["area"] and now["field"] == was["field"] and now["messages"] == was["messages"], \
-            (tag, what, "the composer and the transcript stay where they were", was, now)
+            (tag, what, "the composer and the transcript stay where they were",
+             f"field sizing {was['sizing']} -> {now['sizing']}", was, now)
         assert now["wide"] <= 0 and not now["out"] and not now["factsOver"], (tag, what, now)
         assert now["value"] == "gpt-6-astra", (tag, what, "the capsule still holds Main's model", now)
+
+    def placed(now: dict, what: str) -> None:
+        assert now["open"] == "true" and now["sheetInside"], (tag, what, "the sheet is on screen", now)
+        if now["layout"] == "stack":
+            assert now["bottom"] and now["scrim"], (tag, what, "the stack layout's bottom sheet over a scrim", now)
+        else:
+            assert now["sheetOverRow"] and not now["bottom"] and not now["scrim"], (tag, what, "it floats above the row", now)
 
     closed = page.evaluate(_ROW)
     assert closed["wide"] <= 0 and not closed["out"], (tag, closed)
@@ -159,46 +201,50 @@ def _capsule_walk(page, tag: str) -> None:
     if closed["glyphs"] == "true":
         assert not any(closed["neighbours"]), (tag, "the neighbours folded to their glyphs; Model did not", closed)
 
-    page.click("#chat-model-mode .chat-model-head")
-    page.wait_for_selector('#chat-model-mode[data-open="true"] .chat-model-find', timeout=10_000)
-    page.wait_for_timeout(500)  # the strip's own opening
+    press("#chat-model-mode .chat-model-head")
+    page.wait_for_selector(".ui-popup.model-sheet .chat-model-sources", timeout=20_000)
+    page.wait_for_timeout(500)  # the sheet's own entrance
     opened = page.evaluate(_ROW)
-    still(opened, closed, "the strip open")
+    still(opened, closed, "the sheet open")
+    placed(opened, "the sheet open")
+    assert opened["inField"] is not finger, (tag, "a mouse starts in the field; a finger's press raises no keyboard", opened)
+    assert opened["first"] == ["main", "sources"] and opened["main"] == ["gpt-6-astra", "Main"], \
+        (tag, "Main's own model, then the sources it can lead through, folded", opened)
+    assert opened["fold"]["expanded"] == "false" and " + " in opened["fold"]["names"], (tag, opened)
 
-    page.click("#chat-model-mode .chat-model-find")
-    page.wait_for_selector(".ui-popup.chat-model-list .chat-model-row", timeout=20_000)
-    page.wait_for_timeout(400)
-    listed = page.evaluate(_ROW)
-    still(listed, closed, "the search and its list open")
-    assert listed["search"] == "true" and listed["listInside"] and listed["listOverRow"], (tag, "the list floats above the row, on screen", listed)
-    assert listed["rows"] >= 5, (tag, "Main, then the sources", listed)
-    # A press in the floating list (its rule line chooses nothing) is the capsule's own: the search and its hint stay.
-    rule = page.locator(".ui-popup.chat-model-list .chat-model-rule")
-    rule.tap() if tag.endswith("phone") else rule.click()
+    press(".ui-popup.model-sheet .chat-model-sources .chat-model-cell")
+    page.wait_for_function("() => document.querySelectorAll('.ui-popup.model-sheet .chat-model-source').length >= 5", timeout=10_000)
+    page.wait_for_timeout(300)
+    unfolded = page.evaluate(_ROW)
+    still(unfolded, closed, "the sources unfolded")
+    placed(unfolded, "the sources unfolded")
+    assert unfolded["fold"]["expanded"] == "true" and unfolded["sources"] >= 5, (tag, "Main, then the sources", unfolded)
+    # The floating sheet owns its non-action text too: a press there neither closes it nor picks a model.
+    press(".ui-popup.model-sheet .model-tier-scope")
     page.wait_for_timeout(200)
-    kept = page.evaluate("() => { const m = document.querySelector('#chat-model-mode');"
-                         " return [m.dataset.open, m.dataset.search, m.querySelector('.ui-hint').hidden]; }")
-    assert kept == ["true", "true", False], (tag, "a press in its own list keeps the capsule's hint", kept)
+    kept = page.evaluate(_ROW)
+    still(kept, closed, "a press inside the sheet")
+    placed(kept, "a press inside the sheet")
 
-    page.fill("#chat-model-mode .chat-model-query", "model-1")
-    page.wait_for_function("() => document.querySelectorAll('.ui-popup.chat-model-list .chat-model-row').length >= 60", timeout=10_000)
+    page.fill(".ui-popup.model-sheet .chat-model-query", "model-1")
+    page.wait_for_function("() => document.querySelectorAll('.ui-popup.model-sheet .chat-model-row').length >= 60", timeout=10_000)
     page.wait_for_timeout(300)
     typed = page.evaluate(_ROW)
     still(typed, closed, "sixty suggestions listed")
-    assert typed["listInside"] and typed["listOverRow"], (tag, typed)
-    assert page.evaluate("() => document.querySelector('.ui-popup.chat-model-list').innerText.includes('keep typing')"), "the rest wait for another letter"
+    placed(typed, "sixty suggestions listed")
+    assert page.evaluate("() => document.querySelector('.ui-popup.model-sheet').innerText.includes('keep typing')"), "the rest wait for another letter"
 
-    # Search's former position can be over a neighbour once the wide strip closes. Move away before Escape
-    # so the neighbour's legitimate hover opening does not become the closed-row comparison.
-    page.mouse.move(1, 1)
-    for _ in range(3):  # clears the field, leaves the search, closes the capsule
+    if not finger:
+        page.mouse.move(1, 1)  # a neighbour's legitimate hover opening is not the closed-row comparison
+    for _ in range(2):  # clears the field, then closes the sheet
         page.keyboard.press("Escape")
         page.wait_for_timeout(150)
-    page.wait_for_function("() => document.querySelector('#chat-model-mode').dataset.open !== 'true' && !document.querySelector('.ui-popup.chat-model-list')",
+    page.wait_for_function("() => document.querySelector('#chat-model-mode').dataset.sheetOpen !== 'true' && !document.querySelector('.ui-popup.model-sheet')",
                            timeout=10_000)
     page.wait_for_timeout(500)
     again = page.evaluate(_ROW)
     assert page.locator('.chat-toolbar-row .chat-capsule[data-open="true"]').count() == 0
+    assert not again["scrim"], (tag, "the scrim goes with its sheet", again)
     assert again["area"] == closed["area"] and again["row"] == closed["row"], (tag, "closed again, as it was", closed, again)
     assert again["valueShown"] and again["neighbours"] == closed["neighbours"], (tag, "Model shows its value again", again)
 
@@ -232,7 +278,7 @@ def test_the_capsule_holds_on_a_large_catalog(direct_server_with_data, engine): 
             serve(page)
             page.goto(url, wait_until="domcontentloaded", timeout=30_000)
             _capsule_ready(page, "#chat-model-mode")
-            _capsule_walk(page, f"{engine}-phone")
+            _capsule_walk(page, f"{engine}-phone", finger=True)
         finally:
             browser.close()
 
@@ -306,6 +352,8 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
     shots = pathlib.Path(os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(tmp_path)))
     shots.mkdir(parents=True, exist_ok=True)
     seen: dict = {}
+    # What a picture shows wrong is collected and asserted after the walk, so one frame does not hide the others.
+    problems: list = []
 
     with sync_playwright() as pw:
         browser, desk = _launch(pw, "chromium", viewport=WIDE)
@@ -318,26 +366,34 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
             for theme in ("dark", "light"):
                 _theme(page, theme)
                 page.screenshot(path=str(shots / f"{number}-{name}-{tag}-{theme}.png"), animations="disabled")
-                assert page.evaluate(_WIDE) <= 0, (number, name, tag, "nothing is wider than the screen")
-                assert page.evaluate(_FACTS_OVER) == [], (number, name, tag, "the route's facts fit inside its row")
-                if number in {"04", "09", "10"}:
+                where = (number, name, tag, theme)
+                if page.evaluate(_WIDE) > 0:
+                    problems.append((*where, "something is wider than the screen", page.evaluate(_WIDE)))
+                if page.evaluate(_FACTS_OVER):
+                    problems.append((*where, "a route's facts overflow its row", page.evaluate(_FACTS_OVER)))
+                if number in {"03", "09", "10"}:
                     groups = page.evaluate(_LIST_GROUPS)
-                    assert [group["heading"] for group in groups] == ["", "Recent", "OpenAI-compatible endpoint"], groups
-                    for group in groups:
-                        assert len(group["models"]) == len(set(group["models"])), (number, tag, "each section lists a model once", group)
-                    assert sum(group["models"].count("mock-main") for group in groups) == 1, groups
                     seen[f"list-{number}-{tag}-{theme}"] = groups
-                if number == "04":
+                    if [group["heading"] for group in groups] != ["", "Recent", "OpenAI-compatible endpoint"]:
+                        problems.append((*where, "Main, Recent, then the one source's models", groups))
+                    if any(len(group["models"]) != len(set(group["models"])) for group in groups):
+                        problems.append((*where, "each section lists a model once", groups))
+                    if sum(group["models"].count("mock-main") for group in groups) != 1:
+                        problems.append((*where, "mock-main is listed once", groups))
+                if number == "03":
                     facts = page.evaluate(_FACT_LINES)
                     seen[f"facts-{tag}-{theme}"] = facts
                     if tag == "282":
-                        wrapped = [fact for fact in facts if len(fact["lines"]) > 1]
-                        assert wrapped, (tag, "the long source facts wrap at this width", facts)
+                        # DESIGN "Composer owner controls": where a line cannot hold both, the facts go under the
+                        # model's name, which keeps its line, and wrapped facts read from the same start.
+                        wrapped = [fact for fact in facts if fact["lines"] and (len(fact["lines"]) > 1 or fact["lines"][0]["top"] >= fact["nameBottom"] - 0.5)]
+                        if not wrapped:
+                            problems.append((*where, "the long source facts wrap at this width", facts))
                         for fact in wrapped:
                             first = fact["lines"][0]
-                            assert first["top"] >= fact["nameBottom"] - 0.5, fact
-                            assert abs(first["left"] - fact["nameLeft"]) <= 0.5, fact
-                            assert all(abs(line["left"] - first["left"]) <= 0.5 for line in fact["lines"][1:]), fact
+                            if not (first["top"] >= fact["nameBottom"] - 0.5 and abs(first["left"] - fact["nameLeft"]) <= 0.5
+                                    and all(abs(line["left"] - first["left"]) <= 0.5 for line in fact["lines"][1:])):
+                                problems.append((*where, "wrapped facts start under the model's name", fact))
             _theme(page, "dark")
 
         def everywhere(number: str, name: str, stage, leave=lambda page: None) -> None:
@@ -366,24 +422,18 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
             page.goto(server["url"], wait_until="domcontentloaded", timeout=30_000)
             _capsule_ready(page, "#chat-model-mode")
 
-        def open_strip(page, capsule: str = "#chat-model-mode") -> None:
-            page.click(f"{capsule} .chat-model-head")
-            page.wait_for_selector(f'{capsule}[data-open="true"] .chat-model-find', timeout=10_000)
-            page.wait_for_timeout(500)
+        def open_sheet(page, capsule: str = "#chat-model-mode") -> None:
+            _open_sheet(page, capsule)
+            page.wait_for_timeout(500)  # the sheet's own entrance
 
         def close_capsule(page) -> None:
-            for _ in range(3):
-                page.keyboard.press("Escape")
-                page.wait_for_timeout(120)
-            page.wait_for_function("() => !document.querySelector('.chat-model-mode[data-open=\"true\"]') && !document.querySelector('.ui-popup.chat-model-list')")
+            _close_sheet(page)
 
         def ask_main(page, route: str) -> None:
             """The Main chat's pick up to its confirming sheet."""
-            open_strip(page)
-            page.click("#chat-model-mode .chat-model-find")
-            row = f'.ui-popup.chat-model-list .chat-model-row[data-row="route|{route}"]'
-            page.wait_for_selector(row, timeout=20_000)
-            page.click(row)
+            open_sheet(page)
+            page.wait_for_selector(_row(route), timeout=20_000)
+            page.click(f"{_row(route)} .chat-model-cell")
             page.wait_for_selector(".confirm-dialog [data-main-followers]", timeout=20_000)
             page.wait_for_timeout(300)
             proposed = page.evaluate("""() => {
@@ -422,12 +472,13 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
             cancel_sheet(desk)
             assert _state(desk)["main_route"]["model"] == MAIN, "a cancelled sheet writes nothing"
 
-            # --- The room chooses its own model. 02: its closed capsule. 03: Main's open strip. 04: Search with its list.
+            # --- The room chooses its own model. 02: its closed capsule. 03: the Main chat's open sheet. 04: its field
+            #     in use.
             _open_project(desk, alpha)
-            open_strip(desk, capsule)
-            desk.click(f"{capsule} .chat-model-find")
-            desk.click(f'.ui-popup.chat-model-list .chat-model-row[data-row="route|{PICKED}"]')
+            open_sheet(desk, capsule)
+            desk.click(f"{_row(PICKED)} .chat-model-cell")
             desk.wait_for_function("(sel) => document.querySelector(sel).dataset.own === 'true'", arg=capsule, timeout=20_000)
+            desk.wait_for_function("() => !document.querySelector('.ui-popup.model-sheet')", timeout=10_000)  # a room's pick closes it
             own = desk.evaluate(_CAPSULE, capsule)
             assert own["value"] == "mock-picked" and own["name"] != "Main", own
             _close_project(desk)
@@ -439,19 +490,32 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
                 page.wait_for_timeout(300)
 
             in_room(alpha, "02", "capsule-room-model", room_own)
-            everywhere("03", "strip-open", open_strip, close_capsule)
-            open_strip(desk)
-            strip = desk.evaluate(_CAPSULE, "#chat-model-mode")
-            assert strip["strip"][0] == "mock-main" and "mock-picked" in strip["strip"] and strip["strip"][-1] == "Search", strip
+            everywhere("03", "sheet-open", open_sheet, close_capsule)
+            open_sheet(desk)
+            sheet = desk.evaluate(_SHEET)
+            seen["main_sheet"] = sheet
+            first = sheet["groups"][0]["rows"]
+            assert [(row["row"], row["id"], row["tag"], row["selected"]) for row in first] == [("main", "mock-main", "Main", True)], sheet
+            assert sheet["headings"][0] == "Recent" and [row["id"] for row in sheet["groups"][1]["rows"]] == ["mock-picked"], \
+                ("a room's pick is a recent model everywhere", sheet)
+            assert sheet["offered"] == OFFERED and sheet["chosen"] == "" and not sheet["reset"], ("Main's strip offers no Ultrafast", sheet)
+            assert sheet["scope"] == "Default · Standard · for Main and its new subagents; no running work follows it now", sheet
             close_capsule(desk)
 
             def search(page) -> None:
-                open_strip(page)
-                page.click("#chat-model-mode .chat-model-find")
-                page.wait_for_selector(f'.ui-popup.chat-model-list .chat-model-row[data-row="route|{OTHER}"]', timeout=20_000)
+                open_sheet(page)
+                page.fill(".ui-popup.model-sheet .chat-model-query", "mock-o")
+                page.wait_for_selector(_row(OTHER), timeout=20_000)
                 page.wait_for_timeout(300)
 
-            everywhere("04", "search-list", search, close_capsule)
+            everywhere("04", "sheet-search", search, close_capsule)
+            search(desk)
+            found = desk.evaluate(_SHEET)
+            seen["search"] = found
+            rows = [row for group in found["groups"] for row in group["rows"]]
+            assert rows[0]["row"] == f"route|{OTHER}" and rows[0]["active"], ("the best match is first and active", found)
+            assert rows[-1]["row"].startswith("typed:") and rows[-1]["id"] == "Use “mock-o” as typed", ("any id can be used as typed", found)
+            close_capsule(desk)
 
             # --- Two workers in separate Projects (each Project admits one root): the next two wait behind them.
             for marker in ("ROOM_WIRE_BLOCK", "ROOM_WIRE_FOLLOW", "ROOM_WIRE_FALL"):
@@ -502,24 +566,25 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
             def popover(page) -> None:
                 _show(page, follower)
                 page.click(f"{_card(follower)} button.card-model-fact")
-                page.wait_for_selector(".card-model-pop .chat-model-row", timeout=20_000)
+                page.wait_for_selector(".ui-popup.model-sheet .card-model-head", timeout=20_000)
+                page.wait_for_selector(".ui-popup.model-sheet .chat-model-row", timeout=20_000)
                 page.wait_for_timeout(350)
 
             def close_popover(page) -> None:
                 page.keyboard.press("Escape")
-                page.wait_for_function("() => !document.querySelector('.card-model-pop')")
+                page.wait_for_function("() => !document.querySelector('.ui-popup.model-sheet')")
 
             _close_project(desk)
-            in_room(site, "09", "card-popover", popover, close_popover)
+            in_room(site, "09", "card-sheet", popover, close_popover)
             _fit_room(desk, site, 581)
             popover(desk)
-            said = desk.evaluate("""() => ({ title: document.querySelector('.card-model-pop-title').innerText,
-                acts: document.querySelectorAll('.card-model-pop .card-model-act').length,
-                main: document.querySelector('.card-model-pop .chat-model-row').innerText.replace(/\\s+/g, ' ').trim(),
-                recent: document.querySelector('.card-model-pop .chat-model-section')?.innerText, rule: document.querySelector('.card-model-pop .chat-model-rule').innerText })""")
+            said = desk.evaluate(_SHEET)
             seen["popover"] = said
-            assert said == {"title": "Model for this work · follows Main", "acts": 0, "main": "mock-main Main this work follows Main",
-                            "recent": "Recent", "rule": NEXT_STEP}, said
+            main_row = said["groups"][0]["rows"][0]
+            assert said["title"] == "Model for this work · follows Main" and said["acts"] == [], said
+            assert (main_row["row"], main_row["id"], main_row["facts"], main_row["selected"]) == ("main", "Main", "this work follows Main", True), said
+            assert said["headings"][0] == "Recent" and said["chosen"] == "", said
+            assert said["scope"] == f"Default · Standard · {WORK_SCOPE}", ("its tier applies from its next call", said)
             close_popover(desk)
             _close_project(desk)
 
@@ -543,15 +608,14 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
                 page.wait_for_function("(sel) => Boolean(document.querySelector(sel + ' .card-model-fact.model-fallback'))", arg=_card(falling), timeout=60_000)
                 _show(page, falling)
                 page.click(f"{_card(falling)} button.card-model-fact")
-                page.wait_for_selector(".card-model-pop .card-model-act", timeout=20_000)
+                page.wait_for_selector(".ui-popup.model-sheet .card-model-act", timeout=20_000)
                 page.wait_for_timeout(350)
 
             _close_project(desk)
             in_room(logs, "10", "card-fallback", exits, close_popover)
             _fit_room(desk, logs, 581)
             exits(desk)
-            offered = desk.evaluate("""() => ({ title: document.querySelector('.card-model-pop-title').innerText,
-                acts: [...document.querySelectorAll('.card-model-pop .card-model-act')].map((node) => [node.dataset.act, node.querySelector('.card-model-act-label').innerText]) })""")
+            offered = desk.evaluate(_SHEET)
             seen["exits"] = offered
             assert offered["acts"] == [["return", "Return to mock-broken"], ["wait", "Wait for mock-broken"], ["keep", "Keep on mock-fallback"]], offered
             assert offered["title"].startswith("Left mock-broken at "), offered
@@ -597,7 +661,7 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
             _fit_room(desk, logs, 581)
             exits(desk)
             with desk.expect_response(lambda r: r.url.endswith(f"/api/tasks/{falling}/model") and r.request.method == "POST") as kept_reply:
-                desk.click('.card-model-pop [data-act="keep"]')
+                desk.click('.ui-popup.model-sheet [data-act="keep"]')
             accepted = kept_reply.value.json()
             assert kept_reply.value.status == 200 and accepted["applied"] == "next_step", accepted
             assert accepted["lead"]["basis"] == "fallback", "the call in flight still runs on its fallback"
@@ -655,6 +719,7 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
             everywhere("13", "place-sheet-model", place_sheet, back_to_chat)
         finally:
             provider.release_all()
+            seen["problems"] = problems
             (shots / "real-server-seen.json").write_text(json.dumps(seen, indent=2, default=str), encoding="utf-8")
             (shots / "real-server-models.json").write_text(json.dumps(
                 [{"model": body.get("model"), "marker": provider.marker_of(body)} for body in provider.received]), encoding="utf-8")
@@ -667,3 +732,4 @@ def test_model_choice_on_the_real_server(direct_server_with_data, monkeypatch, t
                 pass
             phone_browser.close()
             browser.close()
+    assert not problems, problems

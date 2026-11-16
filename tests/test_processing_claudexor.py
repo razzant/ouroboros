@@ -73,7 +73,9 @@ def test_response_received_with_proved_no_generation_reprepares_standard(setup, 
     assert [row["state"] for row in finals] == ["released", "settled"]
     assert finals[0]["candidate_raw_sha256"] != finals[1]["candidate_raw_sha256"]
     assert all(row["processing_preference"] == preference for row in finals)
-    assert usage["processing"] == receipt()
+    # The engine's receipt answers the Standard retry; the call asked the work's tier, which its receipt keeps.
+    assert usage["processing"] == {**receipt(), "requested": preference, "reason": "submitted_mode_differs"}
+    assert finals[1]["processing"] == receipt()
 
 
 @pytest.mark.parametrize("axis", ["unknown_outcome", "exact_native", "standard"])

@@ -486,8 +486,7 @@ keeps the saved value and says why. No scope selector or extra settings row.
 **Model is the model new work here starts on.** Its glyph is the mark of the source that model is reached through
 (a source without a mark of its own shows its initial, never an invented logo), lit only while the room chose its
 own; then the name is that source. Closed, it always shows the room's choice, never a running work's model, and
-wears no mark for one; open, its hint adds one fact line when works here run on other
-models, over `Applies to new work here; running work keeps its model.` In the Main chat the capsule is Main itself:
+wears no mark for one; a tier other than Standard follows the model in the accent's word (`gpt-6-astra · Fast`). In the Main chat the capsule is Main itself:
 a pick asks first in the shared confirm dialog (what Main becomes and was, the route's facts,
 `model_roles.MAIN_FOLLOW_NOTE`, `composer_model.MAIN_CACHE_NOTE` with the catalog's cache-write price where it
 states one (§7), and in one line the pinned account and manual window it resets), then writes Main.
@@ -497,21 +496,40 @@ of works is incomplete), then what is not on Main now — running and queued wor
 rooms that start new work on their own model — each with its own tick to move it too. Nothing is ticked
 beforehand; a work on a fallback is listed as one and never counted among those that will switch; a work the
 server offers no model control for has no tick. Each tick is one act after the Main write (a work follows Main
-again; a room's own model is cleared), there is no batch, and a second sheet says each one's own result. Its strip is `Main · the two most recent models · Search` (one recent in the stack layout)
-under the strips' crimson wash, since a model is a choice; a press chooses, arrows only move. **Search is a field in the row; its suggestions float
-above the row like the hint and never move the composer**: Main, the recents, then the sources
-that can lead a work (those Settings offers the Main role, never agent sessions). With one source, its models stand
-under its own name without a source step; when Main has a row above, its model is omitted from this section.
-A recent may also appear under its source. A row is one model through one source, however many accounts list it, never an account: the source, whether
-it is a subscription or paid by key (in its place the catalog's published price per 1M tokens where it states one and
-neither Main's processing tier nor the default one, which every lead pays, is Fast or Economy:
-`OpenRouter · $4 in / $20 out`), its window when known (an unknown window is omitted), `Unavailable` when no
-account can serve it now; where a line cannot hold both, the facts go under the model's name, which keeps its line,
-and wrapped facts read from the same start on each line. Search spans the sources, a model once per provider; a key that cannot send keeps
-Settings' "(no key)", "(off)", "(removed)"; where only Main can lead, the list says so and leads to Settings ›
-Accounts and keys. The catalog suggests and never admits: any id can be used as typed. It is read when the capsule opens,
-never polled. Under a finger opening raises no keyboard: the field takes focus on its own press. Escape clears the
-field, then leaves the search, then closes. A room's pick posts at once; Send waits for it, Panic never does.
+again; a room's own model is cleared), there is no batch, and a second sheet says each one's own result.
+
+**A press opens the Model sheet** (never hover), the one exception to inline capsules: a floating sheet above the row
+(a modal bottom sheet in the stack layout: its scrim's press or Back closes it first) that never moves the composer
+and leaves with its room. From the top: the field (`Model or source`), `Main · Follows Main · <its model>` (in the Main chat, Main's
+own model), `Pinned`, `Recent` (the room's own choice first), then the sources that can lead a work (those Settings
+offers the Main role, never agent sessions): one source's models at once, several under `All sources · Codex,
+OpenRouter + 7`. Main's row is the only way to follow Main; every other row is that route, Main's model included.
+A row is one model through one source, however many accounts list it, never an account: the source, whether it is a
+subscription or paid by key (in its place the price a role's line says, §7, where the tier this pick
+would run on here is Standard: `OpenRouter · $4 in / $20 out`), its window when known, `Unavailable`
+when no account can serve it now; where a line cannot hold both, the facts go under the model's name, which keeps its
+line, and wrapped facts read from the same start. Its Pin (the Projects' glyph) keeps that route, unlisted ones
+too, in `Pinned` for every room and window; it chooses nothing, writes no recent and leaves the sheet open; a mouse
+sees an unpinned row's Pin on hover or focus, a finger always. The field drives the list as a grid: Up and Down
+move among rows, then Right and Left between that row's model and its Pin (until then the caret), Enter presses
+either; the active row stays its model's. Tab leaves for the tier. Search spans the sources, a model once per provider; a key that cannot send keeps Settings'
+"(no key)", "(off)", "(removed)"; where only Main can lead, the list says so and leads to Settings › Accounts and keys.
+The catalog suggests and never admits: any id can be used as typed. It is read when the sheet opens, never polled.
+Under a finger opening raises no keyboard: the field takes focus on its own press. Escape clears the field, then
+closes. A room's pick posts at once and closes; Send waits for it, Panic never does.
+
+**The tier strip** stands at the sheet's foot: `Flex · Standard · Fast` (Flex is the stored `economy`), `Ultrafast` too
+where the route's source and model both list it and never for Main, the scope's own choice filled, `Default` beside
+it while there is one to leave. Default takes Main's tier while the scope follows Main, else the default one, and that
+tier wears a ring; an explicit Standard is a choice, never Default. Under it what the choice applies to and now is
+(`Default · Standard as Main · for new work here and its new subagents without a tier of their own; running work keeps
+its own`; in the Main chat `for Main, 3 running works that follow it and their new subagents`, counting only works on
+Main without a tier of their own; on a card `for this work from its next call and its new subagents …`, its last call's
+deviation in the sheet's head) and, under the mouse or focus before any press (a finger only taps), in a line as tall
+as its tallest, what that tier means on this route: listed, `Not confirmed for <model> here: a provider may serve it
+as Standard`, or `<source> does not list <tier> for <model>: its calls go as Standard`. No tier is refused or waited
+for; a proven refusal before generation continues as Standard, its receipt keeping the tier asked, which the card
+then says. Each work captures its room's tier once at admission; a press writes at once and leaves the sheet open.
 
 Each is a neutral **capsule** of the pills' height — glyph, name, value: `Main gpt-6-astra`, `Subagents Auto`,
 `Context Max`, `Effort X-High`; the name in secondary ink at 500, the value in meta ink at 600,
@@ -526,8 +544,8 @@ Its dot marks the chosen arc when they differ; `Mixed` lights the observed modes
 Never a fill level. Subagents' network (owner 27.10, G) joins Ouroboros to three subagents: Off lights none,
 Auto one subagent/thread, Swarm all subagents and their connecting threads.
 
-**A capsule opens inline, never as a dropdown/panel, one at a time** (owner 11.10; panels tried 26.10,
-withdrawn 27.10); its value yields to the strip. Context: Nano · Low · Max under a glass thumb: the strip's
+**Subagents, Context and Effort open inline, never as a dropdown/panel, one at a time** (owner 11.10; panels tried 26.10,
+withdrawn 27.10; Model's sheet is the exception above); its value yields to the strip. Context: Nano · Low · Max under a glass thumb: the strip's
 crimson wash, Nano its Project's; Low keeps its neutral word on that wash, since a level the owner chose is never
 a grey plate; choosing posts at once, then waits for the answer. Subagents: Off · Auto · Swarm, likewise, Off on
 the same wash. Open, one
@@ -575,7 +593,7 @@ scroll decides, as with Safari's bars: history paging in or out, rows arriving o
 growing, a swipe begun in a card's frame and the app's own jump (the waiting pill
 to a question) move nothing (`web/modules/composer_fold.js`; owner 19.10).
 
-**Hover is an accelerator; the press always works.** With a hovering fine pointer a
+**Hover is an accelerator; the press always works.** With a hovering fine pointer an inline
 capsule opens ~160 ms after arrival (not while the other is open) and closes
 ~300 ms after it leaves its zone (the capsule, its hint and the corridor between,
 a few px wider; never the message field) unless a press pinned it; the press unpins;
@@ -2463,12 +2481,15 @@ CSS alone clips a long quotation, the shared `Show all` / `Show less` control ex
 by press or tap, and an excerpt marked by the server is labelled as an excerpt. When the next step will run on another route the
 fact shows both, `gpt-6-astra → glm-5.3 at the next step` (`when it starts` for a queued work), so a change of
 Main never looks failed while a call in flight finishes. Where the server offers the work's `model` control the
-fact is a quiet capsule in the line's own ink (stronger for a model of the work's own) that opens a popover
-anchored to it, so nothing in the transcript moves: whose model this is, then the Model capsule's own field and
-list — Main, the recent models, Search. The list's Main row is the one way to follow Main, as `Main` is in the
-capsule's strip, and its facts say so (`this work will follow Main`; `this work follows Main` on a follower).
-A pick is one act, and its answer says when it applies: `Switches at the next step; the running call
-finishes.` or, for a queued work, `Applies when it starts.` A refused act is said in the popover in the owner's
+fact is a quiet capsule in the line's own ink (stronger for a model of the work's own) that opens the Model sheet
+anchored to it, so nothing in the transcript moves: whose model this is first, then the field, the list and this
+work's own tier. The list's Main row is the one way to follow Main, and its facts say so (`this work will follow
+Main`; `this work follows Main` on a follower). A pick or a tier is one act, and its answer says when it applies:
+`Switches at the next step; the running call finishes.` or, for a queued work, `Applies when it starts.`; a tier
+act moves nothing else (its fallback, wait, account and window stay); new subagents without a tier of their own take
+the tier the work runs on, Main's included, started ones keep theirs.
+After the model the line names a tier other than Standard and, when its newest call was served otherwise, that too
+(`Fast · Fast asked · served Standard`). A refused act is said in the popover in the owner's
 words, by the server's reason; when the server saved the decision and only its delivery failed, `Retry` sends
 the same request again. Without the offered control the fact is plain text: a control is the
 server's decision and is never guessed. A card whose work publishes no such fact (an older record, a child, a
@@ -2814,12 +2835,13 @@ picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the
 confirming sheet says it before it writes Main, with one more fact (`composer_model.MAIN_CACHE_NOTE`: what follows
 Main may write its start to the new model's cache again) and, where the catalog states it for the install's cache
 tier, the price of a cache write. A model suggestion and the line under a role show the catalog's
-published price per 1M tokens where it states a whole one and the role pays it (not on Fast or Economy), which never
-sorts or filters the list; the line under an API role whose price is not that says `Price unknown`. The line under a
-role also says the model's window in the list's words (`$4 in / $20 out per 1M tokens · 1M window`): the one its
-route is sized with when known, else the catalog's; an unknown window is omitted. In setup the catalog is the draft's
-own (a key typed there lists and prices its models before anything is saved), and the limits step names what its
-limits cannot count, as Dashboard › Costs does (`Not counted: …`). Nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
+published price per 1M tokens where it states a whole one the role pays (not on Fast or Flex), never sorting or
+filtering the list; an entry priced only for text off-peak says `Estimated for text, off-peak · USD only`, no
+figure, except under Vision, whose calls send images; there, as under any API role without a price it pays, the
+line says `Price unknown`. The line also says the model's window in the list's words (`$4 in / $20 out per 1M
+tokens · 1M window`): the one its route is sized with, else the catalog's, else none. In setup the catalog is the draft's own (a key typed
+there lists and prices its models before any save); its limits step says Dashboard › Costs' one line:
+`Not counted: …`, then `Partly counted: …` with each group's condition. Nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
 independently. Fallbacks use the same row in their saved order, with adjacent
@@ -2876,7 +2898,7 @@ the owner, never a field placeholder or help-text instruction, never the
 primary displayed value; the exact stored id may appear in secondary details
 (Agents use Details & history). A configured-subagent reference is the one place a stored spelling
 names a thing: a roster row is labelled by its handle — its route target plus
-the facets that row really runs with, defaults omitted — because a friendlier
+the row's own configured facets, defaults omitted — because a friendlier
 stored label rots as soon as the owner re-points the row. The route identity chip names the source (API · OpenAI, API · OpenRouter · Claude credits,
 Codex · model, Claude Code · agent), not the channel alone. A last-run receipt is shown
 against the route that produced it: when the row's route changed since, the

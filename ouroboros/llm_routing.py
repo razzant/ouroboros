@@ -15,12 +15,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.request_wire_recovery import request_wire_scoped
 from ouroboros.model_wait import dispatch_deadline_remaining_sec
-from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS
+from ouroboros.openrouter_attribution import OPENROUTER_APP_HEADERS, is_openrouter_endpoint
 from ouroboros.provider_connections import connection_rows, connection_values
 from ouroboros.provider_models import (
     CONNECTIONS_KEY,
@@ -131,6 +132,24 @@ def resolve_target(model: str, settings: Optional[Dict[str, Any]] = None, *,
 _DIRECT_LANE = {"supports_openrouter_extensions": False, "supports_generation_cost": False}
 
 
+def _remote_http_client(target: Dict[str, Any], *, async_client: bool = False) -> Tuple[Any, Dict[str, str]]:
+    """The keepalive client and default headers for ``target``'s SDK client.
+
+    A target that refuses redirects (an attributed compatible OpenRouter endpoint) on an SDK
+    that cannot build a client holding that refusal keeps its route, key and SDK default client;
+    only the app identity the route added is left off, never carried by a followed redirect."""
+    from ouroboros.net_transport import keepalive_http_client
+
+    refuses = target.get("follow_redirects") is False
+    http_client = keepalive_http_client(async_client=async_client, follow_redirects=not refuses)
+    headers = dict(target.get("default_headers") or {})
+    if http_client is None and refuses:
+        logging.getLogger(__name__).warning(
+            "openai SDK cannot build a client that refuses redirects; OpenRouter app attribution omitted")
+        headers = {key: value for key, value in headers.items() if key not in OPENROUTER_APP_HEADERS}
+    return http_client, headers
+
+
 def _kind_target(provider: str, get: Any, connection: str, configured: Any, *,
                  api_key_override: Optional[str], openrouter_base_url: str) -> Dict[str, Any]:
     """One kind's transport facts from its connection's fields (``get``)."""
@@ -191,7 +210,11 @@ def _kind_target(provider: str, get: Any, connection: str, configured: Any, *,
             keyless = not api_key and compatible_endpoint_configured(setting)
         # A pair configured without a key is the endpoint's no-auth setting; its
         # transport sends no credential (net_transport.openai_client_class).
-        return {"api_key": api_key, "base_url": base_url, "keyless": keyless, "default_headers": {}, **_DIRECT_LANE}
+        # OpenRouter's own endpoint hears the app identity; a redirect is then an error, never a carrier elsewhere.
+        attributed = is_openrouter_endpoint(base_url)
+        return {"api_key": api_key, "base_url": base_url, "keyless": keyless,
+                "default_headers": dict(OPENROUTER_APP_HEADERS) if attributed else {},
+                **({"follow_redirects": False} if attributed else {}), **_DIRECT_LANE}
     return {
         "api_key": get("api_key", "") if connection or api_key_override is None else api_key_override,
         "base_url": openrouter_base_url,
@@ -474,19 +497,18 @@ class _ProviderRoutingMixin:
     @staticmethod
     def _new_remote_client(target: Dict[str, Any]):
         # The keepalive transport carries SDK-equivalent pool limits (an
-        # explicit transport ignores the Client-level limits); on proxy-routed
-        # installs the helper returns None and SDK defaults keep proxy mounts.
-        from ouroboros.net_transport import keepalive_http_client, openai_client_class
+        # explicit transport ignores the Client-level limits); proxy-routed
+        # installs keep their proxy mounts (see keepalive_http_client).
+        from ouroboros.net_transport import openai_client_class
 
         kwargs: Dict[str, Any] = {
             "api_key": str(target.get("api_key") or ""),
             "max_retries": 0,
         }
-        http_client = keepalive_http_client()
+        http_client, headers = _remote_http_client(target)
         if http_client is not None:
             kwargs["http_client"] = http_client
         base_url = str(target.get("base_url") or "")
-        headers = dict(target.get("default_headers") or {})
         if base_url:
             kwargs["base_url"] = base_url
         if headers:
@@ -542,19 +564,19 @@ class _ProviderRoutingMixin:
 
         client = self._async_remote_clients.get(cache_key)
         if client is None:
-            from ouroboros.net_transport import keepalive_http_client, openai_client_class
+            from ouroboros.net_transport import openai_client_class
 
             kwargs: Dict[str, Any] = {
                 "api_key": api_key,
                 "max_retries": 0,
             }
-            http_client = keepalive_http_client(async_client=True)
+            http_client, sent_headers = _remote_http_client(target, async_client=True)
             if http_client is not None:
                 kwargs["http_client"] = http_client
             if base_url:
                 kwargs["base_url"] = base_url
-            if headers_dict:
-                kwargs["default_headers"] = headers_dict
+            if sent_headers:
+                kwargs["default_headers"] = sent_headers
             client = openai_client_class(target, async_client=True)(**kwargs)
             self._async_remote_clients[cache_key] = client
         return client

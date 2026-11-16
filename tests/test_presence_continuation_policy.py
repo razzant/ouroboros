@@ -462,8 +462,10 @@ def test_proactive_full_agent_preserves_child_and_parent_tail(tmp_path, monkeypa
     from tests.test_presence_continuation_host import _initiate
 
     from ouroboros.presence_carrier import set_presence_runner
+    from tests.conversation_carrier_support import host_lane, join_host_lane_carriers
 
     h = install_bootstrap_harness(monkeypatch, tmp_path / "data")
+    host_lane(monkeypatch, h.data)  # the initiating process is a Host serving alone: no supervisor queue of its own
     h.binding = _seed_presence_behavior(h.data)
     select_review_change(h.data)
     # The initiated turn is a conversation-lane turn (owner decision 1A; the retired proactive thread that looked
@@ -504,6 +506,7 @@ def test_proactive_full_agent_preserves_child_and_parent_tail(tmp_path, monkeypa
     finally:
         h.release.set()
         wait_for(lambda: not PROACTIVE_TURNS.live(), timeout=40, what="proactive teardown")
+        join_host_lane_carriers()  # its carrier settles after the waiter: that tail stays in this world
         set_presence_runner(h.data, None)
         if h.entered.is_set():
             assert h.settled.wait(60)

@@ -828,30 +828,33 @@ def _pinned_default_panel_view(profile: str):
     return task_settings_snapshot(settings, projected)
 
 
-def _panel_catalog() -> str | dict:
+def _panel_catalog() -> str | dict | None:
     """The subagent catalog the panel is read from, chosen as ``_load_settings_into_env`` chooses every other
     key: the pinned document's own under the integrity pin, else an explicit environment value over the
-    document's; ``""`` when neither names one (the Main model then reviews alone)."""
+    document's. ``None`` when neither names one (the key absent, null or a blank string): the settings read's
+    own catalog then stands, a never-configured install's factory reviewer rows. Any other value is named, so
+    a catalog saved empty (``items: []``) stays empty and a malformed one still fails the pool's parse."""
     explicit = os.environ.get(_CATALOG, "")
     if explicit.strip() and not os.environ.get(SETTINGS_INTEGRITY_ENV, ""):
         return explicit
     named, _pin = _settings_document(warn=False)
-    return (named or {}).get(_CATALOG, "")
+    value = (named or {}).get(_CATALOG)
+    return None if value is None or (isinstance(value, str) and not value.strip()) else value
 
 
 def _review_view(pinned=None, catalog: str | None = None):
     """The task view the panel is read under in preparation and execution alike (the catalog rides no
     environment): ``pinned`` (``_pinned_default_panel_view``), else this process's own settings and
     environment, so every other key keeps the authority ``_load_settings_into_env`` gave it; its catalog
-    is the frozen ``catalog``, else the wrapper's choice (``_panel_catalog``)."""
+    is the frozen ``catalog``, else the wrapper's choice (``_panel_catalog``), else the settings read's own."""
     from ouroboros import config
     from ouroboros.settings_integrity import task_settings_snapshot
 
     settings = dict(pinned.settings) if pinned is not None else config.load_settings()
     if catalog is not None:
         settings[_CATALOG] = catalog
-    elif pinned is None:
-        settings[_CATALOG] = _panel_catalog()
+    elif pinned is None and (chosen := _panel_catalog()) is not None:
+        settings[_CATALOG] = chosen
     return task_settings_snapshot(settings, dict(pinned.environ) if pinned is not None else dict(os.environ))
 
 

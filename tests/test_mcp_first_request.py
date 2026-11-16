@@ -37,12 +37,12 @@ class _Listing:
 
 
 def _refresh_threads() -> list:
-    return [thread for thread in threading.enumerate() if thread.name.startswith("mcp-refresh-")]
+    return [thread for thread in threading.enumerate() if thread.name == "mcp-discovery"]
 
 
-def _join_listings() -> None:
-    for thread in _refresh_threads():
-        thread.join(15)
+def _join_listings(manager) -> None:
+    assert manager.discovery.wait(15), "the listing owner must finish before its state is read or torn down"
+    assert _refresh_threads() == [], "no unfinished background listing"
 
 
 @pytest.fixture
@@ -73,7 +73,7 @@ def cold_worker(tmp_path, monkeypatch):
     monkeypatch.setattr(mcp_client.MCPManager, "refresh_server", counted)
     yield registry, listing, on_caller
     listing.release.set()
-    _join_listings()
+    _join_listings(mcp_client.get_manager())
     mcp_client.reset_manager_for_tests()
 
 
@@ -102,7 +102,7 @@ def test_tools_listed_in_the_background_reach_the_next_read_and_enable_tools(col
     publisher._async_list_tools = listing.list_tools
     publisher.refresh_all_background(reason="server-boot")
     listing.release.set()
-    _join_listings()
+    _join_listings(publisher)
 
     assert listing.finished == ["svc"] and on_caller == [False]
     assert "Call schemas loaded" in enable_tools(registry, registry._ctx, "mcp_svc__ping", resident)
@@ -121,11 +121,11 @@ def test_a_refresh_asked_for_on_purpose_still_lists_every_server(cold_worker):
     manager._async_list_tools = listing.list_tools
     manager.refresh_all_background(reason="server-boot")
     listing.release.set()
-    _join_listings()
+    _join_listings(manager)
 
     outcome = manager.refresh_server("svc")  # Settings' Refresh of one server (POST /api/mcp/refresh)
     assert outcome["ok"] and outcome["tool_count"] == 1 and listing.finished == ["svc", "svc"]
     assert manager.refresh_all()["refreshed"]["svc"]["ok"] and len(listing.finished) == 3
     manager.refresh_all_background(reason="settings")  # the settings-save refresh re-lists a listed server
-    _join_listings()
+    _join_listings(manager)
     assert len(listing.finished) == 4 and on_caller == [False, True, True, False]

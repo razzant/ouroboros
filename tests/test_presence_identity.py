@@ -10,6 +10,7 @@ from starlette.testclient import TestClient
 from ouroboros import places
 from ouroboros.gateway import host_service
 from ouroboros.tools.presence import _configure_presence
+from tests.conversation_carrier_support import lone_host_world as lone_host_world  # noqa: F401 -- fixture
 from tests.test_place_focus import focus as focus, task_for
 
 IDENTITY = {"sends_as": {"id": "human@example.test", "label": "Human mailbox", "kind": "user"},
@@ -17,7 +18,7 @@ IDENTITY = {"sends_as": {"id": "human@example.test", "label": "Human mailbox", "
 
 
 @pytest.fixture
-def ingress(focus, monkeypatch):
+def ingress(focus, monkeypatch, lone_host_world):  # its Host serves alone over the focus root
     root, _, _, event = focus
     async def authenticated(*_args):
         return "bridge", {}

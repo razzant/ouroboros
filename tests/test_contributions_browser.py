@@ -233,7 +233,10 @@ ROW = """() => {
             left: rect(slot).left, clientWidth: slot.clientWidth, scrollWidth: slot.scrollWidth, folded: slot.dataset.folded || '' },
         children: [...row.children].map((node) => [node.className, rect(node).left, rect(node).right]),
         moreWidth: more && !more.hidden ? rect(more).width : null,
-        lines: new Set([...row.children].filter((node) => rect(node).width > 0).map((node) => Math.round(rect(node).top))).size,
+        // Latest is absolute, above the phone's line (the approved shell's composer end): it adds no line of capsules
+        // or chips.
+        lines: new Set([...row.children].filter((node) => rect(node).width > 0 && !node.matches('.chat-scroll-bottom-btn'))
+            .map((node) => Math.round(rect(node).top))).size,
         rowHeight: rect(row).height, rowRight: rect(row).right, compact: row.dataset.ownerCompact || '',
         hosts: [...row.children].filter((node) => node !== slot && rect(node).width > 0)
             .map((node) => [node.className, Math.round(rect(node).width * 2) / 2]),
@@ -250,8 +253,10 @@ ROW = """() => {
 
 
 def _record(evidence):
+    # The folder is the run's (a retry's or a local run's may not exist yet): a missing one is made, never a red.
     root = os.environ.get("OUROBOROS_UI_EVIDENCE_DIR")
     if root:
+        Path(root).mkdir(parents=True, exist_ok=True)
         (Path(root) / "chips-rows.json").write_text(json.dumps(evidence, indent=1), encoding="utf-8")
 
 

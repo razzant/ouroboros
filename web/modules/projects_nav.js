@@ -488,8 +488,9 @@ export function createProjectsNav({ header, list, feed, feedOrder, nextOrder, re
         if (anchor?.isConnected) keepOnScreen(anchor, anchorTop);
         // Moving an existing node can blur it even though its identity survives.
         if (focused?.isConnected && list.contains(focused) && focused !== document.activeElement) focused.focus({ preventScroll: true });
-        // A removed row hands its lost keyboard to Find; a control that already took it keeps it.
-        else if (ownedFocus && !focused.isConnected &&
+        // A removed row hands its lost keyboard to Find; a control that already took it keeps it, and a key's Show more
+        // whose read failed hands it on below (to Try again).
+        else if (ownedFocus && !focused.isConnected && !(state.handoff && !waiting && state.handoff.from === focused) &&
             (!document.activeElement || document.activeElement === document.body || document.activeElement === focused)) {
             keyboardHome()?.focus({ preventScroll: true });
         }

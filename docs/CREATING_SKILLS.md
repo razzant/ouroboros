@@ -114,6 +114,8 @@ companion_processes:                # optional; PLURAL, and needs the companion_
   - name: demo_worker               # see "Declaring a companion process"
     command: [python3, scripts/worker.py]
     runtime: python3
+mcp_servers:                        # optional; see "Declaring MCP servers (Connect tools)"
+  - {id: weather, runtime: node, entry: scripts/mcp_server.mjs}
 scheduled_tasks:                    # optional cron suggestions; nothing runs until adopted
   - name: refresh-cache
     cron: "0 * * * *"                # 5-field cron, host-local timezone by default
@@ -545,6 +547,10 @@ Python `allow_source_build: true` and npm `allow_install_scripts: true` opt in
 per entry, each with a declared `check`. Without those flags pip remains
 wheel-only and npm keeps `--ignore-scripts`. An already installed npm package
 can be rebuilt explicitly on retry without rebuilding unrelated packages.
+When no `npm` is on PATH, npm specs use the pinned Node/npm toolchain the host's
+runtime manager delivers with its Claudexor CLI (starting no engine): npm runs as
+that Node with its own CLI, that Node's folder comes first on the install's PATH,
+and the flags, cache and isolated prefix stay as above.
 `deps.json` records resource digests, actual resolved package metadata,
 output hashes and build diagnostics. `installed` records delivery;
 `executable_ready` is unknown without a declared check and true only after
@@ -686,6 +692,49 @@ written: the host drops `HOST_SERVICE_TOKEN`, `HOST_SERVICE_URL`,
 first three itself; the last is the server's PID, telling a container's PID-1
 server from an init adoption. `ports` keeps only all-digit entries; a negative
 or non-numeric one is silently dropped.
+
+### Declaring MCP servers (Connect tools)
+
+A `script` or `extension` skill that ships an MCP stdio server declares it, and the
+owner connects it with one confirmation instead of copying settings by hand:
+
+```yaml
+mcp_servers: [{"id": "chrome_browser", "title": "Chrome (shared tab)", "entry": "scripts/server.mjs", "task_session": true, "browser_policy": true}]
+```
+
+Each item takes only these keys (anything else is a manifest error):
+
+- `id` (required): the MCP server id, lowercase letters and digits joined by single `_`,
+  at most 24 characters. Every tool is named `mcp_<id>__<tool>`, so keep it stable.
+- `entry` (required): a relative path of a file in the skill (no `..`, absolute path or
+  cache/dependency folder such as `node_modules` or `.ouroboros_env`); it is part of the
+  reviewed, hashed payload, and `skill_preflight` checks it by the rule a start applies.
+- `runtime`: currently `node` only; defaults to the manifest's `runtime`.
+- `title`: the Settings display name; defaults to `id`.
+- `task_session`, `browser_policy`: the MCP call-lifetime choices (DEVELOPMENT §12);
+  `browser_policy` needs `task_session: true`.
+
+Once the skill is accepted for its current bytes, on, granted and its packages are
+installed, its Skills card offers **Connect tools**. The confirmation names what will run
+and, when MCP is off, every other server that turning MCP on starts. Confirming writes one
+MCP server row (`id`, `name`, `enabled`, `transport: stdio`, `skill`, the two flags) and turns
+MCP on; nothing else in settings changes, an identical state writes nothing, and a row of
+the same id that this skill did not write is never overwritten. An agent carries the same
+step with `skill_owner_action(action="connect_mcp")`: `preview: true` first, then the
+owner's answer as `owner_source` with the preview's `settings_digest`.
+
+The row stores no command. Every listing, Settings Test and call
+derives the runtime binary, `<skill folder>/<entry>`, the skill folder as working directory and
+both flags from the installed skill (read-only in Settings), so a moved app or runtime
+needs no reconnect. The server gets your scripts' environment: granted settings, state
+folder, packages. Under a deployment's execution domain each start runs the verified work
+copy in its work container, on its runtime (not an extension's: its package stays on the
+service). While the skill is off, missing, edited and not re-accepted, short of grants or
+packages, or no longer declares the server, or the domain cannot start it, only that
+server is unavailable (`MCP_SKILL_UNAVAILABLE`) and nothing starts anywhere; the row
+stays. An accepted update or changed granted value is listed anew and running task
+sessions restart; a row the owner switched off stays off. Steps outside Ouroboros (a browser extension, a sign-in) belong
+in its instructions.
 
 ## The `skill_preflight` tool
 
@@ -972,6 +1021,14 @@ tools:
       conversation: body.channel
       thread: body.thread_ts
       text: body.text          # the words (default: the argument named text)
+  - name: mail_send            # words in one conversation, beside further exact addresses (plugin_api "2.5")
+    effect: message
+    target: [account_id, to, cc]  # beside groups, targets other than the conversation are its audience
+    conversation: conversation_id
+    thread: thread_id
+    touches:
+      - {conversation: to, effect: write, match: exact_casefold}   # a recipient's own place restricts it, no other
+      - {conversation: emitted_root, thread: emitted_root, effect: message}   # the new message's own conversation
 contributes:
   - id: place
     provides: place
@@ -1000,15 +1057,43 @@ contributes:
 - `gesture` adds or removes a reaction-like response on one message, never speech, a pin or an edit. A focus sees its
   door beside the send doors, `message` prefilled only from `event.message.message_id`. With no send door a non-silent
   finish is still posted, so a reaction alone finishes `silent=true`.
-- `target`/`conversation`/`thread` attribute each destination; a dotted name (`body.channel`) selects a nested
-  argument (`args["body"]["channel"]`). `text` (default: the argument named `text`) names the words: your human's
-  answer on a card holding those exact words as whole lines and every destination (the place's label and each declared
-  recipient outside that place's own conversation) sends the message in every mode, held, flagged or before any check (a call declaring neither,
-  such as an MCP tool, uses its exact call for that card); the host checks the card was answered, not the answer.
+- `target`/`conversation`/`thread` attribute each destination; dotted names select nested arguments. Where Places
+  apply, independent lists of several conversations and several threads refuse non-read calls, even without `touches`.
+  `text` (default: the argument named `text`) names the words: your human's
+  answer on a card holding those exact words as whole lines and every place and address the call reaches (each
+  place's label, and its exact address where another it reaches shares that label; each recipient outside a place's
+  own conversation; each group address with its effect, as `write: Drafts · account A`) sends the message in every
+  mode, held, flagged or before any check (a call declaring neither, such as an MCP tool, uses its exact call for
+  that card); the host checks the card was answered, not the answer.
   Declare `account_id` for multi-account writes:
   an exact account outside all applicable Place scopes remains an ordinary tool target, including in Acts.
   Unresolved targets inside applicable scopes retain the Silent/Paused hold. Use the same canonical account key
   in credentials, targets and Places; sender aliases are separate. Never resolve an unknown key to another account after dispatch.
+- `touches` lists further addresses one call reaches. Each group names arguments: `conversation` (one id or a flat
+  list), `account` (one id; default: the call's `account_id`) and `thread` (one id, or the conversation argument
+  itself to pair each id with itself; never a second list), and its `effect`, which says what applies there, not how
+  the provider delivers: `message` where words are authored (one author per conversation; beside a message call
+  only; a conversation the call speaks in is one), `gesture` beside a gesture only, `write` where only the place's
+  state and notes apply (a bare recipient, a folder), or `read`; a read call's groups only read. A row's groups ride
+  its own effect, a `sends` block's the calls it selects. By default (`match: scope`) each id meets the matcher a
+  target does: unknown inside its account's places (a Silent or Paused place then holds the call), the account-wide
+  place's where one exists (an exact place outranks it), no place's in an account none covers; real resources
+  (folders, drafts, roots) keep it. An extra address constraint on a write or read group may declare `match: exact`:
+  only a place whose own or destination scope names that id applies (ranked by the scope that matched, a Silent or
+  Paused one first among equals, so change an existing place's state rather than connect a second spelling; an
+  Active place naming it in one account still outranks a global pause), and none is a known absence;
+  `exact_casefold` is the same with the ids compared casefolded, a comparator the connector chooses for its keys. Ids otherwise compare exactly, so the connector
+  owns their canonical spelling: check each id against the object the handler changes, spelled as its places spell
+  it, before acting. With groups and a declared `conversation`, each of its values is the row's own destination; an
+  empty value names none, so the call acts in its account (unknown inside an account with only narrow places), and
+  its other targets are its audience, never destinations. A row declaring no `conversation` keeps its targets as
+  destinations.
+  An absent, null or empty argument or path step reaches nothing; another shape (the row's own target, conversation
+  or thread too), an invalid group, or groups under a `plugin_api` older than `"2.5"` (an older host refuses a 2.5
+  payload before import) refuse the call whole, naming the repair. DANGEROUS words stay held where they are spoken
+  (the places they land in, else their audience), never through a group's write or read beside them; words with no
+  such address, and a rich call declaring no `text`, keep their exact call. What a call ran with, not a later
+  publication, decides what it did.
 - `icon` is reduced at staging to viewBox and geometry (path, circle, ellipse, line, polyline, polygon, rect, g),
   bounded, with fills and strokes set to `currentColor`; anything else falls back to the house glyph.
   Authors of `provides: place` skills must include `ui/icon.svg` and declare `icon: ui/icon.svg`.
@@ -1278,6 +1363,10 @@ Use the connector's ordinary content-hash-bound skill token for:
   The stamp survives ordinary edits and repeated Connect. An older body can read/write Places, but its changed row
   cannot prove connection continuity: prior bindings stay held; a fresh operation captures the newly observed revision.
   `require_place=true` requires a Place for transport-bound replies, not every tool call from a Presence focus.
+  `match=exact|exact_casefold` (default `scope`; another value is 400 `place_binding_invalid`) binds an extra
+  address constraint as a group's exact match does: it needs the `conversation_id`, has no opaque or unknown
+  fallback, and finds no naming place as confirmed unbound (`place_not_connected` under `require_place=true`). The
+  v1 snapshot never records the mode: keep it beside the snapshot and check with the same one.
   Missing/invalid snapshots are not inferred from `origin.kind`; ordinary queries and legacy rows keep their old lookup.
 - `GET /presence/work/{work_ref}?binding_id=...`: reads correlated late work,
   including after a place is Paused or disconnected. The binding query is optional;
@@ -1492,7 +1581,13 @@ deduplicate by `output_ref`, never by text, since an identical correction is new
   replay, or the retained refusal), never by regenerating an ended attempt.
 - **Polls.** A version-2 turn's poll echoes `continuation_version: 2`; turns admitted at other
   versions keep `1`. Its terminal adds `reply_anchor: {source_event_id, message}`, where `message`
-  is the exact captured `event.message` of the last input the selected answer covers. Covered
+  is the exact captured `event.message` of the last input the selected answer covers. An event may name the
+  further addresses an automatic reply to it reaches as `message.reply_targets`: a list (`[]`: none) of
+  `{conversation, effect: "write", match: "scope"|"exact"|"exact_casefold", thread?}` literal ids, met in the
+  reply's own route (its place's connector, its retained destination's provider and account, never the source
+  account); anything else is refused 400 `presence_payload_invalid`, absence keeps the old boundary.
+  The Host resolves the anchor's set before Safety and holds the reply where one meets a Silent or Paused place;
+  send exactly to that anchor's envelope and hold, never fall back to another message, when they differ. Covered
   inputs are the turn's own event and arrivals delivered to the model before the answered send
   that selected the answer. After a review park they include the incoming messages its reentry
   facts carry whole, never those named only by address. "Last" is the greatest
@@ -1783,13 +1878,14 @@ The frozen ABI is documented in
 This section shows the practical shape.
 
 Extensions declare the PluginAPI generation they bind against in the manifest
-(PluginAPI 2.4; a payload declaring any 2.x minimum negotiates the host's 2.4, methods included):
+(PluginAPI 2.5; a payload declaring any 2.x minimum negotiates the host's 2.5, methods included; a tool row
+with `touches` needs "2.5", which an older host refuses before import):
 
 ```yaml
-plugin_api: "2.4"            # major strict; minor = required minimum
+plugin_api: "2.5"            # major strict; minor = required minimum
 # or, with required capabilities (closed set, validated per execution mode):
 # plugin_api:
-#   version: "2.4"
+#   version: "2.5"
 #   capabilities: [register_tool, subscribe_event]
 ```
 
@@ -2602,6 +2698,12 @@ compact height, since a message gives it less room than the Widgets page.
 Ouroboros's own component cards (`show_card(components=...)`) reuse this
 catalog without routes: their `action`/`form` controls bind
 `submit: {id, once?}`, and a press returns to Ouroboros as owner input.
+A card draws only inline `data:` media, so the tool copies an image named
+by `file` (a PNG, JPEG, GIF or WebP; a card's images at most 2 MiB
+together) into the card as its `src`, and refuses a card whose image,
+audio or video has no such source instead of showing it without one
+(media shown on a `condition_key` or aimed at a `target` is left to the
+renderer).
 
 ### Async job error contract
 
