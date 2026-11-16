@@ -24,6 +24,7 @@ def _pending(root, task_id=TASK, invocation_id=INVOCATION, **extra):
     assert dc.record_start_requested(
         root, run_id="", task_id=task_id, root_task_id=task_id, invocation_id=invocation_id,
         idempotency_key=invocation_id, route="r", project_id="p", project_owned=False,
+        daemon_store_id="fixture-store",  # this suite tests admission/Stop, on a receipt-bound store
         request={"prompt": "stored request", "primaryHarness": "r", "model": "m"}, **extra)
     dc._CUSTODY.clear()
     return dc
@@ -42,6 +43,8 @@ def _held(root, run_id="run-held", task_id=TASK):
 
 class _Recorder(_LiveRunStub):
     """A serving daemon that records every start it is asked for."""
+
+    store_identity = "fixture-store"
 
     def __init__(self, run_id="run-recovered", state="running"):
         super().__init__(run_id=run_id, state=state)

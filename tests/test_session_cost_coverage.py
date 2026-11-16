@@ -349,7 +349,7 @@ def test_actual_continued_review_collects_partial_cost_once(tmp_path, monkeypatc
     """Joining a legacy successor records the stopped run's partial cost once, whether an older host left it
     unrecorded or already collected it. The current host creates no new continuation."""
     from tests._review_session_route_shared import FakeGateway
-    from tests.test_review_session_continuation import _engine, _run, legacy_successor
+    from tests.test_review_session_continuation import _engine, _run, accept_legacy_successor, legacy_successor
 
     posts = _engine(monkeypatch)
     get = FakeGateway.get_run
@@ -370,8 +370,10 @@ def test_actual_continued_review_collects_partial_cost_once(tmp_path, monkeypatc
     stopped = custody.lookup(tmp_path, "t-review", "run-1")[1]
     assert stopped.settled is cost_recorded
     assert len(usage.read_usage_records(tmp_path)) == int(cost_recorded)
+    accept_legacy_successor(monkeypatch, tmp_path, token)
     facts = _run(tmp_path, {"pending_invocation_id": checkpoints[0]}, checkpoints, [], reconcile=True)
     assert [(request, key) for request, key in posts if "continueFrom" in request] == [({"continueFrom": "run-1"}, token)]
+    assert FakeGateway.lookup_requests == [({"continueFrom": "run-1"}, token)]
     assert facts["run_id"] == "run-2"
     assert facts["spend"] == 2 and facts["spend_estimated"] is False
     assert facts["usage"]["cost_partial"] is True and facts["usage"]["cost_final"] is False

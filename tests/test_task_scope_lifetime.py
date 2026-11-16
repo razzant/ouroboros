@@ -96,7 +96,12 @@ def _own_cleanup_threads():
     yield
     ps.wait_for_cleanups(15)
     from ouroboros.tools.shell_process import unsettled_tracked_children
-    leaked = unsettled_tracked_children()
+    # SIGKILL requests in each case's finally have no waitable child handle here.
+    # The tracked shell keeps its group witness until its children exit and a fresh
+    # census confirms it quiet; unrelated /proc churn may leave one read unknown.
+    deadline = time.monotonic() + 5
+    while (leaked := unsettled_tracked_children()) is not None and time.monotonic() < deadline:
+        time.sleep(0.01)
     assert leaked is None, (leaked, _tracked_facts())
 
 

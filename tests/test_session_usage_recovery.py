@@ -16,7 +16,7 @@ from tests._review_session_route_shared import (
 from tests.test_session_input_events import (
     SPLIT, collect, entry, events, persist_review, _synthetic_root_lineage,  # noqa: F401
 )
-from tests.test_review_session_continuation import _engine, record_legacy_successor
+from tests.test_review_session_continuation import _engine, accept_legacy_successor, record_legacy_successor
 from tests._usage_store_testing import ledger_rows
 
 
@@ -72,20 +72,29 @@ def test_lost_continuation_keeps_read_facts_and_same_executor_observes_successor
     with usage_scope(UsageScope(task_id="t-review", root_task_id="root", category="review",
                                 source="review_substrate", review_slot_id="scope_slot_1")):
         executor, token = _rejoining_seat(tmp_path, monkeypatch)
+        accept_legacy_successor(monkeypatch, tmp_path, token, lose_response=True)
+        lookup = FakeGateway.lookup_run
+        def lost_lookup(self, request, **kwargs):
+            answer = lookup(self, request, **kwargs)
+            if len(FakeGateway.lookup_requests) == 1:
+                raise OSError("Continuation lookup response lost")
+            return answer
+        monkeypatch.setattr(FakeGateway, "lookup_run", lost_lookup)
         executor.usage_observer = observed.append
         with pytest.raises(OSError, match="response lost") as failure:
-            executor.execute()  # the engine accepted the recorded continuation POST; its reply was lost
+            executor.execute()  # the accepted successor's noncreating lookup reply is lost too
         failed_usage = failure.value.delegated_usage
         assert failed_usage["input_token_usage"] == SPLIT
         assert failed_usage["observed_attempt"]["model"] == "fake-small"
         assert failed_usage["delegated_run_id"] == "run-1"
         assert len(observed) == 1 and observed[0]["cost"] is None
-        # Replay the original pending token, then collect the already accepted successor.
+        # Re-read the original pending token, then collect the already accepted successor.
         assert executor.execute().raw_text == "[]"
     assert [row["claudexor"]["run_id"] for row in observed] == ["run-1", "run-2"]
     assert all(row["input_token_usage"] == SPLIT for row in observed)
     continued = [(request, key) for request, key in posts if "continueFrom" in request]
-    assert len(posts) == 3 and continued == [({"continueFrom": "run-1"}, token)] * 2  # same key AND bytes: one run
+    assert len(posts) == 2 and continued == [({"continueFrom": "run-1"}, token)]  # only the older host's POST
+    assert FakeGateway.lookup_requests == [({"continueFrom": "run-1"}, token)] * 2  # repeated reads, never creates
     for row in observed:
         persist_review(tmp_path, row)
     assert [row["input_token_usage"] for row in events(tmp_path) if row["type"] == "llm_usage"] == [SPLIT, SPLIT]

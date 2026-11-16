@@ -270,10 +270,23 @@ def run_in_work(argv: Sequence[Any], *, cwd: Any = None, env: Optional[Dict[str,
     try:
         try:
             out, err = communicate_or_stop(proc, timeout_sec, stop, end)
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             end()
-            with contextlib.suppress(Exception):
-                proc.wait(timeout=5)
+            try:  # what arrived before the kill, as subprocess.run reads it; a descendant may still hold a pipe
+                exc.output, exc.stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired as late:
+                exc.output = late.output if late.output is not None else exc.output
+                exc.stderr = late.stderr if late.stderr is not None else exc.stderr
+            except Exception:
+                log.debug("No output read after a work-domain deadline", exc_info=True)
+            if not settled:
+                # The same CompletedProcess every other writer of this error carries; the command's own exit is
+                # unknown (None), never the host's kill and never an invented zero.
+                observed = subprocess.CompletedProcess(words, None, exc.output, exc.stderr)
+                observed.backend_settled, observed.timed_out = False, True
+                raise WorkDomainUnsettled("the work domain timed out without the container confirming its process "
+                                          "group ended; its effect may have happened, and its executor record is "
+                                          "kept for settlement", observed) from exc
             raise
     finally:
         retire_tracked(proc)
@@ -498,16 +511,20 @@ def remove_empty_dir(path: Any) -> None:
     _effect("remove", str(path), ["rmdir", "--", container_path(path)])
 
 
-def make_dir(path: Any) -> None:
-    """One new work folder AS the work domain (``mkdir`` without ``-p``: an existing entry is an ``OSError``)."""
-    _effect("make", str(path), ["mkdir", "--", container_path(path)])
+def make_dir(path: Any, *, mode: Optional[int] = None) -> None:
+    """One new work folder AS the work domain; optional exact mode applies only on creation.
+
+    ``mkdir`` without ``-p``: an existing entry is an ``OSError``; no existing directory is chmodded."""
+    _effect("make", str(path), ["mkdir", *(["-m", format(mode & 0o7777, "o")] if mode is not None else []),
+                              "--", container_path(path)])
 
 
-def make_dirs(path: Any) -> None:
-    """``Path.mkdir(parents=True, exist_ok=True)``; a work folder's ``mkdir -p`` AS the work domain."""
+def make_dirs(path: Any, *, mode: Optional[int] = None) -> None:
+    """``Path.mkdir(parents=True, exist_ok=True)``; work uses ``mkdir -p`` there, with mode only for a new leaf."""
     if not work_spelling(path):
-        return pathlib.Path(path).mkdir(parents=True, exist_ok=True)
-    _effect("make", str(path), ["mkdir", "-p", "--", container_path(path)])
+        return pathlib.Path(path).mkdir(mode=mode if mode is not None else 0o777, parents=True, exist_ok=True)
+    _effect("make", str(path), ["mkdir", "-p", *(["-m", format(mode & 0o7777, "o")] if mode is not None else []),
+                              "--", container_path(path)])
 
 
 def private_dir(beside: Any, prefix: str) -> pathlib.Path:

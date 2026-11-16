@@ -231,9 +231,10 @@ def test_a_native_run_receives_its_inputs_and_returns_verified_outputs_through_t
                                                                 data_dir=data)
     assert seen == [], seen
     delivered = pathlib.Path(inputs.selected[0]["local"])
-    held = delivered.parents[3]  # <staging_root>/scratch/obs-*, owned by the task's drive (session_scratch_owners)
+    workspace = delivered.parents[3]
+    held = workspace.parent  # <staging_root>/scratch/obs-*, owned by the task's drive (session_scratch_owners)
     assert held.parent == staging / "scratch" and held.name.startswith("obs-") and delivered.read_text() == "selected input\n"
-    assert (held / "inputs.json").is_file()
+    assert workspace == held / "w" and (workspace / "inputs.json").is_file()
     copy = pathlib.Path(handle.path)
     assert copy.is_relative_to(staging / "copies") and (copy / "src" / "main.py").read_text() == "print('a')\n"
     assert set(witness.read_text().split()) == {"1"}  # the repository's clean filter ran only in the container

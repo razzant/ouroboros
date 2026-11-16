@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Dict, Optional
+
+log = logging.getLogger(__name__)
 
 
 def owned_started_review_custody(
@@ -264,20 +267,22 @@ def review_continuation_descends_from(root: Any, run_id: str, anchor: dict) -> b
 
 
 def join_recorded_review_continuation(gateway: Any, root: Any, entry: Any, detail: dict, invocation: Any,
-                                      *, remaining: float, seen: set[str]) -> Any:
+                                      *, seen: set[str], checking: Optional[Dict[str, Any]] = None) -> Any:
     """Join a successor an older host recorded automatically under this seat's anchor; never create one.
 
     Continuation is now the author's explicit choice (``review_continuation``): a new operation
     collected through the existing exact recovery. A legacy successor already recorded under
-    ``("review_continue", invocation, run)`` is joined when started, or its UNKNOWN POST is replayed
-    with the same key and recorded body; a definite refusal or a missing record joins nothing.
+    ``("review_continue", invocation, run)`` is joined when started, or read through the engine's
+    noncreating lookup using its recorded body and key. An early 4xx can belong to an accepted
+    command with no native run yet: its job id binds just like a late 202 handle. A missing,
+    refused, unavailable or foreign-store lookup leaves the start pending and the predecessor's
+    original stop untouched; it never licenses a creating POST, even after the owner ended.
+    A bound successor whose checking copy is missing or foreign is still returned for observation: the gap
+    rides ``checking["legacy_capture_gap"]`` (``_legacy_capture``), which then answers its evidence.
     """
-    from types import SimpleNamespace
     from ouroboros import delegate_custody as custody
-    from ouroboros.budget_pause import dispatch_fenced
+    from ouroboros.delegate_accepted import bind_started, locate
     from ouroboros.delegate_collection import record_terminal_money
-    from ouroboros.gateways.claudexor import ClaudexorUnavailable
-    from ouroboros.owner_pause import OwnerPauseRefused, run_operation
     from ouroboros.review_execution import ReviewRouteUnavailable
 
     token = custody.idempotency_key("review_continue", entry.invocation_id, entry.run_id)
@@ -292,37 +297,57 @@ def join_recorded_review_continuation(gateway: Any, root: Any, entry: Any, detai
                                      code="review_recovery_request_mismatch")
     if record["state"] == "started":
         run_id, successor = owned_started_review_custody(custody, root, record, entry.task_id)
-        return None if run_id in seen or successor.continuation_of != entry.run_id else successor
-    if remaining <= 0 or dispatch_fenced(entry.task_id):
-        return None
-    source = SimpleNamespace(drive_root=root, task_id=entry.task_id, root_task_id=entry.root_task_id)
-    try:  # the recorded legacy POST may have been accepted: replay its exact key and body only
-        handle = run_operation(source, lambda: gateway.start_run(body, idempotency_key=token))
-    except (ClaudexorUnavailable, OwnerPauseRefused) as exc:
-        if isinstance(exc, OwnerPauseRefused) or 400 <= int(getattr(exc, "status_code", 0) or 0) < 500:
-            if not custody.emit(root, custody.START_FAILED, {"invocation_id": token, "task_id": entry.task_id,
-                    "reason": str(getattr(exc, "code", "continuation_refused")), "definite": True,
-                    "surface": invocation.surface, "slot_id": invocation.slot_id}):
-                raise
-            return None  # Caller retains the stopped run's original typed failure.
-        raise  # Ambiguous acceptance remains replayable from the same token.
-    run_id = str(handle.get("runId") or handle.get("jobId") or "")
-    if not run_id or run_id in seen:
-        raise ReviewRouteUnavailable("Review continuation returned no new run handle",
-                                     code="invalid_continuation_handle")
+        if run_id in seen or successor.continuation_of != entry.run_id:
+            return None
+        return _legacy_capture(root, entry, invocation, successor, checking)
+    located = locate(gateway, {**record, "invocation_id": token})
+    if not located.bindable or located.run_id in seen:
+        return None  # Reading accepted work needs no generation window or permission to start another run.
+    run_id = located.run_id
     record_terminal_money(root, entry, detail)  # the stopped run's money; the final settlement takes the successor's
     successor = custody.RunCustody(run_id=run_id, invocation_id=token, idempotency_key=token,
-        continuation_of=entry.run_id, ledger_root=str(root), daemon_store_id=custody.admitted_store_id(handle),
+        continuation_of=entry.run_id, ledger_root=str(root), daemon_store_id=located.store_id,
+        engine_ref=entry.engine_ref, access=entry.access, mode=entry.mode, isolation=entry.isolation,
+        delegated=entry.delegated, max_seconds=entry.max_seconds,
         **{key: getattr(entry, key) for key in ("task_id", "route_id", "model", "profile_id", "project_id",
             "project_owned", "project_persistent", "root_task_id", "parent_task_id", "category", "source",
             "review_skill", "review_wave_id", "review_slot_id", "authority_source", "execution_root", "target_root")})
-    successor, landed = custody.bind_started(root, successor, shape={  # converges with any reader of this key
+    successor, landed, _adopted = bind_started(root, successor, exclusive=True, shape={
+            "accepted_start_lookup": located.outcome,
             "access": entry.access, "mode": entry.mode, "isolation": entry.isolation,
             "delegated": entry.delegated, "max_seconds": entry.max_seconds,
-            "surface": invocation.surface, "slot_id": invocation.slot_id})[:2]
-    if not landed:
+            "surface": invocation.surface, "slot_id": invocation.slot_id})
+    if successor is None or not landed:
         raise ReviewRouteUnavailable("Review successor start remains pending in custody",
                                      code="review_continuation_checkpoint_unwritable")
+    if successor.run_id in seen or successor.continuation_of != entry.run_id:
+        return None
+    return _legacy_capture(root, entry, invocation, successor, checking)
+
+
+def _legacy_capture(root: Any, entry: Any, invocation: Any, successor: Any, checking: Optional[Dict[str, Any]]) -> Any:
+    """Advance the capture generation for a bound legacy successor, or name why it cannot.
+
+    The successor is this seat's own bound run, so it is observed and settled whatever its copy's state. A
+    missing or foreign copy (``CheckingAreaUnavailable``) never re-materializes or takes over a copy and never
+    reuses the predecessor's capture receipt: the seat's evidence becomes this typed gap instead, and every
+    earlier capture stays as it is. A later successor whose generation advances replaces the gap."""
+    from ouroboros.review_checking import CheckingAreaUnavailable, prepare_legacy_successor_capture
+
+    try:
+        prepare_legacy_successor_capture(root, entry.task_id, invocation.operation_id, run_id=successor.run_id,
+                                         execution_root=successor.execution_root, access=successor.access)
+    except CheckingAreaUnavailable as exc:
+        if checking is None:
+            raise
+        log.warning("legacy review successor %s is observed without a capture: %s", successor.run_id, exc)
+        checking["legacy_capture_gap"] = {
+            "status": "capture_failed", "capture_gap": "legacy_successor_checking_copy_unavailable",
+            "run_id": successor.run_id, "operation_id": str(invocation.operation_id or ""),
+            "area": str(successor.execution_root or ""), "error": f"CheckingAreaUnavailable: {exc}"}
+        return successor
+    if checking is not None:
+        checking.pop("legacy_capture_gap", None)
     return successor
 
 
@@ -467,3 +492,50 @@ def stopped_review_failure(gateway: Any, run_id: str, detail: Dict[str, Any], su
     except Exception as exc:  # an unreadable output is a named gap beside the typed failure
         failure.review_partial_output_gap = f"{type(exc).__name__}: {exc}"
     return failure
+
+
+def failed_start_seat_evidence(custody_drive: Any, task_id: str, operation_id: str, exc: BaseException,
+                               checking: Dict[str, Any], invocation_id: str, *, unrequested: bool,
+                               posted: bool) -> Dict[str, Any]:
+    """A writable seat's evidence once its start failed, never raising: the attempt's own typed failure stays its
+    outcome. An observed terminal is captured as ever. The copy this attempt made (``checking['allocation']``) is
+    captured, then released unless kept, only on the CURRENT attempt's proof that its start never ran: no
+    START_REQUESTED write (``unrequested``), or ``_start_never_ran``. Every other failure keeps the copy: an entered
+    POST whatever the engine answered (a 4xx too), which may hold an accepted command (``accepted_after_refusal``)."""
+    from ouroboros.review_checking import terminal_seat_evidence
+
+    if checking.get("legacy_capture_gap"):  # a bound legacy successor without its copy: never the old receipt
+        return dict(checking["legacy_capture_gap"])
+    try:
+        proven = unrequested or _start_never_ran(custody_drive, task_id, operation_id, checking, invocation_id,
+                                                 posted=posted)
+        return terminal_seat_evidence(custody_drive, task_id, operation_id, getattr(exc, "checking_terminal_detail", None),
+                                      unsent=checking.get("allocation") if proven else None)
+    except Exception as error:  # e.g. an unreadable install identity at the release: the copy stays for the prune
+        log.warning("checking evidence after the failed start of %s failed", operation_id, exc_info=True)
+        return {"status": "capture_failed", "operation_id": operation_id, "error": f"{type(error).__name__}: {error}"}
+
+
+def _start_never_ran(custody_drive: Any, task_id: str, operation_id: str, checking: Dict[str, Any],
+                     invocation_id: str, *, posted: bool) -> bool:
+    """This attempt's own recorded start provably never ran: its POST was never entered (``posted`` false: a launch
+    fence or any refusal after the START_REQUESTED write attempt), and ``invocation_id`` now reads back
+    ``failed_definite``, with no run, for this task, operation, copy and reviewed root. An entered POST proves
+    nothing whatever the engine answered: a typed body may be synthesized from a non-JSON one, and an accepted
+    command can end before execution and answer its start with a 4xx. A pending fate (the one a replay may still
+    send), a started one (a late STARTED keeps precedence), a legacy, absent or unreadable one prove nothing too."""
+    from ouroboros import delegate_custody as custody
+
+    if not invocation_id or posted:
+        return False
+    try:
+        record = custody.invocation_record(custody_drive, invocation_id) or {}
+    except Exception:
+        log.debug("review start %s: its custody fate is unreadable; the copy stays", invocation_id, exc_info=True)
+        return False
+    request, bound = record.get("request") or {}, checking.get("custody") or {}
+    return (record.get("state") == "failed_definite" and not record.get("run_id")
+            and (record.get("task_id"), record.get("operation_id")) == (task_id, operation_id)
+            and bool(bound.get("execution_root"))
+            and (request.get("execution") or {}).get("workspaceRoot") == bound["execution_root"]
+            and (request.get("scope") or {}).get("root") == bound.get("target_root"))
