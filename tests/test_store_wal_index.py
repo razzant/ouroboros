@@ -67,6 +67,19 @@ def _shared_held(database) -> bool:
     return out == "held"
 
 
+def _skip_without_search_only_open() -> None:
+    """A folder searched but not listed is crossed only by a search-only open (``confined_files.SEARCH_DIR_FLAGS``):
+    ``os.O_SEARCH`` or ``O_PATH``, which CPython exposes only where its build's headers define them (setup-python's
+    macOS 3.10.11 has neither). Without one the root opens with the listing right, as ``confined_files`` says. The skip
+    reads the interpreter, never the product's constant: where the interpreter has the open, a constant that lost it is
+    a failure here, not a skip."""
+    from ouroboros import confined_files
+
+    if os.name != "nt" and not (hasattr(os, "O_SEARCH") or hasattr(os, "O_PATH")):
+        pytest.skip("this interpreter has no search-only open (os.O_SEARCH, O_PATH)")
+    assert os.name == "nt" or confined_files.SEARCH_DIR_FLAGS, "the interpreter has a search-only open the product lost"
+
+
 def _live_store(root):
     """A WAL store whose last commit is still in its log."""
     from ouroboros import store_import, task_store
@@ -183,6 +196,8 @@ def test_a_browser_file_intake_of_a_live_store_s_files_keeps_both_locks(tmp_path
     from ouroboros.tools.registry import ToolContext
     from tests.test_mcp_browser_guard import _ask, _guard
 
+    if sealed:
+        _skip_without_search_only_open()
     use_journal(monkeypatch, "WAL")
     repo, data = tmp_path / "repo", tmp_path / "data"
     repo.mkdir()
@@ -774,6 +789,7 @@ def test_the_windows_branch_holds_a_search_only_root_for_names_alone(tmp_path):
     asks for the listing right and is refused, as on POSIX."""
     from ouroboros import confined_files
 
+    _skip_without_search_only_open()  # the NT-shaped stand-in holds its search-only root by one
     sealed = tmp_path / "sealed"
     sealed.mkdir()
     (sealed / "report.txt").write_bytes(b"sealed report\n")
