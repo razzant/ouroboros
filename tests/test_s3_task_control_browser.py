@@ -156,7 +156,7 @@ def _assert_menu_geometry(metrics: dict, *, placement: str | None = None) -> Non
 def _scrolls_settled(page, frames: int = 5, limit_ms: int = 10_000) -> None:
     """Return once ``frames`` animation frames pass with no scroll anywhere on the page. A viewport change and a
     restyled card re-place the chat feed (its reader stays at the newest message, chat_reading_position.js), and
-    that scroll's event arrives a frame or two after the write. A scroll of the feed holding the trigger closes an
+    that scroll's event arrives a frame or two after the write. A scroll of the feed that moves the trigger closes an
     open menu (owner decision 1D, asserted below), so a press before it lands proves that race, not the portal.
     A page that still scrolls, or draws no frames, after ``limit_ms`` fails here, at once, rather than at the test's
     own ceiling: the limit is a timer, so it holds even where frames stopped."""
@@ -402,12 +402,23 @@ def test_s3_chat_card_dropdown_hurry_and_soft_stop(direct_server_with_data):
                     """,
                 )
 
-                # Owner decision 1D: any nested scroll or resize dismisses
-                # without issuing a task-control action.
+                # Owner decision 1D: a nested scroll that moves the trigger, or a resize, dismisses
+                # without issuing a task-control action. A scroll of the feed that leaves the trigger
+                # where it was (the feed keeping its reading place while a late fact grows above it)
+                # keeps the menu on its anchor (task_control_menu.js, #3563); the same scroll once the
+                # trigger has moved dismisses it.
                 trigger.click()
                 menu.wait_for(state="visible", timeout=10_000)
-                page.locator("#chat-messages").dispatch_event("scroll")
+                feed = page.locator("#chat-messages")
+                assert feed.evaluate("(node, held) => node.contains(held)", trigger.element_handle()) is True
+                feed.dispatch_event("scroll")
+                page.wait_for_timeout(50)
+                assert menu.count() == 1
+                assert trigger.get_attribute("aria-expanded") == "true"
+                live.evaluate("node => { node.style.translate = '0 -24px'; }")
+                feed.dispatch_event("scroll")
                 menu.wait_for(state="detached", timeout=10_000)
+                live.evaluate("node => node.style.removeProperty('translate')")
                 assert trigger.get_attribute("aria-expanded") == "false"
                 assert trigger.evaluate("(node) => document.activeElement === node") is True
                 assert page.evaluate("() => window.__s3Calls.length") == 0
