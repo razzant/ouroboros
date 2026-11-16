@@ -201,7 +201,9 @@ def test_catalog_is_semi_stable_while_dated_history_stays_dynamic(tmp_path, monk
         recommendation=owner_text,
         effort="high",
     ))
-    monkeypatch.setattr("ouroboros.config.load_settings", lambda: saved)
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps(saved), encoding="utf-8")
+    monkeypatch.setattr("ouroboros.config.SETTINGS_PATH", settings_path)
     (tmp_path / "state/reviewer_slot_last_execution.json").write_text(json.dumps({
         "triad": {
             "ts": "2026-08-18T01:02:03+00:00",
@@ -296,9 +298,9 @@ def test_catalog_hides_an_owner_disabled_row_and_selection_refuses_it_typed(monk
     assert select_subagent_snapshot(settings, subagent_id="builder")[0][
         "selected_subagent_id"] == "builder"
 
-    import ouroboros.config as config_module
+    import ouroboros.settings_integrity as settings_integrity
 
-    monkeypatch.setattr(config_module, "runtime_settings", lambda: dict(settings))
+    monkeypatch.setattr(settings_integrity, "runtime_catalog_settings", lambda **_: dict(settings))
     assert [row["subagent_id"] for row in current_subagent_alternatives()] == ["openai/gpt-5.6-sol"]
 
 
@@ -404,7 +406,9 @@ def test_dynamic_session_supervision_fact_line_and_switch_model_cache_invariance
         recommendation="Use for session implementation.",
         effort="high",
     ))
-    monkeypatch.setattr("ouroboros.config.load_settings", lambda: session_settings)
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps(session_settings), encoding="utf-8")
+    monkeypatch.setattr("ouroboros.config.SETTINGS_PATH", settings_path)
     ctx_before = SimpleNamespace(
         repo_dir=tmp_path / "repo",
         drive_root=tmp_path,
@@ -454,7 +458,7 @@ def test_dynamic_session_supervision_fact_line_and_switch_model_cache_invariance
         recommendation="Use for API implementation.",
         effort="high",
     ))
-    monkeypatch.setattr("ouroboros.config.load_settings", lambda: api_only_settings)
+    settings_path.write_text(json.dumps(api_only_settings), encoding="utf-8")
     core_api = _capture_context_core(
         env, Memory(drive_root=tmp_path),
         {"id": "task-1", "type": "task", "text": "work", "model": "openai::gpt-5.6-sol"},

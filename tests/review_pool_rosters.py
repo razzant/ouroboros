@@ -60,7 +60,9 @@ def mixed_pool_rows(models: Sequence[str] = FACTORY_MODELS, *, prefix: str = "re
 
 
 def set_review_pool(monkeypatch, roster_or_models: Any = FACTORY_MODELS, **kwargs: Any) -> str:
-    """Put a pool in the environment: a roster text, or the models of a packet pool."""
+    """Put a pool in the environment as an OPERATOR's variable (a roster text, or the models of a packet pool): the
+    loader lets it stand in only while no saved document sets a catalog, and no projection ever writes one. The
+    document-only path, with no catalog in any environment, is pinned in tests/test_task_settings_snapshot.py."""
     raw = roster_or_models if isinstance(roster_or_models, str) else packet_pool(list(roster_or_models), **kwargs)
     monkeypatch.setenv("OUROBOROS_SUBAGENTS", raw)
     for key in ("OUROBOROS_REVIEWER_SLOTS", "OUROBOROS_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODELS",

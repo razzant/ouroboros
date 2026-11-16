@@ -21,8 +21,10 @@ from ouroboros.route_spec import (
 SUBAGENTS_SETTING = "OUROBOROS_SUBAGENTS"
 SUBAGENTS_RECEIPT_KEY = "OUROBOROS_SUBAGENT_PRESET_RECEIPT"
 # The one ceiling of the catalog AND of a review wave (the review pool IS the
-# marked part of this catalog, so the former per-lane caps fold into it).
-MAX_CONFIGURED_SUBAGENTS = 26
+# marked part of this catalog, so the former per-lane caps fold into it). Every
+# saved row counts, switched off or not; web/modules/subagents_settings.js
+# MAX_AVAILABLE_SUBAGENTS is the editor's copy and must equal it.
+MAX_CONFIGURED_SUBAGENTS = 50
 # Delivery of an ``api_model`` row when it reviews: ``native`` reads the subject
 # with its own tool rounds, ``packet`` receives the assembled pack. A session row
 # always retrieves, so the field is meaningless (and refused) there.

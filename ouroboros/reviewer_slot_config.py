@@ -30,7 +30,7 @@ from __future__ import annotations
 import contextlib as _contextlib
 import contextvars as _contextvars
 import json
-from ouroboros.settings_integrity import runtime_environ
+from ouroboros.settings_integrity import SettingsDocumentUnknown, runtime_catalog_settings
 from ouroboros.model_slots import resolve_processing_preference
 import pathlib
 import threading
@@ -167,9 +167,17 @@ def _catalog_row_slot(row: Any, settings: Any, *, where: str = "") -> Configured
 
 def _catalog_settings(snapshot: Any = None) -> Any:
     """The settings plane the pool reads: an explicit settings snapshot (a task's,
-    a save handler's incoming document, a benchmark container's), else the
-    applied runtime environment."""
-    return snapshot if snapshot is not None else runtime_environ()
+    a save handler's incoming document, a benchmark container's), else the task's
+    catalog or the document (``runtime_catalog_settings``). A document that cannot
+    be read is the typed catalog failure, never an empty pool reviewed by Main."""
+    if snapshot is not None:
+        return snapshot
+    from ouroboros.configured_subagents import SUBAGENTS_SETTING
+
+    try:
+        return runtime_catalog_settings()
+    except SettingsDocumentUnknown as exc:
+        raise ValueError(f"{SUBAGENTS_SETTING} is unknown: {exc}") from exc
 
 
 def _parse_catalog(settings: Any) -> Any:
@@ -485,7 +493,11 @@ def reviewer_slot_config_error() -> str:
     fix is seen immediately."""
     from ouroboros.configured_subagents import SUBAGENTS_SETTING
 
-    return review_pool_state(_catalog_settings().get(SUBAGENTS_SETTING))["error"]
+    try:
+        settings = _catalog_settings()
+    except ValueError as exc:  # the settings document could not be read: the pool is unknown
+        return str(exc)
+    return review_pool_state(settings.get(SUBAGENTS_SETTING))["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -691,7 +703,7 @@ def row_effort_source(row: ConfiguredReviewerSlot) -> str:
 # ---------------------------------------------------------------------------
 
 LAST_EXECUTION_FILENAME = "reviewer_slot_last_execution.json"
-_LAST_EXECUTION_CAP = 64  # the pool is ≤ MAX_CONFIGURED_SUBAGENTS (26) rows; the cap only bounds junk growth
+_LAST_EXECUTION_CAP = 64  # the pool is ≤ MAX_CONFIGURED_SUBAGENTS rows; the cap only bounds junk growth
 
 
 def _last_execution_path() -> "pathlib.Path":

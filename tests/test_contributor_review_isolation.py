@@ -822,7 +822,9 @@ def test_wrapper_settings_load_refuses_bytes_that_changed_under_its_pin(tmp_path
     settings.write_text(json.dumps({"OUROBOROS_REVIEW_ENFORCEMENT": "blocking"}), encoding="utf-8")
     monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(settings))
     monkeypatch.setenv(SETTINGS_INTEGRITY_ENV, hashlib.sha256(b"what was pinned").hexdigest())
-    with pytest.raises(RuntimeError, match="changed after this review pinned it"):
+    from ouroboros.settings_integrity import SettingsIntegrityError
+
+    with pytest.raises(SettingsIntegrityError, match="settings snapshot changed"):
         module._load_settings_into_env()
 
 
@@ -830,6 +832,7 @@ def test_wrapper_settings_load_makes_the_pinned_document_the_whole_panel(tmp_pat
     import scripts.run_external_review as module
     from ouroboros.review_run_isolation import PINNED_PANEL_KEYS
     from ouroboros.settings_defaults import RETIRED_COMMA_LIST_SETTING_KEYS
+    from ouroboros.settings_integrity import SettingsDocumentUnknown
 
     monkeypatch.setattr(module, "_keys_file", lambda: None)
     settings = tmp_path / "settings.json"
@@ -849,21 +852,23 @@ def test_wrapper_settings_load_makes_the_pinned_document_the_whole_panel(tmp_pat
 
     stale = {**_INHERITED_PANEL, "TOTAL_BUDGET": "7"}
     # The document stores the catalog as an object and carries no retired lane key:
-    # the stale projection supplies none of them.
+    # the stale projection supplies none of them, and the catalog rides no environment.
     load({"OUROBOROS_SUBAGENTS": _REVIEW_POOL, "TOTAL_BUDGET": 500}, **stale)
-    assert json.loads(os.environ["OUROBOROS_SUBAGENTS"]) == _REVIEW_POOL
-    assert not {"OUROBOROS_EFFORT_SCOPE_REVIEW", "OUROBOROS_REVIEWER_SLOTS"} & set(os.environ)
+    assert module._panel_catalog() == _REVIEW_POOL
+    assert not {"OUROBOROS_SUBAGENTS", "OUROBOROS_EFFORT_SCOPE_REVIEW", "OUROBOROS_REVIEWER_SLOTS"} & set(os.environ)
     assert os.environ["TOTAL_BUDGET"] == "7"  # outside the panel an explicit environment value still wins
     # A retired reviewer comma-list is no panel: the read seam drops the document's copy and an
     # inherited one is a stale projection, so with the panel unset the default panel stays the default.
     retired = {key: "retired/a,retired/b,retired/c" for key in RETIRED_COMMA_LIST_SETTING_KEYS}
     load(dict(retired), **retired)
     assert not set(RETIRED_COMMA_LIST_SETTING_KEYS) & set(os.environ)
-    # The unpinned operator lane keeps "an explicit environment value wins" for every key.
+    # The unpinned operator lane keeps "an explicit environment value wins" for every key, the panel's too.
     load({"OUROBOROS_SUBAGENTS": json.dumps(_REVIEW_POOL)}, pinned=False, **stale)
-    assert os.environ["OUROBOROS_SUBAGENTS"] == _INHERITED_PANEL["OUROBOROS_SUBAGENTS"]
+    assert os.environ["OUROBOROS_SUBAGENTS"] == module._panel_catalog() == _INHERITED_PANEL["OUROBOROS_SUBAGENTS"]
+    monkeypatch.delenv("OUROBOROS_SUBAGENTS")
+    assert module._panel_catalog() == json.dumps(_REVIEW_POOL)  # else the document's, never exported
     # A pinned document that is not a settings object refuses instead of running the default panel.
-    with pytest.raises(RuntimeError, match="not a settings object"):
+    with pytest.raises(SettingsDocumentUnknown, match="settings document is not an object"):
         load([], **stale)
 
 
@@ -884,7 +889,7 @@ print(json.dumps({"pool": pool}))
 # The wrapper's resolution in ``_prepare_review_configuration`` order, after its real
 # isolation (no proposal read, no provider probe), frozen and then delivered as the
 # review dispatches it, with the OpenRouter rows the wrapper would probe a key for.
-_WRAPPER_PANEL = '''import json, sys
+_WRAPPER_PANEL = '''import json, os, sys
 import scripts.run_external_review as wrapper
 
 if sys.argv[1:]:
@@ -895,11 +900,14 @@ wrapper._apply_contributor_review_env()
 frozen = wrapper._freeze_contributor_slots(wrapper._resolved_review_config(profile=wrapper._CONTRIBUTOR_PROFILE))
 from ouroboros.model_slots import local_lane_label
 from ouroboros.reviewer_slot_config import review_pool_slots
+from ouroboros.settings_integrity import task_settings_scope
 
-# The frozen pool the wrapper runs (each row labelled with its lane) and the pool the
-# pinned catalog now resolves to: the freeze is what the review dispatches.
+# The frozen pool the wrapper runs (each row labelled with its lane) and the pool the review reads
+# under the view ``main`` binds around the lane: the freeze is what the review dispatches.
 pool = [row["route"]["target_id"] for row in frozen["pool_slots"]]
-assert pool == [local_lane_label(slot.model, slot.use_local) for slot in review_pool_slots()], pool
+assert "OUROBOROS_SUBAGENTS" not in os.environ
+with task_settings_scope(wrapper._review_view(catalog=wrapper._frozen_pool_catalog(frozen))):
+    assert pool == [local_lane_label(slot.model, slot.use_local) for slot in review_pool_slots()], pool
 print(json.dumps({"pool": pool, "openrouter_probe": wrapper._configured_openrouter_models(frozen)}))
 '''
 

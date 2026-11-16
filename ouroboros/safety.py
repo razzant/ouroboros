@@ -24,6 +24,7 @@ from ouroboros.loop_llm_call import classify_llm_exception, is_rate_limit_text
 from ouroboros.pricing import emit_llm_usage_event, normalize_usage_cost, infer_provider_from_model
 from ouroboros.utils import sanitize_tool_result_for_log, utc_now_iso
 from ouroboros.config import runtime_setting
+from ouroboros.settings_integrity import SettingsDocumentUnknown, runtime_catalog_settings
 from ouroboros.deployment_policy import (
     RELEASE_AFTER_DANGEROUS, RELEASE_UNJUDGED, REPEAT_AFTER_DANGEROUS, checker, organization_rules, safety_exit_open,
 )
@@ -1335,9 +1336,10 @@ def _run_llm_check(
     if result["status"] != "SAFE" and managed is None:  # a deployment's Supervisor decides alone
         from ouroboros.configured_subagents import normalize_configured_subagents
         try:
-            catalog, _ = normalize_configured_subagents(runtime_setting("OUROBOROS_SUBAGENTS", "") or {"enabled": False, "items": []})
+            raw = runtime_catalog_settings().get("OUROBOROS_SUBAGENTS")
+            catalog, _ = normalize_configured_subagents(raw or {"enabled": False, "items": []})
             row = next((r for r in catalog.items if r.rechecks_flags and r.enabled), None) if catalog.enabled else None
-        except ValueError as exc:
+        except (ValueError, SettingsDocumentUnknown) as exc:
             failure = f"its roster is unreadable: {sanitize_tool_result_for_log(str(exc))}"
     if row is not None:
         second_prompt = ("You review a flag a first checker raised; overturning it needs a reason.\n"
