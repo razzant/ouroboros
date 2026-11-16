@@ -466,8 +466,10 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
     re-POSTed under the invocation's own wire key: the engine returns the ORIGINAL handle when
     the first POST was accepted, and starts fresh only when the daemon truly never saw it. Keys
     live per engine store, so the re-POST goes only to the store the start was submitted to
-    (``replay_store_unproven``, unchanged: a lookup miss neither widens nor replaces it). A
-    definite 4xx retires the invocation and its registration; an unknown outcome stays pending.
+    (``replay_store_unproven(require_identity=True)``: even a legacy or identity-less row needs that
+    receipt for an automatic replay; a lookup miss neither widens nor replaces it). No answer
+    to the replay retires anything, a 4xx included: with a read admitted the work it may hold is
+    read again and bound; otherwise the invocation and its registration stay pending, unknown.
 
     A REVIEW surface's own pending invocation is retained untouched: its panel
     rejoins it through ``review_session_custody``, and a delegation-domain
@@ -489,7 +491,7 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
     record = {**record, "request": body}
     from types import SimpleNamespace
 
-    from ouroboros.delegate_accepted import NO_REPLAY, bind_started, recover
+    from ouroboros.delegate_accepted import NO_REPLAY, accepted_after_refusal, bind_started, recover
     from ouroboros.delegate_pending import replay_store_unproven
     from ouroboros.owner_pause import OwnerPauseRefused, run_operation
 
@@ -503,7 +505,7 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
     if not may_replay:  # a read alone is admitted: nothing is sent
         return {"invocation_id": invocation_id, "task_id": task_id, "action": "invocation_retained",
                 "reason": "replay_not_admitted", "lookup": looked["lookup"]}
-    if unproven := replay_store_unproven(record, getattr(gateway, "store_identity", "")):  # the pass's handshake
+    if unproven := replay_store_unproven(record, getattr(gateway, "store_identity", ""), require_identity=True):
         # No row per pass: the pending request row stays the durable fact while that store is not served.
         return {"invocation_id": invocation_id, "task_id": task_id, "action": "invocation_retained",
                 "reason": "invocation_store_unproven", "detail": unproven, "lookup": looked["lookup"]}
@@ -526,19 +528,26 @@ def _recover_pending_invocation(drive_root: Any, gateway: Any,
         return {"invocation_id": invocation_id, "task_id": task_id,
                 "action": "invocation_retained", "reason": str(exc)}
     except ClaudexorUnavailable as exc:
+        # No answer to the replay proves its POSTs created nothing: with a read admitted, the work they may have
+        # accepted is bound for this pass's settlement (``accepted_after_refusal``); otherwise all stays pending.
+        held, read = accepted_after_refusal(drive_root, gateway, invocation_id, exc) if may_read else (None, {})
+        if held is not None:
+            if read["action"] == "accepted_start_bound":
+                _custody().emit(drive_root, _custody().RECONCILED, read)
+            return _custody()._reconcile_one(drive_root, gateway, held, deliberate_terminal=deliberate_terminal)
         status = int(getattr(exc, "status_code", 0) or 0)
-        if 400 <= status < 500:
-            retired = _retire_recovered_registration(gateway, record)
+        if 400 <= status < 500:  # recorded as this attempt's answer, never as a definite refusal: nothing is retired
             _custody().emit(drive_root, _custody().START_FAILED, {
                 "run_id": "", "task_id": task_id, "project_id": record["project_id"],
-                "project_retired": retired, "reason": f"recovery_refused_{exc.code}",
-                "invocation_id": invocation_id, "definite": True,
+                "project_retired": False, "reason": f"recovery_refused_{exc.code}",
+                "invocation_id": invocation_id, "definite": False,
+                "project_retention_reason": "start_outcome_unknown_run_may_exist",
                 **session_request_facts(record["request"], selected_subagent_id=record.get("selected_subagent_id", ""),
                     task_id=task_id, route=record.get("route", ""), processing=record.get("processing") or {},
                     row_processing=record.get("row_processing")),
             })
-            result = {"invocation_id": invocation_id, "task_id": task_id,
-                      "action": "invocation_retired"}
+            result = {"invocation_id": invocation_id, "task_id": task_id, "action": "invocation_retained",
+                      "reason": "start_refusal_unproven", "lookup": read.get("lookup", "not_read")}
         else:
             result = {"invocation_id": invocation_id, "task_id": task_id,
                       "action": "recovery_unreachable"}
@@ -651,21 +660,6 @@ def recovered_custody(drive_root: Any, gateway: Any, record: Dict[str, Any], run
         "recovered_from_pending_invocation": True,
         "max_seconds": custody.max_seconds,
     }
-
-
-def _retire_recovered_registration(gateway: Any, record: Dict[str, Any]) -> bool:
-    """Discharge the registration an ORIGINAL attempt owned, when its invocation dies."""
-    if _record_persistent(record) or not (record.get("project_owned") and record.get("project_id")):
-        return False
-    try:
-        gateway.remove_project(record["project_id"])
-        return True
-    except Exception as exc:
-        if _custody().daemon_says_absent(exc):
-            return True
-        log.warning("Failed to retire project %s of a dead invocation",
-                    record["project_id"], exc_info=True)
-        return False
 
 
 def _owner_terminal_is_deliberate(drive_root: Any, task_id: str, *,

@@ -273,7 +273,9 @@ def _query_code(
         observed = exc.result
         def text(value):
             return value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value or "")
-        partial = (f"\nObserved command result (not a completed query): exit_code={observed.returncode}"
+        code = getattr(observed, "returncode", None)
+        partial = (f"\nObserved command result (not a completed query): "
+                   f"exit_code={'unknown' if code is None else code}"
                    f"\nstdout:\n{text(observed.stdout)}\nstderr:\n{text(observed.stderr)}" if observed is not None else "")
         return _publish_tool_result(ctx, ToolResult(
             status="error", code="TOOL_ERROR",

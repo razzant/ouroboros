@@ -1,4 +1,4 @@
-"""A recorded scratch whose real ``obs-*`` directory has another device/inode is kept, never repaired.
+"""A legacy recorded scratch whose real ``obs-*`` directory has another device/inode is kept, never repaired.
 
 A reboot can renumber a device, so a valid ownership record may name a real scratch directory under an
 identity it no longer has; another run may still use that directory. Only that case becomes the visible
@@ -18,14 +18,33 @@ import tempfile
 
 import pytest
 
-from ouroboros import maintenance, maintenance_jobs, session_scratch, storage_removers, task_custody, test_environment
-from ouroboros import workspace_preflight
+from ouroboros import (
+    maintenance,
+    maintenance_jobs,
+    session_scratch,
+    storage_removers,
+    task_custody,
+    test_environment,
+    workspace_preflight,
+)
 from ouroboros.workspace_preflight import SESSION_SCRATCH_DIRNAME, release_finished_scratch
 from tests._shared import retire_synthetic_retention
-from tests.test_session_scratch_release import OVER, _record, _started
-from tests.test_session_service_directories import GRANTED, _Catalog, _prepare, _synthetic_temp_parent  # noqa: F401
+from tests.test_session_scratch_release import OVER, _record
+from tests.test_session_scratch_release import _started as _new_started
+from tests.test_session_service_directories import (  # noqa: F401
+    GRANTED,
+    _Catalog,
+    _legacy_scratch,
+    _prepare,
+    _synthetic_temp_parent,
+)
 
 TRASH = ("state", "custody_trash")
+
+
+def _started(tmp_path, **kwargs):
+    data, _workspace = _new_started(tmp_path, **kwargs)
+    return data, _legacy_scratch(_record(data))
 
 
 def _unverify(record: pathlib.Path) -> list:
@@ -215,9 +234,9 @@ def test_a_record_that_cannot_be_read_is_no_evidence_its_scratch_is_gone(tmp_pat
 
 
 def test_a_new_start_still_refuses_the_unverified_directory(tmp_path):
-    first = _prepare(tmp_path, _Catalog(GRANTED))
-    scratch = pathlib.Path(first.scratch)
+    _prepare(tmp_path, _Catalog(GRANTED))
     data = tmp_path / "data"
+    scratch = _legacy_scratch(_record(data))
     _unverify(_record(data))
     record_bytes, before = _record(data).read_bytes(), _tree(scratch)
     again = _prepare(tmp_path, _Catalog(GRANTED))

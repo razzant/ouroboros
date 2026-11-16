@@ -224,7 +224,7 @@ def test_actual_review_continuations_emit_each_run_once(tmp_path, monkeypatch, f
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
     from ouroboros.review_execution import AgentSessionReviewExecutor, ReviewAssignment
     from ouroboros.usage_accounting import UsageScope, usage_scope
-    from tests.test_review_session_continuation import _engine, record_legacy_successor
+    from tests.test_review_session_continuation import _engine, accept_legacy_successor, record_legacy_successor
     from tests._review_session_route_shared import FakeGateway
     monkeypatch.setattr(dcu, "_EMITTED_SESSION_USAGE", {})
     posts = _engine(monkeypatch, stops=2 if final_failed else 1)
@@ -249,6 +249,7 @@ def test_actual_review_continuations_emit_each_run_once(tmp_path, monkeypatch, f
         with pytest.raises(ClaudexorUnavailable):
             first.execute()  # run-1 stopped; its successor is the older host's record below
         token = record_legacy_successor(tmp_path, checkpoints[0])
+        accept_legacy_successor(monkeypatch, tmp_path, token)
         monkeypatch.setattr(dcu, "_EMITTED_SESSION_USAGE", {})  # process-local, like custody's cache
         executor = seat()
         executor.restore_custody({"pending_invocation_id": checkpoints[0]})
@@ -259,6 +260,7 @@ def test_actual_review_continuations_emit_each_run_once(tmp_path, monkeypatch, f
         else:
             result = executor.execute()
     assert [(request, key) for request, key in posts if "continueFrom" in request] == [({"continueFrom": "run-1"}, token)]
+    assert FakeGateway.lookup_requests == [({"continueFrom": "run-1"}, token)]
     assert [row["claudexor"]["run_id"] for row in usage] == ["run-1", "run-2"]
     assert [row["input_token_usage"] for row in usage] == list(splits.values())
     for row in usage:

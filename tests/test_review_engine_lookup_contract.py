@@ -79,7 +79,9 @@ def test_conflict_recovery_keeps_original_key_request_and_registration(tmp_path,
 
 
 @pytest.mark.parametrize("existing_project", [False, True])
-def test_fresh_conflict_retires_only_the_registration_this_start_created(tmp_path, fake_route, existing_project):
+def test_fresh_conflict_retires_nothing_and_keeps_its_token(tmp_path, fake_route, existing_project):
+    """A key conflict answers an ENTERED POST: the key may hold an accepted run, so neither the registration this
+    start created nor its token is retired and its fate stays pending (#3138), whoever owns the project."""
     row = next(r for r in RESPONSES if r["route"] == "create" and r["scenario"] == "conflict")
     fake_route.project_unregistered = not existing_project
     fake_route.start_error = _problem(row)
@@ -87,10 +89,10 @@ def test_fresh_conflict_retires_only_the_registration_this_start_created(tmp_pat
     with pytest.raises(ClaudexorUnavailable, match="different request"):
         _run_session_directly(tmp_path, retry_state=state, operation_id="fresh")
     gateway = fake_route.instances[-1]
-    assert len(gateway.start_requests) == 1 and state == {}
-    assert gateway.removals == ([] if existing_project else ["proj-new"])
+    assert len(gateway.start_requests) == 1 and state == {"pending_invocation_id": gateway.start_keys[0]}
+    assert gateway.removals == []
     retained = custody.invocation_record(tmp_path, gateway.start_keys[0])
-    assert retained["state"] == "failed_definite"
+    assert retained["state"] == "pending"
 
 
 def test_problem_context_is_only_diagnostic_and_old_engines_keep_empty_cause():
