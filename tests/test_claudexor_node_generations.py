@@ -539,6 +539,17 @@ def test_an_older_kept_bundle_yields_only_a_pinned_copy_that_runs_while_naming_s
     assert node_runtime.discovered_host_node() == node and probes == []
 
 
+def _first_node_on(path):
+    """``shutil.which("node", path=path)`` with POSIX semantics on every OS: the fixture models linux-x64, whose Node
+    is the extensionless ``bin/node`` that Windows ``which`` (PATHEXT names only, the current directory first) never
+    finds. The first PATH entry holding that executable file, or None."""
+    for entry in path.split(os.pathsep):
+        candidate = os.path.join(entry, "node")
+        if entry and os.path.isfile(candidate) and (os.name == "nt" or os.access(candidate, os.X_OK)):
+            return candidate
+    return None
+
+
 @pytest.mark.parametrize("bundle,prepared,lane,named", [
     (None, False, None, None),
     ("exact", False, "bundle", None),  # naming cannot tell this copy's version without running it: none is named
@@ -564,10 +575,10 @@ def test_the_gate_environment_names_the_lane_node_without_running_it_and_the_lan
     assert selected == nodes[lane]
     attempts = _forbid_processes(monkeypatch)
     env = preflight_runner._preflight_env(tmp_path / "gate", tmp_path / "gate" / "repo", create=False, workers=1)
-    assert shutil.which("node", path=env["PATH"]) == nodes[named]  # planning, or passes no lane ran: named, unrun
+    assert _first_node_on(env["PATH"]) == nodes[named]  # planning, or passes no lane ran: named, unrun
     lane_env = preflight_runner._preflight_env(tmp_path / "gate", tmp_path / "gate" / "repo", create=False, workers=1,
                                                node=selected)  # the lane's children and the passes after it
-    assert shutil.which("node", path=lane_env["PATH"]) == (selected or nodes[named])
+    assert _first_node_on(lane_env["PATH"]) == (selected or nodes[named])
     assert attempts == [] and not (tmp_path / "gate").exists()
 
 

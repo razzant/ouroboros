@@ -524,8 +524,9 @@ def test_a_bare_npm_step_runs_on_the_pins_node_and_keeps_its_launcher_without_a_
     cli = host / "node_modules" / "npm" / "bin" / "npm-cli.js"
     cli.parent.mkdir(parents=True)
     cli.write_text("// npm\n", encoding="utf-8")
-    (host / "npm").write_text("#!/bin/sh\n", encoding="utf-8")
-    (host / "npm").chmod(0o755)
+    launcher = host / ("npm.cmd" if os.name == "nt" else "npm")  # the launcher `which` finds there (PATHEXT on Windows)
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o755)
     events, ran = [], []
     _governing_pin(monkeypatch, events, prepared=pinned)
     monkeypatch.setattr(isolated_deps, "_run", lambda cmd, **kwargs: ran.append(cmd) or {"returncode": 0})
@@ -534,11 +535,13 @@ def test_a_bare_npm_step_runs_on_the_pins_node_and_keeps_its_launcher_without_a_
     env = {"PATH": str(host)}
     isolated_deps._run_install_step({"argv": ["npm", "run", "build"]}, env_root, env, 1)
     # The author's own path stays the author's.
-    isolated_deps._run_install_step({"argv": [str(host / "npm"), "run", "build"]}, env_root, env, 1)
+    isolated_deps._run_install_step({"argv": [str(launcher), "run", "build"]}, env_root, env, 1)
     monkeypatch.setattr(node_runtime, "pinned_node_wait", lambda: (False, ""))
     isolated_deps._run_install_step({"argv": ["npm", "run", "build"]}, env_root, env, 1)
-    assert ran == [[pinned, str(cli), "run", "build"], [str(host / "npm"), "run", "build"],
-                   [str(host / "npm"), "run", "build"]]
+    # Windows `which` spells the PATHEXT suffix its own way (`npm.CMD`): the same file, compared as the OS does.
+    assert [[os.path.normcase(cmd[0]), *cmd[1:]] for cmd in ran] == [
+        [os.path.normcase(pinned), str(cli), "run", "build"], [os.path.normcase(str(launcher)), "run", "build"],
+        [os.path.normcase(str(launcher)), "run", "build"]]
 
 
 @pytest.mark.parametrize("complete", [False, True], ids=["node-only", "full"])
