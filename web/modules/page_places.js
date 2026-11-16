@@ -208,7 +208,7 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
                 const shown = box.scrollTop;
                 if (anchor !== root && box.contains?.(anchor)) {
                     revealPastFade(box, anchor);
-                    if (box.scrollTop !== shown) box.scrollTop = left;
+                    if (Math.abs(box.scrollTop - shown) > 1) box.scrollTop = left;  // a row's sub-pixel height is no move
                 }
                 remember(box);
             }

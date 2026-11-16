@@ -106,14 +106,15 @@ test('a return within its fade\'s depth goes to the top, and a list beside its o
     // The pressed row lies in the same list. Near the naming row, both come into view; too far from it to share the
     // view, the list stays where the owner left it and the pressed row keeps its view.
     rail.contains = (node) => node === pressed;
-    for (const [at, expected] of [[520, 748 - (600 - 32)], [100, 40]]) {
+    // A pressed row whose sub-pixel height crosses the lower fade by less than a pixel still shares the view.
+    for (const [at, expected] of [[520, 748 - (600 - 32)], [100, 40], [180 + 600 - 32 - 48 + 0.4, 748 - (600 - 32)]]) {
         pressed.getBoundingClientRect = () => ({ top: at - rail.scrollTop, bottom: at + 48 - rail.scrollTop });
         row.getBoundingClientRect = () => ({ top: 700 - rail.scrollTop, bottom: 748 - rail.scrollTop });
         pressed.focus = () => {};
         rail.scrollTop = 40;  // the naming row lies under the lower edge, the pressed row in view
         const later = w.restore.capture(root, pressed);
         later();
-        assert.equal(rail.scrollTop, expected, at);
+        assert.ok(Math.abs(rail.scrollTop - expected) <= 1, `${at}: ${rail.scrollTop}`);
     }
 });
 
