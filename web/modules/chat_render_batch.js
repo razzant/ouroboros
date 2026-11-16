@@ -75,10 +75,11 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
         },
         // A failure is shown where the loading state was; elsewhere the reader
         // keeps the transcript they have and the next sync reconciles it.
-        endRecent(error = null) { recent = error ? { error } : null; },
-        recentFailed: () => Boolean(recent?.error),
+        endRecent(error = null, partial = false) { recent = error ? { error, partial } : null; },
+        recentFailed: () => Boolean(recent?.error && !recent.partial),
         render(snapshot, coverage = {}, approximate = false) {
             const error = recent?.error || snapshot.error;
+            const retry = recent?.error && !recent.partial || snapshot.error;
             const migrating = isStoreMigrating(error);
             const hydrating = Boolean(recent?.loading);
             const loading = hydrating || Boolean(snapshot.loading);
@@ -103,11 +104,11 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
                 && !(hydrating && feedIsEmpty(messagesDiv));
             // A grown room's exhausted chain offers the way on (it rebases to the present); a chain a navigation
             // began ends at its older end: ↓ is the way to the present.
-            const buttonHidden = migrating || (!error && !snapshot.canOlder
+            const buttonHidden = migrating || (!retry && !snapshot.canOlder
                 && !(coverage.horizonGap && !snapshot.away) && !hydrating);
             const fields = [
                 [button, { textContent: hydrating ? 'Loading saved history…' : loading ? 'Loading…'
-                    : changedView ? 'Refresh history' : error ? 'Retry loading messages' : 'Load more history',
+                    : changedView ? 'Refresh history' : retry ? 'Retry loading messages' : 'Load more history',
                     disabled: loading, hidden: buttonHidden }],
                 [note, { textContent: noteText, hidden: !noteText }],
                 [gapNote, { textContent: separateGap ? gapText : '', hidden: !separateGap }],
@@ -119,8 +120,9 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
             if (hydrating) root.setAttribute('aria-busy', 'true'); else root.removeAttribute('aria-busy');
             if ((snapshot.initialized || error || hydrating) && !root.isConnected) messagesDiv.prepend(root);
             root.classList.toggle('has-gaps', !migrating && (incomplete || Boolean(error)));
-            return { ...coverage, complete: Boolean(coverage.complete && !error),
-                error: Boolean(error), note: noteText, truncated_by: incomplete ? ['unloaded'] : [] };
+            // `retry`: the pager's read that failed (`latest`: ↓'s, which ↓ itself retries where the reader is).
+            return { ...coverage, complete: Boolean(coverage.complete && !error), error: Boolean(error),
+                retry: snapshot.retryDirection || '', note: noteText, truncated_by: incomplete ? ['unloaded'] : [] };
         },
     };
 }

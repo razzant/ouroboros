@@ -31,6 +31,23 @@ function harness({ fetch, maxPages = 3 } = {}) {
     return { pager, calls, applied, released, states, protectedIds, setAlive: value => { live = value; } };
 }
 
+for (const jump of ['around', 'revisit']) test(`partial latest rechains a ${jump} to present-based older paging`, async () => {
+    const partial = { ...page(0, { chain: 'present' }),
+        window: { latest_message: null, truncated_by: ['chat_projection_failed'] } };
+    const h = harness({ fetch: (cursor, options) => options.around || cursor === 'jump'
+        ? page(3, { chain: 'jump' }) : cursor ? page(1, { chain: 'present' }) : partial });
+    h.pager.acceptRecent(page(0));
+    await (jump === 'around' ? h.pager.around('task:old', () => true) : h.pager.revisit('jump', () => true));
+    assert.equal(h.pager.getState().away, true);
+    assert.equal((await h.pager.newer()).status, 'unavailable', 'a jumped chain cannot walk newer');
+    await h.pager.latest(() => true);
+    assert.equal(h.pager.getState().away, false);
+    assert.equal(h.pager.getState().firstPage.requestCursor, partial.page_cursor);
+    assert.equal(h.pager.getState().error, null, 'the partial response remains a useful page');
+    await h.pager.older();
+    assert.equal(h.calls.at(-1).cursor, 'before:present:1');
+});
+
 test('first recent read owns the frozen chain; a later live refresh does not replace it', () => {
     const h = harness();
     const recent = page(0);
@@ -250,6 +267,104 @@ test('a failed latest read leaves the old chain available and retries the same r
     assert.equal(h.pager.getState().firstPage.requestCursor, 'replay:B:0');
 });
 
+// ↓ returns to the present (DESIGN "History edges"): its `latest` carries its claim.
+test('↓ makes an older page still loading yield before it lands: the window stays at the present it reads', async () => {
+    const answers = new Map();
+    const h = harness({ fetch: cursor => new Promise(resolve => answers.set(cursor, resolve)) });
+    h.pager.acceptRecent(page(0));
+    const older = h.pager.older();
+    await Promise.resolve();
+    const latest = h.pager.latest(() => true);
+    assert.equal(h.calls[0].signal.aborted, true, 'the older read is stopped at once');
+    assert.equal(h.pager.getState().loading, 'latest');
+    await Promise.resolve();
+    answers.get('before:A:1')(page(1));
+    answers.get(null)(page(0, { chain: 'B' }));
+    assert.equal((await older).status, 'disposed', 'a late older page never lands');
+    assert.equal((await latest).status, 'applied');
+    assert.deepEqual(h.applied.map(item => item.direction), ['recent', 'latest']);
+    const state = h.pager.getState();
+    assert.equal(state.away, false);
+    assert.equal(state.firstPage.requestCursor, 'replay:B:0');
+    h.pager.toPresent();
+    assert.equal(h.pager.getState().loading, '', 'with nothing loading there is nothing to stop');
+});
+
+test('a read of the present already out serves every later asker: it lands while its latest claim holds', async () => {
+    const answers = [];
+    const h = harness({ fetch: () => new Promise(resolve => answers.push(resolve)) });
+    h.pager.acceptRecent(page(0));
+    let first = true, second = true;
+    const one = h.pager.latest(() => first);
+    await Promise.resolve();
+    const two = h.pager.latest(() => second);
+    assert.equal(two, one, 'a second ↓ joins the read already out');
+    first = false;
+    answers[0](page(0, { chain: 'B' }));
+    assert.equal((await two).status, 'applied', 'the newer claim still holds: it lands');
+    assert.equal(h.calls.length, 1);
+    // A claim the reader left drops the answer, unless an asker without a claim (Refresh history) joined it.
+    second = false;
+    const three = h.pager.latest(() => second);
+    await Promise.resolve();
+    assert.equal(h.pager.latest(), three);
+    answers[1](page(0, { chain: 'C' }));
+    assert.equal((await three).status, 'applied');
+    assert.equal(h.pager.getState().firstPage.requestCursor, 'replay:C:0');
+    const four = h.pager.latest(() => second);
+    await Promise.resolve();
+    answers[2](page(0, { chain: 'D' }));
+    assert.equal((await four).status, 'superseded', 'one the reader moved on from never replaces their chain');
+    assert.equal(h.pager.getState().firstPage.requestCursor, 'replay:C:0');
+    assert.equal(h.calls.length, 3);
+});
+
+test('a failed read of the present is the window\'s Retry while ↓ wants it; one the reader left leaves no failure', async () => {
+    let wanted = true;
+    const h = harness({ fetch: () => { throw new TypeError('offline'); } });
+    h.pager.acceptRecent(page(0));
+    assert.equal((await h.pager.latest(() => wanted)).status, 'error');
+    assert.equal(h.pager.getState().retryDirection, 'latest');
+    wanted = false;
+    assert.equal((await h.pager.latest(() => wanted)).status, 'error');
+    assert.equal(h.pager.getState().retryDirection, '', 'the reader moved on: nothing to retry');
+});
+
+test('only ↓\'s own failed read of the present is retried as ↓; an asker without a claim retries where it is', async () => {
+    const h = harness({ fetch: () => { throw new TypeError('offline'); } });
+    h.pager.acceptRecent(page(0));
+    const retry = () => [h.pager.getState().retryDirection, h.pager.getState().retryReturn];
+    assert.equal((await h.pager.latest(() => true)).status, 'error');
+    assert.deepEqual(retry(), ['latest', true]);
+    assert.equal((await h.pager.latest()).status, 'error');
+    assert.deepEqual(retry(), ['latest', false], 'a refresh or a rebase reading the present is not the reader\'s ↓');
+    assert.equal((await h.pager.older()).status, 'error');
+    assert.deepEqual(retry(), ['older', false]);
+});
+
+test('↓ leaves a navigation\'s chain for the present: a navigation still loading yields, and the window is no longer away', async () => {
+    const answers = [];
+    const h = harness({ fetch: (cursor, { around }) => (around ? new Promise(resolve => answers.push(resolve))
+        : page(0, { chain: 'B' })) });
+    h.pager.acceptRecent(page(0));
+    const navigation = h.pager.around('task:t-1', () => true);
+    await Promise.resolve();
+    assert.equal(h.pager.getState().loading, 'around');
+    const latest = h.pager.latest(() => true);
+    assert.equal(h.calls[0].signal.aborted, true);
+    answers[0]({ ...page(5), anchor: { state: 'found' } });
+    assert.equal((await navigation).status, 'disposed');
+    assert.equal((await latest).status, 'applied');
+    assert.equal(h.pager.getState().away, false);
+    const jumped = harness({ fetch: (cursor, { around }) => (around ? { ...page(5), anchor: { state: 'found' } }
+        : page(0, { chain: 'B' })) });
+    jumped.pager.acceptRecent(page(0));
+    assert.equal((await jumped.pager.around('task:t-1', () => true)).status, 'applied');
+    assert.equal(jumped.pager.getState().away, true, 'a navigation began the chain away from the present');
+    assert.equal((await jumped.pager.latest(() => true)).status, 'applied');
+    assert.equal(jumped.pager.getState().away, false, '↓\'s latest begins the present\'s chain again');
+});
+
 test('suspension aborts a page without losing the chain, and an old answer cannot replace a new visit', async () => {
     const answers = [];
     const h = harness({ fetch: () => new Promise(resolve => answers.push(resolve)) });
@@ -300,4 +415,20 @@ test('a dead chat instance cannot apply a completed read before explicit disposa
     assert.equal(h.applied.length, 1);
     h.pager.destroy();
     assert.equal(h.released.length, 1);
+});
+
+for (const direction of ['recent', 'older', 'newer', 'around', 'revisit']) test(`partial projection remains a page: ${direction}`, async () => {
+    const partial = data => ({ ...data, window: { latest_message: null, complete: false, truncated_by: ['chat_projection_failed'] } });
+    let fault = direction !== 'newer';
+    const h = harness({ fetch: cursor => { const data = page(Number(cursor?.split(':').at(-1)) || 0); return fault ? partial(data) : data; } });
+    if (direction !== 'recent') h.pager.acceptRecent(page(0));
+    if (direction === 'newer') { for (let n = 0; n < 3; n++) await h.pager.older(); fault = true; }
+    const result = direction === 'recent' ? h.pager.acceptRecent(partial(page(0)))
+        : direction === 'around' ? await h.pager.around('task:available', () => true)
+        : direction === 'revisit' ? await h.pager.revisit('replay:A:1', () => true)
+        : await h.pager[direction]();
+    assert.equal(result.status, 'applied');
+    assert.equal(h.pager.getState().error, null);
+    assert.ok(h.applied.at(-1).window.truncated_by.includes('chat_projection_failed'));
+    assert.ok(h.pager.getState().cachedPages.length <= 3);
 });
