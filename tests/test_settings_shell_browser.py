@@ -1,6 +1,6 @@
 """The Settings shell in a browser (docs/DESIGN.md "Settings"): the home opens a page, and every way back (the page's
 named header capsule, Escape, the browser's Back) returns where the owner was, one level at a time, the home keeping its scroll
-and the field a level held committing before it closes. On a phone the named Back replaces the places control while a level is open; on a desk the sidebar remains. An address no page registers never shows an empty page: the home opens with its last word
+and the field a level held committing before it closes. On a phone the round Back replaces the places control while a level is open; on a desk the sidebar remains. An address no page registers never shows an empty page: the home opens with its last word
 searched."""
 from __future__ import annotations
 

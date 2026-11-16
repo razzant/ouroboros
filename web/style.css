@@ -98,10 +98,12 @@ html[data-layout="stack"] .shell-icon-control {
     width: 44px;
     height: 44px;
 }
-/* Back (page_header.js renderBackControl; DESIGN "Page header"): the app's one Back, a shell icon control holding the
-   chevron-left, named for where it leads. It stands first in a header's lead, before the place's name or its tabs,
-   and never shrinks. */
+/* Back (page_header.js renderBackControl; DESIGN "Page header"): the app's one Back, the shell's round icon control
+   holding the chevron-left alone, its stroke centred in the circle (the glyph sits 0.75px left on its canvas); where
+   it leads is its tooltip and accessible name. It stands first in a header's row, 8px before the place's name, tabs
+   or capsules, and never shrinks. */
 .shell-back { flex: none; }
+.shell-back > svg { translate: 0.75px 0; }
 
 /* A desk has a docked sidebar: no ☰ in the headers and no drawer head (the stack layout shows both). */
 .mobile-nav-toggle,
@@ -1450,15 +1452,10 @@ html[data-layout="docked"] .app-page-header[data-empty]:not([data-return]) {
 .app-page-lead > * { min-width: 0; }
 .app-page-lead:empty,
 .app-page-tabs:not(:has(> *)) { display: none; }
-/* Levels and returns share the shell's leading capsule. The writer supplies presence and placement. */
-.app-page-return { display: flex; align-items: center; flex-shrink: 100; min-width: calc(20px + var(--space-2) + var(--space-2) + var(--space-1) + 1em); max-width: 40%; order: -1; }
+/* Levels and returns share the one round Back. The writer supplies presence and placement. */
+.app-page-return { display: flex; align-items: center; flex: none; order: -1; }
 .app-page-return:empty { display: none; }
 html[data-telegram-back="back"] .app-page-return { display: none; }
-.shell-back { width: auto; max-width: 100%; gap: var(--space-1); padding-inline: var(--space-2);
-    font: 600 var(--type-body) / var(--line-title) var(--font-sans); }
-.shell-back > svg { flex: none; }
-.shell-back-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-html[data-layout="stack"] .shell-back { width: auto; }
 .app-page-header[data-return] > .app-page-title-block { display: flex; align-items: center; gap: var(--space-2); }
 .app-page-header[data-return="column"] > .app-page-title-block { display: block; }
 .app-page-header[data-return] .app-page-lead { flex: 1; }
@@ -1466,7 +1463,7 @@ html[data-layout="stack"] .app-page-header[data-return] { grid-template-columns:
 html[data-layout="stack"] .app-page-header[data-return] > .app-page-leading { display: none; }
 html[data-layout="stack"] .app-page-header[data-return] > .app-page-title-block { display: contents; }
 html[data-layout="stack"] .app-page-header[data-return] .app-page-title-row { grid-area: title; }
-html[data-layout="stack"] .app-page-header[data-return] > .app-page-title-block > .app-page-return { grid-area: back; max-width: 36vw; }
+html[data-layout="stack"] .app-page-header[data-return] > .app-page-title-block > .app-page-return { grid-area: back; }
 html[data-layout="docked"] .app-page-header[data-lead] {
     grid-template-columns: minmax(8rem, 1fr) auto;
     grid-template-areas: "title toolbar";
@@ -6233,7 +6230,7 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
         grid-template-columns: auto minmax(0, 1fr) auto;
         column-gap: var(--space-2);
     }
-    html[data-layout="stack"] #page-dashboard .section-lead-page > .app-page-return { grid-area: 1 / 1; max-width: 36vw; }
+    html[data-layout="stack"] #page-dashboard .section-lead-page > .app-page-return { grid-area: 1 / 1; }
     html[data-layout="stack"] #page-dashboard .section-lead-page > [data-dashboard-lead-name] { grid-area: 1 / 2; }
     html[data-layout="stack"] #page-dashboard .logs-filters:not([hidden]) { display: contents; }
     html[data-layout="stack"] #page-dashboard .logs-kinds { grid-area: 2 / 1 / auto / -1; padding: var(--space-2) 0; margin: 0; }
@@ -6917,7 +6914,6 @@ html[data-layout="stack"] .logs-card { padding: 0; background: none; box-shadow:
 .dashboard-row-mark[hidden] { display: none; }
 @container sectionplace (min-width: 40rem) {
     .dashboard-shell[data-section-view="page"] .dashboard-body { padding-inline-start: var(--space-4); }
-    .section-lead-page .app-page-return { flex: none; max-width: none; gap: var(--space-2); }
     /* The chosen list row names its pane; the heading remains available to readers. */
     .section-lead-page > [data-dashboard-lead-name],
     #page-settings[data-settings-depth="1"] .section-lead-page > [data-settings-lead-name] {
@@ -7231,10 +7227,9 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
     padding: var(--space-4) var(--space-5) var(--space-5);
 }
 
-/* Skills keeps the return whole and the tabs next to it, independent of its trailing actions. A narrow page
-   column gives the tabs the one line below the header; the list starts at the strip's edge. */
+/* Skills keeps Back and the tabs next to it, 8px apart, independent of its trailing actions. A narrow page column
+   gives the tabs the one line below the header; the list starts at the strip's edge. */
 #page-skills { container: skillspage / inline-size; }
-#page-skills .app-page-return { flex: none; max-width: none; }
 #page-skills .skills-scroll { padding-top: 0; }
 #page-skills .skills-scroll { padding-inline: var(--page-header-padding-x); }
 #page-skills > .app-page-tabs { padding-bottom: 0; }
@@ -7248,7 +7243,7 @@ html[data-layout="stack"] .dashboard-shell { padding-inline: 0; }
 html[data-layout="docked"] #page-skills > .app-page-header[data-lead] {
     grid-template-columns: auto minmax(0, 1fr) auto;
     grid-template-areas: "back tabs toolbar";
-    row-gap: 0;
+    gap: 0 var(--space-2);
     overflow: visible;
     mask-image: none;
     -webkit-mask-image: none;
@@ -7261,7 +7256,7 @@ html[data-layout="docked"] #page-skills .app-page-return { grid-area: back; }
 html[data-layout="docked"] #page-skills .app-page-toolbar { min-height: var(--page-header-row-h); }
 html[data-layout="docked"] #page-skills .app-tab-strip { grid-area: tabs; }
 @media (max-width: 1087px) {
-    @container skillspage (max-width: 36rem) {
+    @container skillspage (max-width: 33rem) {
         html[data-layout="docked"] #page-skills > .app-page-header[data-lead][data-return] { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "back toolbar" "tabs tabs"; }
     }
     @container skillspage (max-width: 30rem) {

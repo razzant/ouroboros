@@ -724,7 +724,7 @@ def test_skills_tabs_and_existing_toolbar_survive_a_narrow_content_column(engine
         page.wait_for_function("document.querySelector('#page-skills .app-page-header').hasAttribute('data-lead')")
         assert page.locator('#page-skills .app-page-lead .app-tab-strip').evaluate('el => el === window.__skillsTabs')
         assert page.evaluate('document.scrollingElement.scrollWidth <= innerWidth')
-        # A jump keeps its full capsule. The page column decides whether the three tabs share its row.
+        # A jump's return is the round Back. The page column decides whether the three tabs share its row.
         _goto(page, 'settings')
         page.locator('[data-settings-open="page:skills"]').click()
         for column in (488, 733):
@@ -732,8 +732,8 @@ def test_skills_tabs_and_existing_toolbar_survive_a_narrow_content_column(engine
             page.evaluate("document.documentElement.style.setProperty('--sidebar-width', '296px')")
             page.wait_for_timeout(150)
             lead = page.locator('#page-skills [data-shell-back]')
-            assert lead.inner_text().strip() == 'Settings'
-            assert lead.locator('.shell-back-name').evaluate('n => n.scrollWidth <= n.clientWidth')
+            assert lead.get_attribute('aria-label') == lead.get_attribute('title') == 'Back to Settings'
+            assert lead.evaluate('n => !n.textContent.trim() && Math.abs(n.offsetWidth - n.offsetHeight) < 1'), 'round, no word drawn'
             positions = []
             for tab in ('installed', 'browse'):
                 strip.locator(f'[data-tab="{tab}"]').click()

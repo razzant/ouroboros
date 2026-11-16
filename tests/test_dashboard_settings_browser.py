@@ -257,8 +257,7 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     page.locator('#page-settings [data-settings-page="models/role/consciousness"]').wait_for(state="visible")
     back = page.locator('#page-settings > .app-page-header [data-shell-back]')
     back.wait_for()
-    assert back.inner_text().strip() == "Consciousness" and back.get_attribute("aria-label") == "Back to Consciousness"
-    assert back.get_attribute("title") == "Back to Consciousness"
+    assert back.get_attribute("aria-label") == "Back to Consciousness" and back.get_attribute("title") == "Back to Consciousness"
     parent = page.locator('#page-settings [data-shell-level]')
     assert parent.count() == 0, 'the jump is the only back control until spent'
     assert page.locator('#page-settings [data-settings-lead-name]').inner_text() == "Consciousness model"
@@ -281,7 +280,7 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     page.wait_for_selector('#page-widgets.active')
     page.evaluate("document.querySelector('[data-nav-page=settings]').click()")
     page.wait_for_selector('#page-settings.active')
-    assert back.inner_text().strip() == "Models" and parent.count() == 0
+    assert back.get_attribute("aria-label") == back.get_attribute("title") == "Back to Models" and parent.count() == 0
     back.click()
     page.locator('[data-settings-page="models"]:visible').wait_for()
     page.evaluate("document.querySelector('[data-nav-page=dashboard]').click()")
@@ -296,8 +295,7 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     page.locator('#page-settings [data-settings-page="permissions"]').wait_for(state="visible")
     back = page.locator('#page-settings > .app-page-header [data-shell-back]')
     back.wait_for()
-    assert back.inner_text().strip() == "Consciousness" and back.get_attribute("aria-label") == "Back to Consciousness"
-    assert back.get_attribute("title") == "Back to Consciousness"
+    assert back.get_attribute("aria-label") == "Back to Consciousness" and back.get_attribute("title") == "Back to Consciousness"
     back.click()
     page.wait_for_selector("#dashboard-panel-consciousness.active")
     # The evolution door opens its row on the Evolution tab, and the allowance door its row in Costs: a door inside
@@ -305,12 +303,12 @@ def test_the_doors_of_consciousness_lead_where_they_say_and_settings_leads_back(
     page.click(row("consciousness-evolution"))
     page.wait_for_selector("#dashboard-panel-evolution.active")
     page.wait_for_function("() => document.activeElement?.dataset.evoWhen === 'off'")
-    assert page.locator("#page-dashboard [data-shell-back]").inner_text().strip() == "Consciousness"
+    assert page.locator("#page-dashboard [data-shell-back]").get_attribute("aria-label") == "Back to Consciousness"
     page.click('[data-dashboard-tab="consciousness"]')
     page.click(row("consciousness-allowance"))
     page.wait_for_selector("#dashboard-panel-costs.active")
     page.wait_for_function("(id) => document.activeElement?.id === id", arg=f"setting-{ALLOWANCE}")
-    assert page.locator("#page-dashboard [data-shell-back]").inner_text().strip() == "Consciousness"
+    assert page.locator("#page-dashboard [data-shell-back]").get_attribute("aria-label") == "Back to Consciousness"
 
 
 def test_costs_shows_subscriptions_from_the_passive_view_alone_and_its_doors_open_accounts(ui):
@@ -326,8 +324,7 @@ def test_costs_shows_subscriptions_from_the_passive_view_alone_and_its_doors_ope
     door.click()
     back = page.locator('#page-settings > .app-page-header [data-shell-back]')
     back.wait_for()
-    assert back.inner_text().strip() == "Costs" and back.get_attribute("aria-label") == "Back to Costs"
-    assert back.get_attribute("title") == "Back to Costs"
+    assert back.get_attribute("aria-label") == "Back to Costs" and back.get_attribute("title") == "Back to Costs"
     back.click()
     page.wait_for_selector("#dashboard-panel-costs.active")
 
@@ -355,7 +352,7 @@ def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, widt
         assert _sideways(page) == [], (tab, leave)
         back.wait_for(state="visible")
         assert back.get_attribute("aria-label").startswith("Back to Settings")
-        assert back.inner_text().strip() == "Settings"
+        assert back.get_attribute("title") == back.get_attribute("aria-label")
         assert page.locator("#page-dashboard [data-shell-back]").count() == 1
         assert page.evaluate("() => Boolean(window.__ouroLayers.returnPage())")
         if leave == "Escape":

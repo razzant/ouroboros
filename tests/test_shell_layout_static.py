@@ -177,7 +177,7 @@ def test_a_section_gives_the_places_control_up_only_where_a_page_replaced_its_li
 def test_a_touch_window_keeps_a_sections_two_columns_in_one_header_row_and_an_empty_lead_draws_nothing():
     """DESIGN:3293,3345,3468: two panes from 40rem still have one header row. Places takes room from the rail's lead;
     the section name remains available to readers. Empty captions cannot keep a second row alive; Settings puts
-    Search in its list, with its one named Back and level in the header when owed."""
+    Search in its list, with its one round Back and level in the header when owed."""
     two = _block(_read("web/ui.css"), "@container sectionplace (min-width: 40rem) {")
     header = 'html[data-layout="stack"] .section-place > .app-page-header'
     assert f'{header} {{ grid-template-areas: "leading lead lead"; }}' in two

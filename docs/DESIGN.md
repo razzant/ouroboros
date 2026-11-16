@@ -3465,9 +3465,9 @@ glyphs (`web/modules/page_icons.js`).
 
 ### Page header
 
-The shared header (`web/modules/page_header.js`) draws one row, without decorative icons. Its first capsule is the
-owed jump's origin (‹ Tools, ‹ Main), then the level's parent when spent. Tooltip and accessible name give its full path.
-Two panes put it over the page column; one column replaces the leading picture. A model role names its destination
+The shared header (`web/modules/page_header.js`) draws one row, without decorative icons. Its first control is a round
+Back with the arrow, its destination in its name: the owed jump's origin, then the level's parent when spent (“Back to
+Settings › Tools”). Two panes put it over the page column; one column replaces the leading picture. A model role names its destination
 (Consciousness model), distinct from its return. Docked, the sidebar names a section without pages: tabs or Files' location lead its
 band, actions end it, at one height and shape. Controls share the content's leading inset, centred in native chrome or
 18px below a browser's top. Skills drops its tabs only when short actions cannot fit, never above 1087px. Rails use the shared fade;
@@ -3476,7 +3476,7 @@ location reveals its folder without widening the rail. Section headings follow
 An empty band draws nothing. Its scroller reaches the window's top; its first row starts below the macOS band,
 which stays the window's (owner 22.10). Widgets cards pass under it with crisp edges (owner 20.10); moving content
 fades by principle 9. Empty band space still drags the window. In stack layout the header row is at most 56 px: one
-leading control (the picture on a room or section list, the named Back when owed), destination name, status, then a
+leading control (the picture on a room or section list, the round Back when owed), destination name, status, then a
 room's consciousness chip and Panic. Tabs or filters occupy one line below; Logs fades its rail short of Clear,
 with no outer events panel on a phone. A short row drops the status word whole after its start step, keeping its mark; Main's title ellipsizes before
 its chip or Panic yields.
@@ -3488,11 +3488,11 @@ title opens even in an empty Project, starts with it, wrapped. Where the room co
 column) a name still cut leaves the consciousness chip its brain and mark, its accessible name keeping the whole
 state; a desk's panel beside Main keeps the chip's word. Panic and ×
 never yield (audit №2, owner 2026-10-28T22:09Z; sidebar names wait for the navigation decision).
-Skills keeps its capsule, tabs and short actions in one row; below 36rem with a return, 30rem without, tabs sit below. On phones Update stays beside the tabs; Refresh ends the title row.
+Skills keeps its Back, tabs and short actions in one row; below 33rem with a return, 30rem without, tabs sit below. On phones Update stays beside the tabs; Refresh ends the title row.
 Files keeps location and actions in the band, its divider at the window top; the filter heads the list, which
 scrolls under the shared fade. Circles ends the band with New circle; Widgets has no controls.
 Files shows the folder's list and the chosen file side by side while its own width holds both (the `files`
-container, 700 px); narrower, the list comes first and a chosen file replaces it with its folder's named Back, which
+container, 700 px); narrower, the list comes first and a chosen file replaces it with a round Back to its folder, which
 keeps an unsaved draft: the file's row says `unsaved` (a new file's draft has its own row at the top) and reopens
 it; another page keeps it too (a return says whether the file changed meanwhile); another file or folder asks. The folder's status stands over the list (audit №7, owner
 2026-10-28T22:09Z).

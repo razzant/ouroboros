@@ -45,9 +45,9 @@ def test_header_presence_comes_from_writers_and_telegram_owns_its_back():
     assert 'display: flex;' in leading, 'sections keep a visible way to the drawer in Telegram'
     assert '--telegram-header-start: 108px;' in css and '--telegram-header-end: 100px;' in css
     assert scope + ' {' in css, 'Telegram section placement excludes room bars'
-    capsule = re.search(r'\.app-page-return \{([^}]+)\}', css)[1]
-    assert float(re.search(r'flex-shrink: ([\d.]+)', capsule)[1]) > 1, 'return words yield before the page controls'
-    assert 'min-width: calc(20px + var(--space-2) + var(--space-2) + var(--space-1) + 1em)' in capsule, 'the chevron and ellipsis keep their space'
+    slot = re.search(r'\.app-page-return \{([^}]+)\}', css)[1]
+    assert 'flex: none;' in slot, 'the round Back never yields to the page controls'
+    assert 'width' not in slot and '.shell-back-name' not in css, 'no word beside the chevron, so nothing to truncate'
 
 
 # No exception: status/provenance/stat labels keep the renderer's sentence case.

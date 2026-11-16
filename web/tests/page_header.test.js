@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { bindHeaderControlPlacement, bindPageBack, bindPageHeader, renderMobileNavToggle, renderPageHeader } from '../modules/page_header.js';
+import { bindHeaderControlPlacement, bindPageBack, bindPageHeader, renderBackControl, renderMobileNavToggle, renderPageHeader } from '../modules/page_header.js';
 import { NodeStub, setup } from './dashboard_dom_fixture.js';
 import { createRoomHeader } from '../modules/chat_header.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
@@ -9,14 +9,15 @@ import { installDom, restoreDom } from './chat_dom_fixture.js';
 test('Skills keeps its return and tabs at the leading edge, with one extra line only in a narrow page column', () => {
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
     assert.match(css, /#page-skills \{ container: skillspage \/ inline-size; \}/);
-    assert.match(css, /#page-skills \.app-page-return \{ flex: none; max-width: none; \}/,
-        'changing the trailing actions cannot shrink or move the return before the tabs');
+    assert.match(css, /html\[data-layout="docked"\] #page-skills > \.app-page-header\[data-lead\] \{[^}]*grid-template-areas: "back tabs toolbar";\s*gap: 0 var\(--space-2\);/,
+        'Back stands 8px before the tabs, its own grid cell, so changing actions cannot shrink or move it');
     assert.match(css, /#page-skills \.skills-scroll \{ padding-top: 0; \}/);
     assert.match(css, /#page-skills > \.app-page-tabs \{ padding-bottom: 0; \}/);
     assert.match(css, /#page-skills > \.app-page-tabs > \.app-tab-strip \{[\s\S]*?margin-bottom: calc\(-1 \* var\(--space-4\)\);/,
         'the strip lends its shadows space without a blank row before the search');
     const narrow = css.slice(css.indexOf('html[data-layout="docked"] #page-skills > .app-page-header[data-lead]'), css.indexOf('.skills-search-chrome {'));
-    assert.match(narrow, /max-width: 36rem/);
+    assert.match(narrow, /max-width: 33rem/, 'the round Back needs 38px of a desk row, 52px under a finger');
+    assert.doesNotMatch(narrow, /max-width: 36rem/, 'the named capsule\'s threshold is gone with it');
     assert.match(narrow, /max-width: 30rem/);
     assert.match(narrow, /@media \(max-width: 1087px\)/);
     assert.match(narrow, /grid-template-areas: "back toolbar" "tabs tabs"/);
@@ -42,11 +43,22 @@ test('a section band has the same inset without native chrome and one leading ed
     assert.match(css, /section-rail \{\s*padding-top: calc\(var\(--page-header-row-h\) \+ var\(--space-3\)\)/);
 });
 
-test('header actions use the floating control tokens while the return keeps its glass recipe', () => {
+test('header actions use the floating control tokens while Back keeps the round glass recipe', () => {
     const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
     assert.match(css, /\.app-page-header \.btn, \.app-page-tabs \.btn \{[^}]*--control-h: var\(--control-h-float\);[^}]*--button-font-size: var\(--type-meta\)/);
-    assert.match(css, /\.shell-back \{ width: auto;/);
     assert.doesNotMatch(css, /\.app-page-header \.shell-back[^}]*--control-h:/);
+});
+
+test('Back is the shell\'s round control: the chevron alone, where it leads in its name and tooltip', () => {
+    const html = renderBackControl({ to: 'Tools', title: 'Settings › Tools', attrs: 'data-shell-back' });
+    assert.match(html, /^<button type="button" class="shell-icon-control shell-back" data-shell-back aria-label="Back to Settings › Tools" title="Back to Settings › Tools"><svg [^>]*>(?:(?!<\/svg>)[\s\S])*<\/svg><\/button>$/,
+        'one round icon control; no word is drawn beside the chevron');
+    const css = readFileSync(new URL('../style.css', import.meta.url), 'utf8');
+    assert.match(css, /\.shell-icon-control \{[^}]*width: var\(--control-h-float\);[^}]*height: var\(--control-h-float\);/);
+    assert.match(css, /\.shell-back > svg \{ translate: 0\.75px 0; \}/, 'the chevron\'s stroke is centred in the circle');
+    assert.doesNotMatch(css, /shell-back-name|\.shell-back \{[^}]*(width|padding|font)/, 'no named capsule: no width, padding or word of its own');
+    assert.match(css, /\.app-page-return \{ display: flex; align-items: center; flex: none; order: -1; \}/);
+    assert.doesNotMatch(css, /\.app-page-return \{[^}]*max-width/, 'nothing to truncate');
 });
 
 test('Telegram sections keep a visible drawer control and one title baseline inside both host buttons', () => {
@@ -116,7 +128,7 @@ test('a section keeps one header row with two panes and with a page alone', () =
     const alone = settings.slice(settings.indexOf('@container sectionplace (max-width: calc(40rem - 0.02px)) {'));
     assert.match(alone, /\[data-section-view="home"\].*grid-template-areas: "leading title toolbar"/,
         'a list alone keeps Places and its section name');
-    // The named-return band: a page alone is the one "lead" area (its named Back and its name), as is any header owing
+    // The named-return band: a page alone is the one "lead" area (its round Back and its name), as is any header owing
     // a return; Settings keeps Search in its list on a touch window, so its two panes keep Places in one row too.
     assert.match(alone, /\[data-section-view="page"\].*grid-template-areas: "lead";/,
         'a page alone puts Back and its own name in that row');
@@ -364,7 +376,7 @@ test('a named return occupies one shell slot in both layouts, and clearing relea
         window.ouroLayout = { layout }; notify();
         assert.equal(header.querySelector('[data-shell-back]'), button, 'one retained control, never in the tab rail');
         assert.equal(button.getAttribute('aria-label'), 'Back to Settings › Tools');
-        assert.equal(button.querySelector('.shell-back-name').textContent, 'Settings');
+        assert.equal(button.title, 'Back to Settings › Tools', 'its tooltip says where it leads');
     }
     button.dispatchEvent({ type: 'click' }); assert.equal(presses, 1);
     top = null; notify();

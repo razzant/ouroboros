@@ -84,14 +84,14 @@ export function renderPageHeader({
 }
 
 /**
- * Back (docs/DESIGN.md "Page header", the Back control): one recipe for the whole app. A header control like ☰ and ×
- * (style.css .shell-icon-control: a neutral capsule at the chrome height, the touch minimum in the stack layout)
- * holding the chevron-left glyph at 20 px, named for where it leads in its tooltip and accessible name. `attrs` are
- * the caller's hooks (a data attribute its handler finds it by).
+ * Back (docs/DESIGN.md "Page header", the Back control): one recipe for the whole app, a jump's return and a level's
+ * Back alike. The shell's round icon control, as ☰ and × are (style.css .shell-icon-control: the chrome height on a
+ * desk, the touch minimum in the stack layout), holding the chevron-left alone at 20 px; where it leads is its tooltip
+ * and accessible name, never drawn. `attrs` are the caller's hooks (a data attribute its handler finds it by).
  */
 export function renderBackControl({ to = '', title = to, attrs = '' } = {}) {
     const name = title ? `Back to ${title}` : 'Back';
-    return `<button type="button" class="shell-icon-control shell-back" ${attrs} aria-label="${escapeHtml(name)}" title="${escapeHtml(name)}">${SHELL_ICONS.back}<span class="shell-back-name">${escapeHtml(to)}</span></button>`;
+    return `<button type="button" class="shell-icon-control shell-back" ${attrs} aria-label="${escapeHtml(name)}" title="${escapeHtml(name)}">${SHELL_ICONS.back}</button>`;
 }
 
 /** An owed jump occupies the level's one Back slot until spent. Placement is a writer fact;
@@ -126,7 +126,6 @@ export function bindPageBack({ layers, currentHeader, doc = document, win = wind
         const title = `Back to ${back.title || back.label}`;
         button.setAttribute('aria-label', title);
         button.title = title;
-        button.querySelector('.shell-back-name').textContent = back.label;
     }
     const off = layers.onChange(paint);
     win.addEventListener('ouro:page-shown', paint);
