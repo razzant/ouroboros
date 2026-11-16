@@ -13,6 +13,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
 import random
 import re
 import time
@@ -27,6 +28,9 @@ from tests.test_telegram_outbox import _BOT, _Bridge, _closed_base, _not_deliver
 
 _REPO = Path(__file__).resolve().parents[1]
 _WAITING = {"pending", "retry_wait", "sending"}
+# Line breaks a stray file's own name can hold: a POSIX file system stores a line feed, Windows refuses such a name
+# (Errno 22), so there the name breaks only at U+2028, where ``str.splitlines`` ends a line just the same.
+_NAME_BREAKS = ("\n", "\u2028") if os.name != "nt" else ("\u2028",)
 
 
 def _bridge(data: Path, base: str, **settings) -> _Bridge:
@@ -95,14 +99,21 @@ def _handle(name: str) -> str:
     return "stray-" + hashlib.sha256(name.encode("utf-8", "surrogateescape")).hexdigest()[:16]
 
 
-def _on_disk(bridge: _Bridge, topic: str) -> str:
-    """The state the journal last wrote for the operation of ``topic``."""
-    for path in (bridge.state / "outbox").glob("*.json"):
+def _on_disk(bridge: _Bridge) -> dict:
+    """By topic, the state each operation's record held when the journal last finished writing it to disk. Observed
+    at the journal's own atomic write, never by opening the file its sender replaces meanwhile (on Windows such an
+    open is refused while the replace lands, and makes that replace fail); a write that fails records nothing."""
+    module, written = bridge.module("telegram_outbox"), {}
+    real = module._write_private
+
+    def write(path, content):
+        real(path, content)  # replaced and flushed, or it raises here as it would anyway
         if not path.name.endswith(".event.json"):
-            record = json.loads(path.read_text(encoding="utf-8"))
-            if record.get("topic") == topic:
-                return str(record.get("state"))
-    return ""
+            record = json.loads(content)
+            written[record.get("topic")] = str(record.get("state"))
+
+    module._write_private = write
+    return written
 
 
 def _records(bridge: _Bridge) -> list:
@@ -259,10 +270,11 @@ def test_canonical_media_keeps_its_bytes_through_a_busy_queue_connect_error_429_
             first.cancel()  # the process stops mid-request
             await asyncio.gather(first, return_exceptions=True)
         cold = _bridge(data, _closed_base())  # restart: Telegram cannot be reached
+        on_disk = _on_disk(cold)
         cold.start()
         # Stop once the photo's wait is on disk: a stop during that write leaves its saved "sending", which the
         # next load must read as unknown (it may have arrived), by design.
-        await _until(lambda: _on_disk(cold, "photo") == "retry_wait")
+        await _until(lambda: on_disk.get("photo") == "retry_wait")
         await cold.stop()
         states = {r["topic"]: (r["state"], [part["state"] for part in r["parts"]]) for r in cold.records()}
         assert states == {"outbound": ("unknown", ["unknown"]), "photo": ("retry_wait", ["retry_wait"]),
@@ -517,9 +529,9 @@ def test_deleting_the_shown_copies_keeps_one_kept_after_the_form_was_drawn(tmp_p
 
 def test_names_never_create_or_hide_what_a_press_deletes(tmp_path, monkeypatch):
     """A file name with line breaks spelling another copy's id and a stray handle, a stray named in Cyrillic with
-    spaces and one whose name holds a line break: the press deletes exactly the handles its own field listed. The
-    oldest kept copy (out of the listed window, named inside the file name) and one kept after the form was drawn
-    stay; every name shows on one line."""
+    spaces and one whose name holds a line break before that id (``_NAME_BREAKS``): the press deletes exactly the
+    handles its own field listed. The oldest kept copy (out of the listed window, named inside the file names) and one
+    kept after the form was drawn stay; every name shows on one line."""
     async def scenario():
         async with _Origin(["403"] * 8) as origin:
             bridge = _bridge(tmp_path / "data", origin.base)
@@ -532,7 +544,8 @@ def test_names_never_create_or_hide_what_a_press_deletes(tmp_path, monkeypatch):
             await bridge.publish("chat.document", {"file_base64": base64.b64encode(b"doc").decode(), "chat_id": 1,
                                                    "filename": tricky, "transport": {}})
             outbox = bridge.state / "outbox"
-            for name in ("черновик отчёта 1.event.json", f"line\n{oldest}.event.json"):
+            strays = sorted(["черновик отчёта 1.event.json", *(f"line{br}{oldest}.event.json" for br in _NAME_BREAKS)])
+            for name in strays:  # listed by exact name
                 (outbox / name).write_text(json.dumps({"text": "stray", "transport": {}}), encoding="utf-8")
             again = _bridge(tmp_path / "data", origin.base)
             await again.drain()
@@ -542,11 +555,11 @@ def test_names_never_create_or_hide_what_a_press_deletes(tmp_path, monkeypatch):
             shown = (await client.get("/copies")).json()
             listed = shown["delete_ids"].splitlines()
             held = [r["id"] for r in again.records() if r.get("held")]
-            strays = sorted(["черновик отчёта 1.event.json", f"line\n{oldest}.event.json"])  # by exact name
             assert listed == [held[3], held[2], held[1], *map(_handle, strays)] and oldest == held[0]
             display = shown["kept_copies"]
             assert "report\\u000a" + oldest + "\\u000astray-0123456789abcdef\\u000a\\u202enot.json.pdf" in display
             assert oldest not in display.splitlines() and "file черновик отчёта 1.event.json" in display
+            assert all(f"file line\\u{ord(br):04x}{oldest}.event.json" in display for br in _NAME_BREAKS)
             took = re.compile(r"\d+ kept copies take [\d.]+ [KM]B on this computer\.")  # what they take, first
             assert took.fullmatch(display.splitlines()[0])
             assert all(line == "" or "·" in line or line in listed or line.endswith("deleted.") or took.fullmatch(line)
@@ -556,7 +569,7 @@ def test_names_never_create_or_hide_what_a_press_deletes(tmp_path, monkeypatch):
             # The display is never read back: even text there spelling the oldest id on its own line deletes nothing.
             posted = {**shown, "kept_copies": f"{shown['kept_copies']}\n\n{oldest}", "confirm_delete": True}
             done = (await client.post("/copies", json=posted)).json()
-            assert done["message"].startswith("Deleted 5 kept copies. 2 other kept copies stay")
+            assert done["message"].startswith(f"Deleted {3 + len(strays)} kept copies. 2 other kept copies stay")
             still = {r["id"] for r in again.records() if r.get("held")}
             assert still == {oldest, newer}
             assert sorted(path.name for path in outbox.glob("*.event.json")) == sorted(
