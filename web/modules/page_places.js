@@ -193,18 +193,25 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
                 box.scrollLeft = left;
                 remember(box);
             }
-            // A list keeps the row that names the page beside it in view, past its fade, as the list's own reveal does
-            // when the row is chosen: a return never leaves the open page unnamed.
+            const anchor = anchors.find((el) => el?.isConnected && el.getClientRects().length && !el.closest('[hidden], [inert]')) || root;
+            // A list brings the row that names the page beside it in, past its fade, as the list's own reveal does when
+            // the row is chosen, so a return does not leave the open page unnamed. The pressed row keeps its view: when
+            // both cannot share it, the list stays where it was left.
             const scrolls = (box) => box.scrollHeight > box.clientHeight && /auto|scroll/.test(win.getComputedStyle?.(box)?.overflowY);
             for (const row of root?.querySelectorAll?.(NAMING_ROW) || []) {
                 if (!row.getClientRects?.().length) continue;
                 let box = row.parentElement;
                 while (box && !scrolls(box)) box = box === root ? null : box.parentElement;
                 if (!box) continue;
+                const left = box.scrollTop;
                 revealPastFade(box, row);
+                const shown = box.scrollTop;
+                if (anchor !== root && box.contains?.(anchor)) {
+                    revealPastFade(box, anchor);
+                    if (box.scrollTop !== shown) box.scrollTop = left;
+                }
                 remember(box);
             }
-            const anchor = anchors.find((el) => el?.isConnected && el.getClientRects().length && !el.closest('[hidden], [inert]')) || root;
             if (!anchor || !anchor.isConnected) { settle(); return; }
             if (!anchor.matches('button, a, input, select, textarea, [tabindex]')) anchor.tabIndex = -1;
             anchor.setAttribute?.('data-return-focus', keyboard ? 'keyboard' : 'pointer');

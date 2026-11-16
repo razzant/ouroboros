@@ -103,6 +103,18 @@ test('a return within its fade\'s depth goes to the top, and a list beside its o
     root.contains = (node) => node === pressed;
     w.restore.capture(root, pressed)();
     assert.equal(pane.scrollTop, 0, 'a reveal that leaves the list within its fade\'s depth settles at the top');
+    // The pressed row lies in the same list. Near the naming row, both come into view; too far from it to share the
+    // view, the list stays where the owner left it and the pressed row keeps its view.
+    rail.contains = (node) => node === pressed;
+    for (const [at, expected] of [[520, 748 - (600 - 32)], [100, 40]]) {
+        pressed.getBoundingClientRect = () => ({ top: at - rail.scrollTop, bottom: at + 48 - rail.scrollTop });
+        row.getBoundingClientRect = () => ({ top: 700 - rail.scrollTop, bottom: 748 - rail.scrollTop });
+        pressed.focus = () => {};
+        rail.scrollTop = 40;  // the naming row lies under the lower edge, the pressed row in view
+        const later = w.restore.capture(root, pressed);
+        later();
+        assert.equal(rail.scrollTop, expected, at);
+    }
 });
 
 test('disposal releases a room\'s places even before another page restore', () => {

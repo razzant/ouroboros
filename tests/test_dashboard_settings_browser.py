@@ -354,13 +354,15 @@ def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, widt
         return top
 
     def returned_where_it_was(tab, top, leave):
-        """The home is where it was; only a row naming the open page beside it that was out of view comes in, and the
-        pressed row stays in view (owner's critic, 16.11: a return never leaves the open page unnamed)."""
+        """The home is where it was. A row naming the open page beside it that was out of view comes in when it can
+        share the view with the pressed row (owner's critic, 16.11: a return does not leave the open page unnamed);
+        the pressed row keeps its view either way."""
         now = page.evaluate("(s) => document.querySelector(s).scrollTop", HOME)
-        if named[tab] is False:
-            assert page.evaluate(named_shown, HOME) is True, f"{leave} from {tab} shows the row naming the open page"
-            assert page.evaluate("""(s) => { const r = document.querySelector(s).getBoundingClientRect(),
-                b = document.activeElement.getBoundingClientRect(); return b.top >= r.top - 1 && b.bottom <= r.bottom + 1; }""", HOME)
+        assert page.evaluate("""(s) => { const r = document.querySelector(s).getBoundingClientRect(),
+            b = document.activeElement.getBoundingClientRect(); return b.top >= r.top - 1 && b.bottom <= r.bottom + 1; }""", HOME), (tab, leave)
+        if named[tab] is False and now != top:
+            assert page.evaluate(named_shown, HOME) is True, f"{leave} from {tab} moved the home only to name the open page"
+            revealed.add(tab)
         else:
             assert now == top, f"{leave} from {tab} returns where Settings was"
 
@@ -388,13 +390,14 @@ def test_a_tab_opened_from_settings_leads_back_to_settings_where_it_was(ui, widt
         assert focus['input'] == ('keyboard' if leave == 'Escape' else 'pointer'), focus
         assert (focus['ring'] != 'none') == (leave == 'Escape'), focus
 
-    tops, named = {}, {}
+    tops, named, revealed = {}, {}, set()
     for tab in TABS:
         tops[tab] = leave_home(tab)
         check_back(tab, "Escape")
         returned_where_it_was(tab, tops[tab], "Escape")
     assert tops["storage"] > 0 and tops["updates"] > 0, f"the home was scrolled when its last rows were pressed: {tops}"
     assert (width < 640) == all(value is None for value in named.values()), named
+    assert (width < 640) == (not revealed), f"two panes bring the naming row in for a nearby pressed row: {revealed}, {named}"
     for leave in ("Back", "system Back"):
         top = leave_home("storage")
         check_back("storage", leave)
