@@ -423,15 +423,16 @@ def test_the_pytest_passes_run_the_node_the_lane_ran_and_none_without_a_lane(tmp
 
     nodes = []
     _stub_pytest_passes(monkeypatch, [], nodes)
-    ran = {"files": 1, "node": "/lane/node", "returncode": 0, "error": None, "reap_error": "", "execution": "executed"}
-    for name, lane, carried in (("lane", ran, "/lane/node"), ("inactive", None, None)):
+    lane_node = str(tmp_path / "lane-bin" / "node")  # absolute on every OS (`/lane` is `D:\\lane` on Windows); never run
+    ran = {"files": 1, "node": lane_node, "returncode": 0, "error": None, "reap_error": "", "execution": "executed"}
+    for name, lane, carried in (("lane", ran, lane_node), ("inactive", None, None)):
         nodes.clear()
         monkeypatch.setattr(pr, "run_node_tests", lambda *_a, lane=lane: lane)
         (tmp_path / name).mkdir()
         assert pr.run_hermetic_pytest(_gate_repo(tmp_path / name), timeout=120) is None
         assert nodes == [carried, carried]
-    env = pr._preflight_env(tmp_path / "gate", tmp_path / "gate" / "repo", create=False, workers=1, node="/lane/node")
-    assert env["PATH"].split(os.pathsep)[0] == os.path.dirname("/lane/node")  # named first, not run to decide
+    env = pr._preflight_env(tmp_path / "gate", tmp_path / "gate" / "repo", create=False, workers=1, node=lane_node)
+    assert env["PATH"].split(os.pathsep)[0] == os.path.dirname(lane_node)  # named first, not run to decide
 
 
 # ── Orchestration: the gate runs the lane on the CANDIDATE tree ───────

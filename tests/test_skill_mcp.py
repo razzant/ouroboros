@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import pathlib
 import queue
 import sys
@@ -1136,7 +1137,39 @@ def _agent_call(world, **kwargs):
     return json.loads(rendered.split("SKILL_ACTION_BLOCKED: ", 1)[-1]), rendered.startswith("⚠️")
 
 
-def test_agent_connect_carries_an_answered_quiz_through_real_owner_source_validation(agent_world):
+def test_agent_connect_waits_for_an_unprepared_pin_even_with_an_answered_quiz(agent_world, monkeypatch):
+    """The preparation-absent control: a node skill waits for the pin's Node (owner, 14 Nov 2026); a real answered
+    quiz carries owner intent, never a runtime, so the preview names the unprepared pin and the confirmed Connect
+    writes nothing."""
+    from ouroboros import node_runtime, platform_layer
+    from ouroboros.claudexor_runtime import get_runtime_manager
+    from ouroboros.owner_quiz import record_answered, record_asked
+
+    # Empty DATA alone does not exclude an exact packaged Node or a carried prepared generation.
+    monkeypatch.setattr(platform_layer, "bundled_resource_bases", lambda: [])
+    monkeypatch.delenv(node_runtime.CARRIED_NODE_ENV, raising=False)
+    manager = get_runtime_manager()  # read from the pin itself, not from the policy under test
+    if not manager.pin_error and not manager.planned_node(manager.pin):
+        pytest.skip("the pin has no Node archive for this host, so its skills keep the PATH rollback")
+    source = {"kind": "quiz", "task_id": "connect-task", "quiz_id": "connect-chrome"}
+    record_asked(agent_world.drive, "connect-task", quiz_id="connect-chrome", options=["Connect", "Not now"],
+                 question="Connect Chrome (shared tab)? Turning MCP on also starts GitHub.")
+    record_answered(agent_world.drive, "connect-task", quiz_id="connect-chrome", option_index=0, request_id="answer-1")
+    preview, blocked = _agent_call(agent_world, owner_source=source, preview=True)
+    assert not blocked and not preview["ready"] and preview["servers"][0]["executable"] == {}
+    assert len(preview["blockers"]) == 1 and "chrome_browser" in preview["blockers"][0]
+    assert ":not_prepared" in preview["blockers"][0] and "no usable node runtime" in preview["blockers"][0]
+    path = agent_world.drive / "settings.json"
+    refused, blocked = _agent_call(agent_world, owner_source=source, settings_digest=preview["settings_digest"],
+                                   confirm_other_servers=True)
+    assert blocked and refused["code"] == "skill_not_ready" and ":not_prepared" in refused["error"]
+    assert json.loads(path.read_text()) == {"MCP_SERVERS": [OTHER], "OUROBOROS_STARTER_SKILLS_TURN_ON": False}
+
+
+def test_agent_connect_carries_an_answered_quiz_through_real_owner_source_validation(agent_world, pinned_path_node):
+    """With the pin's Node prepared (``pinned_path_node``: an isolated pin whose exact bundle is the PATH Node), the
+    answered quiz carries the Connect through owner provenance, confirmation, the settings write and the audit."""
+    from ouroboros import platform_layer
     from ouroboros.owner_quiz import record_answered, record_asked
 
     source = {"kind": "quiz", "task_id": "connect-task", "quiz_id": "connect-chrome"}
@@ -1149,6 +1182,8 @@ def test_agent_connect_carries_an_answered_quiz_through_real_owner_source_valida
     assert not blocked and preview["ready"] and preview["other_servers"] == [{"id": "github", "name": "GitHub"}]
     entry = agent_world.drive / "skills" / "external" / "chrome_browser" / "scripts" / "server.mjs"
     assert preview["servers"][0]["executable"]["args"] == [str(entry.resolve())]
+    prepared = platform_layer.embedded_node_candidates(agent_world.drive.parent / "pinned-path-node")[0]
+    assert os.path.normcase(preview["servers"][0]["executable"]["command"]) == os.path.normcase(str(prepared))
     path = agent_world.drive / "settings.json"
     assert json.loads(path.read_text()) == {"MCP_SERVERS": [OTHER], "OUROBOROS_STARTER_SKILLS_TURN_ON": False}
     foreign = {**source, "task_id": "another-task"}

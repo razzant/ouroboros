@@ -250,6 +250,10 @@ if __name__ == "__main__":
                     owner.run(browser._start_driver(bs), clean=True)
                 else:  # the caller thread's preparation; this engine is absent and may not install
                     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(progress.parent / "no-browsers")
+                    # The driver Node the wrapper runs, named explicitly (the operator's override): an unprepared
+                    # pin refuses before any driver starts, and this scenario's subject is that driver's stderr.
+                    os.environ.pop("OUROBOROS_PLAYWRIGHT_NODE_SELECTED", None)
+                    os.environ["PLAYWRIGHT_NODEJS_PATH"] = str(node)
                     browser._ensure_playwright_installed(engine="webkit", allow_install=False)
                 outcome["ok"] = True
             except BaseException as exc:  # noqa: BLE001 - the settled outcome is the subject

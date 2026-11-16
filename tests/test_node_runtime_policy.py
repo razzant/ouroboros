@@ -697,9 +697,9 @@ def test_a_prepared_pin_or_an_exact_second_bundle_wins_over_path_whatever_the_fi
     from ouroboros import preflight_node
 
     first_base, second_base = tmp_path / "app", tmp_path / "checkout"
-    if first == "older":
-        _make_exec(first_base / "node-standalone" / "bin", "node")
-    exact = _make_exec(second_base / "node-standalone" / "bin", "node")
+    if first == "older":  # each copy where this OS's bundle keeps it (`node-standalone/node.exe` on Windows)
+        _make_exec(platform_layer.embedded_node_candidates(first_base)[0].parent, "node")
+    exact = _make_exec(platform_layer.embedded_node_candidates(second_base)[0].parent, "node")
     path_bin = tmp_path / "hostbin"
     _make_exec(path_bin, "node")
     _isolate_path(monkeypatch, path_bin)
@@ -770,7 +770,8 @@ def test_the_web_lane_may_name_a_path_node_while_skills_wait_for_the_pin(tmp_pat
                         lambda candidates: str(bundled) if shipped == "older" else None)
     _patch_probe(monkeypatch, {bundled: ("24.16.0", ""), path_bin: ("25.8.1", "")})
     _pinned_manager(monkeypatch, pinned="")
-    assert preflight_node.resolve_node() == str(path_node)
+    # PATH's Node as `which` spells it (`node.EXE` on Windows, from PATHEXT): the same file, compared as the OS does.
+    assert os.path.normcase(preflight_node.resolve_node()) == os.path.normcase(str(path_node))
     selected, reason = node_runtime.select_skill_node_runtime()
     assert selected == "" and "pinned:24.22.3:not_prepared" in reason and PLANNED in reason
     assert ("refused shipped " + str(bundled) + " v24.16.0" in reason) == (shipped == "older")
@@ -780,7 +781,8 @@ def test_the_web_lane_may_name_a_path_node_while_skills_wait_for_the_pin(tmp_pat
         node_runtime.skill_node_argv(skill, "node", ["node", "main.js"])  # never a bare `node` from PATH
     assert node_runtime.skill_node_argv({"env": {"PATH": "/mine"}}, "node", ["node", "x"]) == ["node", "x"]
     _pinned_manager(monkeypatch, pinned="", planned="")  # a host the pin has no archive for keeps its PATH Node
-    assert node_runtime.select_skill_node_runtime() == (str(path_node), "path")
+    selected, provenance = node_runtime.select_skill_node_runtime()
+    assert (os.path.normcase(selected), provenance) == (os.path.normcase(str(path_node)), "path")
 
 
 def test_playwright_driver_keeps_an_explicit_node_else_selects_the_pinned_one(monkeypatch):
