@@ -124,6 +124,12 @@ def test_mains_name_yields_to_its_count_and_mark_in_a_narrow_card():
     assert "flex: 0 0 18px;" in _block(css, ".nav-ouro-line1 > .nav-mark-slot {")
 
 
+def test_folded_rings_leave_each_others_touch_reach():
+    css = _read("web/style.css")
+    rings = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] {')
+    assert "column-gap: max(var(--composer-row-gap), calc(var(--touch-target-min) - var(--composer-control-height)));" in rings
+
+
 def test_logs_use_the_space_below_clear_for_the_long_filter_word():
     css = _read("web/style.css")
     logs = _block(css, "@container dashboard (max-width: 27.75rem) {")

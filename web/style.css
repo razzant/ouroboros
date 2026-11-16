@@ -5435,6 +5435,12 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     clip-path: inset(50%);
     white-space: nowrap;
 }
+/* Folded rings keep their look, but their 44px hit areas need separate room on both sides. */
+@media (pointer: coarse) {
+    .chat-toolbar-row[data-owner-glyphs="true"] {
+        column-gap: max(var(--composer-row-gap), calc(var(--touch-target-min) - var(--composer-control-height)));
+    }
+}
 /* While a drag runs, and when the layout itself changes (opening, a resize, a new padding),
    the marks land with the words at once, so a pill never trails behind the word it names. */
 .chat-capsule:is([data-dragging="true"], [data-settling="true"]) :is(.chat-effort-band, .chat-effort-handle, .chat-effort-seg, .chat-context-thumb) {
