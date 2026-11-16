@@ -1,8 +1,9 @@
 """Main's route-bound window facts, independent of review capability authority.
 
 Acceptances are lower bounds, never evidence of room for a reply. A numbered
-refusal, or a numberless one at the refused request's measured size, constrains
-planning until a later larger acceptance or evidence expiry.
+refusal, or a numberless one at the refused request's measured size, caps (never
+raises) its kind of limit until a later larger acceptance or the 24-hour evidence
+expiry; a cold numberless refusal adds none (``record_refusal``).
 The observations share the capability JSON store; old stores need no migration.
 """
 from __future__ import annotations
@@ -12,6 +13,8 @@ from typing import Any, Dict, Optional
 
 
 _REPLY_INSIDE = frozenset({"refusal", "local_health"})  # what proves a total holds the reply: ``WindowRecord.admitted``
+#: Recognition bases that state no unit (``context_budget.size_refusal``, ``context_anchor.cited_limit_refusal``).
+UNTAUGHT_BASES = frozenset({"status_413", "number_equals_declared"})
 
 
 @dataclass(frozen=True)
@@ -235,12 +238,18 @@ def record_refusal(usage, plan, refused_input: int = 0, basis: str = "anchored_e
     A numberless refusal of a request sent inside the reply reservation of a stated total says that total holds the
     reply too, so it is recorded as the total's own refusal (``WindowRecord.admitted`` then charges the reserve).
     Without a stated limit or a measured size a refusal adds no ceiling, and a refusal of one input string's
-    length (``INPUT_STRING_LENGTH_CODES``) adds none at any size: it says nothing of the token window."""
+    length (``INPUT_STRING_LENGTH_CODES``) adds none at any size: it says nothing of the token window.
+    A refusal recognised only by HTTP 413 or by a cited number equal to a declared limit (``UNTAUGHT_BASES``)
+    writes nothing, the measured size included: neither states a unit, and the host's estimate is no provider
+    limit. A token-qualified limit below an input this scope has already had accepted writes no ceiling either:
+    the scope does not name the serving endpoint, so that statement is one endpoint's; it still sizes this
+    round's pass (``loop_model_call._refusal_window``)."""
     from ouroboros import capability_evidence as ce
     from ouroboros.context_budget import INPUT_STRING_LENGTH_CODES
 
     plan = observed_plan(plan, usage)
-    if plan is None or not getattr(plan, "window_witness_bound", True):
+    if (plan is None or not getattr(plan, "window_witness_bound", True)
+            or (usage.get("_last_llm_provider_answer") or {}).get("basis") in UNTAUGHT_BASES):
         return
     message = str(usage.get("_last_llm_provider_message") or "")
     limit = ce._parse_ctx_limit_number(message)
@@ -252,6 +261,9 @@ def record_refusal(usage, plan, refused_input: int = 0, basis: str = "anchored_e
             confirms = total - (record.reserve if record is not None else 0) < size <= total
             record_observation(ce.canonical_evidence_root(), observation_scope(plan), basis=basis,
                                refused=total if confirms else size, kind="total" if confirms else "input")
+        return
+    rows = (ce._read(ce.canonical_evidence_root()).get("main_windows", {}).get(observation_scope(plan)) or {})
+    if limit < max((row.get("accepted", 0) for row in rows.get("observations", [])), default=0):
         return
     # Sglang shares its input bound with generation, so its length refusal stays total.
     input_only = any(marker in message.lower() for marker in ("prompt is too long", "maximum input", "input token count"))

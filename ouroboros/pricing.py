@@ -117,6 +117,24 @@ def get_pricing(
         return dict(rows)
 
 
+def declared_token_limits(provider: str, model: str) -> Dict[int, Tuple[str, str]]:
+    """The token limits the route's endpoint catalogue declares for ``model``, each with what it limits and where:
+    ``max_prompt_tokens`` caps the input, ``context_length`` is a total that holds the reply.
+
+    Read from the endpoint rows ``get_pricing`` keeps beside the tariffs: its cache, else its one free bounded
+    fetch; a route without a catalogue, or a failed read, declares nothing. What one refusal's number may equal
+    (``context_anchor.cited_limit_refusal``), never a planning limit: one model id spans endpoints with different
+    windows, and the observation scope does not name the serving one."""
+    limits: Dict[int, Tuple[str, str]] = {}
+    for tag, row in get_pricing(provider=provider, model=parse_model_route(model).model).items():  # the slug, however the route spells it
+        source = getattr(row, "source", {})
+        for key, kind in (("max_prompt_tokens", "input"), ("context_length", "total")):
+            if type(source.get(key)) is int and source[key] > 0 and (
+                    source[key] not in limits or (kind, limits[source[key]][0]) == ("input", "total")):
+                limits[source[key]] = (kind, f"the endpoint catalogue ({tag} {key})")  # an input cap wins: it sheds less
+    return limits
+
+
 def estimate_cost_optional(model: str, prompt_tokens: int, completion_tokens: int, *,
                            cache_usage: Optional[Dict[str, Any]] = None,
                            allow_live_fetch: bool = True,

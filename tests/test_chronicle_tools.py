@@ -404,7 +404,7 @@ def test_room_read_is_text_with_the_head_line_and_one_header_per_record(tmp_path
     lines = text.split("\n")
     assert lines[0] == f"room 1; head {page['sequence']}"
     assert lines[1].startswith(f"complete: no records after seq {mark['sequence']}")
-    assert lines[2].startswith(f"[page {page['node_id']}; room 1; mind (root root0001); final; covers ")
+    assert lines[2].startswith(f"[page {page['node_id']}; room 1; mind (root, task root0001); final; covers ")
     assert lines[2].endswith(f"seq {page['sequence']}]") and lines[3:5] == ["PAGE TEXT", "second line"]
     assert lines[5].startswith(f"[mark {mark['mark_id']}; room 1;") and lines[6:] == ["MARK TEXT", "quote: PAGE TEXT"]
     with pytest.raises(ValueError):
@@ -537,12 +537,12 @@ def test_node_read_shows_stamp_original_and_corrections_with_the_acting_revision
     text = _memory_read(ctx, node_id=page["node_id"])
     lines = text.split("\n")
     assert lines[0].startswith(f"[page {page['node_id']}; room 1;")
-    assert f"revision {fix['node_id']} (corrected by mind (root root0001))" in lines[0]
+    assert f"revision {fix['node_id']} (corrected by mind (root, task root0001))" in lines[0]
     # The header counts the stamp and names no task; the words come first, the correction under them, then the
     # host's line for each covered task.
     assert "host stamp: 1 task — not_recorded 1;" in lines[0] and "taskA001" not in lines[0]
     assert lines[1].endswith("complete")
-    assert (text.index("text:\nORIGINAL") < text.index(f"correction {fix['node_id']} by mind (root root0001)")
+    assert (text.index("text:\nORIGINAL") < text.index(f"correction {fix['node_id']} by mind (root, task root0001)")
             < text.index("CORRECTED") < text.index("stamp taskA001: status=not_recorded"))
     assert "TOOL_ARG_ERROR" in _memory_read(ctx, node_id="no-such-node")
     assert "TOOL_ARG_ERROR" in _memory_read(ctx, node_id=page["node_id"], rows=True)

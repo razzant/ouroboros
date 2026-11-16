@@ -140,7 +140,7 @@ def remember_size_refusal(ctx, refused, *, measured):
     was sized against. ``refused``: the round's comparison candidate, a capture or a pre-send refusal's facts;
     ``measured``: the round measured that request, so its ``_context_`` facts describe it. Nothing is taken from another
     attempt: what this refusal does not tell stays unknown. It lives through the round's failed fallback walk, which
-    restores none of it (``loop_model_call._route_fit_key``), and through its unsent candidates, which refuse nothing;
+    restores none of it (``context_anchor._route_fit_key``), and through its unsent candidates, which refuse nothing;
     an answer clears it and the next round reads none of it. This round's own attempt keeps the required book inside
     that very request (``book``, as its own measurement counted it); only the host's known-window prediction before
     sending also keeps the window its admission judged (``capacity``), the one decomposition ``required_book_fact``
