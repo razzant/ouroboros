@@ -9,7 +9,9 @@ installs anything:
 A python-standalone left from an earlier pin (a reused build tree that skipped the downloader)
 would otherwise ship again under a new version: the launcher is frozen from a venv of this same
 interpreter, so nothing else would notice. One that cannot start fails its build line by itself.
-The pin is ``PY_VERSION`` in ``scripts/download_python_standalone.sh``. Stdlib only.
+Only the CPython version is compared: a tree from another python-build-standalone release of the
+same CPython (a SQLite or OpenSSL respin) passes. The pin is ``PY_VERSION`` in
+``scripts/download_python_standalone.sh``. Stdlib only.
 """
 
 from __future__ import annotations

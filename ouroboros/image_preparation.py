@@ -110,29 +110,47 @@ def _decode(Image, ImageFile, raw: bytes, *, tolerant: bool):
 def _eight_bit_gray(Image, decoded):
     """Wide grayscale as 8-bit ``L`` stretched from its actual [min, max], plus the note saying so.
 
-    Before this, Pillow 13 refused mode ``I`` as PNG, 12.3 clamped it, a 16-bit image turned white or black
-    depending on how a receiver reduced it and a float image was clamped to 0..255. Integer pixels map by
-    Pillow's linear point transform on ``I`` (no float step), so close values near the int32 limits stay
-    apart. A constant image is black with its value named; float pixels with NaN or infinity keep the
-    clamped view, said as such. Same pixels on Pillow 12.3 and 13."""
+    Pillow 13 refuses mode ``I`` as PNG and 12.3 clamps it; a 16-bit image turns white or black depending on
+    how a receiver reduces it, and a float image would be clamped to 0..255. Integer pixels map by Pillow's
+    linear point transform on ``I`` (no float step), so close values near the int32 limits stay apart; float
+    endpoints are named with nine significant digits, enough to tell any two binary32 values apart. Mode
+    ``I`` names no width: Pillow decodes 16-bit PGM and signed 16-bit TIFF to it too. A constant image is
+    black with its value named. NaN or infinity (the no-data pixels of a depth map or DEM) are shown black
+    and counted while the finite values set the range. A 16-bit transparent value has no 8-bit counterpart,
+    so the view drops it and says so. Same pixels on Pillow 12.3 and 13."""
     if decoded.mode not in _WIDE_GRAY:
         return decoded, ""
     kept = "The original keeps the exact values."
+    if "transparency" in decoded.info:
+        kept = f"Its transparent value is not kept in this view. {kept}"
+    values, every = decoded, "Every pixel"
     if decoded.mode == "F":
-        if not all(map(math.isfinite, array("f", decoded.tobytes()))):
-            return decoded.convert("L"), f"Float pixels include NaN or infinity; shown clamped to 0..255. {kept}"
-        values, kind, shown_value = decoded, "32-bit float", lambda value: f"{value:.6g}"
+        kind, shown_value = "32-bit float", lambda value: f"{value:.9g}"
+        floats = array("f", decoded.tobytes())
+        if not all(map(math.isfinite, floats)):  # no-data pixels of a depth map or DEM: the finite range is the image
+            floor = min(filter(math.isfinite, floats), default=None)
+            if floor is None:
+                return Image.new("L", decoded.size, 0), (
+                    f"Every pixel is NaN or infinity; shown as uniform black. {kept}")
+            missing = sum(1 for value in floats if not math.isfinite(value))
+            values = Image.frombytes("F", decoded.size, array(
+                "f", (value if math.isfinite(value) else floor for value in floats)).tobytes())
+            every = "Every finite pixel"
+            kept = f"NaN or infinity in {missing} of {len(floats)} pixels, shown black. {kept}"
     else:
         values = decoded if decoded.mode == "I" else decoded.convert("I")
-        kind, shown_value = ("32-bit" if decoded.mode == "I" else "16-bit") + " integer", lambda value: str(int(value))
+        kind, shown_value = ("integer" if decoded.mode == "I" else "16-bit integer"), lambda value: str(int(value))
     low, high = values.getextrema()
     if low == high:
-        return Image.new("L", decoded.size, 0), (
-            f"Every pixel has the {kind} value {shown_value(low)}; shown as uniform black. {kept}")
-    scale = 255 / (high - low)
-    shown = values.point(lambda value: value * scale + (0.5 - low * scale)).convert("L")
-    return shown, (f"{kind.capitalize()} grayscale values {shown_value(low)}..{shown_value(high)} are shown as 8-bit: "
-                   f"{shown_value(low)} is black, {shown_value(high)} is white, linear in between. {kept}")
+        shown = Image.new("L", decoded.size, 0)
+        note = f"{every} has the {kind} value {shown_value(low)}; shown as uniform black. {kept}"
+    else:
+        scale = 255 / (high - low)
+        shown = values.point(lambda value: value * scale + (0.5 - low * scale)).convert("L")
+        note = (f"{kind.capitalize()} grayscale values {shown_value(low)}..{shown_value(high)} are shown as "
+                f"8-bit: {shown_value(low)} is black, {shown_value(high)} is white, linear in between. {kept}")
+    shown.info.pop("transparency", None)
+    return shown, note
 
 
 def prepare_image_bytes(raw: bytes, *, max_bytes: int, max_side: int | None = None,
@@ -189,7 +207,8 @@ def prepare_image_bytes(raw: bytes, *, max_bytes: int, max_side: int | None = No
     exceeds_side = max_side is not None and max(decoded.size) > max_side
     if not notes and mime in _NATIVE_MIMES and len(raw) <= max_bytes and not exceeds_side:
         return PreparedImage(raw, mime)
-    if mime not in _NATIVE_MIMES:
+    converted = len(notes) if mime not in _NATIVE_MIMES else None
+    if converted is not None:
         notes.append(f"Converted {mime or 'decoded image'} to PNG with the available decoder.")
     if animated:
         notes.append("Only the first frame is represented; the original animation remains available.")
@@ -231,4 +250,6 @@ def prepare_image_bytes(raw: bytes, *, max_bytes: int, max_side: int | None = No
         decoded.thumbnail(tuple(max(1, int(side * .75)) for side in decoded.size), Image.Resampling.LANCZOS)
     if decoded.size != original_size:
         notes.append(f"Dimensions: {original_size[0]}×{original_size[1]} → {decoded.width}×{decoded.height}.")
+    if converted is not None and out_mime == "image/jpeg":  # the conversion ended as JPEG, not PNG
+        notes[converted] = f"Converted {mime or 'decoded image'} to JPEG with the available decoder."
     return PreparedImage(data, out_mime, " ".join(notes))

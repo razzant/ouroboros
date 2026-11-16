@@ -169,12 +169,19 @@ def gray_tiff(values, size=None, mode="I"):
 WIDE_GRAY_CASES = {  # values, decoder mode, the words the note must carry
     "twelve-bit-in-16": ([0, 1000, 2000, 3000, 4095], "I;16", "16-bit integer grayscale values 0..4095"),
     "big-endian-16": ([0, 300, 40000, 65535], "I;16B", "16-bit integer grayscale values 0..65535"),
-    "int32-signed": ([-5, 0, 10, 20], "I", "32-bit integer grayscale values -5..20"),
+    # Mode I names no width: Pillow decodes 16-bit PGM and signed 16-bit TIFF to it as well.
+    "int32-signed": ([-5, 0, 10, 20], "I", "Integer grayscale values -5..20"),
     "int32-extremes": ([-2**31, -1, 0, 2**31 - 1], "I", "values -2147483648..2147483647"),
     "near-int32-max": ([2147483000, 2147483001, 2147483009, 2147483010], "I", "values 2147483000..2147483010"),
-    "constant": ([-7] * 4, "I", "Every pixel has the 32-bit integer value -7"),
+    "constant": ([-7] * 4, "I", "Every pixel has the integer value -7"),
     "float": ([1000.0, 1000.25, 1000.5, 1001.0], "F", "32-bit float grayscale values 1000..1001"),
-    "float-nan": ([0.0, float("nan"), 1.0, 2.0], "F", "NaN or infinity; shown clamped to 0..255"),
+    "float-adjacent": ([1.0, 1 + 2**-23, 1 + 2**-22], "F", "values 1..1.00000024 are shown as 8-bit: 1 is black"),
+    # No-data pixels of a depth map or DEM: the finite values set the range, NaN and infinity are black and counted.
+    "float-nan": ([0.0, float("nan"), 1.0, 2.0], "F",
+                  "values 0..2 are shown as 8-bit: 0 is black, 2 is white, linear in between. "
+                  "NaN or infinity in 1 of 4 pixels, shown black."),
+    "float-all-nan": ([float("nan"), float("inf"), float("-inf"), float("nan")], "F",
+                      "Every pixel is NaN or infinity; shown as uniform black."),
 }
 
 
@@ -190,7 +197,9 @@ def test_wide_gray_is_shown_as_an_8_bit_view_of_its_own_range(case):
         levels = [shown.getpixel((x, 0)) for x in range(len(values))]
     assert words in prepared.note and "Converted image/tiff to PNG" in prepared.note
     assert "The original keeps the exact values." in prepared.note
-    if case == "float-nan":
+    if "nan" in case:
+        want = [0, 0, 128, 255] if case == "float-nan" else [0] * len(values)
+        assert all(abs(level - goal) <= 1 for level, goal in zip(levels, want)), (levels, want)
         return
     low, high = min(values), max(values)
     if low == high:
@@ -226,9 +235,21 @@ def test_wide_gray_reduction_and_jpeg_fallback_keep_its_levels(mode):
     prepared = prepare_image_bytes(gray_tiff(noisy, size=(256, 256), mode="I;16B" if mode == "I;16" else mode),
                                    max_bytes=40000)
     assert prepared.mime == "image/jpeg" and "Reduced representation" in prepared.note
+    assert "Converted image/tiff to JPEG" in prepared.note and "to PNG" not in prepared.note  # what is sent
     with Image.open(io.BytesIO(prepared.data)) as shown:
         gray = shown.convert("L")
         assert gray.getpixel((10, 10)) < 30 and gray.getpixel((245, 10)) > 200
+
+
+def test_a_16_bit_transparent_value_is_dropped_from_the_8_bit_view_and_said():
+    # 0x1234 as a 16-bit tRNS has no 8-bit counterpart: carried over it would mark a wrong level or nothing at all.
+    out = io.BytesIO()
+    pixels = b"".join(value.to_bytes(2, "little") for value in [0x1234, 40000] * 600)
+    Image.frombytes("I;16", (600, 2), pixels).save(out, format="PNG", transparency=0x1234)
+    prepared = prepare_image_bytes(out.getvalue(), max_bytes=8 << 20, max_side=300)
+    with Image.open(io.BytesIO(prepared.data)) as shown:
+        assert shown.mode == "L" and "transparency" not in shown.info
+    assert "Its transparent value is not kept in this view. The original keeps the exact values." in prepared.note
 
 
 def jpeg2000(container):

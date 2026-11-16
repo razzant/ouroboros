@@ -48,9 +48,12 @@ def test_every_carrier_of_the_bundled_python_names_the_pin():
     deployment = _read("docs/DEPLOYMENT.md")
     assert f"Packages built from this source bundle CPython {version};" in deployment
     assert f"CPython {version} and SQLite " in deployment
+    assert f"expect {version} and Pillow" in deployment  # the transition check an operator runs
     # The managed container's runtime venv is named for the image's minor (runtime_venv refuses another minor's venv).
-    venvs = re.findall(r"/ouroboros/body/venv-(\d+\.\d+)", deployment + _read("Dockerfile"))
-    assert venvs and set(venvs) == {".".join(version.split(".")[:2])}, venvs
+    minor = ".".join(version.split(".")[:2])
+    for text in (deployment, _read("Dockerfile")):  # each names it: a revert to the unversioned path fails too
+        venvs = re.findall(r"/ouroboros/body/venv-(\d+\.\d+)", text)
+        assert venvs and set(venvs) == {minor}, venvs
 
 
 def _environment(python: str) -> dict:

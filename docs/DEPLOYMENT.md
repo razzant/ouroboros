@@ -139,7 +139,7 @@ whole settings file or credentials. Repeated restarts do not fix a parser mismat
 ## Moving an installed app to a new bundled Python
 
 Packages built from this source bundle CPython 3.12.15; 7.11.0 and earlier
-bundle CPython 3.10.22. Pillow 13, which carries the image-decoder security
+bundle Python 3.10. Pillow 13, which carries the image-decoder security
 fixes, needs Python 3.11 or newer, so an app on 3.10 keeps Pillow 12.3 after
 Dashboard → Updates: it keeps working, and stays exposed until the app itself
 is replaced. Only a new application package or image changes the interpreter.
@@ -147,11 +147,17 @@ is replaced. Only a new application package or image changes the interpreter.
 Desktop (macOS, Windows, Linux):
 
 1. In the installed app, run Dashboard → Updates. It stays on Python 3.10.
-2. Quit Ouroboros. Keep the old app under another name if you want a way back.
-   Windows ZIP and Linux tar.gz: remove the old folder, never extract over it.
-3. Install and start the new app. It keeps the checkout, data and settings and
-   installs the checkout's packages for 3.12 beside the 3.10 ones
-   (`state/python-userbase/lib/python3.12`, Windows `Python312`).
+2. Quit Ouroboros. For a way back, keep the old app: rename `Ouroboros.app`, or
+   rename the old Windows ZIP or Linux tar.gz folder and extract the new one into
+   an empty folder, never over the old one. `.deb`, `.rpm` and Homebrew replace
+   the app in place; their way back is the previous package (or a copy of
+   `Ouroboros.app` made before `brew upgrade`).
+3. Install and start the new app. It keeps the checkout, data and settings,
+   runs on the packages it bundles and installs only what the checkout's lock
+   adds, into `state/python-userbase/lib/python3.12` (Windows `Python312`).
+   Packages you or Ouroboros installed by hand into the app's own Python stay
+   with 3.10 and are installed again when needed. If the new app does not
+   start, start the old one again, run Update, then start the new one.
 4. Run Dashboard → Updates once in the new app. If step 1 was skipped, or a
    package manager such as Homebrew replaced the app, the old checkout's Pillow
    12.3 is still in use until this Update; when nothing is newer it changes
@@ -165,27 +171,31 @@ Desktop (macOS, Windows, Linux):
    ```
 
    On Linux the interpreter is `_internal/python-standalone/bin/python3` in the
-   app folder (`/opt/ouroboros` for `.deb`/`.rpm`); on Windows, in PowerShell, set
+   app folder (`/opt/ouroboros` for `.deb`/`.rpm`; an AppImage has no fixed path,
+   so this step's Update is the check there); on Windows, in PowerShell, set
    `$env:PYTHONUSERBASE` the same way and run `_internal\python-standalone\python.exe`
    from the app folder with the same `-B -c` argument.
 
 Each skill's Python environment is rebuilt from its declared packages under the
 new interpreter: enabled skills at the first start, others when enabled.
-Packages added to a skill environment by hand are not carried over. Without
-network, or when a declared package has no Python 3.12 wheel, the rebuild fails
-and is retried at the next start (the latter until the skill moves its pin). To go back, quit
-the new app and start the kept one: it reads its own 3.10 packages and
-environments rebuild again. A managed container moves the same way: Update on
-the current image, then start the new image on the same volumes (Containers
-below). Android's Ubuntu 24.04 environment already runs Python 3.12, so its Update alone brings Pillow 13.
-A source checkout on Python 3.10 keeps Pillow 12.3; Python 3.11 or newer gets
-Pillow 13.
+Packages added to a skill environment by hand are not carried over. A fresh 3.12
+environment has no setuptools (`pkg_resources`, `distutils`), and neither has
+the app's own Python any more: a skill that imports them must declare
+`setuptools`. Without network, or when a declared package has no Python 3.12
+wheel, the rebuild fails and is retried at the next start (the latter until the
+skill moves its pin). To go back, quit the new app and start the kept one: it
+reads its own 3.10 packages and environments rebuild again. A managed container
+moves the same way: Update on the current image, then start the new image on the
+same volumes (Containers below). Android's Ubuntu 24.04 environment already runs
+Python 3.12, so its Update alone brings Pillow 13. A source checkout on Python
+3.10 keeps Pillow 12.3; recreating its environment on Python 3.12
+(`uv sync --locked --extra browser --group dev --python 3.12`) brings Pillow 13.
 
-The move leaves what only the old app reads; check its size with `du -sh` and
-delete it once that app is gone: `state/python-userbase/lib/python3.10` (Windows
-`Python310`; usually a few MB), the managed container's `/ouroboros/body/venv`
-(the whole old lock, hundreds of MB) and the `cpython-310` files in
-`state/pycache.noindex` (compiled bytecode, safe to delete any time).
+The move leaves what only the old app reads; delete it once that app is gone:
+`state/python-userbase/lib/python3.10` (Windows `Python310`; usually a few MB)
+and the managed container's `/ouroboros/body/venv` (the whole old lock, hundreds
+of MB). The `cpython-310` files in `state/pycache.noindex` are compiled bytecode,
+often hundreds of MB; deleting them, or the whole folder, is safe at any time.
 
 ## Containers
 
