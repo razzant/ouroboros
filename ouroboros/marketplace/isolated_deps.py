@@ -188,7 +188,7 @@ def _installer_env(env_root: pathlib.Path, *, ecosystem: str = "", cache_root: p
         # working runtime: the pin's prepared Node first where it governs, else
         # an emergency only; npm itself runs on it (``_npm_command``). node_runtime
         # owns that verdict, the byte-identical healthy case, and the disclosed
-        # residuals (an absent npm still fails honestly upstream).
+        # residuals; an absent npm is prepared by the same runtime manager below.
         from ouroboros.platform_layer import prepend_skill_node_emergency_path
 
         prepend_skill_node_emergency_path(env)
@@ -352,8 +352,6 @@ def _install_node_package(package: str, env_root: pathlib.Path, timeout_sec: int
     # same way the process tools do BEFORE deciding npm is absent (T13).
     bootstrap_process_path()
     npm = "npm" if work_domain.is_work(env_root) else shutil.which("npm")  # a container resolves its own npm
-    if not npm:
-        raise RuntimeError("npm is not available on PATH")
     node_root = env_root / "node"
     work_domain.make_dirs(node_root)
     name = package.rsplit("@", 1)[0] if "@" in package[1:] else package
@@ -361,10 +359,28 @@ def _install_node_package(package: str, env_root: pathlib.Path, timeout_sec: int
     previous_version = (_json(package_manifest) or {}).get("version")
     if review_check is not None:
         review_check()
-    _wait_for_reviewed_node(env_root)
-    env = _installer_env(env_root, ecosystem="node", cache_root=cache_root)  # after the wait: the pin's Node first
+    managed_node = None
+    if not npm:
+        # The existing manager prepares the reviewed Node/npm closure, never starting the daemon.
+        from ouroboros.claudexor_runtime import get_runtime_manager
+
+        try:
+            manager = get_runtime_manager()
+            managed_node = pathlib.Path(manager.ensure_cli_command()[0])
+            npm_cli = manager._managed_npm_cli(managed_node)
+            if not npm_cli.is_file():
+                raise RuntimeError("prepared npm CLI is missing")
+        except RuntimeError as exc:
+            raise RuntimeError(f"npm is not available on PATH; managed Node/npm preparation failed: {exc}") from exc
+        npm_command = [str(managed_node), str(npm_cli)]
+    else:
+        _wait_for_reviewed_node(env_root)
+        npm_command = _npm_command(npm, env_root)
+    env = _installer_env(env_root, ecosystem="node", cache_root=cache_root)  # after preparation: the pin's Node first
+    if managed_node is not None:
+        current_path = env.get("PATH", "")
+        env["PATH"] = os.pathsep.join([str(managed_node.parent), current_path]) if current_path else str(managed_node.parent)
     env["npm_config_prefix"] = str(node_root)
-    npm_command = _npm_command(npm, env_root)
     flags = [] if allow_install_scripts else ["--ignore-scripts"]
     result = _run([*npm_command, "install", *flags, "--prefix", str(node_root), package], cwd=env_root, env=env,
                   timeout_sec=timeout_sec)

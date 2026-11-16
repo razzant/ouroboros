@@ -514,6 +514,8 @@ def test_cli_command_installs_exact_closure_and_managed_node_npm_tree(tmp_path, 
     assert command == [str(node_root / "bin" / "node"),
                        str(runtime.managed_runtime_dir(pin) / "claudexor.bundle.cjs")]
     assert (node_root / "lib/node_modules/npm/bin/npm-cli.js").read_bytes() == b"npm cli\n"
+    # The skill npm installer's seam (isolated_deps): the npm CLI it derives from this command is the delivered one.
+    assert manager._managed_npm_cli(pathlib.Path(command[0])).read_bytes() == b"npm cli\n"
     assert (node_root / "lib/node_modules/npm/package.json").read_bytes() == b"{}\n"
     node_metadata = json.loads((node_root.parent / "managed-node.json").read_text())
     assert node_metadata["schema_version"] == 2

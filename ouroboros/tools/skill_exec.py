@@ -46,7 +46,7 @@ from ouroboros.tools.process_facts import publish_process_facts as _publish_proc
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.shell import _kill_process_group
 from ouroboros.tools.shell_process import contained_popen, retire_tracked, tracked_start
-from ouroboros.tools.tool_result import ToolResult, _publish_tool_result, completed_local_read
+from ouroboros.tools.tool_result import TOOL_CODE_SPECS, ToolResult, _publish_tool_result, completed_local_read
 from ouroboros.usage_accounting import current_usage_scope, record_unmetered_external_dispatch
 from ouroboros.utils import append_jsonl, utc_now_iso
 
@@ -113,6 +113,12 @@ def _resolve_runtime_binary(runtime: str) -> Tuple[Optional[str], str]:
         if resolved.is_file():
             return str(resolved), ""
     return None, ""
+
+
+def _payload_hash(loaded: Any) -> str:
+    """The loader's review-staleness digest of an installed skill's payload (``compute_content_hash``)."""
+    return compute_content_hash(loaded.skill_dir, manifest_entry=loaded.manifest.entry,
+                                manifest_scripts=loaded.manifest.scripts)
 
 
 def _scrub_env(
@@ -627,8 +633,6 @@ def _handle_list_skills(ctx: ToolContext, *, name: str = "", offset: int = 0,
 
 
 def _skill_review_refusal(ctx: ToolContext, code: str, text: str) -> str:
-    from ouroboros.tools.tool_result import TOOL_CODE_SPECS, ToolResult, _publish_tool_result
-
     return _publish_tool_result(ctx, ToolResult(status=TOOL_CODE_SPECS[code].status, code=code, text=text))
 
 
@@ -763,8 +767,6 @@ def _author_finish_existing_skill_review(
     if preflight is not None and not cyber:
         return {"error": _skill_review_refusal(ctx, "TOOL_ERROR", "SKILL_REVIEW_ERROR: deterministic preflight did not pass for the current payload.")}
     if preflight is not None:
-        from ouroboros.utils import append_jsonl, utc_now_iso
-
         preflight_facts = {"content_hash": current_hash, "status": preflight.status,
                            "findings": list(preflight.findings or []), "error": preflight.error}
         append_jsonl(ctx.drive_logs() / "events.jsonl", {
@@ -928,7 +930,6 @@ def _skill_deps_exec_block(drive_root: pathlib.Path, loaded: Any) -> str:
     )
 
 
-
 def _non_executable_review_message(prefix: str, skill_name: str, status: str, *, stale: bool = False,
                                    gate: Dict[str, Any] | None = None, strict_review: bool = False) -> str:
     gate = gate or skill_review_gate(status, stale=stale)
@@ -1067,11 +1068,7 @@ def _handle_skill_exec(
             f"enabled skills {names}. Disable the conflicting skill first."
         )
     try:
-        current_hash = compute_content_hash(
-            loaded.skill_dir,
-            manifest_entry=loaded.manifest.entry,
-            manifest_scripts=loaded.manifest.scripts,
-        )
+        current_hash = _payload_hash(loaded)
     except SkillPayloadUnreadable as exc:
         return (
             f"⚠️ SKILL_EXEC_ERROR: skill {skill_name!r} payload became unreadable "
@@ -1228,11 +1225,7 @@ def _handle_skill_exec(
     # gate-time hash above ran before grants/env/deps resolution — a write
     # landing in that window would execute unreviewed code under a PASS verdict.
     try:
-        spawn_hash = compute_content_hash(
-            loaded.skill_dir,
-            manifest_entry=loaded.manifest.entry,
-            manifest_scripts=loaded.manifest.scripts,
-        )
+        spawn_hash = _payload_hash(loaded)
     except SkillPayloadUnreadable as exc:
         return (
             f"⚠️ SKILL_EXEC_ERROR: skill {skill_name!r} payload became unreadable "
@@ -1356,16 +1349,17 @@ def _handle_toggle_skill(
 
 def _handle_skill_owner_action(
     ctx: ToolContext, skill: str, action: str, expected_content_hash: str,
-    owner_source: dict, items: list[str] | None = None,
+    owner_source: dict, items: list[str] | None = None, preview: bool = False,
+    settings_digest: str = "", confirm_other_servers: bool = False,
 ) -> str:
     """Carry expressed owner intent to its real effect without an HTTP self-call."""
-    from ouroboros.skill_lifecycle_actions import run_skill_action
+    from ouroboros.skill_lifecycle_actions import preview_connect_mcp, run_skill_action
 
-    if action not in {"grant", "attest", "delete"}:
+    if action not in {"grant", "attest", "delete", "connect_mcp"}:
         return "⚠️ SKILL_ACTION_BLOCKED: use toggle_skill for enable/disable."
-    payload = run_skill_action(
-        ctx, skill, action, expected_content_hash=expected_content_hash,
-        owner_source=owner_source, items=items,
+    payload = preview_connect_mcp(ctx, skill, owner_source) if action == "connect_mcp" and preview is True else run_skill_action(
+        ctx, skill, action, expected_content_hash=expected_content_hash, owner_source=owner_source, items=items,
+        settings_digest=settings_digest, confirm_other_servers=confirm_other_servers is True,
     )
     rendered = json.dumps(payload, ensure_ascii=False, indent=2)
     return "⚠️ SKILL_ACTION_BLOCKED: " + rendered if payload.get("error") else rendered
@@ -1528,7 +1522,9 @@ _OWNER_ACTION_SCHEMA = {
     "description": (
         "Carry an already expressed owner instruction to one exact skill revision: "
         "grant manifest-requested permissions/settings keys, perform eligible owner attestation, "
-        "or delete a local external skill. Ordinary Repair does not imply these actions. "
+        "delete a local external skill, or connect_mcp: write the skill's declared MCP servers as Settings rows and "
+        "turn MCP on, once the owner saw its preview (what will run, every other server it starts; usually a quiz) "
+        "and answered: that answer is the confirm's owner_source. Ordinary Repair does not imply these actions. "
         "Interpret the referenced owner's actual words; do not invent a source or treat an ID "
         "as approval. Host validates source membership, caller and revision. Attestation still "
         "runs deterministic preflight and is unavailable for ClawHub/native payloads. "
@@ -1538,9 +1534,12 @@ _OWNER_ACTION_SCHEMA = {
         "type": "object",
         "properties": {
             "skill": {"type": "string"},
-            "action": {"type": "string", "enum": ["grant", "attest", "delete"]},
+            "action": {"type": "string", "enum": ["grant", "attest", "delete", "connect_mcp"]},
             "expected_content_hash": {"type": "string", "description": "Current selected content hash from list_skills."},
             "items": {"type": "array", "items": {"type": "string"}, "description": "For grant only: exact manifest-requested key/permission names, never secret values."},
+            "preview": {"type": "boolean", "description": "connect_mcp only: return the exact change and its disclosure; write nothing."},
+            "settings_digest": {"type": "string", "description": "connect_mcp confirm: the settings_digest its preview returned."},
+            "confirm_other_servers": {"type": "boolean", "description": "connect_mcp confirm: the owner accepted that the preview's other_servers start too."},
             "owner_source": {
                 "type": "object",
                 "description": (

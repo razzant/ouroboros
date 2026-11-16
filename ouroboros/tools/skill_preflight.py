@@ -732,6 +732,16 @@ def _handle_skill_preflight(
                     "ok": ok,
                     "detail": rel if ok else f"missing or escaping script: {rel}",
                 })
+            if manifest.mcp_servers:  # each declared MCP server's entry, by the one rule its start applies
+                from ouroboros.skill_mcp import entry_problem
+
+                for decl in manifest.mcp_servers:
+                    problem = entry_problem(skill_dir, decl["entry"])
+                    manifest_findings.append({
+                        "item": "manifest_mcp_entry_exists",
+                        "ok": not problem,
+                        "detail": f"server {decl['id']!r}: {problem}" if problem else decl["entry"],
+                    })
         except (OSError, UnicodeDecodeError, SkillManifestError) as exc:
             manifest_findings.append({
                 "item": "manifest_parse",

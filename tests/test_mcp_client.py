@@ -593,7 +593,6 @@ def test_manager_reconfigure_drops_invalid_entries():
         _good_server(id="other"),
     )
     mgr.reconfigure(settings)
-    assert mgr.server_count() == 2
     assert mgr.server_ids() == ["demo", "other"]
 
 

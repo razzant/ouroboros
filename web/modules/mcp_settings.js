@@ -22,14 +22,17 @@ import { setResult } from './ui_primitives.js';
 const KEY = 'MCP_SERVERS';
 const TRANSPORTS = [{ value: 'streamable_http', label: 'Streamable HTTP' }, { value: 'sse', label: 'SSE (Server-Sent Events)' },
     { value: 'stdio', label: 'Local process (stdio)' }];
-// task_session is an owner-selected stdio call lifetime; browser_policy stays an Import-set policy.
-// Off stdio they are unsupported fields that Save refuses until they are removed.
+// task_session is an owner-selected stdio call lifetime; browser_policy stays an Import-set policy; a skill-bound
+// row's skill sets both (shown read-only). Off stdio they are unsupported fields that Save refuses until removed.
 const LIFETIME_FLAGS = ['task_session', 'browser_policy'];
 // A remote server's sign-in (`status.sign_in`, ouroboros/mcp_oauth.py): why it is needed, in words.
 const SIGN_IN_REASONS = { not_signed_in: 'not signed in yet', expired: 'the sign-in expired', signed_out: 'signed out',
     refresh_rejected: 'the provider no longer accepts the sign-in', token_rejected: 'the provider no longer accepts the sign-in' };
+// `skill`: written by a skill's Connect tools and kept as saved; such a stdio row runs that skill's declared server,
+// whose command, arguments and folder the host derives each time it starts (no fields of their own here), so its
+// transport is locked; on any other transport the loader refuses the row, and Save does too.
 const SERVER_FIELDS = new Set(['id', 'slug', 'name', 'label', 'enabled', 'transport', 'url', 'command', 'args', 'auth_header',
-    'auth_token', 'headers', 'allowed_tools', 'cwd', 'env', 'env_from_settings', 'schemas_at_start', ...LIFETIME_FLAGS]);
+    'auth_token', 'headers', 'allowed_tools', 'cwd', 'env', 'env_from_settings', 'schemas_at_start', 'skill', ...LIFETIME_FLAGS]);
 
 let mcpServers = [];        // the saved servers in the document's order; each object is also the draft of its form
 let draftServer = null;     // the server of tools/new, until its first Save
@@ -143,16 +146,34 @@ function refusedFieldsMessage(server) {
     ].filter(Boolean).join(' ');
 }
 
-/** The stdio draft's lifetime and its Import-set browser policy, without changing either. */
+/** The call lifetime a row runs with. A skill-bound row's is its skill's: each bind reads the reviewed manifest (the
+ *  server's status reports it), and the copy Connect tools saved stands in until that status is read. */
+function lifetimeOf(server) {
+    const live = server.skill ? statusOf(server) : null;
+    const source = live && live.skill === server.skill ? live : server;
+    return { taskSession: lifetimeFlagOn(source.task_session), browserPolicy: lifetimeFlagOn(source.browser_policy) };
+}
+
+/** The stdio draft's lifetime and its browser policy, without changing either: Import sets the policy, a skill both. */
 function lifetimeNote(server) {
     if (server.transport !== 'stdio') return '';
-    return (lifetimeFlagOn(server.task_session)
+    const { taskSession, browserPolicy } = lifetimeOf(server);
+    return (taskSession
         ? 'One server process serves every call in a task. It ends with the task, a Settings change or a call timeout.'
         : 'Each tool call starts a new server process.')
         + ' Test and Refresh still start separate processes.'
-        + (lifetimeFlagOn(server.browser_policy)
-            ? ' browser_policy: that process may ask Ouroboros’s browser rules about its requests. '
+        + (server.skill ? `${browserPolicy ? ' That process may ask Ouroboros’s browser rules about its requests.' : ''}`
+            + ` The skill ${server.skill} sets this lifetime; each start follows its reviewed files.`
+            : browserPolicy ? ' browser_policy: that process may ask Ouroboros’s browser rules about its requests. '
                 + 'It requires a task session; use Import to change that policy explicitly before switching this off.' : '');
+}
+
+/** The lifetime switch and its note as the row now runs (a bound row's status can arrive after the card). */
+function paintLifetime(card, server) {
+    const input = card.querySelector('[data-mcp-field="task_session"]');
+    if (input) input.checked = lifetimeOf(server).taskSession;
+    const note = card.querySelector('[data-mcp-lifetime]');
+    if (note) note.textContent = lifetimeNote(server);
 }
 
 /** What this server costs the request: its part of the connections map, and its call schemas. */
@@ -167,7 +188,7 @@ function weightLabel(server) {
 
 function unsupportedFields(server) {
     const unused = server.transport === 'stdio' ? ['url', 'auth_token', 'headers']
-        : ['command', 'args', 'cwd', 'env', 'env_from_settings'];
+        : ['command', 'args', 'cwd', 'env', 'env_from_settings', 'skill'];
     // Edited header rows live in the draft even when server.headers is absent.
     const draft = { ...server, ...credentialPayload(server) };
     const fields = Object.keys(draft).filter((key) => !SERVER_FIELDS.has(key)
@@ -186,12 +207,13 @@ const age = (iso) => formatRelativeAge(Date.parse(String(iso || '')), 'just now'
 function statusParts(server) {
     const status = statusOf(server);
     const toolCount = status ? Number(status.tool_count || 0) : 0;
-    const lastError = status ? String(status.last_error || '') : '';
+    const lastError = status ? String(status.skill_error || status.last_error || '') : '';
     const listedAt = status ? String(status.listed_at || '') : '';
     const attempt = status?.latest_attempt;
     const tools = status && Array.isArray(status.tools) ? status.tools : [];
     const parts = [listedAt ? `${toolCountLabel(toolCount)} · listed ${age(listedAt)}` : ''];
-    if (attempt?.ok === false) parts.push(`listing failed ${age(attempt.at)}`);
+    if (status?.skill_error) parts.push('its skill can’t run it now');  // why in the Error fact; nothing starts
+    else if (attempt?.ok === false) parts.push(`listing failed ${age(attempt.at)}`);
     else if (attempt?.partial) parts.push(`listing partial ${age(attempt.at)}`);
     else if (!listedAt) parts.push(attempt ? 'never listed' : 'not listed yet');
     else if (lastError) parts.push('failing');
@@ -339,6 +361,7 @@ function paintStatus() {
     const facts = card.querySelector('[data-mcp-facts]');
     if (facts && facts.innerHTML !== factItems) facts.innerHTML = factItems;
     paintState(card.querySelector('[data-mcp-state]'), server);
+    if (server.skill) paintLifetime(card, server);
     paintUse();
     paintSignIn(card, server);
     const tools = card.querySelector('[data-mcp-tools]');
@@ -363,6 +386,7 @@ function editorHtml(server) {
     const index = live ? mcpServers.indexOf(server) : mcpServers.length;
     const transport = String(server.transport ?? 'streamable_http');
     const isStdio = transport === 'stdio';
+    const skill = isStdio ? String(server.skill || '') : '';
     const unsupported = unsupportedFields(server);
     const json = (value) => (typeof value === 'string' ? value : JSON.stringify(value ?? {}, null, 2));
     const enabled = server.enabled === true || server.enabled === 'True' || server.enabled === 'true';
@@ -371,8 +395,12 @@ function editorHtml(server) {
     const message = cardMessages.get(server);
     const pending = pendingActions.get(server) || new Set();
     const notice = endpointNotice(server);
+    const flags = lifetimeOf(server);
+    // A skill-bound row is stdio by the loader's rule: its transport is shown, never offered as a choice.
+    const transportOptions = TRANSPORTS.filter((opt) => !skill || opt.value === 'stdio').map((opt) =>
+        `<option value="${escapeHtml(opt.value)}"${opt.value === transport ? ' selected' : ''}>${escapeHtml(opt.label)}</option>`).join('');
     const field = (name, label, control, help = '') => `<div class="form-field ui-field"><label for="mcp-${index}-${name}">${label}</label>${control}${help ? `<span class="ui-field-help">${help}</span>` : ''}</div>`;
-    const input = (name, value, placeholder, id = name) => `<input type="text" class="ui-control" id="mcp-${index}-${id}" data-mcp-field="${name}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" autocomplete="off" spellcheck="false">`;
+    const input = (name, value, placeholder, id = name, attrs = '') => `<input type="text" class="ui-control" id="mcp-${index}-${id}" data-mcp-field="${name}" value="${escapeHtml(value)}" placeholder="${escapeHtml(placeholder)}" autocomplete="off" spellcheck="false"${attrs}>`;
     const area = (name, value, rows, placeholder) => `<textarea class="ui-control" id="mcp-${index}-${name}" data-mcp-field="${name}" rows="${rows}" placeholder="${escapeHtml(placeholder)}" autocomplete="off" spellcheck="false">${escapeHtml(value)}</textarea>`;
     const tick = (name, label, on, attrs = '') => `<label class="mcp-server-enabled"><input class="ui-checkbox" type="checkbox" data-mcp-field="${name}" ${on ? 'checked' : ''} ${attrs}><span>${label}</span></label>`;
     const use = live ? switchHtml(`data-entry-switch aria-label="Use this server"${wanted.has(server) ? ' disabled aria-busy="true"' : ''}`, wanted.has(server) ? wanted.get(server) : enabled)
@@ -401,12 +429,12 @@ function editorHtml(server) {
                 <div class="mcp-server-form">
                     <div class="form-grid two">
                         ${field('name', 'Name', input('name', String(server.name ?? ''), 'GitHub'))}
-                        ${field('id', 'Server ID', input('id', String(server.id ?? ''), 'github'))}
+                        ${field('id', 'Server ID', input('id', String(server.id ?? ''), 'github', 'id', skill ? ' readonly' : ''))}
                     </div>
                     <div class="form-grid two">
-                        ${field('transport', 'Transport', `<select class="ui-control" id="mcp-${index}-transport" data-mcp-field="transport">${TRANSPORTS.map((opt) =>
-                            `<option value="${escapeHtml(opt.value)}"${opt.value === transport ? ' selected' : ''}>${escapeHtml(opt.label)}</option>`).join('')}</select>`)}
-                        ${isStdio ? field('endpoint', 'Command', input('command', String(server.command ?? ''), 'npx', 'endpoint'))
+                        ${field('transport', 'Transport', `<select class="ui-control" id="mcp-${index}-transport" data-mcp-field="transport"${skill ? ` disabled aria-describedby="mcp-${index}-endpoint"` : ''}>${transportOptions}</select>`)}
+                        ${skill ? `<div class="form-field ui-field"><span>Runs</span><span class="ui-field-help" id="mcp-${index}-endpoint">The server the skill ${escapeHtml(skill)} declares. Its command, arguments and folder come from the installed skill each time it starts; while the skill can’t run, this server stays unavailable.</span></div>`
+                            : isStdio ? field('endpoint', 'Command', input('command', String(server.command ?? ''), 'npx', 'endpoint'))
                             : `<div class="form-field ui-field"><label for="mcp-${index}-endpoint">Address</label>${input('url', String(server.url ?? ''), 'https://example.com/mcp', 'endpoint')}
                                 <span class="ui-field-help" data-mcp-endpoint-notice ${notice ? '' : 'hidden'}>${escapeHtml(notice)}</span></div>`}
                     </div>
@@ -420,13 +448,13 @@ function editorHtml(server) {
                     <span class="ui-result" data-editor-result data-mcp-message role="status" aria-live="polite"${message ? ` data-tone="${escapeHtml(message.tone)}"` : ''}>${escapeHtml(message?.text || '')}</span>
                 </div>
                 <details class="ui-disclosure" data-mcp-more${moreOpen.has(server) ? ' open' : ''}>
-                    <summary>${isStdio ? 'More: arguments, folder, environment, tools' : 'More: headers, tools, schemas'}</summary>
+                    <summary>${skill ? 'More: tools, schemas' : isStdio ? 'More: arguments, folder, environment, tools' : 'More: headers, tools, schemas'}</summary>
                     <div class="mcp-server-form">
-                        ${isStdio ? stdioFields() : renderHeaderFields(server, index)}
+                        ${skill ? '' : isStdio ? stdioFields() : renderHeaderFields(server, index)}
                         ${field('allowed_tools', 'Allowed tools, comma-separated', input('allowed_tools', Array.isArray(server.allowed_tools) ? server.allowed_tools.join(', ') : '', 'search, read_repo'), 'Empty allows every tool the server lists.')}
                         <div>${tick('schemas_at_start', 'Schemas from task start', isPinned(server))}
                             <span class="ui-field-help">Off: Ouroboros sees this server’s tools in its connections map and loads their call schemas when it needs them. On: in Low and Max the call schemas are in every request from the start of each task.</span></div>
-                        ${isStdio ? `<div>${tick('task_session', 'Keep one server session per task', lifetimeFlagOn(server.task_session), `aria-describedby="mcp-${index}-lifetime" ${lifetimeFlagOn(server.browser_policy) ? 'disabled' : ''}`)}
+                        ${isStdio ? `<div>${tick('task_session', 'Keep one server session per task', flags.taskSession, `aria-describedby="mcp-${index}-lifetime" ${skill || flags.browserPolicy ? 'disabled' : ''}`)}
                             <span class="ui-field-help" id="mcp-${index}-lifetime" data-mcp-lifetime>${escapeHtml(lifetimeNote(server))}</span></div>` : ''}
                     </div>
                 </details>
@@ -597,14 +625,13 @@ function bindCardEvents(card, rowServer) {
         void setEnabled(rowServer, event.target.checked, 'editor');
     });
     const changeTaskSession = (input) => {
-        // A lifetime edit never silently removes the independently imported browser policy.
-        if (lifetimeFlagOn(rowServer.browser_policy)) {
-            input.checked = lifetimeFlagOn(rowServer.task_session);
+        // A lifetime edit never silently removes the imported browser policy; a skill-bound row's is its skill's.
+        if (rowServer.skill || lifetimeFlagOn(rowServer.browser_policy)) {
+            input.checked = lifetimeOf(rowServer).taskSession;
             return;
         }
         rowServer.task_session = Boolean(input.checked);
-        const note = card.querySelector('[data-mcp-lifetime]');
-        if (note) note.textContent = lifetimeNote(rowServer);
+        paintLifetime(card, rowServer);
         serverEdited(rowServer);
     };
     const TICKS = ['enabled', 'schemas_at_start'];
@@ -813,7 +840,7 @@ async function importServers(ctx, result) {
     const applied = await openMcpImportDialog({
         draftServers: () => mcpServers.map((server) => isServer(server) ? {
             ...(server.id ? { id: String(server.id) } : {}), ...(server.slug ? { slug: String(server.slug) } : {}),
-            ...(server.name ? { name: String(server.name) } : {}),
+            ...(server.name ? { name: String(server.name) } : {}), ...(server.skill ? { skill: String(server.skill) } : {}),
             transport: String(server.transport || 'streamable_http'), ...headerImportFacts(server),
         } : null),
         draftFreshness,
