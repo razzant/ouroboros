@@ -182,16 +182,17 @@ def _is_provider_policy_refusal(exc: BaseException) -> bool:
     )
 
 
-def is_size_refusal(failure: Any) -> bool:
+def is_size_refusal(failure: Any, *, any_status: bool = False) -> bool:
     """Whether a failure is a size refusal by the one shared recognition (``context_budget.size_refusal`` over
     ``provider_answer``): an exception, read from the facts attached to it and never a stale ContextVar, or an
-    HTTP 200 body's error object, whose status is its integer ``error.code``."""
+    HTTP 200 body's error object, whose status is its integer ``error.code``. ``any_status``: the local lane reads
+    its own server's answer, whose 5xx with these words is no outage to wait out."""
     answer = provider_answer(failure)
     if not isinstance(failure, BaseException):
         return size_refusal(answer, answer.status) is not None
-    status = next((value for value in (getattr(failure, "status_code", None),
-                                       getattr(getattr(failure, "response", None), "status_code", None))
-                   if type(value) is int and value), None)
+    status = None if any_status else next((value for value in (
+        getattr(failure, "status_code", None), getattr(getattr(failure, "response", None), "status_code", None))
+        if type(value) is int and value), None)
     return size_refusal(answer, status, typed_values(failure, answer), str(failure)) is not None
 
 

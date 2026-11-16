@@ -160,14 +160,21 @@ class _StructuredLocalOverflow(RuntimeError):
     body = {"error": {"code": "context_window_exceeded", "type": "invalid_request_error"}}
 
 
+class _LocalServerError(RuntimeError):
+    status_code = 500
+
+
 @pytest.mark.parametrize("overflow_exc", [
     _StructuredLocalOverflow("provider rejected request"),
     RuntimeError("Error code: 400 - prompt is too long: 250000 tokens > 200000 maximum"),
+    _LocalServerError("Error code: 500 - prompt is too long: 250000 tokens > 200000 maximum"),
 ])
 def test_local_transport_stops_unchanged_retry_on_any_overflow_shape(monkeypatch, overflow_exc):
     """The local path raises LocalContextTooLargeError on the FIRST attempt for
     every structured overflow code and message marker — an identical over-window
-    payload is never resent (the old path matched one literal code only)."""
+    payload is never resent (the old path matched one literal code only). Its own
+    server's status does not gate the reading: a local 5xx with the words is no outage
+    to wait out, while a remote answer's status sets its family."""
     from ouroboros import llm as llm_mod
     from ouroboros import llm_local as llm_local_mod
 

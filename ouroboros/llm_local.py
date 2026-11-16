@@ -187,7 +187,7 @@ class _LocalLaneMixin:
             raise
         except Exception as exc:
             err = str(exc)
-            if is_size_refusal(exc):
+            if is_size_refusal(exc, any_status=True):
                 raise LocalContextTooLargeError(err) from exc
             # Exception-owned capture proves this attempt; prior ContextVar may be unrelated.
             if outcome_unknown_on_chain(exc):
