@@ -27,9 +27,16 @@ _DRIVER_KEYS = ('PLAYWRIGHT_NODEJS_PATH', 'OUROBOROS_PLAYWRIGHT_NODE_SELECTED', 
 _SERVING_NODE = '/serving/state/cx/node/24.22.3-linux-x64.g-0123456789ab-00000000/node-standalone/bin/node'
 
 
-def _pinned_node(monkeypatch, node):
+def _pinned_node(monkeypatch, node, data):
     """The serving installation's pinned Node, whatever this host prepared: 'prepared' is one fixed host path found
-    by record, 'cold' the real lookup in the isolated data root, which names a not-yet-published generation."""
+    by record, 'cold' the real lookup in the isolated data root, which names a not-yet-published generation.
+
+    Both lookups (``carry_pinned_node`` and ``reviewed_node(prepared=True)``) read the store under ``config.DATA_DIR``,
+    which ``isolate`` leaves at the session's shared root: a Node another test prepared there would be carried. The
+    module root is bound to this test's ``data`` so 'cold' really is cold."""
+    from ouroboros import config
+
+    monkeypatch.setattr(config, 'DATA_DIR', data)
     for name in _DRIVER_KEYS:
         monkeypatch.delenv(name, raising=False)
     if node == 'prepared':
@@ -46,7 +53,7 @@ def _pinned_node(monkeypatch, node):
 def test_docker_candidate_uses_mapped_clean_environment(tmp_path, monkeypatch, consumer, node):
     serving = make_serving(tmp_path)
     data = isolate(monkeypatch, tmp_path)
-    _pinned_node(monkeypatch, node)
+    _pinned_node(monkeypatch, node, data)
     monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', 'pro')
     ctx = make_ctx(serving, data, 'docker-env')
     body_candidate.prepare(ctx)
@@ -151,7 +158,7 @@ def test_only_a_local_candidate_process_gets_the_host_driver_node(tmp_path, monk
     driver) reaches a local process only; an operator's host path is not handed to a container either."""
     serving = make_serving(tmp_path)
     data = isolate(monkeypatch, tmp_path)
-    _pinned_node(monkeypatch, node)
+    _pinned_node(monkeypatch, node, data)
     if operator:
         monkeypatch.setenv('PLAYWRIGHT_NODEJS_PATH', operator)
     monkeypatch.setenv('OUROBOROS_RUNTIME_MODE', 'pro')
@@ -170,8 +177,7 @@ def test_only_a_local_candidate_process_gets_the_host_driver_node(tmp_path, monk
         assert carried == _SERVING_NODE and selected == ('' if operator else _SERVING_NODE)
     elif not operator:  # nothing prepared: the generation the serving installation's own preparation publishes
         assert not carried
-        from ouroboros import config
-        assert pathlib.Path(selected).is_relative_to(pathlib.Path(config.DATA_DIR) / 'state' / 'cx' / 'node')
+        assert pathlib.Path(selected).is_relative_to(data / 'state' / 'cx' / 'node')
         assert not pathlib.Path(selected).exists()
     ctx.executor_ref = {'type': 'docker_exec', 'container_name': 'fixture',
         'workspace_host_path': str(candidate.parent), 'workspace_backend_path': '/workspace'}
