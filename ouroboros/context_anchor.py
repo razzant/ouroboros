@@ -206,6 +206,37 @@ def reservation_refusal(usage: Optional[Mapping[str, Any]], refused: Any, measur
                 and measurement.probes_reply_reservation and sent and sent == getattr(measurement, "route_fp", None))
 
 
+def cited_limit_refusal(usage: Dict[str, Any], refused: Any, measurement: Any, plan: Any) -> bool:
+    """A client refusal no typed code explained (``untyped``) cites a number equal to a token limit declared for
+    this route (``context_budget.cited_declared_limit``): recognition by number, stamped on the answer.
+
+    The declarations are the window record's own (``WindowRecord.declared``, never the compatibility capacity),
+    then the endpoint catalogue's for this model id (``pricing.declared_token_limits``). The matched one says what
+    the number limits: an input cap, or a total that holds the reply. It may size this round's pass and teaches
+    nothing (``context_window.UNTAUGHT_BASES``)."""
+    from ouroboros.context_budget import cited_declared_limit
+
+    answer = usage.get("_last_llm_provider_answer") or {}
+    sent = getattr(getattr(refused, "physical_context", None), "route_fp", None)
+    if not answer.get("untyped") or measurement is None or not sent or sent != getattr(measurement, "route_fp", None):
+        return False
+    from ouroboros.pricing import declared_token_limits
+
+    record = getattr(plan, "window_record", None)
+    cited = cited_declared_limit(  # every layer of the same attempt, earlier upstream attempts included
+        answer.get("said") or (), int(getattr(refused, "max_completion_tokens", 0) or measurement.reply_allowance_tokens or 0),
+        {limit.tokens: (limit.kind, f"the window record ({limit.source})") for limit in (record.declared if record else ())},
+        lambda: declared_token_limits(str(getattr(plan, "provider", "") or ""), str(getattr(plan, "model", "") or "")))
+    if cited is None:
+        return False
+    number, (kind, source), speaker, sentence = cited
+    usage["_last_llm_provider_message"] = sentence
+    usage["_last_llm_provider_answer"] = {**answer, "speaker": speaker, "sentence": sentence, "untyped": False,
+                                          "basis": "number_equals_declared", "limit": number, "limit_kind": kind,
+                                          "declaration": source}
+    return True
+
+
 def measured_units(refused_density: Optional[float], measurement: Any,
                    *tokens: Optional[int]) -> Tuple[Optional[int], ...]:
     """``tokens`` the refused request's own density counts, in the units ``measurement`` counts; None stays unknown."""
