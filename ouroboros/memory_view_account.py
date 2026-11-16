@@ -163,6 +163,7 @@ def account_entries(store: ChronicleStore, label: Callable[..., str], units: Map
                             "rejection": next((f["reason"] for f in own if f["kind"] == "rejection"), "")})
         entries.append({"kind": "account", "id": record["id"], "room_id": str(record["room_id"]), "label": "My account across rooms",
                         "period": period_text(period), "source_period": period.span, "period_basis": period.source,
+                        "period_bases": list(period.bases or (period.source,)),
                         "first": period.first,
                         "text": str(record.get("current_text") or ""), "status": "",
                         "signer": draft_signer(record.get("author")), "stamp": "", "fixes": [],
