@@ -274,7 +274,9 @@ def test_catchup_does_not_offer_its_own_speech_but_pending_mail_is_answered(host
                 assert run.wire.spoken == ['Answer to the new room request.']
             else:
                 assert not run.wire.spoken, 'catching up our own answered conversation never offers another turn'
-            assert any('A question already answered before the handoff.' in str(v) for v in run.wire.sent)
+            # The call switches to the new connection before it writes the catch-up frame, and the provider reads
+            # that frame on another loop: wait for it, so a slow loop is no false red and a missing frame still fails.
+            await run.wait(lambda: any('A question already answered before the handoff.' in str(v) for v in run.wire.sent))
         assert run.result[1]['execution_status'] == 'ok', run.result
     asyncio.run(scenario())
 
