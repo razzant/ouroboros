@@ -256,6 +256,47 @@ def test_the_story_keeps_legacy_coverage_and_refuses_a_page_of_a_changed_story(r
     assert [e["id"] for e in every(root, "story")] == [part["id"]]  # folded legacy leaves; the part tells it
 
 
+def test_transfer_story_metadata_is_bounded_and_every_projected_field_reads_whole(root):
+    store = ChronicleStore(root)
+    store.ensure_activated()
+    author = {"kind": "source_author", "label": "Ada " * 25_000, "model": "model-x", "basis": "source"}
+    moved = {"operator": "operator-one", "tool": "x" * 100_000, "task_id": "move0001"}
+    period = {"start": "2026-07-01", "end": "2026-07-31", "incomplete": False}
+    record = ok(store.publish([{"id": "tr-bounded", "kind": "legacy", "room_id": "legacy", "text": "Words.",
+                                "author": author, "metadata": {"transfer": moved, "legacy_written_at": "2026-08-10",
+                                                               "stated_period": period}}]))
+    entry = next(e for e in every(root, "story") if e["id"] == record["id"])
+    assert size(entry) < PER_ENTRY  # the old story answer carried the entire 100k tool
+    for projected, field, expected in ((entry["transfer"]["tool"], ["metadata", "transfer", "tool"], moved["tool"]),
+                                       (entry["author"]["label"], ["author", "label"], author["label"])):
+        assert projected["ref"] == "text" and projected["chars"] == len(expected)
+        assert projected["address"] == {"kind": "record", "id": record["id"], "field": field}
+        assert whole(root, projected["address"], length=40_000) == expected
+    assert (entry["written_at"], entry["stated_period"], entry["source_period"]) == ("2026-08-10", period, period)
+    assert json.loads(whole(root, {**entry["address"], "field": ["author"]})) == author
+    assert json.loads(whole(root, {**entry["address"], "field": ["metadata", "transfer"]})) == moved
+    assert document(root, entry["address"])["text"] == "Words."
+
+
+def test_transfer_story_author_and_metadata_share_one_budget_and_original_addresses(root, monkeypatch):
+    store = ChronicleStore(root)
+    store.ensure_activated()
+    author = {"kind": "source_author", "label": "Ada " * 70, "model": "model-x", "basis": "source"}
+    moved = {"operator": "operator-one", "tool": "script", "task_id": "move0001"}
+    period = {"start": "2026-07-01", "end": None, "incomplete": True}
+    ok(store.publish([{"id": "tr-budget", "kind": "legacy", "room_id": "legacy", "text": "Words.", "author": author,
+                       "metadata": {"transfer": moved, "legacy_written_at": "2026-08-10", "stated_period": period}}]))
+    monkeypatch.setattr(memory_reader, "ENTRY_BUDGET", 100)  # the author's label consumes the shared budget
+    entry = next(e for e in every(root, "story") if e["id"] == "tr-budget")
+    for key, field, expected in (("transfer", "transfer", moved), ("written_at", "legacy_written_at", "2026-08-10"),
+                                  ("stated_period", "stated_period", period)):
+        assert entry[key] == {"ref": "value", "address": {"kind": "record", "id": "tr-budget",
+                                                          "field": ["metadata", field]}}
+        text = whole(root, entry[key]["address"])
+        assert (text if isinstance(expected, str) else json.loads(text)) == expected
+    assert entry["source_period"] == entry["stated_period"]  # no second unbounded copy of the same dates
+
+
 def _addresses(value):
     """Every ``address`` an answer hands out (refs, continuations' sources), wherever it sits."""
     if isinstance(value, dict):

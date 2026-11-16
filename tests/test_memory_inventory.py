@@ -221,7 +221,7 @@ def test_an_accounts_period_is_the_union_of_its_sources_and_it_seals_no_row(tmp_
     assert "covers" not in account and "stream_span" not in account
     period = mi.record_period(store, account, _units(tmp_path))
     assert period == mi.Period({"start": "2026-09-02T00:00:00+00:00", "end": "2026-09-03T00:03:00+00:00",
-                                "incomplete": False}, 6, "mixed")  # Main's quiet block gives its block period
+                                "incomplete": False}, 6, "mixed", ("block", "rows"))  # Main's quiet block: its block period
     assert period.note() == " (partly block period)"
     assert {room: _positions(mi.open_room_rows(tmp_path, room)) for room in ("1", alpha)} == open_before
     assert {room: store.sealed_row_refs(room) for room in ("1", alpha)} == sealed_before
