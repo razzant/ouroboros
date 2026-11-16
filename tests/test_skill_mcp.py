@@ -276,15 +276,16 @@ def test_a_managed_work_domain_is_read_passively_and_refuses_only_what_it_cannot
     monkeypatch.setattr(skill_mcp, "_not_ready", world.readiness)  # the real gate: the domain decides before readiness
     monkeypatch.setattr(work_domain, "managed", lambda: True)
     monkeypatch.setattr(work_domain, "is_work", lambda _path: False)
-    monkeypatch.setattr(work_skill_payloads, "_home", lambda name, digest: f"/srv/work/staging/skills/{name}/{digest}")
+    staging = world.data.parent / "work" / "staging"  # service-side path, before the execution domain's mapping
+    monkeypatch.setattr(work_skill_payloads, "_home", lambda name, digest: staging / "skills" / name / digest)
     copies = []
     monkeypatch.setattr(work_skill_payloads, "launch", lambda *args: copies.append(args) or (["node"], "/srv", {}))
     monkeypatch.setattr("ouroboros.skill_readiness.skill_readiness_for_execution",
                         lambda *_a, **_k: types.SimpleNamespace(blockers=[]))
     preview, result = _connect(world)
-    home = f"/srv/work/staging/skills/chrome_browser/{preview['content_hash']}"
+    home = staging / "skills" / "chrome_browser" / preview["content_hash"]
     assert preview["ready"] and preview["servers"][0]["executable"] == {
-        "command": "node", "args": [f"{home}/scripts/server.mjs"], "cwd": home}
+        "command": "node", "args": [str(home / "scripts" / "server.mjs")], "cwd": str(home)}
     assert result["saved"] and json.loads(path.read_text())["MCP_SERVERS"] == [_bound_row()]
     bound = skill_mcp.bind_config(mcp_client.normalize_server_config(_bound_row()))
     assert bound.skill_error == "" and bound.command == "node" and copies == []  # passive; the container's runtime
@@ -1146,7 +1147,8 @@ def test_agent_connect_carries_an_answered_quiz_through_real_owner_source_valida
     record_answered(agent_world.drive, "connect-task", quiz_id="connect-chrome", option_index=0, request_id="answer-1")
     preview, blocked = _agent_call(agent_world, owner_source=source, preview=True)
     assert not blocked and preview["ready"] and preview["other_servers"] == [{"id": "github", "name": "GitHub"}]
-    assert preview["servers"][0]["executable"]["args"][0].endswith("scripts/server.mjs")
+    entry = agent_world.drive / "skills" / "external" / "chrome_browser" / "scripts" / "server.mjs"
+    assert preview["servers"][0]["executable"]["args"] == [str(entry.resolve())]
     path = agent_world.drive / "settings.json"
     assert json.loads(path.read_text()) == {"MCP_SERVERS": [OTHER], "OUROBOROS_STARTER_SKILLS_TURN_ON": False}
     foreign = {**source, "task_id": "another-task"}
