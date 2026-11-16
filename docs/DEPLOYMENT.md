@@ -136,6 +136,57 @@ path. Default logs are in `~/Ouroboros/data/logs/`; use the actual data root if
 overridden. Share only the relevant traceback and package identity, never the
 whole settings file or credentials. Repeated restarts do not fix a parser mismatch.
 
+## Moving an installed app to a new bundled Python
+
+Packages built from this source bundle CPython 3.12.15; 7.11.0 and earlier
+bundle CPython 3.10.22. Pillow 13, which carries the image-decoder security
+fixes, needs Python 3.11 or newer, so an app on 3.10 keeps Pillow 12.3 after
+Dashboard → Updates: it keeps working, and stays exposed until the app itself
+is replaced. Only a new application package or image changes the interpreter.
+
+Desktop (macOS, Windows, Linux):
+
+1. In the installed app, run Dashboard → Updates. It stays on Python 3.10.
+2. Quit Ouroboros. Keep the old app under another name if you want a way back.
+   Windows ZIP and Linux tar.gz: remove the old folder, never extract over it.
+3. Install and start the new app. It keeps the checkout, data and settings and
+   installs the checkout's packages for 3.12 beside the 3.10 ones
+   (`state/python-userbase/lib/python3.12`, Windows `Python312`).
+4. Run Dashboard → Updates once in the new app. If step 1 was skipped, or a
+   package manager such as Homebrew replaced the app, the old checkout's Pillow
+   12.3 is still in use until this Update; when nothing is newer it changes
+   nothing. To check, run the app's interpreter with your data directory's user
+   packages and expect 3.12.15 and Pillow 13. On macOS:
+
+   ```bash
+   PYTHONUSERBASE="$HOME/Ouroboros/data/state/python-userbase" \
+     /Applications/Ouroboros.app/Contents/Frameworks/python-standalone/bin/python3 \
+     -B -c "import sys, PIL; print(sys.version.split()[0], PIL.__version__, PIL.__file__)"
+   ```
+
+   On Linux the interpreter is `_internal/python-standalone/bin/python3` in the
+   app folder (`/opt/ouroboros` for `.deb`/`.rpm`); on Windows, in PowerShell, set
+   `$env:PYTHONUSERBASE` the same way and run `_internal\python-standalone\python.exe`
+   from the app folder with the same `-B -c` argument.
+
+Each skill's Python environment is rebuilt from its declared packages under the
+new interpreter: enabled skills at the first start, others when enabled.
+Packages added to a skill environment by hand are not carried over. Without
+network, or when a declared package has no Python 3.12 wheel, the rebuild fails
+and is retried at the next start (the latter until the skill moves its pin). To go back, quit
+the new app and start the kept one: it reads its own 3.10 packages and
+environments rebuild again. A managed container moves the same way: Update on
+the current image, then start the new image on the same volumes (Containers
+below). Android's Ubuntu 24.04 environment already runs Python 3.12, so its Update alone brings Pillow 13.
+A source checkout on Python 3.10 keeps Pillow 12.3; Python 3.11 or newer gets
+Pillow 13.
+
+The move leaves what only the old app reads; check its size with `du -sh` and
+delete it once that app is gone: `state/python-userbase/lib/python3.10` (Windows
+`Python310`; usually a few MB), the managed container's `/ouroboros/body/venv`
+(the whole old lock, hundreds of MB) and the `cpython-310` files in
+`state/pycache.noindex` (compiled bytecode, safe to delete any time).
+
 ## Containers
 
 Two images, one recipe file: [`packaging/docker/compose.yaml`](../packaging/docker/compose.yaml)
@@ -150,15 +201,18 @@ profile per volume set; never point two containers at one data volume.
 | Volumes | data, work, `HOME` | one parent volume, or body/data/work/home |
 
 **Interpreter.** The image's Python is python-build-standalone release 20261009:
-CPython 3.10.22 and SQLite 3.53.1, the same assets
+CPython 3.12.15 and SQLite 3.53.1, the same assets
 `scripts/download_python_standalone.sh` and `scripts/download_python_standalone.ps1`
-pin for the desktop packages. It is not Debian's `python:3.10-slim` (SQLite 3.46.1).
+pin for the desktop packages. It is not a Debian `python:*-slim` image.
 Desktop installs receive that interpreter only by installing the app again.
 Dashboard → Updates replaces the repository and its packages; it does not replace
-the bundled interpreter. A managed container keeps its runtime venv on a volume.
-A venv whose interpreter no longer matches this image is left untouched, and the
-log names the recovery step: stop, move that directory aside, start again. Code
-and data stay; packages that lived only in the old venv do not.
+the bundled interpreter. A managed container keeps its runtime venv on a volume,
+named for the image's Python minor (`/ouroboros/body/venv-3.12`): a volume prepared
+by an image with another Python keeps that venv untouched beside the new one, so the
+old image still starts on it. A venv passed with `--runtime-venv` whose interpreter
+no longer matches this image is left untouched, and the log names the recovery
+step: stop, move that directory aside or pass another path, start again. Code and
+data stay; packages that lived only in the old venv do not.
 
 **Exposure.** Both images bind `0.0.0.0` and set no `OUROBOROS_NETWORK_PASSWORD`:
 a missing password only warns and the gate then admits every request, so a
@@ -171,7 +225,7 @@ ouroboros-seed=<dir> .` takes a released seed, the `repo.bundle` and
 `repo_bundle_manifest.json` that `scripts/build_repo_bundle.py` emits from a clean
 annotated release tag; the build refuses a bundle without complete history. The
 image keeps only the launcher; its layout puts the body at
-`/ouroboros/body/{repo,venv}`, data at `/ouroboros/data`, work at
+`/ouroboros/body/repo` and `/ouroboros/body/venv-3.12`, data at `/ouroboros/data`, work at
 `/ouroboros/work` and `HOME` at `/ouroboros/home`. First boot clones the seed into
 the body and prepares `--runtime-venv` (`ouroboros/runtime_venv.py`): it needs
 network for the dependency lock, and an interrupted preparation resumes on the

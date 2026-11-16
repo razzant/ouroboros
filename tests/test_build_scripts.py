@@ -589,19 +589,17 @@ class TestBuildWindowsPs1:
 
 
 def test_python_standalone_pin_is_the_fixed_sqlite_release():
-    """Desktop packages take CPython 3.10.22 from python-build-standalone 20261009.
+    """Desktop packages take python-build-standalone 20261009 (SQLite 3.53.1, the WAL-reset fix).
 
-    That release is the last one that still ships Python 3.10, and its SQLite
-    is 3.53.1 (the WAL-reset fix). The two download scripts are the pin.
+    The two download scripts are the pin; tests/test_python_runtime_pin.py ties every carrier of
+    the Python version to it.
     """
     shell = _read("scripts/download_python_standalone.sh")
     windows = _read("scripts/download_python_standalone.ps1")
     assert 'RELEASE="20261009"' in shell
-    assert 'PY_VERSION="3.10.22"' in shell
     assert '$Release = "20261009"' in windows
-    assert '$PyVersion = "3.10.22"' in windows
     assert "20260211" not in shell and "20260211" not in windows
-    assert "3.10.19" not in shell and "3.10.19" not in windows
+    assert "3.10." not in shell and "3.10." not in windows
     for platform in (
         "aarch64-apple-darwin",
         "x86_64-apple-darwin",
@@ -678,7 +676,7 @@ class TestDockerfile:
         """``docker build -t ouroboros-web .`` must not depend on a locally built base tag.
 
         The interpreter is the pinned python-build-standalone build, checked in
-        the image build for Python 3.10.22 and SQLite >= 3.51.3.
+        the image build for the download scripts' Python and SQLite >= 3.51.3.
         """
         src = _read("Dockerfile")
         assert "FROM python:3.10-slim" not in src
@@ -1149,7 +1147,7 @@ class TestMacOSSigning:
 
         src = _read("build.sh")
         marker = "--- Removing stale WebKit, Playwright Chromium, debug-symbol and test payloads"
-        assert src.index(marker) < src.index("python3 -m PyInstaller")
+        assert src.index(marker) < _find_pyinstaller_cmd_pos(src)
         body = src[src.index("python3 - <<'PY'\n", src.index(marker)) + len("python3 - <<'PY'\n"):]
         body = body[:body.index("\nPY\n")]
         site = tmp_path / "python-standalone" / "lib" / "python3.10" / "site-packages"

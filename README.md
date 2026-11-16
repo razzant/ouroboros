@@ -27,7 +27,7 @@ Ouroboros sends no telemetry by default, and the official project operates no us
 
 > **Just want to use Ouroboros? Click the download for your platform below. You do not need to clone this repository or install Python or uv.**
 
-Desktop downloads bundle CPython 3.10.22 and SQLite 3.53.1. In-app Update replaces the repository and its packages, not that interpreter: install the app again to get this runtime.
+Desktop downloads bundle CPython 3.12.15 and SQLite 3.53.1. In-app Update replaces the repository and its packages, not that interpreter: install the app again to get this runtime. Apps up to 7.11.0 bundle Python 3.10 and keep Pillow 12.3, without the image-decoder fixes of Pillow 13: run Update in the installed app first, then install the new app ([order and checks](docs/DEPLOYMENT.md#moving-an-installed-app-to-a-new-bundled-python)).
 
 - **macOS 12+ on Apple silicon:** [**Download for macOS (.dmg)**][download-macos-arm64]
 - **Windows x64:** [**Download for Windows (.zip)**][download-windows-x64]
@@ -407,7 +407,7 @@ docker run --rm -p 8765:8765 \
   ouroboros-web
 ```
 
-Docker runs the web runtime, not the native desktop shell. Its Python is the same standalone build as the desktop packages (CPython 3.10.22, SQLite 3.53.1). The image bundles WebKit for the locked
+Docker runs the web runtime, not the native desktop shell. Its Python is the same standalone build as the desktop packages (CPython 3.12.15, SQLite 3.53.1). The image bundles WebKit for the locked
 Playwright version and the pinned Chromium, and needs Docker's default BuildKit builder. It runs as root, where Chromium's sandbox cannot start, so browser tools refuse Chromium unless the administrator opts out (`OUROBOROS_CHROMIUM_SANDBOX=off`, [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)). Persistent volumes, the managed image whose body updates
 itself, restart policy and Panic, network exposure and extra CAs: [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md); the
 executable recipes are [`packaging/docker/compose.yaml`](packaging/docker/compose.yaml).

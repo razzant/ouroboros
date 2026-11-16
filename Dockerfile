@@ -7,9 +7,9 @@
 
 FROM ghcr.io/astral-sh/uv:0.12.1 AS uv
 
-# CPython 3.10.22 and SQLite 3.53.1 from python-build-standalone 20261009:
+# CPython 3.12.15 and SQLite 3.53.1 from python-build-standalone 20261009:
 # the same install_only_stripped assets as scripts/download_python_standalone.sh.
-# Debian python:3.10-slim froze on SQLite 3.46.1. This build links only glibc
+# Debian's python:*-slim images lag on SQLite. This build links only glibc
 # (floor 2.17); OpenSSL and SQLite are inside it.
 FROM debian:trixie-slim AS python-standalone
 ARG TARGETARCH
@@ -17,17 +17,17 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && case "${TARGETARCH}" in \
-         amd64) PLATFORM="x86_64-unknown-linux-gnu"; SHA256="caa66b308e10f35b8114054df7d927903f971f631cfa3237b84c40d5d5f35549" ;; \
-         arm64) PLATFORM="aarch64-unknown-linux-gnu"; SHA256="ecbe978a7ecbeb3a9aed67bb5d161180701513b4fa8101037b2a3f1ac11e96be" ;; \
+         amd64) PLATFORM="x86_64-unknown-linux-gnu"; SHA256="ffa8f85f1b56e88b687f08d743d817015524b86a9365fd921243132b80f1a36d" ;; \
+         arm64) PLATFORM="aarch64-unknown-linux-gnu"; SHA256="2e1ba0e7f22e01c534caebf7f09e7820322bc0d055271d3434af671e8400f96f" ;; \
          *) echo "unsupported architecture: ${TARGETARCH}" >&2; exit 1 ;; \
        esac \
-    && FILENAME="cpython-3.10.22+20261009-${PLATFORM}-install_only_stripped.tar.gz" \
+    && FILENAME="cpython-3.12.15+20261009-${PLATFORM}-install_only_stripped.tar.gz" \
     && curl -fsSL "https://github.com/astral-sh/python-build-standalone/releases/download/20261009/${FILENAME}" -o /tmp/python.tar.gz \
     && echo "${SHA256}  /tmp/python.tar.gz" | sha256sum -c - \
     && mkdir -p /opt/python-standalone \
     && tar -xzf /tmp/python.tar.gz -C /opt/python-standalone --strip-components=1 \
     && rm /tmp/python.tar.gz \
-    && /opt/python-standalone/bin/python3 -c "import sqlite3,sys; version=sys.version.split()[0]; sqlite=tuple(int(part) for part in sqlite3.sqlite_version.split('.')); assert version=='3.10.22', version; assert sqlite>=(3, 51, 3), sqlite3.sqlite_version"
+    && /opt/python-standalone/bin/python3 -c "import sqlite3,sys; version=sys.version.split()[0]; sqlite=tuple(int(part) for part in sqlite3.sqlite_version.split('.')); assert version=='3.12.15', version; assert sqlite>=(3, 51, 3), sqlite3.sqlite_version"
 
 # The pinned official Node (ouroboros/claudexor_runtime_pin.json, size/SHA-256 checked) for the build's
 # Playwright CLI, SDK copy and the runtime resolver's standard bundled layout.
@@ -106,7 +106,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --locked --python /opt/python-standalone/bin/python3 --no-dev --extra browser --no-install-project
 
 # Copy application. The immutable venv's Playwright driver gets the pinned Node bytes and LICENSE.node; the managed
-# target's runtime venv (/ouroboros/body/venv) selects a managed copy seeded from /opt/node-standalone at boot.
+# target's runtime venv (/ouroboros/body/venv-<minor>) selects a managed copy seeded from /opt/node-standalone at boot.
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=node-standalone,source=/opt/node-standalone,target=/opt/node-standalone \
@@ -142,7 +142,9 @@ COPY --from=ouroboros-seed repo.bundle repo_bundle_manifest.json /opt/ouroboros/
 RUN python -c "import json, pathlib; seed = pathlib.Path('/opt/ouroboros/seed'); (seed / 'VERSION').write_text(json.loads((seed / 'repo_bundle_manifest.json').read_text())['app_version'] + '\\n')" \
     && git init -q /tmp/seed-check && git -C /tmp/seed-check bundle verify /opt/ouroboros/seed/repo.bundle \
     && rm -rf /tmp/seed-check
-ENTRYPOINT ["python", "/app/launcher.py", "--no-ui", "--seed-bundle", "/opt/ouroboros/seed", "--runtime-venv", "/ouroboros/body/venv"]
+# The runtime venv is named for this image's Python minor: a volume prepared by an image with another
+# Python keeps that venv untouched beside the new one (docs/DEPLOYMENT.md).
+ENTRYPOINT ["python", "/app/launcher.py", "--no-ui", "--seed-bundle", "/opt/ouroboros/seed", "--runtime-venv", "/ouroboros/body/venv-3.12"]
 CMD ["--launch-intent", "automatic"]
 
 # The ordinary immutable image stays the default target.
