@@ -21,7 +21,11 @@
  *     (another folder, a filtered list) is its page's to place.
  * A page that moves a remembered box itself (`scrollTop`, `scrollTo`, `scroll`, `scrollBy`, `scrollIntoView`: a new
  * circle's form at the top) has moved the place with it, so a repaint in the same moment never undoes that move. */
+import { revealPastFade } from './scroll_fade.js';
+
 export const OWN_PLACE = '.chat-messages, #chat-messages, #page-logs';
+// The row of a section's list that names the page open beside it (Settings' rail, the Dashboard's list).
+const NAMING_ROW = '[data-section-view="page"] :is([aria-current="page"], [aria-orientation="vertical"] [aria-selected="true"])';
 
 // Whether this engine drops a box's scroll when what it holds is drawn again: the plain case, off screen.
 export function dropsOnRedraw(doc = document) {
@@ -159,7 +163,8 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
         }
     };
     // A return owns a snapshot of the retained place, not a second navigation stack. The room's feed and Logs
-    // still restore through their reading owners. Keep nearby anchors too: a row may disappear while away.
+    // still restore through their reading owners. Keep nearby anchors too: a row may disappear while away. A box left
+    // within its fade's depth returns to its top, and a list beside its open page shows the row naming that page.
     restore.capture = (root, opener) => {
         const boxes = [root, ...(root?.querySelectorAll('*') || [])].filter((box) => box && !box.matches(OWN_PLACE)
             && (box.scrollHeight > box.clientHeight || box.scrollWidth > box.clientWidth));
@@ -175,8 +180,22 @@ export function initPagePlaces({ doc = document, win = window, drops = () => dro
         return ({ keyboard = false } = {}) => {
             for (const [box, top, left] of saved) {
                 if (!box.isConnected) continue;
-                box.scrollTop = top;
+                // Within its fade's depth the top is the place: a few pixels would only dim the first row under it.
+                const fade = box.matches('.scroll-fade-y')
+                    ? parseFloat(win.getComputedStyle?.(box)?.getPropertyValue?.('--scroll-fade-edge')) || 0 : 0;
+                box.scrollTop = top < fade ? 0 : top;
                 box.scrollLeft = left;
+                remember(box);
+            }
+            // A list keeps the row that names the page beside it in view, past its fade, as the list's own reveal does
+            // when the row is chosen: a return never leaves the open page unnamed.
+            const scrolls = (box) => box.scrollHeight > box.clientHeight && /auto|scroll/.test(win.getComputedStyle?.(box)?.overflowY);
+            for (const row of root?.querySelectorAll?.(NAMING_ROW) || []) {
+                if (!row.getClientRects?.().length) continue;
+                let box = row.parentElement;
+                while (box && !scrolls(box)) box = box === root ? null : box.parentElement;
+                if (!box) continue;
+                revealPastFade(box, row);
                 remember(box);
             }
             const anchor = anchors.find((el) => el?.isConnected && el.getClientRects().length && !el.closest('[hidden], [inert]')) || root;

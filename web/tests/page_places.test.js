@@ -29,7 +29,7 @@ function world() {
         node.scrollLeft = left;
         listeners.doc.get('scroll')({ target: node });
     };
-    return { doc, listeners, page, box, scrolled, restore };
+    return { doc, win, listeners, page, box, scrolled, restore };
 }
 
 test('a box scrolled on a page goes back when the page or its tab is shown again; another page is untouched', () => {
@@ -76,6 +76,27 @@ test('a forward landing resets visible ordinary scrollers, and a captured return
     assert.equal(list.scrollTop, 0, 'a repaint cannot resurrect the stale arrival');
     back();
     assert.deepEqual([list.scrollTop, list.scrollLeft, hidden.scrollTop, feed.scrollTop], [320, 80, 220, 600]);
+});
+
+test('a return within its fade\'s depth goes to the top, and a list beside its open page shows the row naming it', () => {
+    const w = world(), root = w.page('page-settings');
+    w.win.getComputedStyle = () => ({ getPropertyValue: (name) => (name === '--scroll-fade-edge' ? '32px' : ''), overflowY: 'auto' });
+    const box = (top, fades = true) => ({ isConnected: true, scrollTop: top, scrollLeft: 0, scrollHeight: 2000, clientHeight: 600,
+        scrollWidth: 100, clientWidth: 100, clientTop: 0, matches: (selector) => fades && selector === '.scroll-fade-y',
+        ownerDocument: { defaultView: w.win }, getBoundingClientRect: () => ({ top: 0, bottom: 600, left: 0, right: 100 }) });
+    const rail = box(0), pane = box(12), deep = box(240), plain = box(12, false);
+    // The row naming the open page lies under the rail's lower edge: the owner had scrolled the list away from it.
+    const row = { parentElement: rail, getClientRects: () => [1], getBoundingClientRect: () => ({ top: 700, bottom: 748 }) };
+    let beside = false;
+    Object.assign(root, { matches: () => false, parentElement: null,
+        querySelectorAll: (selector) => (selector === '*' ? [rail, pane, deep, plain] : beside ? [row] : []) });
+    const back = w.restore.capture(root);
+    back();
+    assert.deepEqual([rail.scrollTop, pane.scrollTop, deep.scrollTop, plain.scrollTop], [0, 0, 240, 12],
+        'a few pixels under a fade go to the top; a real place, or a box without a fade, keeps its pixels');
+    beside = true;
+    back();
+    assert.equal(rail.scrollTop, 748 - (600 - 32), 'the naming row comes in just past the lower fade');
 });
 
 test('disposal releases a room\'s places even before another page restore', () => {
