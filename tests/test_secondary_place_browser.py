@@ -286,7 +286,9 @@ def test_logs_sidebar_return_restores_reading_when_one_column_reopens_the_select
             page.evaluate(_BURST, [150, "reading"])
             _nav(page, "dashboard")
             dashboard = page.locator("#page-dashboard")
-            expect(dashboard).to_have_attribute("data-section-view", "home")
+            # The automatic view: one column draws the list alone, the selected Logs page has no box until pressed.
+            expect(dashboard).to_have_attribute("data-section-view", "auto")
+            expect(page.locator("#page-logs")).to_be_hidden()
             page.locator('[data-dashboard-tab="logs"]').click()
             page.wait_for_function("() => document.getElementById('log-entries').children.length >= 100")
             page.wait_for_function("() => !document.querySelector('.logs-history-status')?.textContent.includes('Loading')")
@@ -299,7 +301,8 @@ def test_logs_sidebar_return_restores_reading_when_one_column_reopens_the_select
             for _ in range(2):
                 _nav(page, "skills")
                 _nav(page, "dashboard")
-                expect(dashboard).to_have_attribute("data-section-view", "home")
+                expect(dashboard).to_have_attribute("data-section-view", "auto")
+                expect(body).to_be_hidden()
                 page.locator('[data-dashboard-tab="logs"]').click()
                 expect(body).to_be_visible()
                 page.evaluate(_SETTLE_RESTORE_FRAMES)

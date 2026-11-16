@@ -112,9 +112,11 @@ export function initLogs({ ws, state, mount, setControls, setBeforePageLeave }) 
     const logEntries = page.querySelector('#log-entries');
     const historyStatus = page.querySelector('.logs-history-status');
     const emptyLine = page.querySelector('[data-log-empty]');
+    // The section's sheets decide whether its page column is drawn (a one-column list hides it): a panel with no box
+    // is not shown, whatever its tab.
     function isLogsVisible() {
         return state.activePage === 'dashboard' && state.dashboardActiveSubtab === 'logs' && !document.hidden
-            && page.closest('[data-section-view]')?.dataset.sectionView !== 'home';
+            && page.getClientRects().length > 0;
     }
 
     const raw = createLogRaw({ visible: isLogsVisible });

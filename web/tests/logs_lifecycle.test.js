@@ -122,13 +122,16 @@ test('a hidden panel writes no node and reads no history; shown, it catches up a
 
 test('the selected Logs tab stays hidden while the one-column Dashboard shows its list', async (t) => {
     const logs = mountLogs(t, { page: 'chat' });
-    logs.mount.setAttribute('data-section-view', 'home');
+    // The automatic view names no column: below 40rem the sheets hide the page's column, so the panel has no box.
+    const body = logs.mount.querySelector('#page-logs');
+    body.getClientRects = () => [];
+    logs.mount.setAttribute('data-section-view', 'auto');
     logs.emit({ type: 'waiting_for_its_page', ts: at(1) });
     logs.show();
     await settle();
     assert.equal(logs.calls.length, 0, 'the section list is not the selected tab being shown');
     assert.equal(logs.list.children.length, 0);
-    logs.mount.setAttribute('data-section-view', 'page');
+    body.getClientRects = () => [{ width: 1, height: 1 }];
     logs.window.dispatchEvent({ type: 'ouro:dashboard-subtab-shown', detail: { tab: 'logs' } });
     await settle();
     assert.equal(logs.calls.length, STREAMS.length);
