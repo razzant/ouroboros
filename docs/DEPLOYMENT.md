@@ -562,8 +562,11 @@ file or copies it.
 
 ### Execution domain
 
-`execution` names where employees' work runs, apart from the service that enforces the policy. The
-reference shape is the service on a trusted Linux host and the work in containers of its own:
+`execution` names where employees' work runs, apart from the service that enforces the policy. It
+needs a POSIX service host (proven on Linux): on Windows a host path is never the path the work sees,
+so a policy naming `execution`, and with it `extensions.trusted`, stops `server.py` with exit 2; run
+the service in WSL2 or a Linux container there, or leave the section out. The reference shape is the
+service on a trusted Linux host and the work in containers of its own:
 
 ```json
 "execution": {

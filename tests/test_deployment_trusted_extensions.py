@@ -21,12 +21,16 @@ from ouroboros import extension_loader
 from tests._extension_loader_shared import _clear_loader_state, _mark_isolated_deps_installed, _write_ext_skill  # noqa: F401
 from tests.test_deployment_policy import install as install_fixture
 from tests.test_deployment_policy import manage
+from tests.test_execution_domain import posix_host
 
 install = install_fixture  # the shared isolated data root, as a fixture of this module
 
 NAME = "audit_widget"
 REPO = pathlib.Path(__file__).resolve().parents[1]
-MODES = ("unmanaged", "no_execution", "trusted", "untrusted")
+# ``trusted`` and ``untrusted`` name an execution domain, which a Windows service host refuses (``posix_host``); the
+# other two, and every test that names no ``execution``, run on every host.
+MODES = ("unmanaged", "no_execution", pytest.param("trusted", marks=posix_host),
+         pytest.param("untrusted", marks=posix_host))
 
 
 def plugin(log: pathlib.Path) -> str:
@@ -113,6 +117,7 @@ def call_hello(org, name=NAME) -> str:
 DIGEST = "0" * 64
 
 
+@posix_host
 def test_trust_exists_only_with_an_execution_domain_and_is_strict(org):
     from ouroboros.deployment_policy import DeploymentPolicyError, parse_policy
 
@@ -137,6 +142,7 @@ def test_trust_exists_only_with_an_execution_domain_and_is_strict(org):
     assert parse({}, execution=execution(org)).trusted == () and parse({}).trusted == ()
 
 
+@posix_host
 @pytest.mark.parametrize("where", ["inside", "holding", "state_root"])
 def test_a_trusted_package_never_lies_where_the_work_domain_writes(org, where):
     from ouroboros.deployment_policy import DeploymentPolicyError, parse_policy
@@ -149,6 +155,7 @@ def test_a_trusted_package_never_lies_where_the_work_domain_writes(org, where):
         parse_policy(json.dumps(document).encode())
 
 
+@posix_host
 def test_with_execution_every_required_package_is_one_of_the_trusted(org):
     from ouroboros.deployment_policy import DeploymentPolicyError, parse_policy
 
@@ -166,6 +173,7 @@ def test_with_execution_every_required_package_is_one_of_the_trusted(org):
     assert parse(None, domain=False).trusted == (), "without execution a required row stands alone, as before"
 
 
+@posix_host
 def test_settings_name_the_trusted_pins_only_with_an_execution_domain(org, monkeypatch):
     from ouroboros.deployment_policy import policy_state
 
@@ -194,6 +202,7 @@ def test_only_trusted_bytes_load_in_process_and_keep_their_tools(org, monkeypatc
         assert "hello from trusted code" in call_hello(org)
 
 
+@posix_host
 @pytest.mark.parametrize("change", ["bytes", "folder"])
 def test_other_bytes_or_another_folder_of_a_trusted_name_never_load(org, monkeypatch, change):
     from ouroboros.extension_liveness import runtime_state_for_skill_name
@@ -211,6 +220,7 @@ def test_other_bytes_or_another_folder_of_a_trusted_name_never_load(org, monkeyp
     assert ("differ from the version" if change == "bytes" else "another folder") in state["load_error"]
 
 
+@posix_host
 def test_a_staged_copy_that_is_not_the_pinned_bytes_is_replaced_before_anything_imports(org, monkeypatch):
     """A cached tree the loader would reuse (``complete.json`` present) is checked against the pin first."""
     from ouroboros.extension_import_staging import extension_import_identity
@@ -231,6 +241,7 @@ def test_a_staged_copy_that_is_not_the_pinned_bytes_is_replaced_before_anything_
     assert (tree / "skill" / "plugin.py").read_text(encoding="utf-8") == plugin(org.log)
 
 
+@posix_host
 def test_a_copy_that_changes_while_staged_is_refused_and_not_imported(org, monkeypatch):
     from ouroboros import extension_import_staging
 
@@ -247,6 +258,7 @@ def test_a_copy_that_changes_while_staged_is_refused_and_not_imported(org, monke
     assert NAME not in extension_loader.snapshot()["extensions"]
 
 
+@posix_host
 @pytest.mark.parametrize("trusted", [True, False])
 def test_an_out_of_process_extension_runs_only_trusted_and_keeps_its_child_dispatch(org, monkeypatch, trusted):
     """The catalog child and every per-call child load the package themselves: trusted, the tool answers through
@@ -272,6 +284,7 @@ def test_an_out_of_process_extension_runs_only_trusted_and_keeps_its_child_dispa
         assert not calls.exists() or not any(calls.iterdir()), "no child was ever started"
 
 
+@posix_host
 def test_a_child_asked_to_load_an_untrusted_package_refuses_before_import(org, monkeypatch):
     from ouroboros.extension_process_runner import ExtensionProcessError, _load_child_extension
 
@@ -281,6 +294,7 @@ def test_a_child_asked_to_load_an_untrusted_package_refuses_before_import(org, m
     assert imports(org) == 0
 
 
+@posix_host
 def test_host_service_tokens_speak_only_for_trusted_code(org, monkeypatch):
     from ouroboros.extension_plugin_api import mint_skill_token
     from ouroboros.gateway.host_service import HostServiceAuthError, HostServiceContext
@@ -317,7 +331,7 @@ def test_turning_on_an_untrusted_extension_refuses_before_any_write_and_off_stay
     assert off["ok"] and NAME not in extension_loader.snapshot()["extensions"], off
 
 
-@pytest.mark.parametrize("mode", ["unmanaged", "trusted"])
+@pytest.mark.parametrize("mode", ["unmanaged", pytest.param("trusted", marks=posix_host)])
 def test_a_trusted_packages_files_dependencies_and_staged_imports_refuse_every_editor(org, monkeypatch, mode):
     from starlette.applications import Starlette
 
@@ -359,7 +373,8 @@ def test_a_trusted_packages_files_dependencies_and_staged_imports_refuse_every_e
 
 
 @pytest.mark.parametrize("staged", [False, True])
-@pytest.mark.parametrize("mode", ["unmanaged", "trusted", "untrusted"])
+@pytest.mark.parametrize("mode", ["unmanaged", pytest.param("trusted", marks=posix_host),
+                                  pytest.param("untrusted", marks=posix_host)])
 def test_the_dependency_owner_installs_nothing_into_a_trusted_package(org, monkeypatch, mode, staged):
     """With a ``staging_root`` too, an extension's packages stay its own folder's: nothing of it is copied into the
     work domain (``work_skill_payloads.deps_home``), which only script skills use."""
@@ -414,7 +429,7 @@ def test_skills_name_each_extensions_trust_only_with_an_execution_domain(org, mo
     assert rows["notes_helper"]["live_reason"] == "deployment_untrusted"
 
 
-@pytest.mark.parametrize("protected", [False, True])
+@pytest.mark.parametrize("protected", [False, pytest.param(True, marks=posix_host)])
 def test_the_dictation_chooser_offers_no_built_in_the_service_would_not_run(org, monkeypatch, protected):
     """Installed built-ins not yet on and bundled ones not installed are offered as engines; under an execution
     domain only those the policy trusts, since turning on any other one is refused."""

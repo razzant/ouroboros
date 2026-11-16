@@ -20,6 +20,7 @@ import urllib.request
 import pytest
 
 from tests.test_deployment_extensions_ui_browser import _post, _shot, _skills
+from tests.test_execution_domain import posix_host
 from tests.test_ui_smoke_playwright import direct_server_with_data  # noqa: F401
 
 NOTES, OTHER = "org_notes", "team_tools"  # _skills waits for the org_notes card
@@ -75,6 +76,7 @@ def _offer_fixture_update(page):
 
 
 @pytest.mark.ui_browser
+@posix_host  # its second half runs a policy naming `execution`, which a Windows service host refuses
 def test_delivered_and_untrusted_extensions_in_skills(direct_server_with_data, tmp_path):  # noqa: F811
     from playwright.sync_api import sync_playwright
 
