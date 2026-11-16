@@ -253,8 +253,10 @@ ROW = """() => {
 
 
 def _record(evidence):
+    # The folder is the run's (a retry's or a local run's may not exist yet): a missing one is made, never a red.
     root = os.environ.get("OUROBOROS_UI_EVIDENCE_DIR")
     if root:
+        Path(root).mkdir(parents=True, exist_ok=True)
         (Path(root) / "chips-rows.json").write_text(json.dumps(evidence, indent=1), encoding="utf-8")
 
 
