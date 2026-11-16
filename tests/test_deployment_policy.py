@@ -223,6 +223,46 @@ def test_a_server_never_starts_unmanaged_under_an_unusable_policy(tmp_path):
     assert not (data / "settings.json").exists()
 
 
+def test_an_execution_section_needs_a_posix_service_host(install, monkeypatch):
+    """The start's own check (``config.verify_settings_integrity``, whose refusal is the exit 2 above): an
+    ``execution`` section, with ``extensions.trusted`` or without, loads on a POSIX service host and stops a Windows
+    one with the reason and what to do; a policy without it holds on both. Windows is the runner's own there; on a
+    POSIX runner it is the platform layer's flag as ``execution_domain`` holds it."""
+    from ouroboros import config, deployment_policy, execution_domain, platform_layer
+
+    work = install.root / "work"
+    work.mkdir()
+    section = {"executor": {"type": "docker_exec", "container_name": "work", "network": "host",
+                            "path_mappings": [{"host_path": str(work), "backend_path": "/srv/work"}]}}
+    trusted = {"trusted": [{"name": "a", "path": str(install.root / "plugins" / "a"), "content_hash": "0" * 64}]}
+    documents = ({"version": 1, "execution": section}, {"version": 1, "execution": section, "extensions": trusted})
+    monkeypatch.setenv(deployment_policy.GENERATION_ENV, "")  # a successful start pins its digest: this test's own
+
+    def start(document):
+        manage(install, monkeypatch, document)
+        config.verify_settings_integrity()  # what server.py runs before it serves
+        return deployment_policy.current()
+
+    if not platform_layer.IS_WINDOWS:  # a POSIX service host: the same documents load
+        assert [start(document).execution.executor.container_name for document in documents] == ["work", "work"]
+        assert [row.name for row in deployment_policy.current().trusted] == ["a"]
+        monkeypatch.setattr(execution_domain, "IS_WINDOWS", True)
+    for document in documents:
+        path = manage(install, monkeypatch, document)
+        with pytest.raises(config.SettingsIntegrityError) as refused:
+            config.verify_settings_integrity()
+        assert isinstance(refused.value, deployment_policy.DeploymentPolicyError)
+        assert f"{path}: {execution_domain.WINDOWS_HOST_REFUSAL}" in str(refused.value), refused.value
+        assert "run the service on Linux" in str(refused.value) and "WSL2" in str(refused.value)
+        deployment_policy.reset_for_tests()  # any other process's read of the file refuses too: never unmanaged
+        with pytest.raises(deployment_policy.DeploymentPolicyError, match="needs a POSIX service host"):
+            deployment_policy.current()
+    with pytest.raises(deployment_policy.DeploymentPolicyError, match="extensions.trusted applies only with execution"):
+        start({"version": 1, "extensions": trusted})
+    policy = start(POLICY)  # the rest of a policy holds on every service host
+    assert policy.execution is None and policy.rules == RULES and policy.checker.model == CHECKER
+
+
 # --- readers --------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("managed", [True, False])
