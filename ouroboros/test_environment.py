@@ -72,7 +72,7 @@ def scrub_environment(source, *, keep=()) -> dict[str, str]:
     prefixes = ("OUROBOROS_", "GH_", "GIT_", "PYTEST_", "PYTHON", "UV_", "PIP_")
     return {key: value for key, value in source.items()
             if key in keep or not (key.startswith(prefixes) or key.endswith(suffixes)
-                                  or key in projected or key in {"NODE_OPTIONS", "VIRTUAL_ENV"})}
+                                  or key in projected or key in {"NODE_OPTIONS", "VIRTUAL_ENV", "PLAYWRIGHT_NODEJS_PATH"})}
 
 
 # Launch descriptors: launchd/XPC session ids, PyInstaller bootloader state and the

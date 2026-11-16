@@ -1133,7 +1133,7 @@ def test_keep_going_runs_every_lane_after_a_red_one(run_tests, monkeypatch, tmp_
     monkeypatch.delenv("OUROBOROS_PREFLIGHT_SERIAL", raising=False)  # two passes, not the legacy single one
     for node, parallel in ((1, 0), (0, 1)):  # a red Node lane; a red parallel pass
         ran = []
-        monkeypatch.setattr(run_tests, "_node_lane", lambda: node)
+        monkeypatch.setattr(run_tests, "_node_lane", lambda: (node, ""))
         monkeypatch.setattr(run_tests, "_run", lambda label, argv, cwd: ran.append(label) or
                             (parallel if label == "parallel" else 0))
         evidence = tmp_path / f"{keep_going}-{node}"

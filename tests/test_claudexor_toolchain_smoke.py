@@ -157,7 +157,10 @@ def test_platform_gate_runs_the_toolchain_witness_on_windows_pull_requests():
     triggers = workflow.get("on", workflow.get(True))
     for event in ("push", "pull_request"):
         assert {"scripts/claudexor_toolchain_smoke.py", "ouroboros/harness_maintenance.py",
-                "ouroboros/harness_program_facts.py"} <= set(triggers[event]["paths"])
+                "ouroboros/harness_program_facts.py",
+                # The managed Node's other owners: a change limited to one of them still runs the three-OS gate.
+                "ouroboros/claudexor_node_seed.py", "ouroboros/claudexor_runtime_retention.py",
+                "ouroboros/node_runtime.py", "scripts/download_node_standalone*"} <= set(triggers[event]["paths"])
     assert triggers["pull_request"]["branches"] == ["ouroboros"]
     job = workflow["jobs"]["toolchain"]
     assert "if" not in job
@@ -510,7 +513,11 @@ def test_node_repair_directory_transaction_preserves_success_and_failure(tmp_pat
                         lambda base: [pathlib.Path(base) / "node-standalone" / "node.exe"])
     monkeypatch.setattr(platform, "probe_node_version", lambda path: NODE_VERSION if pathlib.Path(path).is_file() else "")
     artifact = pin.node_artifacts["win32-x64"]
-    manager._promote_node(pin, "win32-x64", artifact, archive, include_npm=True)
+
+    def planned():  # the owner's destination, chosen before its download
+        return runtime.node_generation_root(pin, "win32-x64", artifact.sha256)
+
+    manager._promote_node(pin, "win32-x64", artifact, archive, planned(), include_npm=True)
     node = pathlib.Path(manager._resolve_managed_node(pin, "win32-x64", require_npm=True))
     root = node.parent.parent
     npm_cli = root / "node-standalone" / "node_modules" / "npm" / "bin" / "npm-cli.js"
@@ -539,7 +546,7 @@ def test_node_repair_directory_transaction_preserves_success_and_failure(tmp_pat
     fails = fault in {"non_permission", "persistent_promotion"}
     if fails:
         with pytest.raises(runtime.ClaudexorRuntimeError) as caught:
-            manager._promote_node(pin, "win32-x64", artifact, archive, include_npm=True)
+            manager._promote_node(pin, "win32-x64", artifact, archive, planned(), include_npm=True)
         expected = denied if fault.startswith("persistent_") else original_failure
         assert caught.value.code == "runtime_node_install_failed"
         assert caught.value.__cause__ is expected
@@ -547,7 +554,7 @@ def test_node_repair_directory_transaction_preserves_success_and_failure(tmp_pat
         assert {p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()} == old_tree
         assert not npm_cli.exists()
     else:
-        manager._promote_node(pin, "win32-x64", artifact, archive, include_npm=True)
+        manager._promote_node(pin, "win32-x64", artifact, archive, planned(), include_npm=True)
         selected = pathlib.Path(manager._resolve_managed_node(pin, "win32-x64", require_npm=True))
         assert selected != node and selected.read_bytes() == b"node fixture\n"
         assert manager._managed_npm_cli(selected).read_bytes() == b"npm fixture\n"

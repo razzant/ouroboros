@@ -1058,8 +1058,10 @@ def test_a_reviewed_skill_keeps_its_state_in_the_work_domain_across_runs(env, mo
     root and reads it back on its next run; the service keeps its own records apart and spawns only its CLI."""
     from ouroboros.tools import skill_exec
 
+    monkeypatch.setenv("PLAYWRIGHT_NODEJS_PATH", str(env.root / "host-only-node"))
     ctx, drive = _reviewed_skill(env, monkeypatch, "counter", (
         "import os, pathlib\n"
+        "assert 'PLAYWRIGHT_NODEJS_PATH' not in os.environ\n"
         "state = pathlib.Path(os.environ['OUROBOROS_SKILL_STATE_DIR']) / 'count'\n"
         "count = int(state.read_text(encoding='utf-8')) + 1 if state.exists() else 1\n"
         "state.write_text(str(count))\n"
@@ -1151,6 +1153,12 @@ def test_a_skill_bound_mcp_server_inside_the_mappings_gets_its_state_and_key_and
                       requested_keys=["WITNESS_KEY"])
     env.manage(section(env, state_root=str(env.work / "skill-state")))
     fake_docker(env, monkeypatch)
+    from ouroboros.tools import skill_exec
+
+    def no_host_runtime(runtime):
+        raise AssertionError("a mapped MCP skill must use the container runtime")
+
+    monkeypatch.setattr(skill_exec, "_resolve_runtime_binary", no_host_runtime)
     seen, real = [], domain.attached_launch
     monkeypatch.setattr(domain, "attached_launch", lambda *args: seen.append(args) or real(*args))
     manager = mcp_client.MCPManager()

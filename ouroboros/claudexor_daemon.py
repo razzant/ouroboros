@@ -312,6 +312,10 @@ def resolve_attach_login_argv(engine: Any) -> list[str]:
             role=_SETUP_ATTACH_ROLE,
         )
     except ClaudexorRuntimeError as exc:
+        if exc.code == "runtime_node_unavailable":  # the pin's Node is not prepared: this login asks; a retry finds it
+            from ouroboros.server_boot import request_pinned_node
+
+            request_pinned_node()
         if exc.code == "runtime_role_unavailable":
             code = "terminal_transport_unsupported"
             status_code = 409
@@ -320,6 +324,7 @@ def resolve_attach_login_argv(engine: Any) -> list[str]:
             "runtime_probe_failed",
             "runtime_probe_identity_mismatch",
             "runtime_node_version_mismatch",
+            "runtime_node_unavailable",
         }:
             code = "terminal_transport_probe_failed"
             status_code = 503
