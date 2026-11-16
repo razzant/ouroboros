@@ -243,7 +243,7 @@ def failed_attempt_facts(usage: dict, model: str, use_local: bool, *, fresh: boo
     words, codes = {}, {}
     for who, text, history in answer.get("said") or ():  # the current path, and the quoted sentence wherever it stood
         if not history or text == answer.get("sentence"):
-            words.setdefault(who, {})[text[:_OWNER_QUOTE_LIMIT] + (" [cut here]" if len(text) > _OWNER_QUOTE_LIMIT else "")] = None
+            words.setdefault(who, {})[text[:_OWNER_QUOTE_LIMIT] + ('" [cut here] "' if len(text) > _OWNER_QUOTE_LIMIT else "")] = None
     for who, code in answer.get("codes") or ():
         codes.setdefault(who, []).append(code)
     said = [f'{who or "the provider"} said "{" / ".join(texts)}"' + (f' (code {", ".join(codes[who])})' if who in codes else "")

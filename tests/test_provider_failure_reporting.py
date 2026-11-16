@@ -840,6 +840,9 @@ def test_one_reader_gives_each_party_of_an_answer_its_own_sentence_and_codes():
     wrapped = provider_answer({"error": {"code": "context_length_exceeded", "message": "Failed to create completion. Text: ''",
                                          "detail": "The input (4026551 tokens) is longer than the model's context length (1048576 tokens)."}})
     assert size_refusal(wrapped, 400)[3].startswith("The input (4026551 tokens)")
+    raised = classify_llm_exception(_refused(400, {"code": "context_length_exceeded", "message": "Failed to create completion. Text: ''",
+                                                   "detail": "The input (4026551 tokens) is longer than the model's context length (1048576 tokens)."}))
+    assert raised.kind == "context_overflow" and raised.said[1].startswith("The input (4026551 tokens)")  # the raised path quotes it too
     bare = provider_answer({"error": {"code": "context_length_exceeded", "message": "Failed to create completion. Text: ''"}})
     assert size_refusal(bare, 400)[3] == "Failed to create completion. Text: ''"
 

@@ -725,7 +725,8 @@ def classify_llm_exception(exc: Exception, safe_error: str = "") -> LlmErrorClas
     # Its current path's own words, else its printed form: an earlier upstream attempt never re-types the final answer.
     low = "\n".join([text for _speaker, text, history in answer.said if not history] or [safe]).lower()
     if size_family and provider_code.lower() in _STRUCTURED_CONTEXT_OVERFLOW_CODES:
-        return LlmErrorClassification("context_overflow", False, status_code, provider_code, basis="typed", said=answer.innermost())
+        return LlmErrorClassification("context_overflow", False, status_code, provider_code, basis="typed",
+                                      said=(size_refusal(answer, status_code, [provider_code]) or (*[""] * 2, *answer.innermost()))[2:])
     provider_kind = _provider_code_kind(provider_code)
     # Named codes and numeric auth/quota codes are typed authority. Only a
     # numeric code that maps to generic bad_request defers to the semantic body

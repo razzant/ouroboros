@@ -313,9 +313,10 @@ def size_refusal(answer: Any, status: Optional[int], typed: Any = (), printed: s
     """
     if status and status not in SIZE_REFUSAL_STATUSES:
         return None
+    stated = next(((who, text) for who, text, history in answer.said if not history and context_overflow_message(text)), None)
     for code in typed:
         if code.lower() in CONTEXT_OVERFLOW_CODES:
-            return "typed", code, *answer.innermost()
+            return "typed", code, *(stated or answer.innermost())
     for speaker, code, history in answer.codes:
         if code.lower() in CONTEXT_OVERFLOW_CODES:
             own = [text for who, text, earlier in answer.said if (who, earlier) == (speaker, history)]
