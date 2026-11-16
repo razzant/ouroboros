@@ -3,7 +3,8 @@ registry ``working_dir`` is EMPTY records that folder — through the existing
 ``validate_workspace_root`` canonicalization and an atomic empty-field update
 under the projects-registry lock — so the project room is not blind forever.
 A non-empty ``working_dir`` is never overwritten (the v6.58.0 invariant), an
-invalid path is refused as before, and two concurrent promotes elect one winner.
+invalid path is refused as before, a host-managed temporary copy runs its task but
+is never recorded, and two concurrent promotes elect one winner.
 """
 from __future__ import annotations
 
@@ -67,14 +68,63 @@ def test_explicit_workspace_root_is_recorded_into_an_empty_working_dir(tmp_path,
     assert get_project(drive, "blind-room")["working_dir"] == str(folder.resolve())
 
 
+@pytest.mark.parametrize("kind", [
+    "copies_root",      # a helper's copy under the host's working-copies root
+    "inside_recorded",  # a subfolder of a recorded copy that lives outside that root
+    "third_spelling",   # the same, its record written under another case spelling of that root
+    "unknown_record",   # a folder whose own record cannot be read: unknown, never called a copy
+])
+def test_a_host_managed_copy_runs_the_task_but_never_becomes_the_room_folder(tmp_path, monkeypatch, kind):
+    """A helper's copy is a valid task workspace; recording it would bind the room to
+    a folder the host removes when the helper's work ends."""
+    import supervisor.workers as workers
+    from ouroboros import subagent_worktrees as sw
+    from ouroboros.projects_registry import create_project, get_project
+
+    drive = _drive(tmp_path, monkeypatch)
+    copies = tmp_path / "copies"
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(copies))
+    if kind == "copies_root":
+        copy = copies / "copies.noindex" / "dlg_helper_run"
+    elif kind == "unknown_record":
+        copy = tmp_path / "older_root" / "dlg_helper_run"
+        sw._record_file(copy, drive).parent.mkdir(parents=True)
+        sw._record_file(copy, drive).write_text("{", encoding="utf-8")
+    else:  # kept as Older_Root, recorded as OLDER_ROOT, asked as older_root where the volume reads them as one
+        recorded, copy = tmp_path / "older_root" / "dlg_helper_run", tmp_path / "older_root" / "dlg_helper_run" / "src"
+        if kind == "third_spelling":
+            (tmp_path / "Older_Root").mkdir()
+            if not (tmp_path / "OLDER_ROOT").exists() or not (tmp_path / "older_root").exists():
+                pytest.skip("this volume keeps these case spellings apart: they name different folders")
+            recorded = tmp_path / "OLDER_ROOT" / "dlg_helper_run"
+        copy.mkdir(parents=True)
+        sw._put_record({"path": str(recorded.resolve()), "task_id": "helper", "kind": "delegated_exec"}, data_dir=drive)
+    copy.mkdir(parents=True, exist_ok=True)
+    create_project(drive, "weekly-room", name="Weekly")
+    generation = get_project(drive, "weekly-room")["routing_generation"]
+    enqueued: list = []
+
+    outcome = _promote(workers, "fromcopy", "weekly-room", str(copy), enqueued)
+
+    assert outcome["status"] == "scheduled", outcome
+    assert enqueued[0]["workspace_root"] == str(copy.resolve()) and "_room_folder_note" not in enqueued[0]
+    room = get_project(drive, "weekly-room")
+    assert room["working_dir"] == "" and room["routing_generation"] == generation
+    assert outcome["source_note"].startswith("the task's workspace stays; the Project's folder stays unset: ")
+    assert ("removed when" in outcome["source_note"]) is (kind != "unknown_record")
+    assert ("is unknown" in outcome["source_note"]) is (kind == "unknown_record")
+
+
 def test_non_empty_working_dir_is_never_overwritten_by_an_explicit_root(tmp_path, monkeypatch):
     import supervisor.workers as workers
-    from ouroboros.projects_registry import create_project, get_project
+    from ouroboros.projects_registry import create_project, get_project, update_project
 
     drive = _drive(tmp_path, monkeypatch)
     registered = tmp_path / "registered"
     registered.mkdir()
     create_project(drive, "settled-room", name="Settled", working_dir=str(registered))
+    before = update_project(drive, "settled-room", provenance="cloned", clone_url="https://example.test/old.git",
+                            trusted_at="2026-11-01T00:00:00+00:00", pinned=True)
     other = tmp_path / "other"
     other.mkdir()
     enqueued: list = []
@@ -83,7 +133,10 @@ def test_non_empty_working_dir_is_never_overwritten_by_an_explicit_root(tmp_path
 
     assert outcome["status"] == "scheduled", outcome
     assert enqueued[0]["workspace_root"] == str(other.resolve())  # the task uses what it asked for
-    assert get_project(drive, "settled-room")["working_dir"] == str(registered)  # untouched
+    after = get_project(drive, "settled-room")
+    # Promotion touches activity; a skipped CAS preserves the folder, trust, provenance and other metadata.
+    assert {key: value for key, value in after.items() if key != "last_active_at"} == {
+        key: value for key, value in before.items() if key != "last_active_at"}
 
 
 def test_invalid_explicit_root_is_refused_and_nothing_is_recorded(tmp_path, monkeypatch):

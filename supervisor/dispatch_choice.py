@@ -11,7 +11,8 @@ and refused about once a tick for days, three SQLite reads a look and forty look
 2. store (``_screen``, outside Q): the agent restart's holds, an evolution's campaign authority, a schedule's control
    (``followup_policy.scheduled_start``), the owner Pause and the row's own sleep (``owner_pause._validate_launch``),
    read in one short transaction per store (``store_hot_facts.read_ahead``) beside the reads only schedules,
-   evolution and a restart need;
+   evolution and a restart need; once a move, whether a moved row keeps its own resource
+   (``project_placement.pending_resource``: the copy records), which gives its folder lane under Q in step 3;
 3. C2 (``events_budget.budget_resume_dispatch_allowed``), decided under Q from what step 2 read
    (``store_hot_facts.serving``, strict: nothing under Q opens the store).
 
@@ -62,6 +63,7 @@ log = logging.getLogger(__name__)
 # pass's reading of the machine admitted more starts than the one probe row the walk was sized with.
 _ROUNDS = 3
 _ADMITTED: Dict[str, Tuple[tuple, str]] = {}  # row id -> (identity, actor): C2 admitted it under this identity
+_UNREAD_MOVES: Dict[str, Dict[str, Any]] = {}  # row id -> the move whose own resource failed to read: said once
 _CONTROL_KEYS = ("_attempt", "_budget_pause", "_budget_pause_resume", "_resume_selection", "_budget_pause_hold",
                  "_owner_hold", "_owner_wait_resume", "_working_recovery", "_continuation_prepared")
 
@@ -165,11 +167,12 @@ def _drives(queue: Any) -> Dict[str, Any]:
 
 
 def _forget(pending: List[Dict[str, Any]]) -> None:
-    """Under Q: a kept admission lives only while its row is queued."""
-    if _ADMITTED:
+    """Under Q: a kept admission, and a move's unread resource once said, live only while their row is queued."""
+    if _ADMITTED or _UNREAD_MOVES:
         live = {_tid(row) for row in pending}
-        for task_id in [task_id for task_id in _ADMITTED if task_id not in live]:
-            _ADMITTED.pop(task_id, None)
+        for memo in (_ADMITTED, _UNREAD_MOVES):
+            for task_id in [task_id for task_id in list(memo) if task_id not in live]:
+                memo.pop(task_id, None)
 
 
 def _restart_holds(row: Dict[str, Any], held: Dict[int, bool]) -> bool:
@@ -225,6 +228,7 @@ def _screen(queue: Any, rows: List[Dict[str, Any]], undecided: List[Dict[str, An
     """Outside Q: each candidate's store gates, and the facts C2 is decided from under Q for every undecided row."""
     from ouroboros import store_hot_facts
     from ouroboros.owner_pause import OwnerPauseRefused, _validate_launch
+    from ouroboros.project_placement import keeps_own_resource, pending_resource
     from ouroboros.store import StoreBusy
 
     refused, actors, requests, open_rows, held = {}, {}, [], [], {}
@@ -253,6 +257,18 @@ def _screen(queue: Any, rows: List[Dict[str, Any]], undecided: List[Dict[str, An
         requests += [(_drive(queue, row), _root(row)), (_drive(queue, row), _tid(row))]
         open_rows.append(row)
     facts = store_hot_facts.read_ahead(requests) if requests else {}
+    placements = {}
+    for row in open_rows:  # a moved row's own resource: the copy records, read here and never under Q
+        basis = pending_resource(row)
+        if basis is not None:
+            try:
+                placements[id(row)] = (basis, *keeps_own_resource(_pool().DRIVE_ROOT, row))
+                _UNREAD_MOVES.pop(_tid(row), None)
+            except Exception:  # the row waits: its first failed read a move says why where an operator looks
+                first = _UNREAD_MOVES.get(_tid(row)) != basis
+                _UNREAD_MOVES[_tid(row)] = basis
+                (log.warning if first else log.debug)("Own resource of moved %s unreadable; it waits until it reads",
+                                                      row.get("id"), exc_info=True)
     with store_hot_facts.serving(facts):
         for row in open_rows:
             source = SimpleNamespace(task_id=_tid(row), root_task_id=row.get("root_task_id"),
@@ -264,7 +280,7 @@ def _screen(queue: Any, rows: List[Dict[str, Any]], undecided: List[Dict[str, An
             except Exception:
                 log.debug("Launch fences of %s unreadable; it waits this pass", row.get("id"), exc_info=True)
                 refused[id(row)] = "unreadable"
-    return {"refused": refused, "actors": actors, "facts": facts}
+    return {"refused": refused, "actors": actors, "facts": facts, "placements": placements}
 
 
 def _repair(queue: Any, row: Dict[str, Any]) -> None:
@@ -310,7 +326,8 @@ def _collect(queue: Any, remaining: float, invalid_ids: set, limit: int, exclude
     """Under Q: up to ``limit`` rows of ``lane`` the memory gates (then their few stat reads) admit, in queue order,
     each seen by the lanes and child limits of the rows before it and of the rows an earlier walk of this pass chose
     for growth (``carried``), and every row of ``lane`` it passes whose selection C2 must decide (not yet this pass,
-    ``decided``, and no admission kept); None when a malformed depth could not be terminalized."""
+    ``decided``, and no admission kept); None when a malformed depth could not be terminalized. A folder wait it
+    notes names work that holds the lane now (``waits``), never a row a walk picked that its store gates may refuse."""
     from ouroboros.project_lease import lane_holders, running_project_ids
     from supervisor.conversation_lane import resumes_on_lane
 
@@ -319,8 +336,10 @@ def _collect(queue: Any, remaining: float, invalid_ids: set, limit: int, exclude
     undecided: List[Dict[str, Any]] = []
     plans: Dict[int, Dict[str, Any]] = {}
     with queue._queue_lock:
-        running, chosen = wa._started_projection() + [{"task": row} for row in carried], set()
+        started = wa._started_projection()
+        running, chosen = started + [{"task": row} for row in carried], set()
         leased, holders = running_project_ids(running), lane_holders(running, _pool().PENDING)
+        waits = lane_holders(started, _pool().PENDING) if carried else holders  # who holds a lane now
         index, memo = None, {}
         for row in list(_pool().PENDING):
             if len(picked) >= limit:
@@ -333,7 +352,8 @@ def _collect(queue: Any, remaining: float, invalid_ids: set, limit: int, exclude
                 if not _kept(queue, row, index, memo):
                     undecided.append(row)
             if wa._candidate_ineligible(queue, row, remaining, running, selected=chosen, refused=excluded,
-                                        holders=holders, leased=leased, unresolved_invalid_id_set=invalid_ids):
+                                        holders=holders, waits=waits, leased=leased,
+                                        unresolved_invalid_id_set=invalid_ids):
                 continue
             depth_error = _pool()._normalize_pending_task_depth(row)
             if depth_error:
@@ -355,12 +375,17 @@ def _decide(queue: Any, rows: List[Dict[str, Any]], undecided: List[Dict[str, An
             remaining: float, invalid_ids: set, carried: Any = ()) -> List[Dict[str, Any]]:
     """Under Q: C2 for every undecided row, from step 2's read (an admission kept, a superseded selection repaired
     after the read-ahead is left); then the candidates still queued, still admitted by memory, unrefused by step 2
-    and admitted by C2. An evolution without its campaign authority is cancelled, as the chooser cancelled it."""
+    and admitted by C2. An evolution without its campaign authority is cancelled, as the chooser cancelled it. A moved
+    row's own resource step 2 read gives its folder lane first (``settle_resource``); one still unread waits."""
     from ouroboros import store_hot_facts
+    from ouroboros.project_placement import pending_resource, settle_resource
     from supervisor.events_budget import budget_resume_dispatch_allowed
 
     wa = _assignment()
     live, admitted, stale, chosen = {id(item) for item in _pool().PENDING}, [], [], set()
+    for row in rows:
+        if id(row) in live and id(row) in screened.get("placements", {}):
+            settle_resource(row, *screened["placements"][id(row)])
     index = _index(queue) if undecided or any(_carrier(row) for row in rows) else ({}, {})
     memo: Dict[tuple, str] = {}
     running = wa._started_projection() + [{"task": row} for row in carried]
@@ -385,6 +410,8 @@ def _decide(queue: Any, rows: List[Dict[str, Any]], undecided: List[Dict[str, An
                 if reason.startswith("evolution_authority:"):
                     stale.append((row, reason))
                 continue
+            if pending_resource(row) is not None:
+                continue  # its folder lane needs its own resource, unread: a later pass decides it
             admitted.append(row)
             chosen.add(_tid(row))
             running.append({"task": row})

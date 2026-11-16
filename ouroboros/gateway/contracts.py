@@ -29,6 +29,7 @@ from ouroboros.gateway.claudexor_contracts import (  # noqa: F401 -- public re-e
     ClaudexorStatusResponse,
 )
 from ouroboros.gateway.work_contracts import ProcessingTiers, WorkLeadFields, WorkStateFields
+from ouroboros.gateway.project_folder_contracts import FsDirsEntry, FsDirsResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.history_contracts import ChatHistoryResponse, PresenceContact  # noqa: F401 -- public re-exports
 from ouroboros.gateway.health_contracts import BootDocument, BootJob, BootStep, HealthResponse  # noqa: F401 -- public re-exports
 from ouroboros.gateway.attachment_contracts import (  # noqa: F401 -- public re-exports
@@ -591,6 +592,7 @@ class ProjectCreateRequest(TypedDict, total=False):
     init_git: bool
     git_url: str
     with_workspace: bool
+    no_folder: bool  # records the choice to keep none; absent, a file-less room's first promoted task provisions one
 
 
 class ProjectClosure(TypedDict):
@@ -611,6 +613,7 @@ class ProjectEntry(TypedDict, total=False):
     name: str
     chat_id: int
     working_dir: str
+    no_folder: Dict[str, str]  # {at, by}: the recorded choice to keep no folder, until one is chosen
     pinned: bool  # absent on legacy rows means unpinned; no routing/activity effect
     cognition: ProjectCognition
     model_choice: ChatModelChoice  # the room's own model for new owner work; never copied from Main
@@ -641,25 +644,6 @@ class ProjectDeleteResponse(TypedDict):
     ok: bool
     project_id: str
     folder_untouched: bool
-
-
-class FsDirsEntry(TypedDict):
-    name: str
-    path: str
-    is_git: bool
-
-
-class FsDirsResponse(TypedDict):
-    """GET /api/fs/dirs — owner-facing directory browser for the New Project attach
-    picker (server-side; works in web/Docker). Directories only, confined to the
-    home tree, never file contents. ``truncated`` is True when the directory holds
-    more children than the 500-entry cap (no silent truncation)."""
-
-    path: str
-    parent: str
-    home: str
-    dirs: List[FsDirsEntry]
-    truncated: bool
 
 
 class TaskNamedOutbound(TypedDict):

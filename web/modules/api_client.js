@@ -701,6 +701,12 @@ export const apiClient = {
         typeof update === 'string' ? { name: update } : update),
     /** @returns {Promise<import('./api_types.js').ProjectDeleteResponse>} */
     projectDelete: (projectId) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/delete`, {}),
+    /** One Project's working folder as one look finds it (the only read that inspects a folder).
+     *  @returns {Promise<import('./project_folder_types.js').ProjectFolderResponse>} */
+    projectFolder: (projectId) => fetchJson(`/api/projects/${encodeURIComponent(projectId)}/folder`, { cache: 'no-store' }),
+    /** @param {import('./project_folder_types.js').ProjectFolderRequest} change
+     *  @returns {Promise<import('./project_folder_types.js').ProjectFolderResponse>} */
+    projectFolderChange: (projectId, change) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/folder`, change),
     /** @returns {Promise<import('./api_types.js').FsDirsResponse>} */
     fsDirs: (path = '') => fetchJson(`/api/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ''}`, { cache: 'no-store' }),
     /**

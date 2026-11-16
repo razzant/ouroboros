@@ -160,6 +160,7 @@ def lane_rows(ctx: Any, task_ids: Any) -> Dict[str, Dict[str, Any]]:
     facts: Dict[str, Dict[str, Any]] = {}
     for task_id, row in rows.items():
         fact = {key: row.get(key) for key in ("status", "project_id", "root_task_id")}
+        fact["task_id"] = str(row.get("task_id") or task_id)  # who answers: a retry successor for its original
         if fact["status"] in {"requested", "scheduled"} and not (fact["project_id"] and fact["root_task_id"]):
             status, queued = _queue_task_status(_load_queue_snapshot(_status_root(ctx)),
                                                 str(row.get("task_id") or task_id))
@@ -170,6 +171,49 @@ def lane_rows(ctx: Any, task_ids: Any) -> Dict[str, Dict[str, Any]]:
                         root_task_id=fact["root_task_id"] or queued.get("root_task_id"))
         facts[task_id] = fact
     return facts
+
+
+def tree_folder_waits(ctx: Any, tree_id: str, own: Optional[str], task_ids: Any) -> Tuple[str, Dict[str, str]]:
+    """``(folder, waits)``: the folder whose lane ``tree_id`` holds (``own``, a root's own recorded folder, as its
+    RUNNING row records it; for a helper or retry, its tree's current lane holder in the queue, ``project_lease``)
+    and, when it holds one, the folder each selected queued id will wait for at its own selection (a queued row's
+    pending move's, ``project_placement.queued_lane_folder``; a RUNNING one's recorded). A queue that cannot say,
+    or an id its record calls queued that the queue does not list yet, keeps the sleep from arming."""
+    from ouroboros.project_lease import lane_folder, lane_holders
+    from ouroboros.project_placement import queued_lane_folder
+    from ouroboros.projects_registry import _load_bindings
+    from ouroboros.task_results import STATUS_RUNNING, STATUS_SCHEDULED
+    from ouroboros.task_status import _load_queue_snapshot, _queue_task_status
+    from ouroboros.tools.control_task_results import _status_root
+
+    root = _status_root(ctx)
+    snapshot = {} if own == "" else _load_queue_snapshot(root)
+    if snapshot.get("_snapshot_missing") or snapshot.get("_snapshot_invalid"):
+        raise ValueError("the queue cannot be read to tell whether a selected task waits for this tree's folder; "
+                         "wait in the slot or retry the sleep")
+    held = own
+    if held is None:
+        # A restored root retry keeps its logical tree id, but the queue holds only its physical id.
+        # Read the chooser's current holders: helpers and conversation rows hold no lane of their own.
+        holders = lane_holders(snapshot.get("running") or (),
+                               [row["task"] for row in snapshot.get("pending") or ()
+                                if isinstance(row, dict) and isinstance(row.get("task"), dict)])
+        folders = [key[1] for key, trees in holders.items()
+                   if isinstance(key, tuple) and len(key) == 2 and key[0] == "folder" and tree_id in trees]
+        if len(folders) > 1:
+            raise ValueError("the queue names multiple held folders for this tree; wait in the slot or retry the sleep")
+        held = folders[0] if folders else ""
+    if not held:
+        return "", {}
+    bindings, waits = _load_bindings(root, strict=True)["bindings"], {}
+    for task_id in map(str, task_ids):
+        status, task = _queue_task_status(snapshot, task_id)
+        if status not in {STATUS_RUNNING, STATUS_SCHEDULED}:
+            raise ValueError("a selected task is queued by its record but not yet listed by the queue, so whether it "
+                             "waits for this tree's folder is unknown; wait in the slot or retry the sleep")
+        waits[task_id] = (queued_lane_folder(root, {**task, "id": task.get("id") or task_id}, bindings_snapshot=bindings)
+                          if status == STATUS_SCHEDULED else lane_folder(task))
+    return held, waits
 
 
 def cursors_json(store: Any) -> Dict[str, Dict[str, Any]]:

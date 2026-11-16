@@ -9690,6 +9690,14 @@ html[data-layout="stack"] .nav-project-row { height: 52px; }
     margin: 0;
 }
 
+/* Working folder dialog (project_folder.js): the New Project dialog's parts, plus the registered address, which
+   wraps inside the dialog however long it is. */
+.project-folder-path {
+    color: var(--text-primary);
+    font-size: var(--type-body);
+    overflow-wrap: anywhere;
+}
+
 .project-panel {
     display: flex;
     flex-direction: column;
