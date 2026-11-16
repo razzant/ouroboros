@@ -22,6 +22,8 @@ them a second time:
   transfer's period its source states; each labelled), a part's union over its members, an
   account's union over its sources (several rooms: their rows' span, which is not every event
   between and seals no row). The aggregate a part records is historical and not shown.
+- A **stored moment** prints in one form (``minute``, a period as ``period_text``): UTC minutes of
+  any ISO date CPython 3.12 reads, on an older Python too; the stored value stays whole.
 - **Who wrote a record and how a transfer came** are printed in one form by every reader
   (``record_byline``, ``transfer_words``): a claim the record carries, never a confirmed identity;
   the words a transfer brought appear only ``quoted``, as data that never starts a line.
@@ -48,9 +50,11 @@ Nothing here publishes a record or calls a model.
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import pathlib
+import re
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, FrozenSet, Iterable, Iterator, List, Mapping, NamedTuple, Optional, Tuple
@@ -648,6 +652,115 @@ def legacy_progress(units: List[LegacyUnit]) -> Dict[str, Any]:
     return {"periods": len(blocks), "folded": len(blocks) - len(pending), "pending": pending}
 
 
+# --- a stored moment as every reader prints it --------------------------------------------------
+# A 3.12 writer admits ISO forms an older reader's ``fromisoformat`` refuses (``chronicle_import._iso``). These
+# follow CPython 3.12's own parser (Modules/_datetimemodule.c) step by step, so a reader never guesses a date.
+
+_ISO_DATE = re.compile(r"([0-9]{4})(-?)(?:W([0-9]{2})(?:\2([0-9]))?|([0-9]{2})\2([0-9]{2}))")
+_ISO_DIGITS = re.compile(r"[0-9]*")
+_ISO_ZONE = re.compile(r"[Z+-]")
+
+
+def _iso_clock(text: str, pos: int, end: int) -> Tuple[List[int], bool]:
+    """3.12's ``parse_hh_mm_ss_ff`` over ``text[pos:end]``: ``[h, m, s, us]`` and whether ``text`` goes on after it.
+    A fraction may follow any component; digits past the sixth are dropped, never rounded."""
+    values, colon = [0, 0, 0, 0], True
+    for index in range(3):
+        if _ISO_DIGITS.match(text, pos, pos + 2).end() != pos + 2:
+            raise ValueError(text)
+        values[index], char, pos = int(text[pos:pos + 2]), text[pos + 2:pos + 3], pos + 3
+        if not char.isascii():  # the native parser advances one UTF-8 byte here, not a whole code point
+            raise ValueError(text)
+        colon = char == ":" if index == 0 else colon
+        if pos >= end:
+            return values, char != ""
+        if colon and char == ":":
+            continue
+        if char in (".", ","):
+            break
+        if colon:
+            raise ValueError(text)
+        pos -= 1
+    count = min(end - pos, 6)
+    if _ISO_DIGITS.match(text, pos, pos + count).end() != pos + count:
+        raise ValueError(text)
+    values[3] = int(text[pos:pos + count]) * 10 ** (6 - count)
+    return values, _ISO_DIGITS.match(text, pos + count).end() < len(text)
+
+
+def _iso_312(text: str) -> datetime.datetime:
+    """``datetime.fromisoformat(text)`` as CPython 3.12 parses it, on any Python; ValueError where 3.12 refuses
+    (a lone surrogate, never admitted as printable, is refused here wherever it stands)."""
+    text.encode("utf-8")
+    if len(text) < 7:
+        raise ValueError(text)
+    if len(text) == 7:
+        sep = 7
+    elif text[4] == "-":  # YYYY-MM-DD, YYYY-Www, YYYY-Www-D; a digit after YYYY-Www- starts the time
+        sep = 10 if text[5] != "W" else 8 if len(text) < 10 or text[8] != "-" or (
+            len(text) > 10 and text[10] in "0123456789") else 10
+        if len(text) == 9 and text[5] == "W" and text[8] == "-":
+            raise ValueError(text)
+    elif text[4] == "W":  # YYYYWww or YYYYWwwD: the time comes in digit pairs
+        run = _ISO_DIGITS.match(text, 7).end()
+        sep = run if run < 9 else 7 if run % 2 == 0 else 8
+    else:
+        sep = 8
+    date = _ISO_DATE.fullmatch(text, 0, sep)
+    if date is None:
+        raise ValueError(text)
+    year, _, week, weekday, month, day = date.groups()
+    day_of = (datetime.date.fromisocalendar(int(year), int(week), int(weekday or 1)) if week
+              else datetime.date(int(year), int(month), int(day)))
+    clock, zone, end = [0, 0, 0, 0], None, len(text)
+    if end > sep:  # the time after one separator character, then Z or an offset read to the end
+        found = _ISO_ZONE.search(text, sep + 1)
+        at = found.start() if found else end
+        clock, rest = _iso_clock(text, sep + 1, at)
+        if at == end:
+            if rest:
+                raise ValueError(text)
+        elif text[at] == "Z":
+            if at + 1 != end:
+                raise ValueError(text)
+            zone = datetime.timezone.utc
+        else:  # an offset of zero whole seconds is UTC whatever its fraction, as 3.12 builds it
+            offset, rest = _iso_clock(text, at + 1, end)
+            sign = -1 if text[at] == "-" else 1
+            seconds = sign * (offset[0] * 3600 + offset[1] * 60 + offset[2])
+            if rest:
+                raise ValueError(text)
+            zone = (datetime.timezone(datetime.timedelta(seconds=seconds, microseconds=sign * offset[3]))
+                    if seconds else datetime.timezone.utc)
+    return datetime.datetime(day_of.year, day_of.month, day_of.day, *clock, tzinfo=zone)
+
+
+def minute(value: Any) -> str:
+    """A stored moment as ``YYYY-MM-DD HH:MM`` in UTC (a naive one as written), however its source spelled it;
+    anything that is no such date (or leaves the calendar in UTC) is printed as it is."""
+    text = str(value)
+    try:
+        try:
+            moment = datetime.datetime.fromisoformat(text)  # this reader's own parser first, as before
+        except ValueError:
+            moment = _iso_312(text)
+        if moment.tzinfo is not None:
+            moment = moment.astimezone(datetime.timezone.utc)
+    except (ValueError, OverflowError):
+        return text
+    return moment.strftime("%Y-%m-%d %H:%M")
+
+
+def period_text(span: Any, note: str = "") -> str:
+    """``start → end`` of a time span in ``minute``s, then ``note`` (a ``Period``'s: a block's period is labelled as
+    the block's); a span with unknown bounds says so."""
+    span = span if isinstance(span, Mapping) else {}
+    if not span.get("start") and not span.get("end"):
+        return "period unknown"
+    text = f"{minute(span.get('start') or '?')} → {minute(span.get('end') or '?')}"
+    return (text + " (incomplete)" if span.get("incomplete") else text) + note
+
+
 # --- the period and place of a story record ----------------------------------------------------
 
 _BASIS_WORDS = {"block": "block period", "stated": "stated by its source"}
@@ -1002,8 +1115,9 @@ def record_byline(record: Mapping[str, Any]) -> str:
 
 
 def transfer_words(record: Mapping[str, Any]) -> str:
-    """How a transfer (``chronicle_import``) came here and when its source says its words were written; ``''``
-    for any other record. ``ts`` is the local publication, never the source's date; who ran it is ``quoted``."""
+    """How a transfer came here and when its source says its words were written: date-only stays date-only,
+    a time prints in ``minute``s, and the stored value stays whole. ``''`` for any other record; ``ts`` is the local
+    publication, never the source's date; who ran it is ``quoted``."""
     meta = record.get("metadata") if isinstance(record.get("metadata"), Mapping) else {}
     moved = meta.get("transfer") if isinstance(meta.get("transfer"), Mapping) else {}
     if not moved:
@@ -1012,9 +1126,12 @@ def transfer_words(record: Mapping[str, Any]) -> str:
     def named(key: str, missing: str) -> str:
         return quoted(moved[key]) if moved.get(key) else missing
 
+    written = meta.get("legacy_written_at")
+    if written and not (isinstance(written, str) and _ISO_DATE.fullmatch(written)):
+        written = minute(written)
     return (f"transferred {str(record.get('ts') or '')[:10] or 'date not recorded'} by "
             f"{named('operator', 'operator not recorded')} with {named('tool', 'tool not recorded')}, "
-            f"task {named('task_id', 'not recorded')}; written {meta.get('legacy_written_at') or 'date not stated'}")
+            f"task {named('task_id', 'not recorded')}; written {written or 'date not stated'}")
 
 
 def _change_line(record: Mapping[str, Any], released: Optional[Mapping[str, Any]] = None) -> str:
