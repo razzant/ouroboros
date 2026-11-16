@@ -1015,7 +1015,8 @@ details.ui-disclosure > :not(summary) { margin-top: var(--space-2); }
    A place that has pages draws one list of them, and the place's box decides the layout. The place element is
    `.section-place` (the container `sectionplace`); in it, `.section-shell[data-section-view]` holds the list's column
    `.section-rail` and the page's column `.section-pane`, and the header's lead `.section-lead` follows the same
-   columns. Narrower than 40rem one column shows the list ("home") or the page ("page"); from 40rem an open page stands
+   columns. Narrower than 40rem one column shows the list ("home", or "auto" until a page is chosen) or the page
+   ("page"); from 40rem an open page stands
    beside the list, which becomes the rail: `--section-rail-w` wide, a property both the shell's grid and the header's
    lead read, so each column has its name in the band over it. The list is `.section-list` > `.section-group` (an
    optional `.section-group-title`) > `.section-rows` (a card of rows on a phone) > `.section-row`: a glyph, the page's
