@@ -192,6 +192,8 @@ TOOL_POLICY: Dict[str, str] = {
     "set_next_wakeup": POLICY_SKIP,
     "place_reply": POLICY_CHECK,
 }
+# A read-mostly tool's named actions that change something: checked whatever the tool's own policy says.
+CHECKED_ACTIONS = {"manage_schedules": ("create", "update", "restore"), "manage_project_folder": ("clear", "choose")}
 
 
 # run_command safe-subject whitelist.
@@ -1432,7 +1434,7 @@ def _assess_call(tool_name, arguments, messages, ctx, python_resolution, resolve
     is_mcp = tool_name.startswith("mcp_")
     effect = effect_of(tool_name, ext_tool=ext_tool, ctx=ctx, is_mcp=is_mcp, args=arguments)
     speech = _declared_speech(tool_name, effect)  # an unread MCP call waits too
-    if tool_name == "manage_schedules" and arguments.get("action") in {"create", "update", "restore"}:
+    if arguments.get("action") in CHECKED_ACTIONS.get(tool_name, ()):
         policy = POLICY_CHECK
     if effect.declared and effect.effect == "read":
         _emit_durable_safety_event(ctx, {"type": "safety_declared_read_skip", "tool": tool_name, "source": effect.source,

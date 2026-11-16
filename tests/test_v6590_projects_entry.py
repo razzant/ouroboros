@@ -3,8 +3,10 @@ delete/hide, and the directory-browser confinement.
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import subprocess
+import unicodedata
 
 import pytest
 
@@ -51,6 +53,365 @@ def test_validate_attach_path_boundaries(tmp_path):
     assert "system repo" in err_repo
     _, err_data = validate_attach_path(str(data / "sub"), system_repo_dir=sys_repo, drive_root=data)
     assert err_data  # nonexistent AND under data — either error is a refusal
+
+
+# --- lasting folders: a host-managed temporary copy never becomes one ---------------
+
+@pytest.mark.parametrize("kind", [
+    "copies_root",        # the place: the host's working-copies root holds it
+    "recorded",           # the provenance: a private-copy record names it outside that root
+    "inside_recorded",    # a subfolder of that recorded copy is still its content
+    "unreadable_record",  # a record that cannot be read is never read as absent
+])
+def test_a_host_managed_copy_never_becomes_a_lasting_project_folder(tmp_path, monkeypatch, kind):
+    from types import SimpleNamespace
+
+    from ouroboros import subagent_worktrees as sw
+    from ouroboros.project_sources import TemporaryCopyRefused, validate_attach_path
+    from ouroboros.projects_registry import create_project, get_project, update_project
+    from ouroboros.promotion_source import resolve_promote_source
+
+    data, repo, copies = tmp_path / "data", tmp_path / "repo", tmp_path / "copies"
+    data.mkdir()
+    repo.mkdir()
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(copies))
+    recorded = (copies / "copies.noindex" if kind == "copies_root" else tmp_path / "earlier_root") / "helper"
+    copy = recorded / "src" if kind == "inside_recorded" else recorded
+    copy.mkdir(parents=True)
+    if kind in ("recorded", "inside_recorded"):
+        sw._put_record({"path": str(recorded.resolve()), "task_id": "helper", "kind": "delegated_exec"}, data_dir=data)
+    if kind == "unreadable_record":
+        sw._record_file(copy, data).parent.mkdir(parents=True)
+        sw._record_file(copy, data).write_text("{", encoding="utf-8")
+
+    resolved, error = validate_attach_path(str(copy), system_repo_dir=repo, drive_root=data)
+    assert resolved is None and "Project folder outlives its tasks" in error
+    if kind == "unreadable_record":  # refused as unknown, never called a copy
+        assert error.startswith(f"whether {copy.resolve()} is a host-managed temporary copy is unknown: ")
+        assert "cannot be read" in error and "removed when" not in error
+    else:
+        assert "removed when" in error
+    # source= promotion refuses before it registers a row (no dangling Project).
+    folder, _, source_error, pid, created = resolve_promote_source(
+        SimpleNamespace(DRIVE_ROOT=data, REPO_DIR=repo), str(copy), "")
+    assert (folder, created) == ("", False) and source_error.startswith("attach: ")
+    assert get_project(data, pid) is None
+    # Every registry write of a new folder refuses it, writing nothing.
+    create_project(data, "room")
+    registry = data / "state" / "projects.json"
+    before = registry.read_bytes()
+    with pytest.raises(TemporaryCopyRefused):
+        create_project(data, "from-copy", working_dir=str(copy))
+    with pytest.raises(TemporaryCopyRefused):
+        update_project(data, "room", working_dir=str(copy), provenance="attached")
+    assert registry.read_bytes() == before
+
+
+def test_owner_folders_clones_and_genesis_stay_lasting_project_folders(tmp_path, monkeypatch):
+    from ouroboros import subagent_worktrees as sw
+    from ouroboros.project_sources import temporary_copy_refusal, validate_attach_path
+    from ouroboros.projects_registry import create_project, ensure_project_workspace, get_project, update_project
+
+    data, repo, copies, projects = (tmp_path / name for name in ("data", "repo", "copies", "projects"))
+    data.mkdir()
+    repo.mkdir()
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_PROJECTS_ROOT", str(projects))
+    earlier = copies / "copies.noindex" / "helper"
+    earlier.mkdir(parents=True)
+    create_project(data, "historical", working_dir=str(earlier))  # bound before this root was the copies root
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(copies))
+    # Replaying the old input returns the old row as it is and writes nothing.
+    registry = data / "state" / "projects.json"
+    before = registry.read_bytes()
+    replay = create_project(data, "historical", working_dir=str(earlier))
+    assert (replay["created"], replay["working_dir"]) == (False, str(earlier)) and registry.read_bytes() == before
+    # Names are not facts: owner folders spelled like host copies attach and bind.
+    for name in ("dlg_abc_123", "body_def", "copies.noindex"):
+        owned = tmp_path / "owner" / name
+        owned.mkdir(parents=True)
+        assert validate_attach_path(str(owned), system_repo_dir=repo, drive_root=data) == (owned.resolve(), "")
+        assert create_project(data, f"own-{name[:4]}", working_dir=str(owned))["working_dir"] == str(owned)
+    # A recorded copy outside the root claims its own subfolders only: not its parent, not similar names.
+    recorded = tmp_path / "older" / "helper"
+    recorded.mkdir(parents=True)
+    sw._put_record({"path": str(recorded.resolve()), "task_id": "helper", "kind": "delegated_exec"}, data_dir=data)
+    for neighbour in (recorded.parent, recorded.parent / "helper-notes", recorded.parent / "helperx" / "src"):
+        neighbour.mkdir(parents=True, exist_ok=True)
+        assert validate_attach_path(str(neighbour), system_repo_dir=repo, drive_root=data) == (neighbour.resolve(), "")
+    # Genesis provisions and binds under the durable projects root; a clone lands there too.
+    workspace = ensure_project_workspace(data, "fresh", repo)
+    assert workspace and get_project(data, "fresh")["working_dir"] == workspace
+    assert temporary_copy_refusal(workspace, drive_root=data) == ""
+    assert temporary_copy_refusal(projects / "cloned-repo", drive_root=data) == ""
+    # The root's boundary: a folder holding it is no copy; another spelling of a copy is, where the volume
+    # reads both spellings as one folder (a case-sensitive volume keeps them two folders).
+    assert temporary_copy_refusal(copies.parent, drive_root=data) == ""
+    swapped = pathlib.Path(str(earlier).swapcase())
+    one = swapped.exists() and os.path.samefile(swapped, earlier)
+    assert ("inside the host's working-copies root" in temporary_copy_refusal(swapped, drive_root=data)) is one
+    # A record bound before the rule stays readable and updatable, never cleared or migrated.
+    assert update_project(data, "historical", name="Kept", working_dir=str(earlier))["working_dir"] == str(earlier)
+    assert get_project(data, "historical")["name"] == "Kept"
+    assert update_project(data, "historical", working_dir="")["working_dir"] == ""  # removing a folder is unchanged
+
+
+# --- one folder, several spellings: a copy's identity is physical ---------------------
+
+_NFC, _NFD = (unicodedata.normalize(form, "Ёлка-Root") for form in ("NFC", "NFD"))
+_SPELLINGS = {  # (as the volume keeps it, as the producer wrote it, as the owner asks for it)
+    "case": ("EarlierRoot", "EARLIERroot", "earlierroot"),
+    "unicode_form": (_NFD, _NFC, _NFD),
+}
+
+
+def _one_folder_or_skip(base: pathlib.Path, kept: str, *spellings: str) -> None:
+    """Make ``base/kept``; skip unless this volume reads every spelling as that one folder."""
+    (base / kept).mkdir(parents=True)
+    if not all((base / name).exists() and os.path.samefile(base / name, base / kept) for name in spellings):
+        pytest.skip("this volume keeps these spellings apart: they name different folders")
+
+
+def _firmlink(path: pathlib.Path) -> pathlib.Path:
+    """``path`` spelled through macOS's Data-volume firmlink, or skip where that names nothing."""
+    alias = pathlib.Path("/System/Volumes/Data" + str(path))
+    if not (alias.exists() and os.path.samefile(alias, path)):
+        pytest.skip("no Data-volume firmlink spells this path")
+    return alias
+
+
+def _produce(kind: str, root: pathlib.Path, tmp: pathlib.Path, data: pathlib.Path) -> pathlib.Path:
+    """A real producer's copy under ``root`` as given, its record written the way that producer writes it."""
+    from ouroboros import subagent_worktrees as sw
+
+    source = tmp / "source"
+    source.mkdir()
+    if kind == "standalone":  # a skill payload snapshot: its own .git, no backreference naming its spelling
+        (source / "SKILL.md").write_text("---\nname: spelling-probe\ndescription: Disposable fixture\n---\nNothing.\n",
+                                         encoding="utf-8")
+        return pathlib.Path(sw.provision_payload_snapshot(
+            target_root=source, task_id="probe", snapshot_id="spelling", worktree_root=root, data_dir=data).path)
+    (source / "src").mkdir()
+    (source / "src" / "sample.txt").write_text("fixture\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", "--template="], cwd=source, env=sw.isolated_git_env(), check=True)
+    if kind == "linked":  # a task copy: a linked worktree
+        return pathlib.Path(sw.provision_worktree(
+            repo_dir=source, task_id="helper", worktree_root=root, data_dir=data, source_is_system_repo=False).path)
+    # A long task id's execution snapshot: an 85-character folder whose record stem carries a case-bound digest.
+    return pathlib.Path(sw.provision_execution_snapshot(target_root=source, task_id="ABc" * 22,
+                                                        snapshot_id="spelling-long-leaf", worktree_root=root,
+                                                        data_dir=data).path)
+
+
+@pytest.mark.parametrize("producer, spelling", [
+    ("linked", "case"),          # the incident: written EARLIERroot, kept EarlierRoot, asked earlierroot
+    ("standalone", "case"),      # no Git backreference to recover the written spelling
+    ("long_leaf", "case"),       # the folder itself asked in another case: only its kept name finds the record
+    ("linked", "unicode_form"),  # written NFC, kept and asked NFD
+    ("linked", "firmlink"),      # asked through /System/Volumes/Data
+])
+def test_a_copy_recorded_under_another_spelling_never_becomes_a_lasting_folder(tmp_path, monkeypatch, producer,
+                                                                              spelling):
+    """Every lasting binding of an earlier root's copy refuses before it writes or initializes anything,
+    whichever spelling wrote its record; the record keeps its name, bytes and readers."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros import subagent_worktrees as sw
+    from ouroboros.gateway.projects import api_projects_create
+    from ouroboros.private_copy_read import checkout_registration, record_at
+    from ouroboros.project_sources import TemporaryCopyRefused, validate_attach_path
+    from ouroboros.projects_registry import create_project, get_project, update_project
+    from ouroboros.promotion_source import resolve_promote_source
+
+    data, repo, base = tmp_path / "data", tmp_path / "repo", tmp_path / "spellings"
+    data.mkdir()
+    repo.mkdir()
+    kept, written, asked = _SPELLINGS.get(spelling, ("EarlierRoot",) * 3)
+    _one_folder_or_skip(base, kept, written, asked)
+    recorded = _produce(producer, base / written, tmp_path, data)
+    leaf = recorded.name.swapcase() if spelling == "case" else recorded.name
+    copy = (_firmlink(base) if spelling == "firmlink" else base) / asked / recorded.parent.name / leaf
+    assert os.path.samefile(copy, recorded) and str(copy) != str(recorded)
+    if str(copy.resolve()) != str(recorded):  # resolve() keeps the asked spelling: its own record file names nothing
+        assert checkout_registration(copy, data) == "absent"
+    record = sw._record_file(recorded, data)
+    raw, listing = record.read_bytes(), sorted(os.listdir(record.parent))
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(tmp_path / "current_copies"))
+    (copy / "src").mkdir(exist_ok=True)
+    for folder in (copy, copy / "src"):  # the copy and what it holds
+        resolved, error = validate_attach_path(str(folder), system_repo_dir=repo, drive_root=data)
+        assert resolved is None and "removed when its work ends" in error, error
+        ws, _, source_error, pid, created = resolve_promote_source(
+            SimpleNamespace(DRIVE_ROOT=data, REPO_DIR=repo), str(folder), "")
+        assert (ws, created) == ("", False) and source_error.startswith("attach: ") and get_project(data, pid) is None
+    create_project(data, "room")
+    registry = data / "state" / "projects.json"
+    before = registry.read_bytes()
+    for folder in (copy, copy / "src", copy / "not-yet"):  # every registry write, a folder still to come included
+        with pytest.raises(TemporaryCopyRefused, match="removed when its work ends"):
+            create_project(data, "from-copy", working_dir=str(folder))
+        with pytest.raises(TemporaryCopyRefused, match="removed when its work ends"):
+            update_project(data, "room", working_dir=str(folder))
+
+    class _Req:  # the UI's attach asking for init_git refuses before git init runs
+        app = SimpleNamespace(state=SimpleNamespace(drive_root=data, repo_dir=repo))
+
+        async def json(self):
+            return {"id": "gateway-copy", "path": str(copy / "src"), "init_git": True}
+
+    response = asyncio.run(api_projects_create(_Req()))
+    assert response.status_code == 400 and "removed when its work ends" in json.loads(response.body)["error"]
+    assert not (copy / "src" / ".git").exists() and registry.read_bytes() == before
+    # The record keeps its file name and bytes; its readers find it where they always did.
+    assert record.read_bytes() == raw and sorted(os.listdir(record.parent)) == listing
+    assert record_at(recorded, data) == json.loads(raw) and checkout_registration(recorded, data) == "registered"
+
+
+@pytest.mark.parametrize("spelling", ["case", "unicode_form", "firmlink"])
+def test_the_working_copies_root_under_another_spelling_holds_no_lasting_folder(tmp_path, monkeypatch, spelling):
+    """The configured root spelled one way and a folder in it asked for another way: still inside it."""
+    from ouroboros.project_sources import TemporaryCopyRefused, temporary_copy_refusal
+    from ouroboros.projects_registry import create_project
+
+    data, base = tmp_path / "data", tmp_path / "roots"
+    data.mkdir()
+    kept, written, asked = _SPELLINGS.get(spelling, ("Copies",) * 3)
+    _one_folder_or_skip(base, kept, written, asked)
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(base / written))
+    helper = (_firmlink(base) if spelling == "firmlink" else base) / asked / "copies.noindex" / "dlg_helper_run"
+    helper.mkdir(parents=True)
+    for folder in (helper, helper / "not-yet", helper.parent.parent):  # a copy, a folder to come, the root itself
+        assert "inside the host's working-copies root" in temporary_copy_refusal(folder, drive_root=data)
+        with pytest.raises(TemporaryCopyRefused):
+            create_project(data, "in-root", working_dir=str(folder))
+
+
+def test_folders_a_case_sensitive_volume_keeps_apart_stay_apart(tmp_path, monkeypatch):
+    """Where the volume keeps two case spellings as two folders, a record and the working-copies root claim
+    only their own folder: an owner's folder differing in case stays a lasting folder."""
+    from ouroboros import subagent_worktrees as sw
+    from ouroboros.project_sources import temporary_copy_refusal, validate_attach_path
+
+    data, repo = tmp_path / "data", tmp_path / "repo"
+    data.mkdir()
+    repo.mkdir()
+    (tmp_path / "Different").mkdir()
+    if (tmp_path / "different").exists():
+        pytest.skip("this volume reads both case spellings as one folder")
+    recorded, copies = tmp_path / "Different" / "helper", tmp_path / "Copies"
+    for folder in (recorded, copies, tmp_path / "different" / "helper", tmp_path / "copies" / "x"):
+        folder.mkdir(parents=True)
+    sw._put_record({"path": str(recorded), "task_id": "helper", "kind": "delegated_exec"}, data_dir=data)
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(copies))
+    assert "removed when its work ends" in temporary_copy_refusal(recorded, drive_root=data)
+    assert "working-copies root" in temporary_copy_refusal(copies / "x", drive_root=data)
+    for owned in (tmp_path / "different" / "helper", tmp_path / "copies" / "x"):
+        assert validate_attach_path(str(owned), system_repo_dir=repo, drive_root=data) == (owned.resolve(), "")
+
+
+@pytest.mark.parametrize("case", [
+    "exact_unreadable",       # this very spelling's record cannot be read: unknown, refused, never called a copy
+    "records_unlistable",     # the records folder cannot be listed: unknown, refused
+    "same_name_unreadable",   # unreadable, merely sharing the folder's name (another folder's, or this one's under
+                              # an unprovable spelling): tied to nothing, the folder passes, the gap is logged
+    "same_name_healthy",      # another folder's readable record of this name: passes
+    "other_name_unreadable",  # unreadable under another name: never read, passes
+])
+def test_an_unreadable_record_is_unknown_never_a_copy(tmp_path, monkeypatch, caplog, case):
+    from ouroboros import subagent_worktrees as sw
+    from ouroboros.private_copy_read import records_naming
+    from ouroboros.project_sources import temporary_copy_refusal
+
+    data, folder = tmp_path / "data", tmp_path / "owner" / "helper"
+    folder.mkdir(parents=True)
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_ROOT", str(tmp_path / "copies"))
+    target = {"exact_unreadable": folder, "other_name_unreadable": tmp_path / "elsewhere" / "other"}.get(
+        case, tmp_path / "elsewhere" / "helper")
+    file = sw._record_file(target, data)
+    file.parent.mkdir(parents=True)
+    if case == "same_name_healthy":
+        sw._put_record({"path": str(target), "task_id": "other", "kind": "delegated_exec"}, data_dir=data)
+    else:
+        file.write_text("{", encoding="utf-8")
+    if case == "records_unlistable":
+        if os.name == "nt" or os.geteuid() == 0:
+            pytest.skip("a folder's mode withholds no listing here (Windows, or root)")
+        file.parent.chmod(0o311)  # searchable, so its own record file still answers: absent
+    try:
+        with caplog.at_level("WARNING", logger="ouroboros.project_sources"):
+            refusal = temporary_copy_refusal(folder, drive_root=data)
+        read = records_naming([folder], data)
+    finally:
+        file.parent.chmod(0o755)
+    unknown = f"whether {folder.resolve()} is a host-managed temporary copy is unknown: "
+    if case == "exact_unreadable":
+        assert refusal == f"{unknown}the private-copy record of {folder.resolve()} cannot be read"
+    elif case == "records_unlistable":
+        assert refusal == f"{unknown}the private-copy records folder cannot be read" and read.unlistable
+    else:
+        assert refusal == "" and not read.rows
+        named = case == "same_name_unreadable"  # the read keeps the gap, and the pass says so in the log
+        assert read.unreadable == ({file.name} if named else set())
+        assert (file.name in caplog.text and "incomplete read of the copy records" in caplog.text) is named
+
+
+@pytest.mark.parametrize("spelling", ["case", "firmlink"])
+@pytest.mark.parametrize("protected", ["data", "repo"])
+def test_ouroboros_own_roots_in_another_spelling_refuse_an_attach_before_init_git_writes(tmp_path, protected, spelling):
+    """The system-repo and data-drive overlap rule admission applies after ``init_git`` (case-folded, as tool access
+    reads it) refuses first, and as one physical folder however spelled (``workspace_admission.protected_overlap``):
+    no nested Git, no row. Before, another spelling passed here and ``git init`` ran before the refusal."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros.gateway.projects import api_projects_create
+    from ouroboros.project_sources import validate_attach_path
+    from ouroboros.projects_registry import get_project
+
+    base = tmp_path / "roots"
+    data, repo = base / "DataDrive", base / "SystemRepo"
+    for folder in (data / "sub", repo / "sub"):
+        folder.mkdir(parents=True)
+    inside = (data if protected == "data" else repo) / "sub"
+    if spelling == "firmlink":
+        asked = _firmlink(inside)
+    else:
+        _one_folder_or_skip(tmp_path / "probe", "Kept", "kept")
+        asked = base / inside.parent.name.lower() / "sub"
+    label = {"data": "Ouroboros data drive", "repo": "Ouroboros system repo"}[protected]
+    assert validate_attach_path(str(asked), system_repo_dir=repo, drive_root=data) == (
+        None, f"path must not overlap the {label}")
+
+    class _Req:
+        app = SimpleNamespace(state=SimpleNamespace(drive_root=data, repo_dir=repo))
+
+        async def json(self):
+            return {"id": "aliased", "path": str(asked), "init_git": True}
+
+    response = asyncio.run(api_projects_create(_Req()))
+    assert response.status_code == 400 and json.loads(response.body)["error"] == f"path must not overlap the {label}"
+    assert not (inside / ".git").exists() and get_project(data, "aliased") is None
+
+
+def test_kept_spelling_reads_the_volume_and_never_guesses(tmp_path, monkeypatch):
+    from ouroboros import platform_darwin_abi as abi
+
+    folder = tmp_path / "Kept" / "Folder"
+    folder.mkdir(parents=True)
+    (tmp_path / "file.txt").write_text("x\n", encoding="utf-8")
+    if abi.IS_DARWIN:
+        descriptors = len(os.listdir("/dev/fd"))
+        assert abi.kept_spelling(str(folder)) == str(folder.resolve())
+        swapped = str(folder.resolve()).swapcase()
+        if os.path.exists(swapped):  # a case-insensitive volume answers with the case it stores
+            assert abi.kept_spelling(swapped) == str(folder.resolve())
+        for unknown in (tmp_path / "absent", tmp_path / "file.txt", "", "nul\0byte"):
+            assert abi.kept_spelling(str(unknown)) is None  # absent, not a folder, unusable: never a guess
+        assert len(os.listdir("/dev/fd")) == descriptors  # every descriptor closed
+    monkeypatch.setattr(abi, "IS_DARWIN", False)
+    assert abi.kept_spelling(str(folder)) is None
 
 
 def test_attach_snapshot_init_is_opt_in_and_idempotent(tmp_path):

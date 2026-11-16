@@ -133,7 +133,7 @@ EXPECTED_TOOLS = [
     "chronicle_write", "memory_read", "memory_mark",
     "journal_read", "journal_write", "workpad_read", "workpad_write",
     "start_task", "list_projects", "tell_task",
-    "move_to_project", "close_project", "schedule_followup",
+    "move_to_project", "close_project", "manage_project_folder", "schedule_followup",
     "memory_map", "memory_update_registry",
     "plan_task", "recent_tasks", "live_roots", "update_focus",
     "search_ui_translations", "pin_ui_translation", "record_update_description", "remote_mcp_sign_in",
