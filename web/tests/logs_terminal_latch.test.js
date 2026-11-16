@@ -43,6 +43,7 @@ class NodeStub {
     getAttribute(key) { return this.attrs[key] ?? null; }
     hasAttribute(key) { return key in this.attrs; }
     removeAttribute(key) { delete this.attrs[key]; }
+    getClientRects() { return [{ width: 1, height: 1 }]; }  // drawn: the Logs reader asks whether its panel has a box
     get firstElementChild() { return this.children[0]; }
     get nextElementSibling() { return this.parentElement?.children[this.parentElement.children.indexOf(this) + 1]; }
     get textContent() { return this._text + this.children.map((child) => child.textContent).join(''); }
