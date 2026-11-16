@@ -253,7 +253,7 @@ def test_an_execution_section_needs_a_posix_service_host(install, monkeypatch):
             config.verify_settings_integrity()
         assert isinstance(refused.value, deployment_policy.DeploymentPolicyError)
         assert f"{path}: {execution_domain.WINDOWS_HOST_REFUSAL}" in str(refused.value), refused.value
-        assert "on Linux or macOS" in str(refused.value) and "WSL2" in str(refused.value)
+        assert "run the service on Linux" in str(refused.value) and "WSL2" in str(refused.value)
         deployment_policy.reset_for_tests()  # any other process's read of the file refuses too: never unmanaged
         with pytest.raises(deployment_policy.DeploymentPolicyError, match="needs a POSIX service host"):
             deployment_policy.current()

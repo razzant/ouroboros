@@ -67,9 +67,9 @@ POLICY_FIELD = "execution"
 # A container path is POSIX, so on a Windows service host no folder the service names is the one the work sees, and
 # ``work_domain`` would read every file below a mapping as the service's own: the section could only fail open there.
 WINDOWS_HOST_REFUSAL = ("execution needs a POSIX service host: on Windows a host path is never the path the work "
-                        "container sees, so the service would act on work files itself; run the service on Linux or "
-                        "macOS (for example in WSL2 or a Linux container), or remove execution and extensions.trusted, "
-                        "which needs it")
+                        "container sees, so the service would act on work files itself; run the service on Linux (for "
+                        "example in WSL2 or a Linux container), or remove execution and extensions.trusted, which needs "
+                        "it")
 WORK_ENGINE = "work"
 _DOCKER_TIMEOUT_SEC = 10.0  # one Docker CLI call: the transport's bound, never a judgment
 _LOCK = threading.Lock()
