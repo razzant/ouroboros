@@ -5435,11 +5435,15 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     clip-path: inset(50%);
     white-space: nowrap;
 }
-/* Folded rings keep their look, but their 44px hit areas need separate room on both sides. */
+/* Folded rings keep their look, but their 44px hit areas need separate room on both sides. The chips slot gives back
+   the gap it starts after (its own rule above), so it gives back this wider one too and never wraps the row. */
 @media (pointer: coarse) {
     .chat-toolbar-row[data-owner-glyphs="true"] {
-        column-gap: max(var(--composer-row-gap), calc(var(--touch-target-min) - var(--composer-control-height)));
+        --composer-glyph-gap: max(var(--composer-row-gap), calc(var(--touch-target-min) - var(--composer-control-height)));
+        column-gap: var(--composer-glyph-gap);
     }
+    .chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips { margin-inline-start: calc(-1 * var(--composer-glyph-gap)); }
+    .chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips::before { width: calc(var(--composer-glyph-gap) - 6px); }
 }
 /* While a drag runs, and when the layout itself changes (opening, a resize, a new padding),
    the marks land with the words at once, so a pill never trails behind the word it names. */

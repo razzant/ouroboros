@@ -115,7 +115,13 @@ def _block(css: str, head: str) -> str:
 def test_folded_rings_leave_each_others_touch_reach():
     css = _read("web/style.css")
     rings = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] {')
-    assert "column-gap: max(var(--composer-row-gap), calc(var(--touch-target-min) - var(--composer-control-height)));" in rings
+    assert "--composer-glyph-gap: max(var(--composer-row-gap), calc(var(--touch-target-min) - var(--composer-control-height)));" in rings
+    assert "column-gap: var(--composer-glyph-gap);" in rings
+    # The chips slot gives back that same wider gap, or a folded row with chips would wrap onto a second line.
+    chips = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips {')
+    assert "margin-inline-start: calc(-1 * var(--composer-glyph-gap));" in chips
+    lead = _block(css, '.chat-toolbar-row[data-owner-glyphs="true"] > .chat-composer-chips::before {')
+    assert "width: calc(var(--composer-glyph-gap) - 6px);" in lead
 
 
 def test_logs_use_the_space_below_clear_for_the_long_filter_word():
