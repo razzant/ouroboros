@@ -693,18 +693,20 @@ inside it. `tests/test_appearance_static.py` holds both facts.
 A status has **an explicit foreground/background pair**, never a foreground
 derived from whatever generic opacity sits on the element.
 
-The connected Chat header says `Starting…` until a complete server-ready
-observation confirms the supervisor can assign work; a live socket alone means
-only that the UI transport is open. The host's boot phases refine the word
-without changing the fact: `Chat ready, restoring background tasks` once the
-dialogue accepts messages durably while pooled work is still not admitted, and
-`Start failed` (its cause beside it where it fits, always the badge title) when
-the generation cannot become ready: a start that failed in its init. A ready generation
-that loses its task core does not fail this way: it ends and restarts (ARCHITECTURE §9,
-the Fault door), with one `supervisor_failure` Main row before and the startup notice after. `Online` is reserved for a ready, idle
-runtime; known queued, active or finalizing work keeps its own factual label. A
-durably accepted incoming message likewise proves acceptance, not that its task
-has begun or a model has read it.
+Until a complete server-ready observation confirms the supervisor can assign work,
+the connected Chat header says `Starting…`; a live socket proves only transport.
+`Chat ready` means messages are durably accepted while pooled work is not admitted.
+`Start failed` names an init failure that prevents readiness.
+The first running named step follows (`· loading extensions`,
+`· starting executors`, else, once the chat is ready, `· finishing startup`); a failure's cause replaces it.
+No hover is needed: the room's list shows whether a new message is saved, all running
+steps and failure causes. Settings shows the word with its step or failure cause,
+beside Restart on failure.
+
+A ready generation losing its task core ends and restarts (ARCHITECTURE §9, Fault
+door): one `supervisor_failure` Main row, then the startup notice. `Online` means
+ready and idle; known queued, active or finalizing work keeps its label.
+Acceptance proves neither task start nor model receipt.
 
 The Update indicator names the real stage, then a failed or unconfirmed outcome until the owner hides it with the close beside it (this browser, that attempt; the record is untouched). It opens the existing Updates panel, never a second apply flow. A confirmed success never wears the indicator (owner 1B): the panel retains it until the next admitted attempt, with actual saved-local-work references and accessible diagnostics, and it never masks a newer available version. A pre-admission refusal stays with the request. A busy-work refusal offers explicit retry, never a delayed automatic restart. Connection or version alone proves no successful update. Unknown remains neutral and a failed/refused/rolled-back attempt takes the error triple; a needed restart keeps its words, without a close. The Update and Replace confirmations say in fixed words, before the engine and interpreter facts, what the restart does to this installation's tasks (what returns by itself, what stays paused or held, what is not continued); the engine's admission count is labelled engine work, never tasks. Above the description, in the panel for the update on offer and at the top of that confirmation, one host line counts what the range brings over a review FAIL or no verdict (`Went in over a review FAIL or no verdict: 2 merges, 3 commits Ouroboros made on this computer.`): merges whose receipt observed one and this install's own commits it recorded so, shown with or without a description and only from that range's check facts; the items are named in Details, a PASS on earlier code and a commit without a receipt are not counted, a range whose older receipts were not read says how many (`The review receipts of 41 older commits were not read.`), and when nothing is named there is no line (unknown, never clean). The Restart confirmation's Details name what that door does differently: sleeping tasks wait for Resume and the runs its tasks started in Claudexor end. After a start that restored queue rows, the startup notice says how many of them continue by themselves, wait for Resume or stay paused, read as the work projection reads them; when a row cannot be read it keeps the count alone.
 
@@ -1544,14 +1546,14 @@ server's mark: `Reconnecting…` (a ring; `· server answers` once the core answ
 attempt still failed: an observation, never a cause), `Updating…` (a ring) while a room shown again or
 reconnected still reads what it missed after 300 ms, the owner's own unconfirmed send and the
 owner's own Stop press (moving), and `Starting…` with the boot phases that refine it
-(no mark). The transcript's typing bubble shows only while the room's work moves and
+(no work mark; the owner's amber stays). The transcript's typing bubble shows only while the room's work moves and
 no card speaks for it. The title
 ellipsizes first, and a new word never moves a neighbour or resizes the bar.
 Pressing the status, or ↓/↑ on it, opens that
 room's work and only that room's as one floating list under the bar's capsules, the same in every
 room (an opaque sheet of its own from the status capsule to the bar's last control, Main's history note waiting behind it): one row per work, the owner's unconfirmed sends, and unfinished cards an
 incomplete read has not confirmed (shown unknown, without controls). A Project
-with nothing else keeps its latest represented root card. Main's list opens when there is work to show; a
+with nothing else keeps its latest represented root card. Main's list opens when there is work or a start to show; a
 Project's starts with the room's whole name, wrapped (its title in the bar keeps one line, §10), so its title
 opens it even when nothing is listed, and the list then says `Nothing running or queued.` A row names its work (its
 coined name or the request's title, never `Continue: …`, else the owner's

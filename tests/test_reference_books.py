@@ -105,3 +105,50 @@ def test_current_production_books_are_chaptered_and_composition_covers_the_closu
         # PHYSICAL chapter, never a line of the composed book.
         assert f"Source: `{chapter.source_path}`" in view.text
     assert not view.source_complete
+
+
+def test_exact_bytes_memo_rereads_membership_and_mtime_restored_edits(tmp_path, monkeypatch):
+    import os
+    from ouroboros import reference_books as books
+
+    corpus = sources()
+    for path, raw in corpus.items():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(raw)
+    books._book_source.cache_clear()
+    parsed, read = [], []
+    original = books.parse_markdown_source
+    def parse(raw, path):
+        parsed.append(path)
+        return original(raw, path)
+    def reader(path):
+        read.append(path)
+        return (tmp_path / path).read_bytes()
+    monkeypatch.setattr(books, "parse_markdown_source", parse)
+    cold = load_reference_book(tmp_path, "architecture", reader)
+    assert load_reference_book(tmp_path, "architecture", reader) == cold
+    assert len(parsed) == 3 and len(read) == 6
+    chapter = tmp_path / "docs/architecture/runtime.md"
+    stamp = chapter.stat()
+    chapter.write_bytes(chapter.read_bytes().replace(b"full startup", b"next startup"))
+    os.utime(chapter, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+    edited = load_reference_book(tmp_path, "architecture", reader)
+    assert edited != cold and "next startup" in compose_book(edited) and len(parsed) == 4
+    entry = tmp_path / "docs/ARCHITECTURE.md"
+    entry.write_bytes(entry.read_bytes().replace(b"- [Memory][memory]\n", b""))
+    assert len(load_reference_book(tmp_path, "architecture", reader).chapters) == 1
+    chapter.unlink()
+    with pytest.raises(OSError):
+        load_reference_book(tmp_path, "architecture", reader)
+    assert books._book_source.cache_info().maxsize == 64
+
+
+def test_book_memo_does_not_share_mutable_frontmatter():
+    corpus = sources()
+    path = "docs/architecture/runtime.md"
+    corpus[path] = b"---\nlabels: [original]\n---\n" + corpus[path]
+    first = load_reference_book(Path("unused"), "architecture", corpus.__getitem__)
+    first.chapters[0].frontmatter["labels"].append("reader edit")
+    second = load_reference_book(Path("unused"), "architecture", corpus.__getitem__)
+    assert second.chapters[0].frontmatter == {"labels": ["original"]}

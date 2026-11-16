@@ -456,6 +456,44 @@ def documents_by_ids(root: Any, task_ids: Iterable[str]) -> Dict[str, Dict[str, 
     return dict(_documents(fetched))
 
 
+_NOTE_KEYS = ("task_id", "status", "working_notes")
+
+
+def working_note_documents(root: Any, task_ids: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+    """Only identity, status and the working-notes pointer, from one current-body snapshot.
+
+    JSON1 selects inside SQLite; Python receives no result text, handoffs or card overlays.
+    Multi-path extraction preserves JSON types. A TEXT body SQLite does not take as RFC 8259
+    JSON (``json_valid`` 0, on every supported SQLite: the NaN/Infinity ``machine_json`` writes,
+    or a damaged body) travels whole and ``json.loads`` reads it as the full reader does, so a
+    non-finite value keeps its pointer and an undecodable body refuses only its own row.
+    Existing rows with missing, undecodable or non-object bodies remain empty documents for
+    strict admission to refuse, rather than disappearing as absent.
+    """
+    ids = sorted({str(task_id) for task_id in task_ids})
+    if not ids:
+        return {}
+    select = """SELECT t.task_id, CASE WHEN json_valid(b.body) THEN
+        CASE WHEN json_type(b.body) = 'object' THEN
+            '' || json_extract(b.body, '$.task_id', '$.status', '$.working_notes')
+        END END AS view, CASE WHEN typeof(b.body) = 'text' AND NOT json_valid(b.body) THEN b.body END AS raw
+        FROM tasks AS t LEFT JOIN task_bodies AS b ON b.task_id = t.task_id
+        WHERE t.task_id IN (SELECT value FROM json_each(?))"""
+    with open_store(root, write=False) as txn:
+        pages = [rows for _page, rows in _pages(txn, ids, select, ("task_id", "view", "raw"))]
+    return {row["task_id"]: _note_document(row["view"], row["raw"]) for page in pages for row in page.rows()}
+
+
+def _note_document(view: Optional[str], raw: Optional[str]) -> Dict[str, Any]:
+    if view is not None:
+        return dict(zip(_NOTE_KEYS, json.loads(view)))
+    try:
+        document = json.loads(raw) if raw is not None else None
+    except (ValueError, RecursionError):
+        return {}
+    return {key: document.get(key) for key in _NOTE_KEYS} if isinstance(document, dict) else {}
+
+
 def origin_documents(root: Any, origin: str) -> Tuple[Dict[str, Dict[str, Any]], Dict[str, str]]:
     """``(documents, faults)`` an owner message's operation may be: each row whose typed top-level origin is
     ORIGIN (``<chat_id>:<client_message_id>``, ``store_hot_facts.task_columns``), and each row an older writer

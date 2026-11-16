@@ -13,6 +13,7 @@ import {
 } from '../modules/chat_activity.js';
 import { createChatInstance } from '../modules/chat.js';
 import { startFailureCause } from '../modules/host_starting_status.js';
+import { createRoomRetirement, roomSocket } from '../modules/room_retire.js';
 import { emptyWorkState, roomStatusView } from '../modules/work_status.js';
 import { installDom, restoreDom } from './chat_dom_fixture.js';
 import { projection, room, work } from './work_fixture.js';
@@ -20,7 +21,7 @@ import { projection, room, work } from './work_fixture.js';
 test('the room says Starting… only where it would say Online', () => {
     const idle = emptyWorkState();
     assert.deepEqual(roomStatusView(idle, { ready: false }),
-        { kind: 'starting', text: 'Starting…', tone: 'starting', mark: 'none', owner: false, amber: '', title: '' });
+        { kind: 'starting', text: 'Starting…', tone: 'starting', mark: 'none', owner: false, amber: '', step: '', title: '', detail: '' });
     assert.equal(roomStatusView(idle, { ready: true }).text, 'Online');
     assert.equal(roomStatusView(idle).text, 'Online', 'callers that state nothing keep Online');
     const inRoom = (activity, extra) => ({ ...idle, room: room(activity, extra) });
@@ -74,7 +75,7 @@ test('the page sequencer keeps its newest applied body until a read is unavailab
     assert.equal(applied.length, 1);
 });
 
-function mountChat({ asPanel = false, chatId = asPanel ? 7 : 1, latest = null, connected = true, snapshots = null } = {}) {
+function mountChat({ asPanel = false, chatId = asPanel ? 7 : 1, latest = null, connected = true, snapshots = null, ws = null } = {}) {
     const env = installDom(async (url) => ({ ok: true, json: async () =>
         String(url).startsWith('/api/chat/history') ? { messages: [], window: { complete: true } }
             : { active_chat_activities: [], active_chat_activities_complete: true } }));
@@ -82,7 +83,7 @@ function mountChat({ asPanel = false, chatId = asPanel ? 7 : 1, latest = null, c
     let generation = 0;
     let isConnected = connected;
     const instance = createChatInstance({
-        ws: { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },
+        ws: ws || { on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },
             isConnected: () => isConnected, send() {} },
         state: { activePage: 'chat', projectChatIds: new Set(asPanel ? [chatId] : []), unreadCount: 0 },
         updateUnreadBadge() {},
@@ -100,7 +101,7 @@ function mountChat({ asPanel = false, chatId = asPanel ? 7 : 1, latest = null, c
         snapshot: (patch) => instance.hydrateStateSnapshot({
             active_chat_activities: [], active_chat_activities_complete: true, ...projection(chatId), ...patch,
         }, Infinity, ++generation),
-        setConnected(value) { isConnected = value; handlers.get(value ? 'open' : 'close')?.({ previouslyConnected: true }); },
+        setConnected(value, event = { previouslyConnected: true }) { isConnected = value; handlers.get(value ? 'open' : 'close')?.(event); },
         settle: async () => { for (let i = 0; i < 8; i += 1) await new Promise((resolve) => setTimeout(resolve, 0)); },
         close() { instance.destroy(); restoreDom(env.prior); },
     };
@@ -264,20 +265,26 @@ test('bootPhase reads the typed object alone', () => {
 });
 
 test('the Starting… header follows the phase: starting, chat ready, failed', () => {
-    assert.deepEqual(startingStatus(null), { kind: 'starting', text: 'Starting…', title: '' });
-    assert.deepEqual(startingStatus(SERVING), { kind: 'starting', text: 'Starting…', title: '' });
-    assert.deepEqual(startingStatus(CHAT_READY),
-        { kind: 'starting', text: 'Chat ready, restoring background tasks', title: '' });
+    assert.deepEqual(startingStatus(null), { kind: 'starting', text: 'Starting…', step: '', title: '', detail: '' },
+        'nothing known about the phase says nothing more');
+    assert.deepEqual(startingStatus(SERVING), { kind: 'starting', text: 'Starting…', step: '', title: '',
+        detail: 'The chat opens once the data store is ready; a message sent before that is not saved.' });
+    assert.deepEqual(startingStatus(CHAT_READY), { kind: 'starting', text: 'Chat ready', step: 'loading extensions',
+        title: 'loading extensions', detail: 'Messages are saved and answered once the start finishes. Now: loading extensions.' },
+        'the step is said beside the word, so a short bar drops it first and keeps Chat ready');
     assert.deepEqual(startingStatus(FAILED),  // the word stays whole; the cause is the step a short bar drops first
         { kind: 'failed', text: 'Start failed', tone: 'failed', step: 'current-facts store not published: failed',
-          title: 'current-facts store not published: failed' }, 'a failed start is its own state, never a starting one');
+          title: 'current-facts store not published: failed', detail: 'current-facts store not published: failed' },
+        'a failed start is its own state, never a starting one');
     assert.deepEqual(startingStatus({ ...SERVING, phase: 'failed' }),
-        { kind: 'failed', text: 'Start failed', tone: 'failed', step: '', title: '' });
+        { kind: 'failed', text: 'Start failed', tone: 'failed', step: '', title: '', detail: '' });
     assert.deepEqual(startingStatus(SOFT_FAILED),
-        { kind: 'starting', text: 'Chat ready, restoring background tasks', title: 'extensions: ValueError: bad manifest' },
+        { kind: 'starting', text: 'Chat ready', step: 'finishing startup', title: 'extensions: ValueError: bad manifest',
+          detail: 'Messages are saved and answered once the start finishes. A start step failed and the start goes on: extensions: ValueError: bad manifest' },
         'a fail-soft step shows its error while the start goes on');
     const idle = emptyWorkState();
-    assert.equal(roomStatusView(idle, { ready: false, boot: CHAT_READY }).text, 'Chat ready, restoring background tasks');
+    assert.deepEqual([roomStatusView(idle, { ready: false, boot: CHAT_READY }).text, roomStatusView(idle, { ready: false, boot: CHAT_READY }).step],
+        ['Chat ready', 'loading extensions']);
     assert.equal(roomStatusView(idle, { ready: true, boot: FAILED }).text, 'Online',
         'readiness outranks the phase: a ready supervisor is Online whatever the boot said');
     assert.equal(roomStatusView({ ...idle, room: room('queued') }, { ready: false, boot: CHAT_READY }).text,
@@ -302,14 +309,19 @@ test('Main: the header paints the phase from the snapshot and forgets it on disc
         chat.snapshot({ supervisor_ready: false, boot: SERVING });
         assert.equal(chat.status(), 'Starting…');
         chat.snapshot({ supervisor_ready: false, boot: CHAT_READY });
-        assert.equal(chat.status(), 'Chat ready, restoring background tasks');
+        assert.equal(chat.status(), 'Chat ready');
+        assert.equal(globalThis.document.byId.get('chat-status').dataset.step, 'loading extensions');
         assert.equal(chat.kind(), 'status-badge starting', 'still the starting tone: tasks are not admitted yet');
         chat.instance.hydrateStateSnapshot({ supervisor_ready: false }, Infinity, 50);
-        assert.equal(chat.status(), 'Chat ready, restoring background tasks', 'a body without the phase changes nothing');
+        assert.equal(chat.status(), 'Chat ready', 'a body without the phase changes nothing');
         const page = chat.instance.page;
         const trigger = page.querySelector('.rw-trigger');
         const failure = page.querySelector('.rw-failure');
-        assert.equal(trigger.disabled, true, 'Main with nothing listed while it starts: nothing to open');
+        // No hover needed: Main with nothing listed still opens while it starts, and its list says what runs.
+        await chat.settle();
+        assert.equal(trigger.disabled, false, 'Main while it starts: the start itself is something to open');
+        assert.equal(page.querySelector('.rw-note').textContent,
+            'Messages are saved and answered once the start finishes. Now: loading extensions.');
         assert.equal(failure.hidden, true, 'a start that goes on says no failure');
         chat.snapshot({ supervisor_ready: false, boot: FAILED });
         assert.equal(chat.status(), 'Start failed', 'the word alone, so a narrow bar never drops it with the cause');
@@ -340,11 +352,207 @@ test('Main: the header paints the phase from the snapshot and forgets it on disc
     } finally { chat.close(); }
 });
 
+// The reconnect contract (#3376): the page keeps polling while the socket is down, and the server from before a restart
+// may answer ready; the socket then reopens on the new server, which may still be starting. A real reconnect forgets
+// readiness as the close did, so only a body read after it proves readiness; the socket's first open and a room's
+// return (`resumed`, room_retire.js) forget nothing.
+test('Main: a reconnect forgets a readiness polled while the socket was down, so a restarted host is never Online', async () => {
+    const chat = mountChat();
+    try {
+        chat.snapshot({ supervisor_ready: true });
+        assert.equal(chat.status(), 'Online');
+        chat.setConnected(false);
+        chat.snapshot({ supervisor_ready: true });  // the page's poll still reaches the server before its restart
+        assert.equal(chat.status(), 'Reconnecting…');
+        chat.setConnected(true);  // the socket reopens on the new server
+        assert.equal(chat.status(), 'Starting…', 'the old server\'s Online is not the new one\'s');
+        chat.instance.hydrateStateSnapshot({ supervisor_error: 'not yet' }, Infinity, 70);
+        assert.equal(chat.status(), 'Starting…', 'a body that states no readiness proves none');
+        chat.snapshot({ supervisor_ready: false, boot: CHAT_READY });
+        assert.equal(chat.status(), 'Chat ready', 'the new server\'s own start');
+        chat.snapshot({ supervisor_ready: true, boot: { ...CHAT_READY, phase: 'ready', tasks_ready: true, steps: [] } });
+        assert.equal(chat.status(), 'Online');
+        await chat.settle();
+    } finally { chat.close(); }
+});
+
+test('the socket\'s first open keeps the boot read, and a room\'s return is no reconnect', async () => {
+    const chat = mountChat({ connected: false });
+    try {
+        chat.snapshot({ supervisor_ready: true });  // the boot read lands before the socket's first open
+        chat.setConnected(true, { previouslyConnected: false });
+        assert.equal(chat.status(), 'Online', 'a page load paints no Starting… over the boot read');
+        await chat.settle();
+    } finally { chat.close(); }
+    const panel = mountChat({ asPanel: true, latest: { supervisor_ready: true } });
+    try {
+        assert.equal(panel.status(), 'Online');
+        panel.instance.leave();  // away: its socket view hears no open meanwhile (room_retire.js)
+        panel.instance.stay();
+        panel.setConnected(true, { previouslyConnected: true, resumed: true });  // back: the room's own synthetic open
+        assert.equal(panel.status(), 'Online', 'a return without an outage keeps what the room knew');
+        await panel.settle();
+    } finally { panel.close(); }
+});
+
+// The page's one socket (ws.js) under a room's own view of it (room_retire.js roomSocket). `previouslyConnected()` is
+// the page's: true once any socket of it opened. `open()` goes as ws.js does: the fact is set, then `open` carries the
+// earlier value.
+function pageSocket({ connected = true, opened = connected } = {}) {
+    const listeners = new Map();
+    const socket = {
+        ws: { readyState: 1 },
+        on(type, fn) {
+            if (!listeners.has(type)) listeners.set(type, new Set());
+            listeners.get(type).add(fn);
+            return () => listeners.get(type).delete(fn);
+        },
+        fire: (type, payload) => [...(listeners.get(type) || [])].forEach((fn) => fn(payload)),
+        isConnected: () => connected,
+        previouslyConnected: () => opened,
+        send: () => ({ status: 'sent', clientMessageId: '' }),
+        drop() { connected = false; socket.fire('close'); },
+        open() { const previouslyConnected = opened; connected = opened = true; socket.fire('open', { previouslyConnected }); },
+    };
+    return socket;
+}
+
+// A room room_retire.js keeps over that socket: `away()` (a Project put away, Main suspended) and `back()`, which takes
+// the page's newest body (`latest()`) as app.js offers it: retired at every socket open until a read after it lands.
+function keptRoom(socket, { asPanel = true, seed = null, latest = () => null } = {}) {
+    const chat = mountChat({ asPanel, latest: seed, ws: roomSocket(socket) });
+    const rooms = createRoomRetirement({ instances: new Map([['p', chat.instance]]), latestState: latest });
+    return {
+        ...chat,
+        away: () => (asPanel ? rooms.putAway('p') : rooms.suspend(chat.instance)),
+        back() { chat.instance.page.hidden = false; if (asPanel) rooms.show('p'); else rooms.restore(chat.instance); },
+    };
+}
+
+// The socket's first open is no reconnect for a room away across it either. Main lives from startup, so it may be away
+// (another page, a hidden window) when that open comes and app.js retires the page's newest body; back before a read
+// after it, Main still has the boot read.
+test('a room away across the socket\'s first open keeps the boot read on its return', async () => {
+    const socket = pageSocket({ connected: false });  // no socket of this page has opened yet
+    const main = keptRoom(socket, { asPanel: false });
+    try {
+        main.snapshot({ supervisor_ready: true });  // the boot read lands before the socket's first open
+        main.away();
+        socket.open();  // the first open, unheard while away
+        main.back();  // before any body read after it: only the room's own `resumed` open
+        assert.equal(main.status(), 'Online', 'a page load paints no Starting… over the boot read');
+        await main.settle();
+    } finally { main.close(); }
+});
+
+// A room that leaves while the socket is down hears no reconnect while away (room_retire.js: its paused view keeps only
+// its sends' custody, and a reconnect that opens at its first attempt leaves no close for its return). Through the real
+// owners: it forgets readiness as it leaves, so its `resumed` open proves nothing and only a body read after it does.
+test('a room left in an outage proves readiness again after a reconnect it did not hear', async () => {
+    let latest = null;
+    const socket = pageSocket();
+    const panel = keptRoom(socket, { latest: () => latest });
+    try {
+        panel.snapshot({ supervisor_ready: true });
+        panel.away();
+        panel.back();
+        assert.equal(panel.status(), 'Online', 'left and back without an outage: what the room knew stands');
+        socket.drop();
+        panel.snapshot({ supervisor_ready: true });  // the page's poll still reaches the server before its restart
+        assert.equal(panel.status(), 'Reconnecting…');
+        panel.away();  // left while the socket is still down
+        socket.open();  // the reconnect, on the new server, while the room is away
+        panel.back();  // before any body read after that reconnect: only the room's own `resumed` open
+        assert.equal(panel.status(), 'Starting…', 'the old server\'s Online is not the new one\'s');
+        panel.snapshot({ supervisor_ready: false, boot: CHAT_READY });
+        assert.equal(panel.status(), 'Chat ready', 'the new server\'s own start');
+        socket.drop();
+        panel.away();
+        socket.open();
+        latest = { active_chat_activities: [], active_chat_activities_complete: true, ...projection(7), supervisor_ready: true };
+        panel.back();  // a body read after that reconnect landed while it was away: the return takes it
+        assert.equal(panel.status(), 'Online', 'a body read after the reconnect speaks for the new server');
+        await panel.settle();
+    } finally { panel.close(); }
+});
+
+// The socket's fact, not the room's: a Project opened during an outage heard no open of its own, yet the page's socket
+// had opened, so its seed from a body polled in that outage is forgotten as it leaves before the reconnect.
+test('a Project opened in an outage and left before the reconnect returns without the polled Online', async () => {
+    const socket = pageSocket({ connected: false, opened: true });  // the page's socket opened earlier and is down
+    const panel = keptRoom(socket, { seed: { supervisor_ready: true } });
+    try {
+        panel.away();
+        socket.open();
+        panel.back();
+        assert.equal(panel.status(), 'Starting…', 'the body polled in the outage does not speak for the server now');
+        await panel.settle();
+    } finally { panel.close(); }
+});
+
+test('Project panel: mounted while the socket is down, its seed from a body polled then is forgotten at the reconnect', async () => {
+    const panel = mountChat({ asPanel: true, latest: { supervisor_ready: true }, connected: false });
+    try {
+        panel.setConnected(true);  // the socket's reconnect: `previouslyConnected` holds for a room mounted meanwhile too
+        assert.equal(panel.status(), 'Starting…', 'the body polled in the outage does not speak for the server now');
+        panel.snapshot({ supervisor_ready: true });
+        assert.equal(panel.status(), 'Online');
+        await panel.settle();
+    } finally { panel.close(); }
+});
+
 test('Project panel: seeds the phase from the page snapshot', () => {
     const panel = mountChat({ asPanel: true, latest: { supervisor_ready: false, boot: CHAT_READY } });
     try {
-        assert.equal(panel.status(), 'Chat ready, restoring background tasks');
+        assert.equal(panel.status(), 'Chat ready');
         panel.snapshot({ supervisor_ready: true });
         assert.equal(panel.status(), 'Online');
     } finally { panel.close(); }
+});
+
+
+test('actual startup substeps replace generic restoration and concurrent work remains in the title', () => {
+    const active = (names) => ({ ...CHAT_READY, steps: names.map((name) => ({ name, state: 'running' })) });
+    for (const [name, text] of [
+        ['startup:event_queue', 'preparing task transport'], ['startup:bootstrap', 'checking program files'],
+        ['startup:queue_restore', 'restoring the queue'], ['startup:worker_spawn', 'starting executors'],
+        ['startup:task_recovery', 'restoring saved work'], ['startup:resume', 'resuming saved work'],
+    ]) {
+        assert.deepEqual([startingStatus(active([name])).text, startingStatus(active([name])).step], ['Chat ready', text]);
+    }
+    const concurrent = startingStatus(active(['supervisor_outcome', 'startup:event_queue', 'extensions']));
+    assert.equal(concurrent.step, 'loading extensions');
+    assert.equal(concurrent.title, 'loading extensions · preparing task transport');
+    assert.equal(startingStatus(active(['supervisor', 'supervisor_outcome', 'unknown-new-stage'])).step,
+        'finishing startup', 'unknown or outer steps do not invent restoration');
+    assert.equal(startingStatus({ ...active(['extensions']), phase: 'failed', error: 'transport failed' }).text, 'Start failed');
+    const soft = startingStatus({ ...active(['startup:worker_spawn']), steps: [
+        { name: 'extensions', state: 'failed', error: 'bad manifest' },
+        { name: 'startup:worker_spawn', state: 'running' },
+        { name: 'startup:task_recovery', state: 'done' },
+    ] });
+    assert.equal(soft.step, 'starting executors');
+    assert.equal(soft.title, 'extensions: bad manifest · starting executors');
+    // Where no pointer hovers (the room's list, Settings): every running step, never only the first.
+    assert.equal(concurrent.detail, 'Messages are saved and answered once the start finishes. Now: loading extensions, preparing task transport.');
+    assert.equal(startingStatus(active(['skills'])).step, 'preparing skills', 'a first install\'s long skills step is named');
+});
+
+// A head start that failed and was replaced (#3376: `startup:event_queue` stays a failed step of a start that goes
+// on): while the start runs, its words say the step failed and the start goes on; once ready, nothing says it failed.
+test('a recovered event-queue step is a failed step while the start goes on, and nothing once the host is ready', () => {
+    const recovered = { phase: 'serving', dialogue_ready: true, steps: [
+        { name: 'startup:event_queue', state: 'failed', error: 'OSError: the first event-bus Queue() RPC is refused' },
+        { name: 'startup:worker_spawn', state: 'running' }] };
+    const going = startingStatus(recovered);
+    assert.deepEqual([going.kind, going.text, going.step], ['starting', 'Chat ready', 'starting executors']);
+    assert.match(going.detail, /A start step failed and the start goes on: startup:event_queue: OSError/);
+    const idle = emptyWorkState();
+    assert.equal(roomStatusView(idle, { ready: false, boot: recovered }).tone, 'starting', 'never the failure tone');
+    assert.equal(startFailureCause({ badge: { dataset: { tone: 'starting' }, title: going.title }, ready: false,
+        latest: { supervisor_ready: false, boot: recovered } }), null, 'the list never says the start failed while it goes on');
+    const ready = { supervisor_ready: true, boot: { ...recovered, phase: 'ready', tasks_ready: true,
+        steps: [recovered.steps[0], { name: 'startup:worker_spawn', state: 'done' }] } };
+    assert.equal(roomStatusView(idle, { ready: true, boot: ready.boot }).text, 'Online');
+    assert.equal(startFailureCause({ badge: { dataset: { tone: 'online' }, title: '' }, ready: true, latest: ready }), null);
 });

@@ -412,19 +412,14 @@ function syncNavigationState() {
     const sidebarInert = isStackLayout() && !drawerOpen;
     if (primarySidebar && primarySidebar.inert !== sidebarInert) primarySidebar.inert = sidebarInert;
 
-    document.querySelectorAll('[data-nav-page]').forEach((button) => {
-        const isActive = !activeProjectId && button.dataset.navPage === state.activePage;
-        button.classList.toggle('active', isActive);
-        if (isActive) button.setAttribute('aria-current', 'page');
+    const choose = (button, chosen) => {  // the chosen place's class and `aria-current`, a page's or a Project's row
+        button.classList.toggle('active', chosen);
+        if (chosen) button.setAttribute('aria-current', 'page');
         else button.removeAttribute('aria-current');
-    });
+    };
+    document.querySelectorAll('[data-nav-page]').forEach((button) => choose(button, !activeProjectId && button.dataset.navPage === state.activePage));
     // One chosen row at a time: the open Project's row (owner Q6).
-    document.querySelectorAll('[data-project-id]').forEach((button) => {
-        const isActive = button.dataset.projectId === activeProjectId;
-        button.classList.toggle('active', isActive);
-        if (isActive) button.setAttribute('aria-current', 'page');
-        else button.removeAttribute('aria-current');
-    });
+    document.querySelectorAll('[data-project-id]').forEach((button) => choose(button, button.dataset.projectId === activeProjectId));
     let exit = Promise.resolve();
     let arrived = Promise.resolve();
     if (projectPanel) {
@@ -615,6 +610,7 @@ const stateSnapshots = createStateSnapshotSequencer((data, requestedAt, generati
     hydrateOpenChatsFromState(data, requestedAt, generation);
     evolution?.hydrateStateSnapshot(data);
     projectHeader?.update(data);
+    settingsControls?.stateApplied(data);
     observeMainRevision(data.main_visible_revision);
 }, undefined, (requestedAt) => {
     markProjectActivityUnknown();

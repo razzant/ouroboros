@@ -2,10 +2,13 @@
 
 What the lifespan ran before it served now runs here, in the same order, on the boot
 coordinator's thread while the socket already answers (``server_liveness.start_boot_coordinator``;
-the step list and the pinned seams stay in ``server.py::lifespan``). Each function is one named
-step: it does its work or raises, and the coordinator records the outcome in the boot document.
-Nothing here decides readiness; the two waits at the end only observe the store's publication
-and the supervisor's outcome for the document's phase.
+the step list and the pinned seams stay in ``server.py::lifespan``). A step does its work or
+raises, and the coordinator records the outcome in the boot document; ``on_loop`` and
+``stop_extension_loop`` are helpers, not steps. One step, ``prepare_event_queue``, gives the event
+bus a head start on its own thread while the extensions load; the supervisor waits for it to end
+(``wait_event_queue``) before it initializes its workers. Nothing here decides readiness; the two
+waits at the end only observe the store's publication and the supervisor's outcome for the
+document's phase.
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ import asyncio
 import os
 import pathlib
 import threading
+from concurrent.futures import Future, wait
 from typing import Any, Callable, Optional
 
 import uvicorn
@@ -231,8 +235,59 @@ def wait_store_published(root: pathlib.Path, stop: threading.Event, document: Bo
 def wait_supervisor_outcome(ready: threading.Event, error: Callable[[], Optional[str]], stop: threading.Event,
                             document: BootDocument = BOOT) -> None:
     """The generation is ready once the supervisor (or the providerless recovery) is; its failure
-    is this step's failure."""
+    is this step's failure. The lifespan names the step ``supervisor_outcome``: ``supervisor`` is the
+    generation's own step with its startup sub-steps, which this observation never overwrites."""
     while not (ready.wait(0.5) or error() or stop.is_set() or document.phase() == "failed"):
         pass
     if error():
         raise RuntimeError(error())
+
+
+_head_start: Optional[Future] = None  # the latest provider-ready lifespan's (prepare_event_queue); a done one is inert
+
+
+def prepare_event_queue(root: pathlib.Path, stop_requested: Callable[[], bool],
+                        document: BootDocument = BOOT) -> Future:
+    """Start the process-lifetime event bus on its own thread while the extensions load: a head
+    start, never workers or recovery, which still wait for the registered subscribers.
+
+    The supervisor waits for it to end (``wait_event_queue``), then makes its ordinary
+    ``get_event_q`` call: that returns this queue, or after a failure (this step's, in the boot
+    document) ends the attempt's never-published manager and creates anew, as without the head
+    start. Stop/Panic is rechecked under the queue's lock, and fences the manager's start."""
+    global _head_start
+    future = _head_start = Future()
+
+    def prepare():
+        try:
+            outcome = store_switch.wait_ready(root, timeout=0.1)
+            while outcome.get("status") == "importing" and not stop_requested():
+                outcome = store_switch.wait_ready(root, timeout=0.1)
+            if stop_requested():
+                future.cancel()
+                return
+            if outcome.get("status") not in ("published", "not_started"):
+                raise RuntimeError(f"store not published: {outcome.get('status')}")
+            from supervisor.workers import get_event_q
+
+            with document.step("startup:event_queue"):
+                queue = get_event_q(drive_root=root, stop_requested=stop_requested)
+            future.set_result(queue)
+        except BaseException as exc:
+            log.warning("The event bus head start failed; unless the boot stops, the supervisor creates the bus itself",
+                        exc_info=True)
+            future.set_exception(exc)
+
+    try:
+        threading.Thread(target=prepare, daemon=True, name="boot-event-queue").start()
+    except BaseException as exc:
+        future.set_exception(exc)
+    return future
+
+
+def wait_event_queue(stop_requested: Callable[[], bool]) -> bool:
+    """Wait until the head start ended, never past a Stop; False once stopping. Its outcome is not
+    re-raised: the caller's own ``get_event_q`` call owns creation, as without a head start."""
+    while _head_start is not None and not _head_start.done() and not stop_requested():
+        wait([_head_start], timeout=0.1)
+    return not stop_requested()

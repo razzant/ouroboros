@@ -1,7 +1,6 @@
 """Self-editable Starlette/uvicorn entry point for UI and supervisor runtime."""
 
 import asyncio
-import base64  # noqa: F401
 import json
 import subprocess as subprocess
 import os
@@ -58,13 +57,12 @@ from ouroboros.server_process import (  # noqa: F401
     DATA_DIR, _owner_restart_requested,
     _request_restart_exit, _restart_requested,
     _supervisor_stop, _exit_signalled,
-    _SignalStopServer, _embedded_uvicorn_server,
+    _SignalStopServer,
     capture_server_source_baseline, server_stop_cause, log, restart_gate_line, restored_queue_sentence,
     FAULT_BUS_LOST, FAULT_LOOP_FAILED, bind_fault_exit, end_generation_on_fault, fault_cancel_reason,
     fault_exit, held_saved_work_count, previous_fault_sentence, end_fault_held_runs, raise_open_file_limit,
 )
 from ouroboros.server_routing_context import (  # noqa: F401
-    _active_direct_roots,
     _addressable_root_tasks,
     _chat_running_tasks,
     _clip_marked,
@@ -72,21 +70,16 @@ from ouroboros.server_routing_context import (  # noqa: F401
     _latest_project_task_result,
     _main_routing_manifest,
     _owner_binding_chat_id,
-    _project_id_for_registered_chat,
     _reserved_project_for_chat,
     _scoped_task_metadata,
-    _task_result_ground_truth,
     main_lane_routing_metadata,
 )
 from ouroboros.server_owner_routing import (  # noqa: F401
     _owner_evolution_stop,
-    _record_routing_receipt,
     _route_owner_message,
     _route_project_chat_to_running_task,
-    _stage_mailbox_attachments,
 )
 from ouroboros.server_liveness import (  # noqa: F401
-    _alert_chat_turn_wedge,
     _chat_turn_wedged,
     _start_supervisor_liveness_watchdog,
     _supervisor_loop_stalled,
@@ -95,12 +88,10 @@ from ouroboros.server_liveness import (  # noqa: F401
 from ouroboros.server_liveness import BOOT, start_boot_coordinator, wait_event
 from ouroboros.server_maintenance import (  # noqa: F401
     bind_body_lifespan,
-    _LAST_CANCEL_INTENT_SWEEP,
     _migrate_startup_cancel_latches,
     _startup_worker_pids,
     _installed_skill_names,
     _periodic_supervisor_maintenance,
-    _periodic_zombie_reconcile,
     _prune_delegated_snapshots,
     _prune_worktrees,
     _reconcile_delegated_runs,
@@ -120,7 +111,7 @@ from ouroboros.server_restart import (  # noqa: F401
     _begin_task_teardown, _live_running_task_ids, _managed_update_pending_kwargs,
     _perform_owner_restart, _safe_restart_serialized,
     _shutdown_supervisor_event_bus, _shutdown_task_cleanup_args,
-    _stop_owned_daemon_for_new_pin, _stop_owned_work,
+    _stop_owned_daemon_for_new_pin,
 )
 
 REPO_DIR = pathlib.Path(os.environ["OUROBOROS_REPO_DIR"])
@@ -196,7 +187,9 @@ from ouroboros.server_runtime import (
 )
 
 _supervisor_ready = threading.Event()  # a live generation finished init: the API's `supervisor_ready`
-_supervisor_init_done = threading.Event()  # init reached an outcome (ready OR `_supervisor_error`): boot waiters
+# Init reached ready or `_supervisor_error`. Stop before init is deliberately no outcome:
+# a dying generation must not release the update finalizer waiting on this event.
+_supervisor_init_done = threading.Event()
 _supervisor_error: Optional[str] = None
 _bootstrap_ok: Optional[bool] = None  # this generation's `_bootstrap_supervisor_repo` outcome; None until it ran
 _event_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -650,6 +643,8 @@ def _run_supervisor(settings: dict) -> None:
         _consciousness = None
     prior_worker_pids: set[int] | None = None
     _watchdog_stop = threading.Event()  # per-generation: set on EVERY exit of this generation
+    def stop_requested(stop=_watchdog_stop) -> bool:  # this generation's token bound now; shared stops read per call
+        return any(e.is_set() for e in (stop, _supervisor_stop, _restart_requested, _exit_signalled))
     try:
         BOOT.step_started("supervisor")  # tasks_ready is this generation's; its sub-steps follow
         # Watch startup stalls; even a failed watchdog start publishes an init outcome.
@@ -662,7 +657,7 @@ def _run_supervisor(settings: dict) -> None:
         from supervisor.state import control_is, load_state, save_state, update_state
         from supervisor.state import append_jsonl, update_budget_from_usage, rotate_jsonl_log_if_needed
         # The dialogue opened at the store's publication; this generation attaches to it.
-        bridge = _open_dialogue(settings, stop_requested=lambda stop=_watchdog_stop: any(e.is_set() for e in (stop, _supervisor_stop, _restart_requested, _exit_signalled)))
+        bridge = _open_dialogue(settings, stop_requested=stop_requested)
 
         from supervisor.git_ops import safe_restart
         ok, msg = run_startup_phase(_loop_liveness, "startup:bootstrap", lambda: _bootstrap_supervisor_repo(settings))
@@ -685,11 +680,15 @@ def _run_supervisor(settings: dict) -> None:
         )
 
         # Managed manifest branch defaults must drive worker commit/restart flows too.
-        _workers_branch_dev, _workers_branch_stable = _runtime_branch_defaults()
-        workers_init(
+        branch_dev, branch_stable = _runtime_branch_defaults()
+        if not server_boot.wait_event_queue(lambda: panic_termination_requested() or stop_requested()):
+            _watchdog_stop.set()
+            BOOT.step_ended("supervisor", error="stopped before init")
+            return
+        run_startup_phase(_loop_liveness, "startup:workers_init", lambda: workers_init(
             repo_dir=REPO_DIR, drive_root=DATA_DIR,
-            branch_dev=_workers_branch_dev, branch_stable=_workers_branch_stable,
-        )
+            branch_dev=branch_dev, branch_stable=branch_stable,
+        ))
 
         from supervisor.message_bus import send_with_budget
         from ouroboros.consciousness import BackgroundConsciousness
@@ -697,27 +696,27 @@ def _run_supervisor(settings: dict) -> None:
 
         prior_worker_pids = _startup_worker_pids(DATA_DIR)
         interrupted_running: list = []
-        restored_pending = restore_pending_from_snapshot(terminalized=interrupted_running)
-        _start_preparation_generation(stop=lambda stop=_watchdog_stop: any(e.is_set() for e in (stop, _supervisor_stop, _restart_requested, _exit_signalled)))
-        kill_workers(preserve_pending=True)
-        spawn_workers()
+        restored_pending = run_startup_phase(_loop_liveness, "startup:queue_restore", lambda: restore_pending_from_snapshot(terminalized=interrupted_running))
+        _start_preparation_generation(stop=stop_requested)
+        run_startup_phase(_loop_liveness, "startup:old_workers_stop", lambda: kill_workers(preserve_pending=True))
+        run_startup_phase(_loop_liveness, "startup:worker_spawn", spawn_workers)
         from ouroboros.server_process import record_applied_restart_settings
         record_applied_restart_settings({"OUROBOROS_SKILLS_REPO_PATH": settings.get("OUROBOROS_SKILLS_REPO_PATH", "")})
         persist_queue_snapshot(reason="startup")
         try:
             from ouroboros.delegate_recovery import pre_adopt_planned_handoffs
 
-            pre_adopt_planned_handoffs(DATA_DIR, list(PENDING))
+            run_startup_phase(_loop_liveness, "startup:delegate_pre_adopt", lambda: pre_adopt_planned_handoffs(DATA_DIR, list(PENDING)))
         except Exception:
             log.debug("Planned delegate pre-adoption failed", exc_info=True)
-        _startup_custody_sweep()
+        run_startup_phase(_loop_liveness, "startup:custody", _startup_custody_sweep)
         recovered_files = run_startup_phase(_loop_liveness, "startup:task_recovery", lambda: _run_startup_task_recovery(
             DATA_DIR, REPO_DIR, skip_live_data=_pytest_default_real_data_dir,
             prior_worker_pids=prior_worker_pids,
         ))
         _resume_interrupted_project_deletions()
-        _startup_prune_sweeps(preserve_task_sources=bool(
-            recovered_files["unresolved"] or recovered_files["protected"] or recovered_files["errors"]), recovery_report=recovered_files)
+        run_startup_phase(_loop_liveness, "startup:prune", lambda: _startup_prune_sweeps(preserve_task_sources=bool(
+            recovered_files["unresolved"] or recovered_files["protected"] or recovered_files["errors"]), recovery_report=recovered_files))
 
         previous_fault = previous_fault_sentence(held_saved_work_count(PENDING))  # the last generation's fault, if one
         if restored_pending > 0 or interrupted_running or previous_fault:
@@ -741,7 +740,7 @@ def _run_supervisor(settings: dict) -> None:
         from ouroboros.upgrade_notices import startup_upgrade_notices
         startup_upgrade_notices(settings)
 
-        auto_resume_after_restart()
+        run_startup_phase(_loop_liveness, "startup:resume", auto_resume_after_restart)
 
         def _get_owner_chat_id() -> Optional[int]:
             try:
@@ -759,7 +758,6 @@ def _run_supervisor(settings: dict) -> None:
             _consciousness.start()
             log.info("Background consciousness auto-restored from saved state.")
 
-        branch_dev, branch_stable = _runtime_branch_defaults()
         _event_ctx = types.SimpleNamespace(
             DRIVE_ROOT=DATA_DIR, REPO_DIR=REPO_DIR,
             BRANCH_DEV=branch_dev, BRANCH_STABLE=branch_stable,
@@ -1224,6 +1222,8 @@ async def lifespan(app):
         ("owned_stops", lambda: live and finish_unconfirmed_stops(lifespan_drive_root)),  # before any extension/replacement process (§9)
         ("inherited_records", lambda: live and start_inherited_import(lifespan_drive_root)),  # the one-time disk walk, off the ready path
         ("usage_store", _usage_store),
+        ("event_queue_preparation", lambda: live and startup_provider_ready and server_boot.prepare_event_queue(lifespan_drive_root, lambda: (
+            panic_termination_requested() or any(e.is_set() for e in (body_stop, _supervisor_stop, _restart_requested, _exit_signalled))))),
         ("pinned_node", lambda: live and server_boot.prepare_pinned_node(lifespan_drive_root)),  # local, before any Playwright
         ("skills", lambda: live and server_boot.seed_skills(lifespan_drive_root, settings, provider_ready=startup_provider_ready)),
         ("projects", lambda: live and server_boot.reconcile_projects(lifespan_drive_root)),
@@ -1237,7 +1237,7 @@ async def lifespan(app):
         ("mcp", server_boot.mcp_startup),
         ("extension_reconcile", lambda: live and server_boot.on_loop(_event_loop, _start_extension_reconcile())),
         ("store", lambda: live and server_boot.wait_store_published(lifespan_drive_root, body_stop)),
-        ("supervisor", lambda: server_boot.wait_supervisor_outcome(_supervisor_ready, lambda: _supervisor_error, body_stop)),
+        ("supervisor_outcome", lambda: server_boot.wait_supervisor_outcome(_supervisor_ready, lambda: _supervisor_error, body_stop)),
     ]
     start_boot_coordinator(steps, stop=body_stop)
     BOOT.serving()
