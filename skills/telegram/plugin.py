@@ -25,6 +25,7 @@ from .lib.telegram_api import (
     is_transient_telegram_error,
     markdown_to_telegram_html,
     message_chunks,
+    replacing_request,
     next_telegram_retry_delay,
     _LOCALIZED_TEXTS,
     _MAX_TELEGRAM_UPLOAD_BYTES,
@@ -52,7 +53,7 @@ from .lib.miniapp_registration import _read_status, register as register_miniapp
 from .lib.telegram_token import _report_failure, _wait_for_bot_token, binding_for, make_token_observer
 from .lib.telegram_connection import (  # status of the token, the bridge and the Mini App
     _COMMAND_MODE_FULL, _COMMAND_MODE_STRICT, _VALID_COMMAND_MODES, _fail_permanent_poll_rejection,
-    _make_connection, _make_status, _save_bridge_status, connection_components, poll_failure_reason,
+    _make_status, _save_bridge_status, connection_components, poll_failure_reason, register_connection,
 )
 from .lib.telegram_connection import _bridge_status, _connection_fields  # noqa: F401 — the plugin's status facade
 from .scripts.telegram_settings import (
@@ -1043,8 +1044,7 @@ def _make_outbound(api, cue: TypingCue | None = None):
             chat_id = _target_chat(local_settings, event)
             if not chat_id:
                 return
-            client = _telegram_client(api, event, chat_id)
-            lang = telegram_i18n.language()
+            lang = telegram_i18n.language()  # a client (and so a bot token) only where a message goes
 
             # Subagent lifecycle → one dedicated bubble per subagent, edited in
             # place across its lifecycle (not a flood of new messages). Since 6.22
@@ -1054,7 +1054,8 @@ def _make_outbound(api, cue: TypingCue | None = None):
             sub_event = str(event.get("subagent_event") or "").strip().lower()
             if sub_event:
                 if _subagent_cards_enabled(local_settings):
-                    await _render_subagent_card(api, client, chat_id, event, sub_event, lang, quiet=_is_silent_mode_enabled(local_settings))
+                    await _render_subagent_card(api, _telegram_client(api, event, chat_id), chat_id, event, sub_event, lang,
+                                                quiet=_is_silent_mode_enabled(local_settings))
                 return
 
             # Card-internal host rows: the web shows them inside a task card, and
@@ -1087,7 +1088,7 @@ def _make_outbound(api, cue: TypingCue | None = None):
                 if notice:
                     if picker:
                         _clear_silent_msg(api, chat_id)
-                    await client.send_message(chat_id, notice, parse_mode="")
+                    await _telegram_client(api, event, chat_id).send_message(chat_id, notice, parse_mode="")
                 return
 
             text = str(event.get("text") or "").strip()
@@ -1106,6 +1107,7 @@ def _make_outbound(api, cue: TypingCue | None = None):
                     text = _completion_text(event, str(event.get("task_id") or ""), lang)
             if not text:
                 return
+            client = _telegram_client(api, event, chat_id)
             # Honor the host's markdown hint: plain text (markdown=False) is sent
             # verbatim so literal *, _, `, [] aren't mis-parsed as Telegram
             # formatting; an absent/True hint renders markdown→HTML as before.
@@ -1122,17 +1124,22 @@ def _make_outbound(api, cue: TypingCue | None = None):
 
             # An answer never lands under, or revives, the typing it ends (DESIGN §9).
             async with _cue_message(cue, chat_id) as delivered:
-                # editMessageText returns False on any failure (too old, deleted, parse error): send instead.
-                if tracked_msg_id and _replaceable_progress(api, client.bot_id, chat_id, tracked_msg_id, event):
-                    edited = await client.edit_message_text(chat_id, tracked_msg_id, text, parse_mode=parse_mode)
-                    if not edited and parse_mode:
-                        edited = await client.edit_message_text(chat_id, tracked_msg_id, text, parse_mode="")
-                    if edited:
+                with contextlib.ExitStack() as fallbacks:
+                    # editMessageText returns False on any failure (too old, deleted, parse error): send instead.
+                    if tracked_msg_id and _replaceable_progress(api, client.bot_id, chat_id, tracked_msg_id, event):
+                        edited = await client.edit_message_text(chat_id, tracked_msg_id, text, parse_mode=parse_mode)
+                        if not edited:
+                            fallbacks.enter_context(replacing_request())
+                        if not edited and parse_mode:
+                            edited = await client.edit_message_text(chat_id, tracked_msg_id, text, parse_mode="")
+                            if not edited:
+                                fallbacks.enter_context(replacing_request())
+                        if edited:
+                            delivered()
+                            return
+                    msg_id = await client.send_message(chat_id, text, parse_mode=parse_mode, **({"disable_notification": True} if quiet else {}))
+                    if msg_id:
                         delivered()
-                        return
-                msg_id = await client.send_message(chat_id, text, parse_mode=parse_mode, **({"disable_notification": True} if quiet else {}))
-                if msg_id:
-                    delivered()
 
             if single and msg_id:
                 _set_silent_msg(api, client.bot_id, chat_id, msg_id)  # an edit of a split note would erase its last part
@@ -1173,9 +1180,9 @@ def _make_photo(api):
         try:
             local_settings = _load_settings(api)
             chat_id = _target_chat(local_settings, event)
-            client = _telegram_client(api, event, chat_id)
             image_base64 = str(event.get("image_base64") or "").strip()
             if chat_id and image_base64:
+                client = _telegram_client(api, event, chat_id)
                 # Media cannot replace a text bubble in Telegram — break the
                 # silent chain so the next outbound starts a fresh message.
                 _clear_silent_msg(api, chat_id)
@@ -1197,9 +1204,9 @@ def _make_video(api):
         try:
             local_settings = _load_settings(api)
             chat_id = _target_chat(local_settings, event)
-            client = _telegram_client(api, event, chat_id)
             video_base64 = str(event.get("video_base64") or "").strip()
             if chat_id and video_base64:
+                client = _telegram_client(api, event, chat_id)
                 # Media cannot replace a text bubble — reset silent tracking.
                 _clear_silent_msg(api, chat_id)
                 caption = str(event.get("caption") or "")
@@ -1220,10 +1227,10 @@ def _make_document(api):
         try:
             local_settings = _load_settings(api)
             chat_id = _target_chat(local_settings, event)
-            client = _telegram_client(api, event, chat_id)
             file_base64 = str(event.get("file_base64") or "").strip()
             file_ref = event.get("file_ref") if isinstance(event.get("file_ref"), dict) else None
             if chat_id and (file_base64 or file_ref):
+                client = _telegram_client(api, event, chat_id)
                 # Media/files cannot replace a text bubble — reset silent tracking.
                 _clear_silent_msg(api, chat_id)
                 import base64 as _base64
@@ -1246,6 +1253,9 @@ def _make_document(api):
                             except TelegramRequestRejected as exc:
                                 if not exc.plain_retry_safe:
                                     raise
+                                with replacing_request():
+                                    await client.send_message(chat_id, notice + " " + t["file_open_app_hint"], parse_mode="")
+                                return
                         await client.send_message(chat_id, notice + " " + t["file_open_app_hint"], parse_mode="")
                         return
                     file_handle = source.open("rb")
@@ -1272,12 +1282,13 @@ def _make_document(api):
                             raise
                         if file_handle is not None:
                             file_handle.seek(0)
-                        await client.send_document(
-                            chat_id,
-                            file_bytes,
-                            filename=filename,
-                            caption=caption,
-                        )
+                        with replacing_request():
+                            await client.send_document(
+                                chat_id,
+                                file_bytes,
+                                filename=filename,
+                                caption=caption,
+                            )
                 else:
                     await client.send_document(
                         chat_id,
@@ -1309,9 +1320,9 @@ def _make_links(api):
         try:
             local_settings = _load_settings(api)
             chat_id = _target_chat(local_settings, event)
-            client = _telegram_client(api, event, chat_id)
             if not chat_id:
                 return
+            client = _telegram_client(api, event, chat_id)
             title = str(event.get("title") or "").strip() or "Links"
             raw_actions = event.get("actions") if isinstance(event.get("actions"), list) else []
             actions = []
@@ -1335,7 +1346,8 @@ def _make_links(api):
                     raise
                 api.log("warning", "Telegram links keyboard failed; sending a plain list.")
                 plain_text = "\n".join([title, *(f"{label} — {url}" for label, url in actions)])
-                await client.send_message(chat_id, plain_text, parse_mode="")
+                with replacing_request():
+                    await client.send_message(chat_id, plain_text, parse_mode="")
         except Exception as exc:
             _report_failure(api, "links", exc)
     return handle
@@ -1346,9 +1358,9 @@ def _make_quiz(api, cue: TypingCue | None = None):
         try:
             local_settings = _load_settings(api)
             chat_id = _target_chat(local_settings, event)
-            client = _telegram_client(api, event, chat_id)
             if not chat_id:
                 return
+            client = _telegram_client(api, event, chat_id)
             question = str(event.get("question") or "").strip()
             raw_options = event.get("options") if isinstance(event.get("options"), list) else []
             # Shared quiz contract cap: ouroboros.tools.core._MAX_QUIZ_OPTIONS.
@@ -1448,20 +1460,24 @@ def register(api):
     # Every mirrored message goes through one durable, ordered journal (lib/telegram_outbox.py).
     outbox = outbox_for(api)
     api.register_supervised_task("outbox", outbox.run, restart_policy="on_failure", max_restarts=10)
-    api.subscribe_event("chat.outbound", outbox.subscriber("outbound", _make_outbound(api, cue), decide=True))
+
+    def routed(event):  # each content handler's first filter: no target chat, nothing to save
+        return bool(_target_chat(_load_settings(api), event))
+    api.subscribe_event("chat.outbound", outbox.subscriber("outbound", _make_outbound(api, cue), decide=True, routed=routed))
     api.subscribe_event("chat.typing", _make_typing(cue))
-    api.subscribe_event("chat.photo", outbox.subscriber("photo", _make_photo(api)))
-    api.subscribe_event("chat.video", outbox.subscriber("video", _make_video(api)))
-    api.subscribe_event("chat.document", outbox.subscriber("document", _make_document(api)))
-    api.subscribe_event("chat.links", outbox.subscriber("links", _make_links(api)))
-    api.subscribe_event("chat.quiz", outbox.subscriber("quiz", _make_quiz(api, cue)))
-    api.subscribe_event("chat.quiz_state", outbox.subscriber("quiz_state", _make_quiz_state(api)))
+    api.subscribe_event("chat.photo", outbox.subscriber("photo", _make_photo(api), routed=routed))
+    api.subscribe_event("chat.video", outbox.subscriber("video", _make_video(api), routed=routed))
+    api.subscribe_event("chat.document", outbox.subscriber("document", _make_document(api), routed=routed))
+    api.subscribe_event("chat.links", outbox.subscriber("links", _make_links(api), routed=routed))
+    api.subscribe_event("chat.quiz", outbox.subscriber("quiz", _make_quiz(api, cue), routed=routed))
+    api.subscribe_event("chat.quiz_state", outbox.subscriber(  # a card's edit: only once a card is remembered
+        "quiz_state", _make_quiz_state(api), routed=lambda event: telegram_quiz.card_follows(api, event)))
     # GET hydrates the declarative form with what is stored; POST saves it.
     api.register_route("settings/save", handler=_make_settings_save(api), methods=("GET", "POST"))
     api.register_route("miniapp/status", handler=_make_status(api), methods=("POST",))
     # Share… in the Mini App: the bridge's own client prepares the owner's message for Telegram's chat picker.
     api.register_route("miniapp/prepare-share", handler=make_prepare_share(api, _bridge_client), methods=("POST",))
-    api.register_route("connection", handler=_make_connection(api), methods=("GET", "POST"))
+    register_connection(api)  # Connection's status and its kept-copies form
     api.register_settings_section(
         "telegram",
         title="Telegram",
