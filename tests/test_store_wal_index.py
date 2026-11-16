@@ -70,11 +70,14 @@ def _shared_held(database) -> bool:
 def _skip_without_search_only_open() -> None:
     """A folder searched but not listed is crossed only by a search-only open (``confined_files.SEARCH_DIR_FLAGS``):
     ``os.O_SEARCH`` or ``O_PATH``, which CPython exposes only where its build's headers define them (setup-python's
-    macOS 3.10.11 has neither). Without one the root opens with the listing right, as ``confined_files`` says."""
+    macOS 3.10.11 has neither). Without one the root opens with the listing right, as ``confined_files`` says. The skip
+    reads the interpreter, never the product's constant: where the interpreter has the open, a constant that lost it is
+    a failure here, not a skip."""
     from ouroboros import confined_files
 
-    if os.name != "nt" and not confined_files.SEARCH_DIR_FLAGS:
+    if os.name != "nt" and not (hasattr(os, "O_SEARCH") or hasattr(os, "O_PATH")):
         pytest.skip("this interpreter has no search-only open (os.O_SEARCH, O_PATH)")
+    assert os.name == "nt" or confined_files.SEARCH_DIR_FLAGS, "the interpreter has a search-only open the product lost"
 
 
 def _live_store(root):
