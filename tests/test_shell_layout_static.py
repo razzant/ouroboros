@@ -124,6 +124,13 @@ def test_mains_name_yields_to_its_count_and_mark_in_a_narrow_card():
     assert "flex: 0 0 18px;" in _block(css, ".nav-ouro-line1 > .nav-mark-slot {")
 
 
+def test_logs_use_the_space_below_clear_for_the_long_filter_word():
+    css = _read("web/style.css")
+    logs = _block(css, "@container dashboard (max-width: 27.75rem) {")
+    assert "grid-column: 4; grid-row: 1;" in _block(logs, ".logs-filters > .logs-inline-clear {")
+    assert "grid-column: 3 / -1;" in _block(logs, ".logs-filters > .filter-chip:nth-child(6) {")
+
+
 def test_a_section_gives_the_places_control_up_only_where_a_page_replaced_its_list():
     """In the stack layout a section's page is one row, Back and its name, where the places control stood. From 40rem
     a section holds its list beside the page and the first-level page has no Back: there the places control is the

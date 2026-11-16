@@ -6264,6 +6264,8 @@ body.keyboard-open :is(.ui-modal, .marketplace-modal) { margin-block: 0 auto; }
 @container dashboard (max-width: 27.75rem) {
     .logs-filters { display: grid; grid-template-columns: repeat(3, auto) minmax(0, 1fr); justify-items: start; }
     .logs-filters > .logs-inline-clear { grid-column: 4; grid-row: 1; justify-self: end; }
+    /* Consciousness can use the space below Clear; its wider system-font word must not widen column three. */
+    .logs-filters > .filter-chip:nth-child(6) { grid-column: 3 / -1; }
 }
 
 .logs-card { display: grid; gap: var(--space-2); min-width: 0; }
