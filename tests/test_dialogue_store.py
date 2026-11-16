@@ -161,6 +161,12 @@ def test_a_page_of_rows_reaches_python_in_one_step_whatever_its_length(tmp_path,
     assert sum(map(len, found.values())) == 1_203 and sum(stepped) == 5 + 3  # 250 addresses a step, then 500 rows
     stepped.clear()
     assert len(dp.ordinals_of(tmp_path, "chat", [row.seq for row in every])) == 1_203 and sum(stepped) == 3
+    for room in range(10, 70):  # sixty more rooms: their facts still reach Python in one step
+        ds.append(tmp_path, "chat", chat(f"r{room}", f"room {room}", chat_id=room))
+    stepped.clear()
+    listed = ds.rooms(tmp_path)
+    assert sum(stepped) == 1 and [room["chat_id"] for room in listed] == [1, 2, 3, *range(10, 70)]
+    assert listed == [ds.room(tmp_path, room["chat_id"]) for room in listed], "every column one room's read has"
 
 
 # ---- the writer seam ------------------------------------------------------------------------
