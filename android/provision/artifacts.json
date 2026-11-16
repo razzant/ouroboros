@@ -183,9 +183,9 @@
   },
   {
     "name": "node",
-    "url": "https://nodejs.org/dist/v24.16.0/node-v24.16.0-linux-arm64.tar.gz",
-    "sha256": "589f5b6dd4fcfee4dfda73013903c966abaa8abd93dbc9d436544e472b4f0e74",
-    "size_bytes": 56772294,
+    "url": "https://nodejs.org/dist/v24.22.3/node-v24.22.3-linux-arm64.tar.gz",
+    "sha256": "261af2af250dfd7e9f25cf151d1b2713a0adf8f10a9ad116c4947f68627affe8",
+    "size_bytes": 58051304,
     "extract_to": "node",
     "strip_components": 1
   },

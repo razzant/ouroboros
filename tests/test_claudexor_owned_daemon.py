@@ -3247,22 +3247,48 @@ def test_status_payload_marks_facets_ok_when_the_daemon_answered(monkeypatch, tm
     assert [h["id"] for h in payload["harnesses"]] == ["codex"]
 
 
-def test_status_payload_discloses_a_refused_per_harness_model_read(monkeypatch, tmp_path):
-    """`include=models` asks the daemon for each harness's model list separately,
-    and one of those reads can refuse while the catalog itself landed. The row
-    carries `models_error` so the UI can say "not checked" instead of calling a
-    saved model undiscovered — a verdict about a search nobody ran. Nothing
-    pinned the field's emission, so dropping it left every suite green."""
+@pytest.mark.parametrize("route", ["accounts", "legacy"])
+def test_status_payload_asks_model_catalogs_together_and_discloses_a_refusal(monkeypatch, tmp_path, route):
+    """`include=models` asks each visible harness's model list in its own request,
+    and asks them together: a busy daemon answers every request late, so asked one
+    after another the read paid that wait once per harness. The pin is a
+    rendezvous, as in the fan-out test: the three reads must meet at one barrier,
+    which reads asked one after another never do. They are then released in
+    reverse catalog order, so rows filled by completion would usually come out
+    crossed; the barrier, not this order, is the guarantee. The hidden harness is
+    never asked. One read refuses while the catalog itself landed: its
+    row carries `models_error` so the UI can say "not checked" instead of calling
+    a saved model undiscovered, a verdict about a search nobody ran, and its
+    siblings keep their lists. Both the negotiated accounts view and the legacy
+    list take this path."""
+    import threading
+
     from ouroboros.gateway.claudexor_accounts import _status_payload
     from ouroboros.gateways import claudexor as gw
     from ouroboros.gateways.claudexor import ClaudexorUnavailable
+
+    visible = ["codex", "claude", "cursor"]
+    rendezvous = threading.Barrier(len(visible), timeout=10)
+    finished = {harness: threading.Event() for harness in visible}
+    asked = []
+
+    def answer(harness_id):
+        asked.append(harness_id)
+        rendezvous.wait()
+        try:
+            for later in visible[visible.index(harness_id) + 1:]:
+                assert finished[later].wait(10)
+            if harness_id == "claude":
+                raise ClaudexorUnavailable("daemon_unreachable", "model read refused")
+        finally:
+            finished[harness_id].set()
 
     class FakeDaemon:
         def status_dict(self):
             return {"state": "running"}
 
     class FakeGateway:
-        engine_version = "3.3.13"
+        engine_version = "6.1.2"
 
         def __init__(self, endpoint):
             pass
@@ -3276,16 +3302,18 @@ def test_status_payload_discloses_a_refused_per_harness_model_read(monkeypatch, 
         def handshake(self, **_kw):
             return {}
 
+        def operations(self):
+            if route == "legacy":
+                return []
+            return [{"method": "GET", "path": "/v2/harnesses/:id/models",
+                     "parameters": [{"name": "view", "location": "query", "enum": ["accounts"]}]}]
+
         def agent_capabilities(self):
-            return {"harnesses": [{"id": "codex", "displayName": "Codex CLI",
-                                   "status": "ok", "enabled": True}]}
-
-        def harnesses(self):
-            return [{"id": "codex", "manifest": {"capability_profile": {"auth": {
-                "supported_sources": ["native_session"]}}}}]
-
-        def harness_models(self, harness_id):
-            raise ClaudexorUnavailable("daemon_unreachable", "model read refused")
+            row = {"status": "ok", "enabled": True, "setupLogin": {"mode": "in_app"}}
+            return {"harnesses": [{**row, "id": "codex", "displayName": "Codex CLI"},
+                                  {**row, "id": "openrouter", "displayName": "OpenRouter", "setupLogin": None},
+                                  {**row, "id": "claude", "displayName": "Claude Code"},
+                                  {**row, "id": "cursor", "displayName": "Cursor"}]}
 
         def credential_profiles(self):
             return {"profiles": [], "harnessAccounts": [], "accountPools": []}
@@ -3293,20 +3321,43 @@ def test_status_payload_discloses_a_refused_per_harness_model_read(monkeypatch, 
         def quota_snapshots(self):
             return []
 
+        def harness_model_catalog(self, harness_id, *, view=None, credential_profile_id=None):
+            assert view == "accounts"
+            answer(harness_id)
+            return {"accounts": [{"credentialProfileId": f"{harness_id}-1", "availability": "available",
+                                  "catalog": {"source": "live", "models": [{"id": f"{harness_id}-model"}]}}]}
+
+        def harness_models(self, harness_id):
+            answer(harness_id)
+            return [{"id": f"{harness_id}-model"}]
+
     monkeypatch.setattr(owned, "get_owned_daemon", lambda: FakeDaemon())
     monkeypatch.setattr(owned, "owned_config_dir", lambda: tmp_path / "cfg")
     monkeypatch.setattr(gw, "discover_daemon_at", lambda _path: object())
     monkeypatch.setattr(gw, "ClaudexorGateway", FakeGateway)
 
+    # Asked one after another, the first read waits for siblings that never
+    # start: the barrier breaks and the status read raises.
     payload = _status_payload(include_models=True)
 
-    row = payload["harnesses"][0]
-    assert row["models"] == []
-    assert row["models_error"] == "daemon_unreachable", (
+    assert sorted(asked) == sorted(visible), "the hidden harness is never asked"
+    assert [row["id"] for row in payload["harnesses"]] == visible
+    codex, claude, cursor = payload["harnesses"]
+    for row in (codex, cursor):
+        assert [model["id"] for model in row["models"]] == [f"{row['id']}-model"]
+        assert "models_error" not in row
+    if route == "accounts":
+        assert [model["credential_profile_id"] for model in codex["models"]] == ["codex-1"]
+        assert cursor["model_catalog"]["accounts"][0]["credentialProfileId"] == "cursor-1"
+    else:
+        assert "model_catalog" not in codex and "model_catalog" not in cursor
+    assert claude["models"] == []
+    assert claude["models_error"] == "daemon_unreachable", (
         "a refused model read is indistinguishable from a harness with no models"
     )
+    assert "model_catalog" not in claude
     # The CATALOG itself answered, so its facet stays authoritative.
-    assert payload["reads"]["catalog"] == "ok"
+    assert payload["reads"]["catalog"] == "ok" and payload["daemon"]["state"] == "running"
 
 
 @pytest.mark.parametrize("half", ["accounts_half_named", "accounts_half_native"])

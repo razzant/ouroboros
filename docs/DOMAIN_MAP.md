@@ -12,23 +12,23 @@ The manifest is the SSOT of the module→domain assignment (1:1, complete over t
 | D02 | LLM client, routing & providers | 49 | 0 |
 | D03 | Context assembly, fit & compaction | 40 | 0 |
 | D04 | Tool execution: registry, access & typed results | 24 | 0 |
-| D05 | Tool surfaces: files, code, shell, media, external | 57 | 0 |
+| D05 | Tool surfaces: files, code, shell, media, external | 58 | 0 |
 | D06 | Review stack | 101 | 0 |
 | D07 | Delegation, subagents & Claudexor | 113 | 0 |
 | D08 | Supervisor: queue, workers, events & runtime control | 80 | 0 |
 | D09 | Cancellation, owner control & process custody | 28 | 0 |
 | D10 | Git, update & release machinery | 40 | 0 |
-| D11 | Gateway, server & Web UI | 121 | 0 |
+| D11 | Gateway, server & Web UI | 122 | 0 |
 | D12 | Settings & configuration | 28 | 0 |
 | D13 | Safety, guards & runtime mode | 12 | 0 |
-| D14 | Skills & extensions | 73 | 0 |
+| D14 | Skills & extensions | 74 | 0 |
 | D15 | Memory, knowledge, consciousness & self-evolution | 40 | 0 |
 | D16 | Observability, usage accounting & cost | 32 | 0 |
 | D17 | Projects, workspaces & task results | 60 | 0 |
 | D18 | Launcher, packaging, platform & shared substrate | 42 | 0 |
 | D19 | Frozen contracts (ABI) | 16 | 0 |
 | D20 | Presence | 26 | 0 |
-| **total** | | **1049** | **0** |
+| **total** | | **1052** | **0** |
 
 ## Dependency direction matrix (strict, pinned)
 
@@ -65,7 +65,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
 
 ## Hidden coupling (classified out of the strict graph)
 
-- lazy-only cross-domain pairs: **129**
+- lazy-only cross-domain pairs: **130**
   - D01->D08
   - D01->D10
   - D01->D11
@@ -102,6 +102,7 @@ Rows may import columns (`[graph].allowed`). `·` = forbidden direction.
   - D06->D03
   - D06->D05
   - D06->D08
+  - D06->D11
   - D06->D14
   - D06->D15
   - D07->D03
@@ -417,6 +418,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/mcp_browser_guard.py`
 - `ouroboros/mcp_catalog.py`
 - `ouroboros/mcp_client.py`
+- `ouroboros/mcp_discovery.py`
 - `ouroboros/mcp_headers.py`
 - `ouroboros/mcp_import.py`
 - `ouroboros/mcp_oauth.py`
@@ -903,6 +905,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/gateway/secret_rows.py`
 - `ouroboros/gateway/settings.py`
 - `ouroboros/gateway/settings_secrets.py`
+- `ouroboros/gateway/skill_mcp_contracts.py`
 - `ouroboros/gateway/skill_my_skills.py`
 - `ouroboros/gateway/skill_publish.py`
 - `ouroboros/gateway/skill_source_contracts.py`
@@ -1048,6 +1051,7 @@ No function body (≥ 10 normalized lines) is shared verbatim across domains. Ne
 - `ouroboros/skill_lifecycle_actions.py`
 - `ouroboros/skill_lifecycle_queue.py`
 - `ouroboros/skill_loader.py`
+- `ouroboros/skill_mcp.py`
 - `ouroboros/skill_owner_attestation.py`
 - `ouroboros/skill_payload_binding.py`
 - `ouroboros/skill_peer_inventory.py`

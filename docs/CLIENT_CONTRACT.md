@@ -201,7 +201,7 @@ To finish setup, send `POST /api/onboarding/complete`:
 
 An empty review pool is an explicit choice, not a production recommendation. Setup validates configuration, not reachability or successful generation; test the provider separately. Optional model slots may be blank to keep inheritance. Completion on an existing install is still a settings write, not an idempotent readiness check. `400` rejects input, `403` is a permission refusal, and `409 onboarding_state_changed` means the settings changed before commit.
 
-`POST /api/onboarding/subagents/preview` takes the same body and returns, without saving, the agent roster and the model settings setup would produce, and `known_spend_gaps`: the names of what the draft's limits cannot count (roles on a route with no known price; empty when each has one).
+`POST /api/onboarding/subagents/preview` takes the same body and returns, unsaved, the agent roster and model settings setup would produce, `known_spend_gaps` (names the draft's limits cannot count: no known price) and `partly_counted_spend` (`{name, condition}`: priced only under it).
 
 `POST /api/onboarding/model-catalog` takes the same body and answers as `GET /api/model-catalog` (§14) for the access the draft names: its keys, connection rows and local model, which no saved file holds yet. It reads only those access fields, so it answers while Main is blank, and it saves and records nothing. A connection whose kept key the draft would send to another address, or to the same address with certificate checking turned off, is not asked: it is an `errors` row with `stage: "kept_key"`. A key typed in the draft goes where the draft says.
 
@@ -644,6 +644,7 @@ Files produced by tasks are covered in §6.
 
 **What is installed:**
 - `GET /api/extensions` (`ExtensionsIndexResponse`) lists every installed skill (`InstalledSkill`) and what is live. It makes no network call.
+- A skill row's `mcp_servers` (`[]` if none declared, absent on identity-collision rows) gives `{id, title, conflict, bound, configured, tool_count, listed, error, notes}`: `conflict`, another row claims the id; `bound`, this skill owns the row; `configured`, binding and MCP are on; `listed`/`tool_count`, last listing; `error`, refusal or failed listing; `notes`, successful listing diagnostics.
 - `GET /api/extensions/{skill}/manifest` and `/settings_section` read one skill.
 - `GET /api/skills/daemons` lists companion processes.
 
@@ -659,6 +660,7 @@ Files produced by tasks are covered in §6.
 - **Delete:** `POST /api/skills/{skill}/delete` unloads an external or self-authored skill and removes its payload and state; a repeat answers 404. `deleted_state` confirms state removal.
 - **Publication check:** `POST /api/skills/{skill}/publish-preflight` is read-only; every status answers the same shape, and `state: "hard_block"` is a refusal. An optional body `{destination: {source_id, mode}}` (`SkillPublishPreflightRequest`; mode `origin`, `entry` or `new_entry`) picks where it would go; the answer's `repository` is that destination (default: where the skill came from, else the hub). Missing publication prerequisites may answer `409` before the skill is looked up; read `reason_code`, not an assumed `404` for an unknown name.
 - **Reconcile:** `POST /api/skills/{skill}/reconcile` brings one extension's live state in line with its saved state.
+- **Connect tools:** `GET /api/skills/{skill}/mcp-connect` previews the declared rows, what runs, the `other_servers` turning MCP on starts and its `settings_digest`, writing nothing. `POST` (`SkillMcpConnectRequest`) confirms with that digest, `expected_content_hash` (the preview’s `content_hash`) and `confirm_other_servers: true` if any. A changed document or revision, conflict, unready skill or policy refuses with `saved: false`; under `Prefer: respond-async` an unsettled confirm is `SkillMcpConnectPending`: unconfirmed, follow its job.
 
 **Required by a deployment.** Under a policy file that requires extensions, `GET /api/extensions` adds `deployment: {when_unmet, required}` (each requirement as the server process observes it: `state`, `reason`, `detail`, the observing `process`; a missing package included), and a required skill's row carries its own `deployment` row. Its switch and removal are the organization's: Off, delete, uninstall, update, a same-name install and a repair task answer 403 `code: managed_by_deployment` before any effect; Review, attest and grant stay the employee's. No answer carries a value the file fixes.
 
@@ -739,7 +741,7 @@ with the `presence` permission, `id`, `label`, and `destination: vendor:<Name>`;
 `scope` defaults to `account` (or `conversation`), `wakes` lists typed wake facts,
 `source` uses the chip contract, `settings` names a section, and `read_only: provider`
 indicates provider support. Their `tools` list carries full names and declared
-`effect`, `target`, `conversation`, `thread` facts. No speech-engine runtime/route
+`effect`, `target`, `conversation`, `thread`, `message`, `sends` and `touches` facts. No speech-engine runtime/route
 is required. `icon_spec` is `{kind:"host", name}` or `{kind:"svg", svg}` with
 sanitized geometry, else `{}` for the fallback; the `icon` declaration remains
 a host name or `ui/icon.svg`. SVG assets carry sandbox CSP. Installed and Browse
@@ -883,7 +885,7 @@ A package-manager copy may only advise: display the vendor sentence, never run i
 
 ## 14. Models, local model and MCP
 
-**The model catalog.** `GET /api/model-catalog` (`ModelCatalogResponse`) lists selectable models: every configured provider's, or with `source_id` one agent account's. `value` is what a model setting stores. A provider that failed is an `errors` row and the read is still 200: missing models are unknown, not proof of none. An OpenRouter row may carry `price` (USD per 1M tokens, as its catalog states it: `input`, `output`, `tiers` by input length, and `cache_write` for the prompt-cache tier this install sends, each absent rather than guessed; `cache_write_ttl` names that tier, and a client says the figure only while the settings document still names it) and `context_window` (the window its catalog publishes, for display). `model_sources` and `account_catalogs` pass through. A catalog's `sourceProgram: {path, version} | null` names its actual producer; account catalog and source envelopes carry provenance once, rather than copying it into each model. Null means no proven program producer, never a guessed inventory version. The opened chooser's non-option closing group shows that provenance and any engine-offered Update; keyboard/touch actions keep the list open, show progress/result and refresh suggestions without replacing typed IDs. API-only lists have no program row. Opening compares selected path/version strings with the producer and refreshes mismatched catalogs once; unchanged selections add no catalog read. Choosers subscribe to status only while an operation is pending.
+**The model catalog.** `GET /api/model-catalog` (`ModelCatalogResponse`) lists selectable models: every configured provider's, or with `source_id` one agent account's. `value` is what a model setting stores. A provider that failed is an `errors` row and the read is still 200: missing models are unknown, not proof of none. An OpenRouter row may carry `price` (USD per 1M tokens, as its catalog states it: `input`, `output`, `tiers` by input length, and `cache_write` for the prompt-cache tier this install sends, each absent rather than guessed; `cache_write_ttl` names that tier, and a client says the figure only while the settings document still names it) and `context_window` (the window its catalog publishes, for display); a DeepSeek row, `price_condition: "off_peak_usd"` where its published entry prices text alone off-peak on a USD key (a condition, no figure). `model_sources` and `account_catalogs` pass through. A catalog's `sourceProgram: {path, version} | null` names its actual producer; account catalog and source envelopes carry provenance once, rather than copying it into each model. Null means no proven program producer, never a guessed inventory version. The opened chooser shows that provenance and any engine-offered Update as DESIGN §7 says. Opening compares selected path/version strings with the producer and refreshes mismatched catalogs once; unchanged selections add no catalog read. Choosers subscribe to status only while an operation is pending.
 
 **The local model:**
 - `POST /api/local-model/start` (`LocalModelStartRequest`) answers `{status: "starting"}` after the model is downloaded; the request stays open meanwhile. It is not idempotent. Then poll `GET /api/local-model/status` until `status` is `ready` or `error` (`offline`, `downloading` and `loading` come before).
@@ -891,7 +893,7 @@ A package-manager copy may only advise: display the vendor sentence, never run i
 - `POST /api/local-model/test` runs two real completions; a failed probe is still 200. `POST /api/local-model/stop` stops it (and an install in progress) and is safe to repeat.
 
 **MCP servers:**
-- `GET /api/mcp/status` lists the configured servers and their last listed tools; it makes no network call.
+- `GET /api/mcp/status` lists the configured servers and their last listed tools; it makes no network call. Server rows add `skill` (owning skill, else `""`) and `skill_error` (why its binding is unavailable, else `""`); configuration-error rows omit both.
 - `POST /api/mcp/refresh` lists one server's tools (`{server_id}`) or every server's (`{}`); it is safe to repeat.
 - `POST /api/mcp/sign-in` runs one step of a remote server's sign-in: `{action: "begin", server_id}` returns the provider's `url` and the `redirect_uri` it returns to (an owner's own app adds `client_id`, `client_secret`); `{action: "complete", state, code|error, iss}` (or `returned_url`, the address the browser stopped on) finishes it and lists the server; `{action: "sign_out", server_id}` forgets the tokens, with `revoked` saying what the provider confirmed. A refusal is 200 with `ok: false`, `code: "MCP_AUTH_REQUIRED"` and its `reason`.
 - `POST /api/mcp/test` connects once to a draft server (`{server}`, with `server_id` to fill masked secrets from that saved server) and saves nothing. A failed test is 200 with `ok: false`.

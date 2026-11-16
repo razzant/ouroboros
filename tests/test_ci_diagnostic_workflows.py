@@ -751,7 +751,7 @@ def test_full_lane_runs_as_nine_guarded_shards_under_step_ceilings(tmp_path):
     # Every producer step has its own ceiling, and their sum stays under the job's: a step
     # ceiling fails the step and leaves the evidence steps running, the job ceiling cancels them.
     ceilings = (install["timeout-minutes"], lane["timeout-minutes"], tools["timeout-minutes"])
-    assert ceilings == (45, 90, 20) and sum(ceilings) < job["timeout-minutes"] == 170
+    assert ceilings == (70, 90, 20) and sum(ceilings) < job["timeout-minutes"] == 195
     assert "chromium webkit" in install["run"]
     for producer in (lane, tools):
         assert producer["env"]["OUROBOROS_EXPECT_BROWSER_ENGINES"] == "chromium,webkit"
@@ -1109,6 +1109,7 @@ case "$role $*" in
   "python -m playwright install-deps --dry-run "*) kind=resolve ;;
   "python -m playwright install "*) kind=browsers ;;
   "python -m ouroboros.chromium_runtime install") kind=cft ;;
+  "python "*/scripts/download_node_standalone.py) kind=node ;;
   *) echo "unexpected call: $role $*" >&2; exit 97 ;;
 esac
 n=0
@@ -1201,21 +1202,27 @@ def _until_hung(stand_ins):
 
 
 @pytest.mark.parametrize("workflow, job, arguments", [
-    ("ui-browser.yml", "ui-shard", "--pinned-chromium chromium webkit"), (*PARTIAL, "chromium webkit")],
+    ("ui-browser.yml", "ui-shard", "--pinned-node --pinned-chromium chromium webkit"),
+    (*PARTIAL, "--pinned-node chromium webkit")],
     ids=["full-lane", "partial"])
 def test_ui_browser_installs_bound_each_download_below_their_step_ceiling(browser_install, workflow, job, arguments):
     """#2895: an Ubuntu mirror serving 30 KB/s held `playwright install --with-deps` to the 45-minute step ceiling."""
     install = _steps(workflow, job)["install_browsers"]
     assert install["run"] == f"python -I -S scripts/ci_browser_install.py {arguments}"
-    assert install["timeout-minutes"] == 45 and "continue-on-error" not in install
+    assert install["timeout-minutes"] == 70 and "continue-on-error" not in install
     assert install["env"] == {"PLAYWRIGHT_BROWSERS_PATH": "${{ runner.temp }}/ui-browsers"}
     text = (ROOT / ".github/workflows" / workflow).read_text(encoding="utf-8")
     assert "playwright install" not in text and "--with-deps" not in text and "apt-get" not in text
-    # Two bounded stages of two attempts, each stop's three graces included, take at most 41 minutes and
-    # leave the rest of the step's unchanged ceiling to dpkg's single run.
+    # Packages and browsers, and with --pinned-node the reviewed Node first: each bounded stage has two attempts,
+    # each stop's three graces included. They take at most 62 minutes and leave the step's ceiling at least eight
+    # more for dpkg's single run, which the 45-minute ceiling of two stages left four.
     assert browser_install.ATTEMPTS == 2 and browser_install.ATTEMPT_SEC == 600
-    bounded = 2 * browser_install.ATTEMPTS * (browser_install.ATTEMPT_SEC + 3 * browser_install.STOP_GRACE_SEC)
-    assert bounded <= 41 * 60 < install["timeout-minutes"] * 60
+    stages = 2 + ("--pinned-node" in arguments.split())
+    bounded = stages * browser_install.ATTEMPTS * (browser_install.ATTEMPT_SEC + 3 * browser_install.STOP_GRACE_SEC)
+    assert bounded <= 62 * 60 and install["timeout-minutes"] * 60 - bounded >= 8 * 60
+    job = _workflow(workflow)["jobs"][job]
+    ceilings = [step.get("timeout-minutes", 0) for step in job["steps"]]
+    assert sum(ceilings) < job["timeout-minutes"]  # the job ceiling never cancels the evidence steps first
 
 
 def test_every_ubuntu_browser_install_is_the_bounded_one():
@@ -1251,6 +1258,31 @@ def test_a_clean_install_fetches_every_package_before_one_dpkg_run_and_retries_n
     assert stand_ins.sudo() == ([] if euid == 0 else [
         "sudo apt-get update", "sudo apt-get install " + packages.format("--download-only"),
         "sudo apt-get install " + packages.format("--no-download")])
+
+
+def test_the_ui_lanes_stage_the_reviewed_node_once_and_their_test_steps_name_it():
+    """Carbon R2: the lane's Playwright ran the SDK's own Node while the browser tools fetched Node 24.22.3 inside the
+    test. The install step stages the pinned Node once; the test steps name that executable, which safe_test keeps
+    (``test_run_tests_script``, through the real launcher). Carbon R5: the partial diagnostic lane installs as the
+    full lane does."""
+    steps = _steps("ui-browser.yml", "ui-shard")
+    node = "${{ github.workspace }}/node-standalone/bin/node"
+    assert "--pinned-node" in steps["install_browsers"]["run"]
+    assert steps["ui_tests"]["env"]["PLAYWRIGHT_NODEJS_PATH"] == node
+    assert steps["browser_tools"]["env"]["PLAYWRIGHT_NODEJS_PATH"] == node
+    partial = _steps(*PARTIAL)
+    assert "--pinned-node" in partial["install_browsers"]["run"]
+    assert partial["ui_diagnostic"]["env"]["PLAYWRIGHT_NODEJS_PATH"] == node
+
+
+@_POSIX_RUNNER
+def test_pinned_node_is_a_bounded_first_stage_and_the_driver_runs_on_it(browser_install, stand_ins, capsys, monkeypatch):
+    monkeypatch.delenv("PLAYWRIGHT_NODEJS_PATH", raising=False)
+    stand_ins.plan(node=["fail"])  # one retry, like every download
+    code, out, called = _install(browser_install, stand_ins, capsys, "--pinned-node", "--pinned-chromium")
+    assert code == 0, out
+    assert called == ["node", "node", *CLEAN]
+    assert os.environ["PLAYWRIGHT_NODEJS_PATH"] == str(browser_install.REPO / "node-standalone" / "bin" / "node")
 
 
 @_POSIX_RUNNER

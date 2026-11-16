@@ -184,15 +184,37 @@ def _installer_env(env_root: pathlib.Path, *, ecosystem: str = "", cache_root: p
         "CARGO_HOME": str(env_root / "cargo" / "home"), "CARGO_TARGET_DIR": str(env_root / "cargo" / "target"),
     })
     if ecosystem == "node" and not work_domain.is_work(env_root):  # a container resolves its own node
-        # npm's `#!/usr/bin/env node` shebang must resolve a working runtime.
-        # node_runtime owns the emergency verdict, the byte-identical healthy
-        # case, and the disclosed residuals (npm itself is not bundled: an
-        # absent npm still fails honestly upstream, and an npm launcher with an
-        # ABSOLUTE node shebang ignores PATH).
+        # A `#!/usr/bin/env node` launcher (an npm script, npx) must resolve a
+        # working runtime: the pin's prepared Node first where it governs, else
+        # an emergency only; npm itself runs on it (``_npm_command``). node_runtime
+        # owns that verdict, the byte-identical healthy case, and the disclosed
+        # residuals; an absent npm is prepared by the same runtime manager below.
         from ouroboros.platform_layer import prepend_skill_node_emergency_path
 
         prepend_skill_node_emergency_path(env)
     return env
+
+
+def _wait_for_reviewed_node(env_root: pathlib.Path) -> None:
+    """Before an admitted node-family install runs (``npm install``, a declared step or check of the node ecosystem):
+    where the reviewed Node pin governs this host, it runs only on the pin's Node, which ``_installer_env`` puts first
+    on its PATH. Unprepared, the install waits: it asks for that Node once (single-flight) and fails with the reason,
+    recorded like any install failure the next dependency pass retries, never on a PATH Node. A work domain resolves
+    its own runtime; without a pin, or on a host the pin has no archive for, nothing changes."""
+    if work_domain.is_work(env_root):
+        return
+    from ouroboros.node_runtime import NodeRuntimeUnavailable, pinned_node_wait
+    from ouroboros.platform_layer import select_skill_node_runtime
+
+    governs, planned = pinned_node_wait()
+    selected, reason = select_skill_node_runtime() if governs else ("", "")
+    if not governs or selected:
+        return
+    if planned:
+        from ouroboros.server_boot import request_pinned_node
+
+        request_pinned_node()
+    raise NodeRuntimeUnavailable(f"no reviewed Node for this install: {reason}")
 
 
 def _pipe_tail(pipe: Any, out: Dict[str, bytes], key: str, max_bytes: int) -> None:
@@ -312,6 +334,16 @@ def _install_python_packages(packages: List[str], env_root: pathlib.Path, timeou
     return [result]
 
 
+def _npm_command(launcher: str, env_root: pathlib.Path) -> List[str]:
+    """An installer's npm command for the resolved ``launcher``: on the pin's Node where it governs this host
+    (``node_runtime.reviewed_npm_command``), as is in a work domain, whose container resolves its own."""
+    if work_domain.is_work(env_root):
+        return [launcher]
+    from ouroboros.node_runtime import reviewed_npm_command
+
+    return reviewed_npm_command(launcher)
+
+
 def _install_node_package(package: str, env_root: pathlib.Path, timeout_sec: int, *,
                           allow_install_scripts: bool = False, cache_root: pathlib.Path | None = None, review_check: Any = None) -> List[Dict[str, Any]]:
     from ouroboros.platform_layer import bootstrap_process_path
@@ -320,19 +352,38 @@ def _install_node_package(package: str, env_root: pathlib.Path, timeout_sec: int
     # same way the process tools do BEFORE deciding npm is absent (T13).
     bootstrap_process_path()
     npm = "npm" if work_domain.is_work(env_root) else shutil.which("npm")  # a container resolves its own npm
-    if not npm:
-        raise RuntimeError("npm is not available on PATH")
     node_root = env_root / "node"
     work_domain.make_dirs(node_root)
-    env = _installer_env(env_root, ecosystem="node", cache_root=cache_root)
-    env["npm_config_prefix"] = str(node_root)
     name = package.rsplit("@", 1)[0] if "@" in package[1:] else package
     package_manifest = node_root / "node_modules" / name / "package.json"
     previous_version = (_json(package_manifest) or {}).get("version")
     if review_check is not None:
         review_check()
+    managed_node = None
+    if not npm:
+        # The existing manager prepares the reviewed Node/npm closure, never starting the daemon.
+        from ouroboros.claudexor_runtime import get_runtime_manager
+
+        try:
+            manager = get_runtime_manager()
+            managed_node = pathlib.Path(manager.ensure_cli_command()[0])
+            npm_cli = manager._managed_npm_cli(managed_node)
+            if not npm_cli.is_file():
+                raise RuntimeError("prepared npm CLI is missing")
+        except RuntimeError as exc:
+            raise RuntimeError(f"npm is not available on PATH; managed Node/npm preparation failed: {exc}") from exc
+        npm_command = [str(managed_node), str(npm_cli)]
+    else:
+        _wait_for_reviewed_node(env_root)
+        npm_command = _npm_command(npm, env_root)
+    env = _installer_env(env_root, ecosystem="node", cache_root=cache_root)  # after preparation: the pin's Node first
+    if managed_node is not None:
+        current_path = env.get("PATH", "")
+        env["PATH"] = os.pathsep.join([str(managed_node.parent), current_path]) if current_path else str(managed_node.parent)
+    env["npm_config_prefix"] = str(node_root)
     flags = [] if allow_install_scripts else ["--ignore-scripts"]
-    result = _run([npm, "install", *flags, "--prefix", str(node_root), package], cwd=env_root, env=env, timeout_sec=timeout_sec)
+    result = _run([*npm_command, "install", *flags, "--prefix", str(node_root), package], cwd=env_root, env=env,
+                  timeout_sec=timeout_sec)
     if result["returncode"] != 0:
         detail = result.get("stderr_tail") or ""
         raise RuntimeError(f"npm install {package!r} failed" + (f": {detail}" if detail else ""))
@@ -343,7 +394,8 @@ def _install_node_package(package: str, env_root: pathlib.Path, timeout_sec: int
         # authorized package, never every package sharing this environment.
         if review_check is not None:
             review_check()
-        rebuilt = _run([npm, "rebuild", "--prefix", str(node_root), package], cwd=env_root, env=env, timeout_sec=timeout_sec)
+        rebuilt = _run([*npm_command, "rebuild", "--prefix", str(node_root), package], cwd=env_root, env=env,
+                       timeout_sec=timeout_sec)
         results.append(rebuilt)
         if rebuilt["returncode"] != 0:
             raise RuntimeError(f"npm rebuild {package!r} failed: {rebuilt.get('stderr_tail', '')}")
@@ -434,6 +486,10 @@ def _install_actions(spec: Dict[str, Any], env_root: pathlib.Path, cache_root: p
         return {"outputs": [_output_facts(env_root, p) for p in expected], "executable_ready": None}
     commands = [step["argv"][0] for step in [*steps, *([check] if check is not None else [])]]
     ecosystem = "node" if spec["kind"] in {"node", "npm"} or any(cmd in {"node", "npm"} for cmd in commands) else ""
+    if ecosystem == "node" and (steps or check is not None):  # reviewed first: only an admitted step asks for Node
+        if review_check is not None:
+            review_check()
+        _wait_for_reviewed_node(env_root)
     base_env = _installer_env(env_root, ecosystem=ecosystem, cache_root=cache_root)
     for index, step in enumerate(steps):
         env = augment_env_for_skill_deps(base_env, env_root.parent)
@@ -473,7 +529,9 @@ def _run_install_step(step: Dict[str, Any], env_root: pathlib.Path, env: Dict[st
         selected = str((cwd / cmd[0]).resolve()) if "/" in cmd[0] or "\\" in cmd[0] else shutil.which(cmd[0], path=env.get("PATH", ""))
         if not selected and cmd[0] in {"python", "python3"}:
             selected = sys.executable  # Same embedded-Python fallback as skill_exec.
-        if selected:
+        if cmd[0] == "npm":  # a bare npm step runs on the pin's Node, as the installer's npm does
+            cmd = [*_npm_command(selected or "npm", env_root), *cmd[1:]]
+        elif selected:
             cmd[0] = selected
     return _run(cmd, cwd=cwd, env=env, timeout_sec=timeout_sec)
 

@@ -277,11 +277,20 @@ def test_the_allowlisted_service_env_and_mcp_stdio_env_keep_the_installation_mar
     monkeypatch.setattr(mcp_client, "StdioServerParameters", lambda **kwargs: captured.append(kwargs) or SimpleNamespace(**kwargs))
     monkeypatch.setattr(mcp_client, "stdio_client", lambda params, **kw: SimpleNamespace(params=params))
     cfg = mcp_client.normalize_server_config({"id": "local", "transport": "stdio", "command": "python3", "args": []})
+    # The driver Node is a fixed prepared fact, not this host's: an automatic selection carries its marker beside it.
+    from ouroboros import claudexor_runtime
+
+    node = "/managed/node-24.22.3"
+    monkeypatch.setattr(claudexor_runtime, "get_runtime_manager", lambda: SimpleNamespace(
+        reviewed_node=lambda allow_install=False, prepared=False: node))
+    for name in ("PLAYWRIGHT_NODEJS_PATH", "OUROBOROS_PLAYWRIGHT_NODE_SELECTED"):
+        monkeypatch.delenv(name, raising=False)
+    driver = {"PLAYWRIGHT_NODEJS_PATH": node, "OUROBOROS_PLAYWRIGHT_NODE_SELECTED": node}
 
     for build in (service_env, _service_env, _executor_service_env):  # nothing planted: byte-identical allowlist
         assert not ps.scope_entries(build())
     mcp_client._transport_factory(cfg)
-    assert "env" not in captured[-1], "no marker planted: the SDK default environment, as before"
+    assert captured[-1]["env"] == driver, "no marker planted: the SDK default environment plus the selected driver Node"
 
     monkeypatch.setenv(install, "1")
     monkeypatch.setenv(task, "1")
@@ -289,7 +298,7 @@ def test_the_allowlisted_service_env_and_mcp_stdio_env_keep_the_installation_mar
         env = build()
         assert env.get(install) == "1" and task not in env, "a service keeps the installation marker only"
     mcp_client._transport_factory(cfg)
-    assert captured[-1]["env"] == {install: "1"}, "a stdio server rides in the installation's scope"
+    assert captured[-1]["env"] == {install: "1", **driver}, "a stdio server rides in the installation's scope"
 
 
 def test_markers_are_names_only_and_never_logged_or_persisted_with_environment_bytes(tmp_path, caplog):

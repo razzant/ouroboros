@@ -505,8 +505,8 @@ own model), `Pinned`, `Recent` (the room's own choice first), then the sources t
 offers the Main role, never agent sessions): one source's models at once, several under `All sources · Codex,
 OpenRouter + 7`. Main's row is the only way to follow Main; every other row is that route, Main's model included.
 A row is one model through one source, however many accounts list it, never an account: the source, whether it is a
-subscription or paid by key (in its place the catalog's published price per 1M tokens where it states one and the
-tier this pick would run on here is Standard: `OpenRouter · $4 in / $20 out`), its window when known, `Unavailable`
+subscription or paid by key (in its place the price a role's line says, §7, where the tier this pick
+would run on here is Standard: `OpenRouter · $4 in / $20 out`), its window when known, `Unavailable`
 when no account can serve it now; where a line cannot hold both, the facts go under the model's name, which keeps its
 line, and wrapped facts read from the same start. Its Pin (the Projects' glyph) keeps that route, unlisted ones
 too, in `Pinned` for every room and window; it chooses nothing, writes no recent and leaves the sheet open; a mouse
@@ -2835,12 +2835,13 @@ picker) shows `model_roles.MAIN_FOLLOW_NOTE` before Save; its second host is the
 confirming sheet says it before it writes Main, with one more fact (`composer_model.MAIN_CACHE_NOTE`: what follows
 Main may write its start to the new model's cache again) and, where the catalog states it for the install's cache
 tier, the price of a cache write. A model suggestion and the line under a role show the catalog's
-published price per 1M tokens where it states a whole one and the role pays it (not on Fast or Flex), which never
-sorts or filters the list; the line under an API role whose price is not that says `Price unknown`. The line under a
-role also says the model's window in the list's words (`$4 in / $20 out per 1M tokens · 1M window`): the one its
-route is sized with when known, else the catalog's; an unknown window is omitted. In setup the catalog is the draft's
-own (a key typed there lists and prices its models before anything is saved), and the limits step names what its
-limits cannot count, as Dashboard › Costs does (`Not counted: …`). Nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
+published price per 1M tokens where it states a whole one the role pays (not on Fast or Flex), never sorting or
+filtering the list; an entry priced only for text off-peak says `Estimated for text, off-peak · USD only`, no
+figure, except under Vision, whose calls send images; there, as under any API role without a price it pays, the
+line says `Price unknown`. The line also says the model's window in the list's words (`$4 in / $20 out per 1M
+tokens · 1M window`): the one its route is sized with, else the catalog's, else none. In setup the catalog is the draft's own (a key typed
+there lists and prices its models before any save); its limits step says Dashboard › Costs' one line:
+`Not counted: …`, then `Partly counted: …` with each group's condition. Nothing forecasts a call's tokens or cost. The account is a property of that role: Auto
 rotates compatible accounts and an explicit pin stays pinned. A model inherited
 from Main remains visibly inherited while its account can be pinned
 independently. Fallbacks use the same row in their saved order, with adjacent

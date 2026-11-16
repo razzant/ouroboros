@@ -11,7 +11,7 @@ import { bindModelChooser, matchingModelOptions, modelChooserHtml, modelOptions,
 import { createModelList } from '../modules/model_list.js';
 import { createModelRolesEditor } from '../modules/model_roles.js';
 import { applyPayload, CODE_PREFIX, setMissTransport } from '../modules/i18n.js';
-import { cacheWriteWords, catalogModelOptions, priceWords, routeModelInputHtml } from '../modules/route_editor_primitives.js';
+import { cacheWriteWords, catalogModelOptions, modelPriceWords, priceWords, routeModelInputHtml, withoutPrice } from '../modules/route_editor_primitives.js';
 import { ElementStub } from './chat_dom_fixture.js';
 import { appendHtml, domDouble } from './dom_double.js';
 
@@ -146,6 +146,62 @@ test('under a role: an OpenRouter model says its price per 1M tokens; every othe
     assert.match(gone, /Accounts/, 'a key that cannot send says so first');
     assert.doesNotMatch(gone, /\$/);
     editor.destroy();
+});
+
+test('a DeepSeek row its published entry prices only for text off-peak in USD says that condition, never a figure; Vision says Price unknown', async () => {
+    assert.equal(modelPriceWords({ price_condition: 'off_peak_usd' }), 'Estimated for text, off-peak · USD only');
+    assert.equal(modelPriceWords(withoutPrice({ price_condition: 'off_peak_usd' }, { media: true })), '', 'a role sending images: none');
+    assert.equal(modelPriceWords({ price: { input: 4, output: 20 }, price_condition: 'off_peak_usd' }, { unit: true }),
+        '$4 in / $20 out per 1M tokens', 'a published figure is said as before');
+    assert.equal(modelPriceWords({ price_condition: 'surge' }), '', 'a condition this client does not know is no price');
+    assert.equal(modelPriceWords(null), '');
+    const { contract } = JSON.parse(readFileSync(new URL('./fixtures/onboarding_bootstrap.json', import.meta.url), 'utf8'));
+    const { doc } = domDouble();
+    const host = doc.createElement('div');
+    host.id = 'roles';
+    doc.body.append(host);
+    Object.defineProperty(host, 'innerHTML', { set(html) { host.replaceChildren(); appendHtml(host, html); }, get: () => '' });
+    const editor = createModelRolesEditor({ hostId: 'roles', doc, showContext: false, store: { snapshot: {}, accountsKnown: false },
+        catalogFetch: async () => ({ items: [], model_sources: [] }) });
+    editor.load({ DEEPSEEK_API_KEY: 'k', OUROBOROS_MODEL: 'deepseek::deepseek-v4-pro', OUROBOROS_MODEL_LIGHT: 'deepseek::deepseek-chat',
+        OUROBOROS_MODEL_VISION: 'deepseek::deepseek-v4-pro' }, contract);
+    editor.adoptCatalog({ model_sources: [], items: [
+        { provider_id: 'deepseek', id: 'deepseek-v4-pro', value: 'deepseek::deepseek-v4-pro', name: 'deepseek-v4-pro',
+            price_condition: 'off_peak_usd', context_window: 1000000 },
+        { provider_id: 'deepseek', id: 'deepseek-chat', value: 'deepseek::deepseek-chat', name: 'deepseek-chat' }] });
+    await new Promise((resolve) => setImmediate(resolve));
+    const said = (group) => host.querySelectorAll(`[data-model-role-group="${group}"] [data-model-role-status]`)
+        .map((node) => node.textContent);
+    assert.deepEqual(said('main'), ['Estimated for text, off-peak · USD only · 1M window']);
+    assert.deepEqual(said('vision'), ['Price unknown · 1M window'], 'its calls carry images the text tariff never prices');
+    assert.deepEqual(said('light'), ['Price unknown'], 'a retired entry stays unknown');
+    editor.destroy();
+});
+
+test('every list of models says a conditional price the role line says, and drops it where the price is not the one paid', async () => {
+    const pro = { provider_id: 'deepseek', id: 'deepseek-v4-pro', value: 'deepseek::deepseek-v4-pro', name: 'deepseek-v4-pro',
+        price_condition: 'off_peak_usd' };
+    const said = 'Estimated for text, off-peak · USD only';
+    // Settings' suggestions (Models, Agents, the wizard); a Fast/Flex row and Vision drop the condition with the price.
+    assert.equal(catalogModelOptions([pro])[0].meta, said);
+    assert.equal(catalogModelOptions([withoutPrice(pro, { tiered: true })])[0].meta, undefined);
+    assert.equal(catalogModelOptions([withoutPrice(pro, { media: true })])[0].meta, undefined);
+    assert.deepEqual(withoutPrice({ ...OPUS }, { media: true }), OPUS, 'figures stay for Vision; only a text condition goes');
+    assert.deepEqual(withoutPrice(OPUS, { tiered: true }), { ...OPUS, price: null, price_condition: '' });
+    assert.equal(catalogModelOptions([pro, { ...pro, price_condition: '' }])[0].meta, undefined, 'records that disagree: none');
+    // The composer's capsule and the work card's list (buildModelIndex → describeRoute).
+    const index = (options = {}) => buildModelIndex({ catalog: { items: [pro] }, ...options });
+    assert.equal(describeRoute(index(), { model: pro.value }).price, said);
+    for (const tier of ['fast', 'economy', 'ultrafast']) {
+        assert.equal(describeRoute(index(), { model: pro.value }, { tier }).price, '', `a context on ${tier}`);
+    }
+    assert.equal(describeRoute(index(), { model: pro.value }, { tier: 'standard' }).price, said, 'Standard pays it');
+    const split = buildModelIndex({ catalog: { items: [pro, { ...pro, price_condition: 'surge' }] } });
+    assert.equal(describeRoute(split, { model: pro.value }).price, '', 'a row whose records disagree states no condition');
+    // A place's or a circle's Model field.
+    const { modelSuggestions } = await import('../modules/place_sheet.js');
+    assert.equal(modelSuggestions({ items: [pro] }, { tierPriced: false })[0].meta, said);
+    assert.equal(modelSuggestions({ items: [pro] }, { tierPriced: true })[0].meta, undefined);
 });
 
 test('in the composer list a priced model says its price where "paid by key" stood; other rows read as before', () => {

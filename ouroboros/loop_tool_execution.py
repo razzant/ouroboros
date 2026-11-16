@@ -652,7 +652,7 @@ def _execute_single_tool(
 
     consume_last_process_facts()
 
-    tool_ok = True
+    tool_ok, ran_with = True, None
     try:
         from ouroboros.delegate_output import staged_read_delivery_scope
 
@@ -662,7 +662,11 @@ def _execute_single_tool(
             from ouroboros.tools.tool_discovery import with_gateway_schema
             tool_result = with_gateway_schema(tools, fn_name, tool_result)
         from ouroboros.place_guard import with_destination_facts  # a send into another place: its notes beside the act
-        tool_result = tool_result if host_refusal else with_destination_facts(getattr(tools, "_ctx", None), fn_name, args, tool_result)
+        from ouroboros.tools.extension_dispatch import dispatched_descriptor  # read with the publication it ran
+        tool_ctx = getattr(tools, "_ctx", None)
+        ran_with = dispatched_descriptor(tool_ctx, fn_name)
+        tool_result = tool_result if host_refusal else with_destination_facts(
+            tool_ctx, fn_name, args, tool_result, ext_tool=ran_with)
         result = tool_result.text
     except (UsageAccountingError, ModelWaitInterrupted):
         raise
@@ -681,6 +685,9 @@ def _execute_single_tool(
     # the loop holds the dispatcher's typed result and reads it directly).
     is_error = _typed_execution_failure(tool_ok, tool_result)
     result_meta = _typed_result_metadata(fn_name, result, is_error, tool_result)
+    from ouroboros.tool_effects import RETAINED_DECLARATION, retained_declaration
+    if (kept := retained_declaration(ran_with)) is not None:  # readers after the call judge what it ran with
+        result_meta[RETAINED_DECLARATION] = kept
     # R5 (node-runtime sprint): merge the handler's TYPED process facts into
     # the call's result_meta. When a typed publication exists it owns the WHOLE
     # fact family — including the ABSENCE of a member (a typed publication

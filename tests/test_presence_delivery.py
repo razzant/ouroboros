@@ -36,6 +36,12 @@ def isolated_supervisor(tmp_path, monkeypatch):
         "STATE_LOCK_PATH": tmp_path / "locks/state.lock",
     }.items():
         monkeypatch.setattr(state, name, value)
+    yield
+    from ouroboros.presence_carrier import set_presence_runner
+    from tests.conversation_carrier_support import join_host_lane_carriers
+
+    join_host_lane_carriers()  # its carriers settle after the waiters: that tail stays in this world
+    set_presence_runner(tmp_path, None)  # the runner its Hosts registered for this root leaves with it
 
 
 def _payload(**changes):

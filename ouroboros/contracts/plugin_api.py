@@ -34,7 +34,9 @@ from ouroboros.skill_token import SkillToken
 # 2.3: additive union of memory reading and realtime/conversation registration.
 # 2.4: settings state (value/missing/unknown) and a settings refresh of a declared companion; every declared
 #      2.x minimum negotiates them, a field-less legacy payload is refused them.
-PLUGIN_API_VERSION = "2.4"
+# 2.5: no method changes; a connector's tool declarations may name exact target groups (``touches``,
+#      tool_effects.py). A payload using them declares at least 2.5, so an older host refuses it before import.
+PLUGIN_API_VERSION = "2.5"
 # The generation an extension WITHOUT the manifest field binds against —
 # "absent ≡ 1.3 by construction" (owner-ratified §6.1-Δ; deliberately NOT 1.4).
 LEGACY_PLUGIN_API_GENERATION = "1.3"
@@ -208,6 +210,7 @@ def plugin_api_surface_fingerprint() -> str:
 # change without a version bump) refuses negotiation until the version is
 # bumped and the new fingerprint recorded here.
 PLUGIN_API_SURFACE_FINGERPRINTS: Dict[str, str] = {
+    "2.5": "b1539cbdb03a6b4d05111f645c94f9de32c3113b36be68d21fd6cc8d809a5a52",
     "2.4": "c472950639f4467a21f4407d9416871e8f744f27392f1a8d5f711ade39579d7c",
     "2.3": "bd1062f96b99607b4651ba319e74f9620a5bae08ad1aa0d5dcb106d8ad542d12",
     "2.2": "46ee2d134ca3c3957adef9366b326b97a84abaae757e8e9d18030a7838329506",
