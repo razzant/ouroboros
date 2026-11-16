@@ -1259,6 +1259,55 @@ test('a failed catch-up stays owed: each ↓ retries until current data arrives'
     assert.deepEqual(f.calls.slice(before), [null, null, null], 'success alone makes the present reusable');
 });
 
+// A store upgrade (503 `migrating`) is waiting, not a failed read (DESIGN "History edges"): the room reads on by itself.
+const upgrading = { httpStatus: 503, body: { error: 'Saved history is being upgraded', reason_code: 'migrating' } };
+
+test('↓ during a store upgrade still moves at once and names no Retry; the next newest read lands', async (t) => {
+    const f = await awayRoom(t);
+    f.respond(upgrading);
+    pressLatest();
+    await drain();
+    assert.equal(atBottom(f), true, 'the immediate return stands');
+    assert.equal(busy(), false);
+    assert.equal(latestButton().getAttribute('aria-label'), 'Scroll to latest message', 'waiting is no failed read');
+    assert.equal(latestButton().classList.contains('visible'), false);
+    f.respond(present(row('chat:901', 'Published after the upgrade')));
+    await f.instance.refreshHistory({ revision: 65 });
+    await drain();
+    assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:901'), 'the present lands under the reader');
+    assert.equal(atBottom(f), true);
+});
+
+test('a reconnect into a store upgrade keeps ↓ waiting through its automatic reads; an ordinary failed catch-up names Retry', async (t) => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    pressLatest();
+    await drain();
+    const drawn = () => [latestButton().classList.contains('visible'), latestButton().getAttribute('aria-label')];
+    const quiet = [false, 'Scroll to latest message'];
+    f.respond(upgrading);
+    f.disconnect();
+    f.reconnect();
+    await drain();
+    assert.deepEqual(drawn(), quiet, 'the catch-up the upgrade refused waits: no Retry at the retained end');
+    const again = held();
+    f.respond(again.promise);
+    const before = f.calls.length;
+    await new Promise(resolve => setTimeout(resolve, 750));
+    assert.deepEqual(f.calls.slice(before), [null], 'the room reads the store again by itself');
+    assert.deepEqual(drawn(), quiet, 'and ↓ stays waiting while that read is out');
+    again.release(present(row('chat:905', 'Published after the upgrade')));
+    await drain();
+    assert.ok(f.bubbles().some(node => node.dataset.historyId === 'chat:905'), 'publication lands under the follower');
+    assert.equal(atBottom(f), true);
+    assert.deepEqual(drawn(), quiet);
+    f.respond({ httpStatus: 503, body: { error: 'History source unavailable' } });
+    f.disconnect();
+    f.reconnect();
+    await drain();
+    assert.deepEqual(drawn(), [true, 'Retry loading latest messages'], 'an ordinary failed catch-up still names Retry');
+});
+
 test('a reopened revision waits for catch-up instead of consuming its unread arrival with old hydration', async t => {
     const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
     await f.refresh();
@@ -1531,6 +1580,32 @@ test('a read of the present that failed part-way confirms nothing: ↓ reads, na
     await drain();
     assert.equal(atBottom(f), true);
     assert.equal(latestButton().getAttribute('aria-label'), 'Scroll to latest message');
+});
+
+test('a catch-up that ends partial names ↓ Retry at the retained end at once, with no read or credit of its own', async (t) => {
+    const f = fixture(t, page(presentRows(900), 'page:recent', 'before:1'));
+    await f.refresh();
+    pressLatest();
+    await drain();
+    assert.equal(latestButton().classList.contains('visible'), false, 'following at the retained end');
+    f.respond({ ...present(row('chat:903', 'Part of the answer')),
+        window: { complete: false, truncated_by: ['quota', 'chat_projection_failed'] } });
+    const before = f.calls.length;
+    f.disconnect();
+    f.reconnect();
+    await drain();
+    assert.deepEqual(f.calls.slice(before), [null], 'the catch-up read alone');
+    assert.equal(busy(), false);
+    assert.equal(latestButton().getAttribute('aria-label'), 'Retry loading latest messages', 'with no press or scroll');
+    assert.equal(latestButton().classList.contains('visible'), true);
+    assert.equal(atBottom(f), true);
+    assert.equal((await f.instance.refreshHistory({ revision: 95 })).painted, false, 'a partial read earns no read credit');
+    f.respond(present(row('chat:905', 'Whole again')));
+    f.disconnect();
+    f.reconnect();
+    await drain();
+    assert.equal(latestButton().getAttribute('aria-label'), 'Scroll to latest message', 'a whole catch-up answers it');
+    assert.equal(latestButton().classList.contains('visible'), false);
 });
 
 test('a disconnect while ↓ reads the present: ↓ waits for the reconnect\'s catch-up and lands on it', async (t) => {

@@ -474,7 +474,9 @@ export function createChatInstance({
         }
     }
     let activeLiveGroupId = '';
-    const catchUp = createCatchUp(syncChatStatus);  // a return's or reconnect's read still out after its bound
+    // A return's or reconnect's read: status once out past its bound, ↓ Retry once it ends unconfirmed (shown only,
+    // as a hidden feed reads as at its end).
+    const catchUp = createCatchUp(() => { syncChatStatus(); if (isInstanceVisible()) updateScrollButton(); });
     let pendingRestartNotice = '';
     try {
         pendingRestartNotice = restartNoticeText(new URL(window.location.href).searchParams.get('_ouro_reason') || '');
@@ -2667,8 +2669,7 @@ export function createChatInstance({
         if (!scrollBottomBtn) return;
         _hasNewActivity &&= !isNearBottom(ACTUAL_BOTTOM_TOLERANCE_PX);
         const busy = reading.returning;
-        const retry = historyWindow?.retry === 'latest' || catchUp.retry
-            || historyWindow && historyControls.recentFailed();
+        const retry = historyWindow?.failed || catchUp.retry && !historyWindow?.waiting;
         const label = busy ? 'Loading latest messages…' : retry ? 'Retry loading latest messages'
             : _hasNewActivity ? 'New activity — scroll to latest message'
             : 'Scroll to latest message';
@@ -2680,8 +2681,7 @@ export function createChatInstance({
     }
     // Freshness gates reads, not retained movement.
     function presentHeld() {
-        const { away, retryDirection } = historyPager.getState();
-        return historyLoaded && !catchUp.owed && !historyControls.recentFailed() && !away && retryDirection !== 'latest' && !historyWindow?.horizonGap;
+        return historyLoaded && !catchUp.owed && !historyWindow?.failed && !historyPager.getState().away && !historyWindow?.horizonGap;
     }
     // ↓ moves now. One claim owns the read and landing; new reading cancels it, repeated physical presses share it.
     async function showLatest({ arrive = false } = {}) {

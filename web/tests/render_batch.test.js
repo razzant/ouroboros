@@ -174,6 +174,28 @@ test('the empty-Main greeting and the reconnect notice are chrome: a read over t
     assert.equal(controls.beginRecent(), false, 'a painted transcript gets no loading chrome');
 });
 
+test('a migrating store is waiting for ↓, never a failed read, also while its automatic retry is out', () => {
+    const doc = { byId: new Map(), createElement: (tag) => new ElementStub(tag, doc) };
+    const messages = new ElementStub('div', doc);
+    messages.isConnected = true;
+    const controls = createHistoryControls(messages);
+    const migrating = Object.assign(new Error('importing'), { status: 503, body: { reason_code: 'migrating' } });
+    const snapshot = { initialized: true, canOlder: true };
+    const facts = (state = snapshot) => { const { waiting, failed } = controls.render(state); return { waiting, failed }; };
+    controls.endRecent(migrating);
+    assert.equal(controls.recentFailed(), false);
+    assert.deepEqual(facts(), { waiting: true, failed: false });
+    assert.equal(controls.beginRecent(), true);
+    assert.deepEqual(facts(), { waiting: true, failed: false }, 'the read that asks again still waits');
+    controls.endRecent(new Error('offline'));
+    assert.equal(controls.recentFailed(), true);
+    assert.deepEqual(facts(), { waiting: false, failed: true }, 'an ordinary failure is one');
+    controls.endRecent();
+    assert.deepEqual(facts({ ...snapshot, error: migrating, retryDirection: 'latest' }), { waiting: true, failed: false },
+        '↓\'s own read refused by the upgrade waits too');
+    assert.deepEqual(facts({ ...snapshot, error: new Error('offline'), retryDirection: 'latest' }), { waiting: false, failed: true });
+});
+
 // ─────────────── sticky hydration / replay contracts ──────────────────────
 
 test('sticky single-flight never swallows the post-completion resync', () => {

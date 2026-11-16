@@ -69,14 +69,17 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
         // Only an EMPTY feed (or a failure already on screen) gets the loading
         // state: an ordinary refresh never puts chrome over a painted transcript.
         // Returns whether there is a state to draw, so a painted feed costs nothing.
+        // A migrating store read again is still `waiting` for its publication.
         beginRecent() {
-            if (recent?.error || feedIsEmpty(messagesDiv)) recent = { loading: true };
+            if (recent?.error || feedIsEmpty(messagesDiv)) {
+                recent = { loading: true, waiting: recent?.waiting || isStoreMigrating(recent?.error) };
+            }
             return Boolean(recent);
         },
         // A failure is shown where the loading state was; elsewhere the reader
-        // keeps the transcript they have and the next sync reconciles it.
+        // keeps the transcript they have and the next sync reconciles it. A migrating store has not failed.
         endRecent(error = null, partial = false) { recent = error ? { error, partial } : null; },
-        recentFailed: () => Boolean(recent?.error && !recent.partial),
+        recentFailed: () => Boolean(recent?.error && !recent.partial && !isStoreMigrating(recent.error)),
         render(snapshot, coverage = {}, approximate = false) {
             const error = recent?.error || snapshot.error;
             const retry = recent?.error && !recent.partial || snapshot.error;
@@ -120,9 +123,12 @@ export function createHistoryControls(messagesDiv, statusHost = null, {
             if (hydrating) root.setAttribute('aria-busy', 'true'); else root.removeAttribute('aria-busy');
             if ((snapshot.initialized || error || hydrating) && !root.isConnected) messagesDiv.prepend(root);
             root.classList.toggle('has-gaps', !migrating && (incomplete || Boolean(error)));
-            // `retry`: the pager's read that failed (`latest`: ↓'s, which ↓ itself retries where the reader is).
-            return { ...coverage, complete: Boolean(coverage.complete && !error), error: Boolean(error),
-                retry: snapshot.retryDirection || '', note: noteText, truncated_by: incomplete ? ['unloaded'] : [] };
+            // For ↓: `failed`, a read of the present it retries where the reader is (the room's newest, or the pager's
+            // `latest`, ↓'s own included); `waiting`, a migrating store read again until it publishes: no Retry answers it.
+            const waiting = migrating || Boolean(recent?.waiting);
+            return { ...coverage, complete: Boolean(coverage.complete && !error), error: Boolean(error), waiting,
+                failed: !waiting && Boolean(recent?.error && !recent.partial || snapshot.retryDirection === 'latest'),
+                note: noteText, truncated_by: incomplete ? ['unloaded'] : [] };
         },
     };
 }

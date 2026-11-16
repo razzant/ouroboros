@@ -1491,7 +1491,7 @@ newest-arrived message wherever it lies. After a target jump or revisit,
 ↓ restores the present paging chain even on a partial latest read, keeping useful
 partial history accessible.
 
-Failed history reads offer Retry in header chrome. Partial pages show gaps;
+Failed history reads offer Retry at the in-feed edge. Partial pages show gaps;
 Retry never blocks their rows, older history or navigation.
 After an unconfirmed attempt, ↓ stays visible at the retained end as Retry; a bare
 disconnect is not a failed read. This Retry starts a cancellable return;
