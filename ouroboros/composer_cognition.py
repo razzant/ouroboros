@@ -1,8 +1,10 @@
 """Saved Context, Effort, Subagents and model choice of Main and each registered Project room.
 
-Projects copy Main's Context, Effort and Subagents once, at creation or migration. Reads stay
-read-only; every settings writer freezes legacy rooms before changing Main. Registry writers take
-their Main snapshot before the registry lock, never acquiring settings under it.
+A new Project copies Main's Effort and Subagents once and starts its Context in Max, whatever Main's Context
+is (``new_room_cognition``; owner 15.11.2026, 3A: a room never inherits Main's temporary Low); a legacy row frozen
+at migration keeps Main's Context and Effort, its Subagents Auto, and a recovered row its saved cognition or
+Main's. Reads stay read-only; every settings writer freezes legacy rooms before changing Main.
+Registry writers take their Main snapshot before the registry lock, never acquiring settings under it.
 Actor lifetimes and room resolution belong to the task-settings owner.
 
 The model choice is the room's alone and is never copied: absent, a room follows the configured
@@ -190,6 +192,11 @@ def main_cognition(settings: Mapping[str, Any] | None = None) -> dict:
     if cognition["context_mode"] == "low" and not owner_declared_low(projected.get("OUROBOROS_CONTEXT_MODE_AUTO_LOW")):
         cognition["context_mode"] = "max"
     return cognition
+
+
+def new_room_cognition(baseline: Mapping[str, Any]) -> dict:
+    """A new room's cognition: Main's Effort and Subagents, its Context in Max (owner 15.11.2026, 3A)."""
+    return {**copy.deepcopy(dict(baseline)), "context_mode": "max"}
 
 
 def project_cognition(project: Mapping[str, Any], baseline: Mapping[str, Any]) -> dict:
