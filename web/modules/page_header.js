@@ -108,7 +108,7 @@ export function bindPageBack({ layers, currentHeader, doc = document, win = wind
         if (!header) return;
         const slot = header.querySelector('[data-page-return]');
         const column = slot?.closest('.section-lead-page');
-        const primary = column && layers.returnPage?.() || layers.page();
+        const primary = layers.page();  // the top page layer: a level opened after a jump peels before the jump
         if (primary?.back) header.setAttribute('data-return', column ? 'column' : 'leading');
         else header.removeAttribute('data-return');
         if (!slot) return;

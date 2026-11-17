@@ -3467,7 +3467,7 @@ glyphs (`web/modules/page_icons.js`).
 ### Page header
 
 The shared header (`web/modules/page_header.js`) draws one row, without decorative icons. Its first control is a round
-Back with the arrow, its destination in its name: the owed jump's origin, then the level's parent when spent (“Back to
+Back with the arrow, its destination in its name: the top layer's, peeled one at a time (“Back to
 Settings › Tools”). Two panes put it over the page column; one column replaces the leading picture. A model role names its destination
 (Consciousness model), distinct from its return. Docked, the sidebar names a section without pages: tabs or Files' location lead its
 band, actions end it, at one height and shape. Controls share the content's leading inset, centred in native chrome or

@@ -78,6 +78,7 @@ export function initSettings(ctx = {}) {
     const layered = new Set();
     const places = new WeakMap();  // a column → where it was scrolled while visible
     let opening = false;
+    let landedBy = null;  // the return of the jump landing now: the levels it shows stay under it
     let besideBefore = false;
     let serial = 0;
     const shown = () => state.activePage === 'settings';
@@ -219,6 +220,7 @@ export function initSettings(ctx = {}) {
         const kept = aside.get(path);
         aside.delete(path);
         const level = Object.assign(kept || { path, id: `settings-level-${++serial}`, view }, { opener: opener || focused });
+        if (landedBy) level.jump = landedBy;
         if (!kept) {
             level.el = document.createElement('section');
             level.el.className = 'settings-page scroll-fade-y';
@@ -379,10 +381,12 @@ export function initSettings(ctx = {}) {
 
     // Every level that hides the one under it is a layer, so Escape and the system's (and Telegram's) Back close the
     // top one: in one column every level; in two panes every level below the first (the first stands beside the list,
-    // which is not hidden). Settings put away: none.
+    // which is not hidden). A jump's landing stays under its return (its first level is the return itself); a level
+    // opened afterwards goes above it, so Back peels one at a time. Settings put away: none.
     function syncLayers() {
         if (!layers) return;
-        const wanted = !shown() ? [] : beside() || layers.returnPage?.() ? levels.slice(1) : levels;
+        const owed = (level) => (level.jump && layers.has?.(level.jump) ? level.jump : undefined);
+        const wanted = !shown() ? [] : levels.filter((level, at) => at > 0 || !(beside() || owed(level)));
         layers.batch(() => {
             for (const id of [...layered]) {
                 if (wanted.some((level) => level.id === id)) continue;
@@ -391,7 +395,7 @@ export function initSettings(ctx = {}) {
             }
             for (const level of wanted) {
                 layers.push({ id: level.id, el: level.el, page: true, modal: false, focus: false, opener: null,
-                    before: layers.returnPage?.()?.id,
+                    before: owed(level),
                     back: { label: levels.indexOf(level) > 0 ? settingsTitle(levels[levels.indexOf(level) - 1].path) : 'Settings' },
                     onClose: () => backFrom(level) });
                 layered.add(level.id);
@@ -423,9 +427,14 @@ export function initSettings(ctx = {}) {
         opening = true;
         try {
             return await showPage('settings', { ...options, row, key: `settings:${target}`, enter: () => {
+                const jump = layers?.returnPage?.();
+                landedBy = jump?.destination === `settings:${target}` ? jump.id : null;
                 const at = levels.findIndex((level) => level.path === target);
-                if (!target || at >= 0) closeLevels(target ? at + 1 : 0, { row });
-                else go(target, { row, fresh: true });
+                if (landedBy) levels.slice(0, at + 1).forEach((level) => { level.jump = landedBy; });
+                try {
+                    if (!target || at >= 0) closeLevels(target ? at + 1 : 0, { row });
+                    else go(target, { row, fresh: true });
+                } finally { landedBy = null; }
             } });
         } finally { opening = false; }
     }
@@ -445,7 +454,8 @@ export function initSettings(ctx = {}) {
         if (box === homeEl || (overviewEl && box === overviewEl) || levels.some((level) => level.el === box)) places.set(box, box.scrollTop);
     };
     const onPageShown = (event) => {
-        syncLayers();
+        // Settings opened from outside syncs its layers once its landing is known (openFromOutside's `enter`).
+        if (!opening || event.detail?.page !== 'settings') syncLayers();
         if (event.detail?.page !== 'settings') look();
         else if (!opening) { announce(); ensurePage(); }
     };

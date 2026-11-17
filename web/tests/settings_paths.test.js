@@ -663,6 +663,51 @@ test('the header Back is hidden beside the list, leads to the list in one column
     assert.deepEqual([pages(), back()], [[], null]);
 });
 
+test('after a jump into Settings a level opened there peels before the jump; the landing stays under its return', async (t) => {
+    const { createPageNavigation } = await import('../modules/page_navigation.js');
+    const { env, content, state, layers } = world(t);
+    env.document.createElement = (tag) => new DescendantStub(tag);
+    let deeper = null;
+    registerSettingsPage('test-landing', { title: 'Landing', mount(body, { ctx }) {
+        body.innerHTML = '<p>landing</p>';
+        deeper = () => ctx.openSettings('test-after');
+    } });
+    registerSettingsPage('test-after', { title: 'After', mount(body) { body.innerHTML = '<p>after</p>'; } });
+    const shown = (name) => {
+        state.activePage = name;
+        env.window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: name } }));
+    };
+    const nav = createPageNavigation({ layers, doc: env.document, canLeave: async () => true,
+        capture: () => ({ key: state.activePage, label: 'Main', restore() { shown('chat'); } }) });
+    t.after(() => nav.destroy());
+    const showPage = (name, options = {}) => nav.go(options.key || name, () => { shown(name); options.enter?.(); }, options);
+    const controls = initSettings({ state, layers, ws: { on() {} }, showPage, openDashboardTab() {}, setBeforePageLeave() {} });
+    content.querySelector('[data-settings-home]').getClientRects = () => [];  // one column: a level hides the list
+    const said = () => content.querySelector('.app-page-header [data-shell-back]')?.getAttribute('aria-label') || null;
+    const pages = () => content.querySelectorAll('.settings-page').map((level) => level.dataset.settingsPage);
+    const kinds = () => layers.ids().map((id) => (layers.get(id).returnTo ? 'return' : layers.get(id).back.label));
+    // Main → Settings › Landing (the jump): its landing is the return itself.
+    await controls.open('test-landing'); await settle();
+    assert.deepEqual([pages(), kinds(), said()], [['test-landing'], ['return'], 'Back to Main']);
+    // A level opened there afterwards goes above the return and is the first to go.
+    deeper(); await settle();
+    assert.deepEqual([pages(), kinds(), said()], [['test-landing', 'test-after'], ['return', 'Landing'], 'Back to Landing']);
+    layers.back('escape'); await settle();
+    assert.deepEqual([pages(), kinds(), said()], [['test-landing'], ['return'], 'Back to Main']);
+    layers.back('escape'); await settle();
+    assert.deepEqual([state.activePage, kinds()], ['chat', []]);
+    // A landing's own parent stays under the jump: landing on Landing › After puts After's Back to Landing beneath the
+    // return, and it is there once the jump is spent.
+    await controls.open('test-landing', { map: true }); await settle();
+    deeper(); await settle();
+    await showPage('chat', { map: true }); await settle();
+    await controls.open('test-after'); await settle();
+    assert.deepEqual([pages(), kinds(), said()], [['test-landing', 'test-after'], ['Landing', 'return'], 'Back to Main']);
+    layers.back('escape'); await settle();
+    await showPage('settings', { map: true }); await settle();
+    assert.deepEqual([pages(), kinds(), said()], [['test-landing', 'test-after'], ['Settings', 'Landing'], 'Back to Landing']);
+});
+
 test('a direct child address keeps its named parent and row; a first-level address has no extra level', async (t) => {
     const { env, content, state, showPage, layers, shown } = world(t);
     env.document.createElement = (tag) => new DescendantStub(tag);

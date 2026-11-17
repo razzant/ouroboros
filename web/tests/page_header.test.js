@@ -449,6 +449,15 @@ test('a level shows only the owed jump, then its own parent, in either layout', 
     assert.equal(header.querySelector('[data-shell-level]'), null, 'one control when the jump is spent');
     first.dispatchEvent({ type: 'click' });
     assert.deepEqual(calls.at(-1), ['keyboard', 'level']);
+    // A level opened after the jump stands above it: the circle is the top page layer's, so it peels first.
+    const later = { id: 'later', page: true, back: { label: 'Light model' } };
+    jump = { id: 'jump', page: true, returnTo: {}, back: { label: 'Main' } };
+    layers.page = () => later; notify();
+    assert.equal(first.getAttribute('aria-label'), 'Back to Light model');
+    first.dispatchEvent({ type: 'click' });
+    assert.deepEqual(calls.at(-1), ['keyboard', 'later']);
+    layers.page = () => jump; notify();
+    assert.equal(first.getAttribute('aria-label'), 'Back to Main', 'then the jump');
 });
 
 test('outside a section column a file or room level above a jump keeps its own Back', (t) => {
