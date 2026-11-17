@@ -12428,9 +12428,11 @@ html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-
 }
 /* The row keeps the name at least 4rem beside that action: 156px before it (the host's 108px, ☰ and its gap), 196px
    after (the host's 100px and the action's 96px), less the row's 24px of padding. Narrower, the action keeps its node
-   below with the others and the name takes the row up to the host's buttons, ellipsizing there. */
+   below with the others and the name takes the row up to the host's buttons, ellipsizing there. The action stays the
+   box its finger's reach is measured from (ui.css .ui-hit-area): unpositioned, that reach spread over the header and
+   took the presses of the tabs beside it. */
 @container tgrow (max-width: calc(328px + 4rem - 0.02px)) {
-    html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header :is(.app-page-toolbar > button:last-child, .logs-clear-list) { position: static; }
+    html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header :is(.app-page-toolbar > button:last-child, .logs-clear-list) { position: relative; inset: auto; }
     html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat) > .app-page-header :is(.app-page-title, .app-page-lead-title) { right: var(--telegram-header-end); }
 }
 html[data-telegram-fullscreen="active"] #content > .page:not(#page-chat).section-place[data-section-view="page"] > .app-page-header .app-page-title { display: none; }

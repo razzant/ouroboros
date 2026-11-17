@@ -99,7 +99,10 @@ test('Telegram sections keep a visible drawer control and one title baseline ins
     assert.match(telegram, /> \.app-page-header \{\n    position: relative;\n    container: tgrow \/ inline-size;/);
     const narrow = telegram.slice(telegram.indexOf('@container tgrow (max-width: calc(328px + 4rem - 0.02px)) {'));
     assert.ok(telegram.includes('@container tgrow (max-width: calc(328px + 4rem - 0.02px)) {'), 'the row\'s own query');
-    assert.match(narrow.slice(0, narrow.indexOf('\n}')), /:is\(\.app-page-toolbar > button:last-child, \.logs-clear-list\) \{ position: static; \}[\s\S]*:is\(\.app-page-title, \.app-page-lead-title\) \{ right: var\(--telegram-header-end\); \}/);
+    // Out of the row the action stays positioned: its finger's reach (ui.css .ui-hit-area) is measured from its own
+    // box, never the header's (a static Refresh took the presses of every Skills tab at 320 and 350 px).
+    assert.match(narrow.slice(0, narrow.indexOf('\n}')), /:is\(\.app-page-toolbar > button:last-child, \.logs-clear-list\) \{ position: relative; inset: auto; \}[\s\S]*:is\(\.app-page-title, \.app-page-lead-title\) \{ right: var\(--telegram-header-end\); \}/);
+    assert.doesNotMatch(telegram, /button:last-child, \.logs-clear-list\) \{ position: static/);
     assert.match(telegram, /:is\(\.app-page-toolbar > button:last-child, \.logs-clear-list\) \{\n    position: absolute;/, 'a wide row keeps the action in it');
     // A page's name takes the host row's one title slot: a page alone, and two panes of an automatic view; a list
     // alone (the automatic view in one column) keeps the place's name.
