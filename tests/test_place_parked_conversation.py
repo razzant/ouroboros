@@ -163,6 +163,40 @@ def test_nothing_passive_or_controlled_wakes_a_real_question_park(host, monkeypa
     until(lambda: (load_task_result(world.data, author) or {}).get("status") == "completed", "its terminal")
 
 
+def test_an_unattributed_change_reaches_a_real_question_park_as_context_and_its_next_wake_reads_it(host):
+    from tests.test_place_conversation_work import UNKNOWN_LABEL, post_change
+
+    world = host()
+    seen = {}
+
+    def read(messages):
+        seen["words"] = json.dumps(messages, ensure_ascii=False)
+        return finish("Noted; still waiting on the question.")
+
+    author = _park_at_question(world, read)
+    model_woke, scripted_model = threading.Event(), world.h.script
+
+    def observe_wake(messages):
+        model_woke.set()
+        return scripted_model(messages)
+
+    world.h.script = observe_wake
+    calls = world.h.calls
+    change, reply = post_change(world)
+    assert reply.status_code == 200 and reply.json()["outcome"] == "silent", reply.text
+    assert attention(world, change)["reason"] == "current_author" and attention(world, change)["recipient"] == author
+    assert [row["place_arrival"]["wake"] for row in place_rows(world.data, author)] == [False]
+    assert not model_woke.wait(1.5), "no round: context wakes no park"
+    assert world.h.calls == calls and len(world.h.agents) == 1, "and no stand-in focus"
+    assert (load_task_result(world.data, author).get("owner_wait") or {}).get("state") == "waiting"
+    follow, reply = post(world, text="Now a real message.")
+    assert reply.status_code == 200 and attention(world, follow)["recipient"] == author, reply.text
+    until(lambda: seen.get("words"), "the woken author's next model call")
+    assert UNKNOWN_LABEL in seen["words"] and "Now a real message." in seen["words"], "its wake reads both"
+    assert seen["words"].count("Assigned to ouroboros-agent") == 1, "the change once, in its mail"
+    until(lambda: (load_task_result(world.data, author) or {}).get("status") == "completed", "its terminal")
+
+
 def test_a_parked_author_and_a_reading_root_get_one_routing_focus_listing_both_and_exact_tell_wakes_only_that_author(host):
     from ouroboros.conversation_lease import live_author
 

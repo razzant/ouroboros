@@ -456,6 +456,7 @@ async def _api_identity(request: Request) -> JSONResponse:
                          "presence_wake_signals": 1,
                          "presence_explicit_completion": 1,
                          "presence_reaction_context": 1,
+                         "presence_change_context": 1,
                          "presence_identity": 1,
                          "presence_place_binding_version": PLACE_BINDING_VERSION,
                          "notify_version": NOTIFY_VERSION})

@@ -1221,7 +1221,9 @@ provider lets you tell them apart (GitHub does), do report the account's other a
 made by other tools acting as it): the host settles an event whose actor is `sends_as.id`, not reported
 unauthenticated, as heard with reason `own_account`; it stays in the room and the next own wake and never wakes a
 focus. Where `sends_as` is the owner's confirmed account, its posts are the owner's words and keep the ordinary path.
-Otherwise, other people who post from the sending account are heard as it, not woken on. Bot identities
+Otherwise, other people who post from the sending account are heard as it, not woken on. A change's `actor` is
+whoever made it (an editor, an assigner), never the original author; when the provider names nobody, it carries no
+id (`non_text` below). Bot identities
 never derive owner status or offer this confirmation. Only the human activates a place, through its sheet or an owner-door Main turn;
 consciousness may still set Silent or Paused.
 
@@ -1320,6 +1322,11 @@ Use the connector's ordinary content-hash-bound skill token for:
   `[{"kind": str, "description": str}]` (sticker, poll, location: neither words nor a file); past 4000 characters a
   description is cut and counted, naming where it stays whole. The focus (in its own block) and history state these
   as connector facts beside exact words, never quotable as speech. An event of only these facts is never empty.
+  Kind `state_change` marks a change, not new words: state-only action (empty `text`) or revision (exact current
+  words; another author's ride `forward_origin`); an older connector's `message.previous_source_event_id`
+  (the revised observation) reads the same, `edited_at` alone never does. With no actor id a change never wakes,
+  whatever the wake list says: background for a live author or sole reader (a bot's only under `from_bot`), else
+  heard (`change_actor_unknown`; `/identity` `presence_change_context: 1`).
 - Optional message facts: `reply_to_message` (`message_id`; author `from`/`sender_chat` with
   `first_name`/`last_name`/`title`/`display_name`/`name`, `username`, `id`; `text`/`caption`; `forward_origin`;
   `attachments[].file_name`), `reply_to_message_id`, `quote.text` (alone: author not recorded), `media_group_id`
@@ -1391,9 +1398,8 @@ clock. Before allowance, rate or capacity is consulted, the conversation's curre
 sole reader (a promoted or follow-up root of this place and conversation whose loop reads mail or
 is in an unheld cold sleep, or an author parked for its review or private question, whose wait
 wakes and retakes the conversation before any model call), receives later arrivals as typed
-context-only mail, whether or not they match a wake fact (one from the owner's confirmed account is stored as their
-words there by provenance: `place_confirmed`, carried, outside the owner sources that owe a reply; it becomes an order
-only by a verified cite); they never answer its question. An untagged message in the same thread, topic or direct message is a
+context-only mail, whether or not they match a wake fact (one from the owner's confirmed account is stored as
+`place_confirmed`, carried, outside the owner sources that owe a reply); they never answer its question. An untagged message in the same thread, topic or direct message is a
 wake: it ends an ordinary wait and reopens an unsent final. Other untagged group messages reach a
 current author as background and a root not at all; they stay readable in the room. Several
 readers receive nothing: the arrival takes an ordinary focus under the allowance, whose

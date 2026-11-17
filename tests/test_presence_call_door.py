@@ -345,6 +345,11 @@ DOOR_CASES = [
     ("identity_malformed", {"identity": []}, (400, "presence_identity_invalid"), (400, "presence_identity_invalid")),
     ("identity_other_actor", {"identity": ME}, FOCUS, OPENED),
     ("own_account", {"actor": {"platform_actor_id": "me"}, "identity": ME}, (200, "heard"), (403, "place_own_account")),
+    # A change no one is named for (my own edit reads the same): heard by both doors, whatever was selected.
+    ("unattributed_change", {"actor": {"attribution": "unknown"},
+                             "message": {"non_text": [{"kind": "state_change", "description": "Edited"}]}},
+     (200, "heard"), (403, "place_change_actor_unknown")),
+    ("unnamed_new_words", {"actor": {"attribution": "unknown"}}, FOCUS, OPENED),  # new words keep the ordinary path
     ("own_account_unverified", {"actor": {"platform_actor_id": "me", "authenticated": False}, "identity": ME},
      FOCUS, OPENED),
     ("own_account_authenticated_string", {"actor": {"platform_actor_id": "me", "authenticated": "false"},

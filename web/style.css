@@ -2960,6 +2960,22 @@ html[data-layout="stack"] .chat-toolbar-row > .chat-scroll-bottom-btn {
     min-height: 0;
 }
 
+/* Where the work came from (task_origin.js): one meta line under a root card's or a portal's name, the place that
+   called it, what called it and who. Its parts wrap as the card's meta line's do: each moves to the next line whole
+   with its own separator, and the gap is the one space after it. Details keep the facts in full. */
+.chat-live-origin {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 var(--space-1);
+    flex: 1 1 100%;
+    min-width: 0;
+    color: var(--text-meta);
+    font-size: var(--type-meta);
+    line-height: var(--line-meta);
+}
+.chat-live-origin[hidden] { display: none; }
+.chat-live-origin > span { min-width: 0; overflow-wrap: anywhere; }
+
 /* Activity grows with useful content. Details retain the complete source. */
 .chat-live-activity {
     color: var(--text-meta);

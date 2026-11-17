@@ -12,9 +12,9 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from ouroboros import dialogue_import, dialogue_store as ds, places
+from ouroboros import dialogue_import, dialogue_store as ds, place_arrivals, places
 from ouroboros.chat_references import reference_from_row
-from ouroboros.gateway import place_history, places_api
+from ouroboros.gateway import places_api
 from ouroboros.gateway.history import make_chat_history_endpoint
 from ouroboros.presence_delivery import PresenceDeliveryRecorder
 from ouroboros.presence_runner import capture_presence_event
@@ -91,7 +91,7 @@ def test_heard_facts_are_decoded_after_the_read_transaction(tmp_path, monkeypatc
     def loads(text):
         assert not watch.open, 'heard facts were decoded inside the read transaction'
         return json.loads(text)
-    monkeypatch.setattr(place_history, 'json', SimpleNamespace(loads=loads))
+    monkeypatch.setattr(place_arrivals, 'json', SimpleNamespace(loads=loads))  # the one heard-facts reader
     page = client.get('/api/chat/history', params={'chat_id': task['chat_id']}).json()
     facts = [row['place_history'] for row in page['messages'] if 'place_history' in row]
     assert any(row.get('attention') == {'decision': 'heard', 'reason': 'paused'} and row.get('facts') == ['mention'] for row in facts)
@@ -154,6 +154,46 @@ def test_old_heard_and_hold_rows_keep_their_absent_fields(tmp_path, monkeypatch)
     assert by_text['Keep the unsaved note.']['facts'] == []
     assert by_text['Reply held: historical place is Silent'] == {'kind': 'notice'}
     assert by_text['Legacy **answer**'] == {'kind': 'message', 'delivery_state': 'authored'}
+    client.close()
+
+
+def test_a_change_reaches_the_room_reader_as_connector_facts_beside_its_unchanged_words(tmp_path, monkeypatch):
+    from ouroboros.place_intake import settle_heard
+    from ouroboros.presence_admission import admit_presence_turn
+    client, _place, task, event = scenario(tmp_path, monkeypatch)
+    admission = admit_presence_turn(drive_root=tmp_path, authenticated_transport_skill='bridge', provider='chat',
+                                    account_id='qa', conversation_id='design')
+    change = replace(event, source_event_id='qa-change', actor={'attribution': 'unknown'}, facts=('any_message',),
+                     text='Title\n\nBody as it stands',
+                     message={'non_text': [{'kind': 'state_change', 'description': 'Edited; who edited is unknown'},
+                                           {'description': 'a sticker'}, {'kind': 'poll', 'description': '  '}, 'malformed']})
+    settle_heard(tmp_path, capture_presence_event(admission, change, drive_root=tmp_path), change, 'change_actor_unknown')
+    page = client.get('/api/chat/history', params={'chat_id': task['chat_id']}).json()
+    row, = [row for row in page['messages'] if row['text'] == 'Title\n\nBody as it stands']
+    assert row['place_history']['attention'] == {'decision': 'heard', 'reason': 'change_actor_unknown'}
+    assert row['place_history']['non_text'] == [  # validated items only, in order; a kindless one keeps its content
+        {'kind': 'state_change', 'description': 'Edited; who edited is unknown'}, {'kind': 'content', 'description': 'a sticker'}]
+    assert all('non_text' not in other['place_history'] for other in page['messages']
+               if 'place_history' in other and other is not row)
+    # A v0 reply keeps the event it answered in its transport (the real writer, as ``finish_turn`` calls it): those
+    # facts stay the event's, never the reply's; a receipt's own message facts stay its own.
+    from ouroboros.presence_runner import _log_dialogue
+    assigned = replace(event, source_event_id='qa-assigned', text='Please review the issue.',
+                       message={'non_text': [{'kind': 'state_change', 'description': 'Maya assigned the issue to Noor'}]})
+    answered = capture_presence_event(admission, assigned, drive_root=tmp_path)
+    assert assigned.delivery_reporting_version == 0
+    _log_dialogue(tmp_path, task=answered, event=assigned, direction='out', text='I checked the issue.',
+                  chat_id=answered['chat_id'], user_id=0, task_id=answered['id'])
+    PresenceDeliveryRecorder(tmp_path).record('bridge', {
+        'schema_version': 1, 'delivery_id': 'qa-poll', 'part_id': '0', 'state': 'delivered', 'provider': 'chat',
+        'account_id': 'qa', 'conversation_id': 'design', 'thread_id': '', 'text': 'Which first?', 'format': '',
+        'origin': {'kind': 'tool'}, 'message': {'non_text': [{'kind': 'poll', 'description': 'poll: the button; the label'}]}})
+    rows = {row['text']: row for row in client.get('/api/chat/history', params={'chat_id': task['chat_id']}).json()['messages']}
+    assert rows['Please review the issue.']['place_history']['non_text'] == [
+        {'kind': 'state_change', 'description': 'Maya assigned the issue to Noor'}]
+    reply = rows['I checked the issue.']
+    assert reply['role'] == 'assistant' and reply['place_history'] == {'kind': 'message', 'delivery_state': 'authored'}, reply
+    assert rows['Which first?']['place_history']['non_text'] == [{'kind': 'poll', 'description': 'poll: the button; the label'}]
     client.close()
 
 

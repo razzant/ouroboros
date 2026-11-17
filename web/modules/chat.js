@@ -26,6 +26,7 @@ import { createMainWaiting } from './main_waiting.js';
 import { createHostStart } from './host_starting_status.js';
 import { createModelWaitController, isModelWaitReference } from './model_wait.js';
 import { closingLine, syncClosingSentence, syncSettledItems } from './settled_card.js';
+import { noteOrigin, paintOrigin } from './task_origin.js';
 import { createChatReadingPosition } from './chat_reading_position.js';
 import { createRowSleep } from './chat_row_sleep.js';
 import { onRefit } from './text_fit.js';
@@ -747,6 +748,7 @@ export function createChatInstance({
         const title = cardTitle(record);
         const line = record.finished && !record.isSubagent && record.wakeSummary ? closingLine(record, title) : record.collapsedActivity;
         if (record.titleEl.textContent !== title) { record.titleEl.textContent = title; portals.relabel(record); }
+        paintOrigin(record);  // the name may already say the place
         return renderCollapsedActivity(record, projectCollapsedActivity({ record, suggestedName: title, headline: line, body: line }));
     }
 
@@ -1056,8 +1058,7 @@ export function createChatInstance({
         const files = syncSettledItems(record, detail, { write: withStableViewport });
         const words = syncClosingSentence(record, detail);
         if (words) syncCardHeadline(record);
-        const origin = record && detail?.schedule_name && record.scheduleName !== detail.schedule_name;
-        if (origin) record.scheduleName = detail.schedule_name;
+        const origin = noteOrigin(record, detail);
         const history = syncHistoryRetentionItem(record, detail);
         const candidate = syncCandidateRemainderItem(record, detail);
         const chain = episodes.note(record, detail);
@@ -1676,6 +1677,7 @@ export function createChatInstance({
         if (summary.model) record.agentModel = summary.model;
         // Keep the observed initiator.
         if (summary.initiator) record.initiator = summary.initiator;
+        noteOrigin(record, null, summary.placeOrigin);
         if (summary.continueRequester) record.continueRequester = summary.continueRequester;
 
         // Only task facts own the outcome chip under a hold; failed tools are diagnostics.
@@ -2293,7 +2295,7 @@ export function createChatInstance({
 
                 const historicalTerminalProjections = new Set();
                 for (const msg of messages) if (msg.historical_terminal && msg.task_id) {
-                    historicalTerminals.set(msg.task_id, { ...msg.historical_terminal, ...(msg.current_outcome && { phase: msg.current_outcome.outcome_phase }), wake_summary: msg.wake_summary, suggested_name: msg.suggested_name, schedule_name: msg.schedule_name });
+                    historicalTerminals.set(msg.task_id, { ...msg.historical_terminal, ...(msg.current_outcome && { phase: msg.current_outcome.outcome_phase }), wake_summary: msg.wake_summary, suggested_name: msg.suggested_name, schedule_name: msg.schedule_name, place_origin: msg.place_origin });
                     if (msg.summary_kind === 'terminal_root_projection' || msg.outcome_final === true) {
                         historicalTerminalProjections.add(msg.task_id);
                     }

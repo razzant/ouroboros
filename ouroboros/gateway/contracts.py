@@ -260,6 +260,9 @@ class ChatOutbound(ChatReferenceFields, SharedRowFrame):
     spoken: NotRequired[Dict[str, Any]]  # call_id, item_id, played_ms, status: played/generated/interrupted
     initiator: NotRequired[str]  # origin label: "consciousness" on a wake-up's frames/rows (and its roots); absent on an owner's turn
     continue_requester: NotRequired[str]  # who asked for this Continue, read from its admission: owner|ouroboros|unknown; absent elsewhere
+    # A place's work (and what it starts): {place_id, place_label?, provider?, actor?: {id?, label?, owner?, bot?}, wakes,
+    # routed?}, copied by value from its admission's focus (``subagent_messages.place_origin``); absent on other work.
+    place_origin: NotRequired[Dict[str, Any]]
     # Monetary projections are nullable when the physical-attempt ledger cannot be read: ``None`` is distinct from a
     # confirmed $0. The honest names (accounted upper bounds, not settled receipts), the only outbound spellings since
     # ABI 7.0 dropped the ``cost_usd[_with_children]`` aliases; cost_projection.py is the one author.
@@ -720,6 +723,7 @@ class ActiveChatActivity(ActiveDirectTurn):  # global root census (kind also pre
     last_line_at: NotRequired[str]
     tool_calls: NotRequired[int]
     detached: NotRequired[bool]  # durable detached_at, independent of carrier/phase
+    place_origin: NotRequired[Dict[str, Any]]  # ChatOutbound.place_origin's shape: a Main portal's only carrier of it
     project_name: NotRequired[str]
     status: NotRequired[str]
     outcome_axes: NotRequired[Dict[str, Any]]
@@ -1186,6 +1190,7 @@ class TaskDetailResponse(TypedDict, total=False):
     # note, settled_at, revision, commits?, commits_complete?, commits_omitted?}; commits (newest first) only when adopted.
     body_adoptions: List[Dict[str, Any]]
     review_overrides: Dict[str, Any]  # a root's review trace: {count?, latest?, continued?, landed?, skills?} (review_overrides.py)
+    place_origin: Dict[str, Any]  # ChatOutbound.place_origin's shape, from the task's own admitted focus; absent elsewhere
     error: str
 
 

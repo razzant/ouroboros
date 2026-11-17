@@ -74,6 +74,13 @@ export const CHECK_CHIPS = Object.freeze({
 });
 
 export const placeStateOf = (value) => PLACE_STATES.find((state) => state.value === value) || null;
+/** No kind is checked under "What calls it here". Then no event starts a new conversation at once, yet a conversation
+ *  that already has live work can still wake its author (`place_intake.author_hears`, `offer_arrival`): the words of
+ *  such a place state the setting and promise neither a wake nor silence. A bot check alone is a checked kind; Paused
+ *  and consciousness off say their own. */
+export const noKindChecked = (place) => !place?.wakes?.length;
+/** Active's note while no kind is checked: what calls it is said once, under "What calls it here". */
+export const ACTIVE_UNCHECKED_NOTE = 'Lives here: listens, speaks and acts.';
 export const safetyLevelOf = (value) => SAFETY_LEVELS.find((level) => level.value === value) || null;
 
 /** «a», «a and b», «a, b and c». */

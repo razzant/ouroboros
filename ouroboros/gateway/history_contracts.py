@@ -118,6 +118,7 @@ class PlaceHistoryFacts(TypedDict, total=False):
     historical_import: PlaceHistoryImport  # never owner confirmation or attention
     sent_at: str  # the provider send time its arrival recorded (``source_order``); absent: unknown, never inferred
     reaction: PlaceHistoryReaction  # a typed reaction arrival or receipt; absent: not one
+    non_text: List[Dict[str, str]]  # the connector's {kind, description} beside the words (kind state_change: a change), never speech
 
 
 class ChatHistoryMessage(TypedDict, total=False):
