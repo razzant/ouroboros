@@ -38,10 +38,29 @@ def _configure_presence(ctx: ToolContext, action: str, place_id: str = "", **par
             result = places_view(root)
         elif action == "inspect":
             records = places.place_records(root)
-            if place_id not in records.places:
-                raise places.PlaceError("place_not_found", "place_id")
-            result = {"place": place_view(root, records.places[place_id], records=records),
-                      "circle": records.circle_context(place_id), "earlier": earlier(root, place_id)}
+            circle_id = "" if place_id else params.get("circle_id", "")
+            try:
+                previous = earlier(root, place_id, circle_id=circle_id)
+            except places.PlaceError as exc:
+                if exc.code != "place_history_unreadable":
+                    raise
+                previous = {"error": exc.code, "message": f"Earlier words could not be read: {exc}"}
+            if circle_id:
+                circle = records.circle(circle_id)
+                if circle is None and not previous:
+                    raise places.PlaceError("circle_not_found", "circle_id")
+                result = {"circle_id": circle_id, "circle": circle_summary(circle) if circle else None,
+                          "earlier": previous}
+                if circle is None:
+                    result["status"] = "This circle no longer exists."
+            else:
+                place = records.places.get(place_id)
+                if place is None and not previous:
+                    raise places.PlaceError("place_not_found", "place_id")
+                result = {"place": place_view(root, place, records=records) if place else None,
+                          "circle": records.circle_context(place_id), "earlier": previous}
+                if place is None:
+                    result.update(place_id=place_id, status="This place is not connected.")
         elif action == "connect":
             result = {"place": place_view(root, connect_declared_place(root, **params))}
         elif action == "create_circle":

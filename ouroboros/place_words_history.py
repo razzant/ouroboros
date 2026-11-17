@@ -13,7 +13,8 @@ circle. A wake or another speaker is refused (``place_owner_words_owner_only``);
 Disconnecting is an act on the place, never refused for its words, which are kept here like any other.
 
 The journal has no remover: durable memory (BIBLE P3), kept with the data root. It enters no context by itself;
-``configure_presence`` ``inspect`` shows a place's ``earlier`` words.
+``configure_presence`` ``inspect`` reads ``earlier`` by place id even after disconnect, or by circle id even when
+no place ever joined. An unreadable journal leaves the current view readable, with its exact error in ``earlier``.
 """
 from __future__ import annotations
 
@@ -103,26 +104,28 @@ def retain(drive_root: Any, before: PlaceRecords, after: PlaceRecords, revision:
                          "removes could not be kept in their history, so nothing changed; the same call can be retried.")
 
 
-def earlier(drive_root: Any, place_id: str) -> list[dict[str, Any]]:
-    """The words that left this place, or a circle while it was there, newest change first (one change's words in the
-    order they stood): each as it stood (kind, exact text, author, time, its note id or circle) with the act that
+def earlier(drive_root: Any, place_id: str = "", *, circle_id: str = "") -> list[dict[str, Any]]:
+    """The words that left this place (including its circle then), or the named circle if no place id is given,
+    newest change first (one change's words in the order they stood): each as it stood (kind, exact text, author,
+    time, its note id or circle) with the act that
     removed or replaced it, when, who made the change and the focus that wrote it. No journal yet: none; an unreadable
     one is a ``place_history_unreadable`` error, never "none"."""
     from ouroboros.knowledge_versions import _journal_lines
 
     path = journal_path(drive_root)
-    if not path.exists():
-        return []
     found = []
     try:
-        for _offset, line in _journal_lines(path, json.dumps(place_id, ensure_ascii=False).encode("utf-8")):
+        if not path.exists():
+            return []
+        for _offset, line in _journal_lines(path, json.dumps(place_id or circle_id, ensure_ascii=False).encode("utf-8")):
             try:
                 row = json.loads(line)
             except ValueError:  # a torn append: its change was refused, so its words still stand
                 continue
             change = {key: row[key] for key in ("changed_at", "changed_by", "owner_speaks_in", "writer") if key in row}
             found += [{**{key: value for key, value in word.items() if key != "places"}, **change}
-                      for word in row.get("words", []) if place_id in _holders(word)]
+                      for word in row.get("words", [])
+                      if (place_id in _holders(word) if place_id else word.get("circle_id") == circle_id)]
     except OSError as exc:
         raise PlaceError("place_history_unreadable", str(path), f"place_history_unreadable: {path}: {exc}") from exc
     return found
