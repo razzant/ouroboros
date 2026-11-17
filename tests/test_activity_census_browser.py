@@ -306,7 +306,13 @@ def test_activity_background_shows_kept_services_after_their_producer_ended_and_
                 dialog = page.get_by_role("dialog")
                 assert "rechecks it, stops any remaining processes" in dialog.inner_text()
                 page.screenshot(path=str(evidence / f"{engine_name}-dark-1100x750-capture-confirm.png"))
-                dialog.get_by_role("button", name="Cancel", exact=True).click()
+                # Cancel ends the row's action, and every Activity action ends with a refresh that renders the rows
+                # anew (activity.js, the click handler's `finally`). A row resolved before that render is detached
+                # by it, so the narrow frame waits for the render before it scrolls to the row (#3615).
+                with page.expect_response(lambda r: r.request.method == "GET"
+                                          and r.url.split("?")[0].endswith("/api/services/kept")):
+                    dialog.get_by_role("button", name="Cancel", exact=True).click()
+                page.locator('[data-activity-section="background"]:not([aria-busy])').wait_for()
                 page.set_viewport_size({"width": 390, "height": 844})
                 owed.scroll_into_view_if_needed()
                 page.screenshot(path=str(evidence / f"{engine_name}-dark-390x844-capture-owed.png"))
