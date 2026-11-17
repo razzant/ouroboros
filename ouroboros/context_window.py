@@ -139,9 +139,15 @@ def record_observation(root, route_fp: str, *, accepted: int = 0, refused: int =
                         and _window_age(row["ts"]) <= ce._CONFIRMED_TTL_SEC]
 
             # A repeated success adds nothing unless it improves the answer to a
-            # serving read or answers a refusal recorded since the previous success.
+            # serving read, answers a refusal recorded since the previous success, or is
+            # owed to a plan captured at an earlier read: no fresh success at least as
+            # large follows the newest read (the preservation rule below).
             high = max((row.get("accepted", 0) for row in rows), default=0)
-            changed = refused or accepted > high or any(
+            newest_read = max((read.get("sequence", 0) for read in reads), default=0)
+            captured = newest_read and not any(
+                row.get("accepted", 0) >= accepted and row.get("sequence", 0) > newest_read
+                and _window_age(row["ts"]) <= ce._CONFIRMED_TTL_SEC for row in rows)
+            changed = refused or accepted > high or captured or any(
                 accepted > rows[i]["refused"] and answer(i) is None for i in refusals()) or any(
                 accepted > max([read["tokens"], *[rows[i]["accepted"] for i in after(read)]]) for read in reads)
             if not changed:
@@ -408,7 +414,8 @@ def resolve_window(evidence, reserve: int, *, root=None, bound: bool = True,
             contradiction = physical
     # Everything below is a projection of ordered events. Freshness is filtered
     # here; it never changes publication order in the pure reducer.
-    events = [limit for limit in declared if physical is None or not physical_statement(
+    # A serving statement reaches the timeline only as the fresh selected read: an expired one is unknown.
+    events = [limit for limit in declared if not physical_statement(
         {"source": limit.source, "provider": getattr(evidence, "provider", "")})]
     timeline = [physical] if physical else []
     for row in rows:

@@ -1,17 +1,13 @@
 """Numeric evidence layered on the upstream provider-answer reader and size recognition.
 
 ``_usage_response.provider_answer`` owns structural traversal; ``context_budget.size_refusal`` owns
-recognition (final status, typed code, frozen wording, 413). FORMS only extract numbers after that
-recognition; an unsupported sentence adds no recognition. Numeric evidence additionally excludes
-output/body-only bounds and unrelated typed causes: they cannot teach a token window.
+recognition. FORMS only extract numbers after that recognition; an unsupported sentence adds no recognition.
+One object is the refusal: the holder of a typed size code, else the object that said the recognised sentence.
+Its subtree on the current path alone supplies structured counts, the sentence numbers are read from, and the
+causes that exclude numbers: a code of another kind (the classifier's, ``OTHER_CAUSE_CODES``), an output or body
+limit. An earlier upstream attempt, a sibling diagnostic and the exception's printed form supply none of these.
 ``meaning`` distinguishes total, input_plus_reply, input and unknown. Units stay explicit; a unitless
 number never becomes a token window. No IO: ``window_learning`` owns recovery and ``context_window`` storage.
-
-Recognition accepts client statuses 400/413/422 or an answer without a status; the local lane
-reads its own server at any status. It uses a typed code on any layer, HTTP 413, a cited number
-equal to a token limit declared for the route (``context_anchor.cited_limit_refusal``), or frozen
-wording (``context_budget.size_refusal``). No phrase is added: other words go to minds with their
-speaker (``failed_attempt_facts``). These are upstream's recognition rules, not extra readers.
 """
 from __future__ import annotations
 
@@ -23,6 +19,12 @@ from typing import Any, Dict, Optional, Tuple
 USAGE_KEY = "_last_llm_size_refusal"
 #: llama.cpp's typed size refusal (``ERROR_TYPE_EXCEED_CONTEXT_SIZE``, server-common.cpp).
 LLAMA_CPP_TYPE = "exceed_context_size_error"
+#: Codes of another cause that the classifier's vocabulary (``loop_llm_call._NON_RETRYABLE_PROVIDER_MARKERS``) does
+#: not name. An addition for numbers only: a refusal carrying one states no window; its retry class is unchanged.
+OTHER_CAUSE_CODES = ("authentication_error", "authorization_error", "permission_error", "permission_denied",
+                     "unauthenticated", "quota_exceeded", "content_filter", "content_policy_violation", "policy_violation",
+                     "safety_violation", "invalid_schema", "validation_error", "invalid_parameter", "invalid_parameters",
+                     "413", "payload_too_large", "request_entity_too_large")
 _N = r"([0-9][0-9,]*)"
 
 
@@ -108,41 +110,27 @@ def _int(value: Any) -> int:
     return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0 else 0
 
 
-def excludes_size(status: Optional[int], answer: Any, message: str = "", *, codes=()) -> bool:
-    """Typed non-context causes at any wrapper outrank a size quotation in its diagnostic."""
+def excludes_size(status: Optional[int], layers) -> bool:
+    """A cause of another kind in ``layers`` (the recognised object's subtree; else the current path) outranks a
+    size quotation: a code the classifier types otherwise (``loop_llm_call._provider_code_kind``, its retryable
+    codes) or one of ``OTHER_CAUSE_CODES``, a body limit, or output wording beside no typed size code."""
     from ouroboros.context_budget import CONTEXT_OVERFLOW_CODES, output_or_body_size_message
     from ouroboros.loop_llm_call import _RETRYABLE_PROVIDER_CODES, _provider_code_kind
 
-    layers = [obj.value for obj in answer.objects]
-    values = list(codes) + [layer.get(key) for layer in layers for key in ("code", "type", "limit_source")]
+    values = [layer.get(key) for layer in layers for key in ("code", "type", "limit_source")]
     size_codes = CONTEXT_OVERFLOW_CODES | {LLAMA_CPP_TYPE}
     typed_context = any(str(value or "").lower() in size_codes for value in values)
     generic = {"400", "badrequest", "badrequesterror", "invalidrequest", "invalidrequesterror", "error"}
-    # A gateway's precise cause (e.g. in-flight funds) explains its generic HTTP code (402).
-    for value in sorted(values, key=lambda value: str(value or "").isdigit()):
+    for value in values:
         code = str(value or "").strip().lower()
         if not code or code in size_codes or code.replace("_", "").replace("-", "").replace(" ", "") in generic:
             continue
-        if code in _RETRYABLE_PROVIDER_CODES or code == "429":
-            return True
-        if code in {"authentication_error", "authorization_error", "permission_error", "permission_denied", "unauthenticated"}:
-            return True
-        if code in {"quota_exceeded", "quota_exhausted"}:
-            return True
-        if code in {"content_filter", "content_policy_violation", "policy_violation", "safety_violation"}:
-            return True
-        if "schema" in code or code in {"validation_error", "invalid_parameter", "invalid_parameters"}:
-            return True
-        if code in {"413", "request_too_large", "payload_too_large", "request_entity_too_large"}:
-            return True
-        kind = _provider_code_kind(code)
-        if kind:
+        if code in _RETRYABLE_PROVIDER_CODES or code == "429" or code in OTHER_CAUSE_CODES or _provider_code_kind(code):
             return True
     if status in {401, 402, 403, 429}:
         return True
-    texts = [message] + [str(layer.get(key) or "") for layer in layers for key in ("message", "error")
-                         if not isinstance(layer.get(key), dict)]
-    for text in texts:
+    for text in (str(layer.get(key) or "") for layer in layers for key in ("message", "error")
+                 if not isinstance(layer.get(key), dict)):
         low = text.lower()
         # HTTP-body limits never become a token-window fact, even alongside an input+reply quotation.
         if "body too large" in low or "payload too large" in low or "request entity too large" in low:
@@ -211,15 +199,26 @@ def parse(status: Optional[int], body: Any, message: str = "") -> Optional[SizeR
     return from_answer(answer, status, message)
 
 
-def from_answer(answer, status, message="", typed=()):
-    """Extract numeric evidence from an already-read answer; never extend recognition."""
+def _recognized_subtree(answer, basis: str, code: str, speaker: str, sentence: str):
+    """The one recognised object and its subtree (``ProviderAnswer.recognized_subtree``): for a typed basis the
+    current-path holder of the code, else the object that said the recognised sentence."""
+    holder = next((who for who, value, history in answer.codes if value == code and not history), None)
+    if basis == "typed" and holder is not None:
+        return answer.recognized_subtree(holder, "", code)
+    return answer.recognized_subtree(speaker, sentence, code) if sentence else []
+
+
+def _read_numbers(answer, status, message="", typed=()):
+    """``(excluded, fact)`` for one answer: the recognised refusal's numbers, or why it may state none."""
     from dataclasses import replace
 
     from ouroboros.context_budget import size_refusal
 
     recognized = size_refusal(answer, status, typed, printed=message)
-    if recognized is None or excludes_size(status, answer, message, codes=typed):
-        return None
+    if recognized is None:  # excluded only where its own words state numbers the text fallback would read
+        stated = any((fact := _from_text(text)) is not None and fact.has_numbers
+                     for _who, text, history in answer.said if not history)
+        return stated and excludes_size(status, [obj.value for obj in answer.objects if not obj.history]), None
     basis, code, speaker, sentence = recognized
     if recognized == ("frozen", "", "", ""):
         # Printed-only recognition (e.g. vLLM's output wording): numbers still require
@@ -227,32 +226,56 @@ def from_answer(answer, status, message="", typed=()):
         current = [(who, text) for who, text, history in answer.said if not history]
         if len(current) == 1:
             speaker, sentence = current[0]
-    found = next((fact for layer in answer.recognized_objects(speaker, sentence, code)
-                  if (fact := _structured(layer)) is not None), None)
-    # Printed exceptions can identify a refusal, but are not provider numeric evidence.
-    found = found or _from_text(sentence)
+    subtree = _recognized_subtree(answer, basis, code, speaker, sentence)
+    layers = [answer.objects[i].value for i in subtree]
+    if excludes_size(status, layers):
+        return True, None
+    found = next((fact for layer in layers if (fact := _structured(layer)) is not None), None)
+    # The sentence counts only where the recognised object (or its child) said it.
+    said = bool(sentence) and any(sentence in answer.objects[i].sentences for i in subtree)
+    found = found or (_from_text(sentence) if said else None)
     if found is None:
         found = SizeRefusal(units="unstated" if basis == "status_413" else "tokens", source=basis)
-    return replace(found, gateway=speaker, upstream=sentence)
+    return False, replace(found, gateway=speaker, upstream=sentence)
 
 
-def from_exception(exc: Any) -> Optional[SizeRefusal]:
-    """``parse`` over a provider exception as the host's classifier reads it (status, structured body)."""
+def from_answer(answer, status, message="", typed=()):
+    """Extract numeric evidence from an already-read answer; never extend recognition."""
+    return _read_numbers(answer, status, message, typed)[1]
+
+
+def recorded(excluded: bool, found: Optional[SizeRefusal]) -> Optional[SizeRefusal]:
+    """The fact a failure's usage keeps: its numbers, a numberless ``excluded`` fact when it states numbers that
+    teach no window (``for_usage`` then reads no text for it), else None."""
+    return found if found is not None else SizeRefusal(source="excluded") if excluded else None
+
+
+def answer_fact(answer, status) -> Optional[SizeRefusal]:
+    """``recorded`` for an answer read without an exception (an HTTP 200 body's error)."""
+    return recorded(*_read_numbers(answer, status))
+
+
+def _exception_numbers(exc: Any):
     from ouroboros._usage_response import provider_answer, typed_values
     from ouroboros.context_budget import LocalContextTooLargeError
     from ouroboros.loop_llm_call import _exception_status_code
 
     answer = provider_answer(exc)
     status = None if isinstance(exc, LocalContextTooLargeError) else _exception_status_code(exc)
-    return from_answer(answer, status, message=repr(exc), typed=typed_values(exc, answer))
+    return _read_numbers(answer, status, message=repr(exc), typed=typed_values(exc, answer))
+
+
+def from_exception(exc: Any) -> Optional[SizeRefusal]:
+    """``parse`` over a provider exception as the host's classifier reads it (status, structured body)."""
+    return _exception_numbers(exc)[1]
 
 
 def stamp(usage: Dict[str, Any], exc: Any) -> Optional[SizeRefusal]:
-    """Replace the failed call's refusal fact in ``usage`` (cleared when this failure states none)."""
+    """Replace the failed call's refusal fact in ``usage`` (``recorded``; cleared when this failure states none)."""
     usage.pop(USAGE_KEY, None)
-    found = from_exception(exc)
-    if found is not None:
-        usage[USAGE_KEY] = found.to_json()
+    excluded, found = _exception_numbers(exc)
+    if (fact := recorded(excluded, found)) is not None:
+        usage[USAGE_KEY] = fact.to_json()
     return found
 
 

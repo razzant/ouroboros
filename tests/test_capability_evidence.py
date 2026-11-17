@@ -77,12 +77,19 @@ def test_local_health_confirmed(tmp_path, monkeypatch):
     assert ev.window_tokens == 256_000
 
 
+def _age_probes(root):  # every stored probe record dated past the confirmed TTL
+    data = ce._read(root)
+    data["probes"] = {fp: {**row, "ts": "2000-01-01T00:00:00+00:00"} for fp, row in data["probes"].items()}
+    ce._save(root, data)
+
+
 def test_provider_outage_keeps_prior_confirmed(tmp_path, monkeypatch):
     """A transient provider outage must NEVER erase a prior CONFIRMED record
-    (module invariant) — it is kept, surfaced as stale (v6.33.0 P4)."""
+    (module invariant) — it is kept, surfaced as stale once past its TTL (v6.33.0 P4)."""
     monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: (1_000_000, ce.utc_now_iso()))
     ev1 = ce.probe(tmp_path, provider="openrouter", model="x/y", allow_fetch=True)
     assert ev1.status == ce.STATUS_CONFIRMED and ev1.window_tokens == 1_000_000
+    _age_probes(tmp_path)
     # Provider now unreachable: metadata 0 + a transport failure.
     monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: (0, ce.utc_now_iso()))
     monkeypatch.setattr(ce, "_metadata_fetch_transport_failed", lambda *a, **k: True)
@@ -801,8 +808,9 @@ def test_freshness_is_an_explicit_axis_of_the_owned_predicate(tmp_path, monkeypa
     fresh = ce.probe(tmp_path, provider="openrouter", model="x/y", allow_fetch=True)
     assert fresh.stale is False
     assert ce.is_known(fresh, require_fresh=True) is True
+    _age_probes(tmp_path)
 
-    # Provider now unreachable: the prior record is KEPT (module invariant) but stale.
+    # Provider now unreachable: the prior record past its TTL is KEPT (module invariant) but stale.
     monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: (0, ce.utc_now_iso()))
     monkeypatch.setattr(ce, "_metadata_fetch_transport_failed", lambda *a, **k: True)
     stale = ce.probe(tmp_path, provider="openrouter", model="x/y", allow_fetch=True, force=True)
