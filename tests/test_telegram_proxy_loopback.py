@@ -284,7 +284,9 @@ def test_all_telegram_consumers_succeed_through_real_transport(tmp_path, monkeyp
             except asyncio.TimeoutError:
                 stuck = {task.get_name(): [f"{frame.f_code.co_filename}:{frame.f_lineno}" for frame in task.get_stack()]
                          for task in asyncio.all_tasks() if task is not asyncio.current_task()}
-                raise AssertionError(f"the loopback servers still hold connections: {stuck}") from None
+                if stuck:  # a handler still running is this test's failure; with none, Windows' Proactor loop
+                    raise AssertionError(f"the loopback servers still hold connections: {stuck}") from None
+                # may still owe a closed transport's connection_lost, which only 3.12's wait_closed waits for
             if bot.tasks:
                 await asyncio.wait_for(asyncio.gather(*bot.tasks), 5)
         assert not bot.errors

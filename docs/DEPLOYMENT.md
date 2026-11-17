@@ -162,8 +162,8 @@ Desktop (macOS, Windows, Linux):
    package manager such as Homebrew replaced the app, the old checkout's Pillow
    12.3 is still in use until this Update, and on Windows that old code cannot
    copy files on Python 3.12 ("changed during read" on attachments, generated
-   images and delegated results); when nothing is newer it changes
-   nothing. To check, run the app's interpreter with your data directory's user
+   images and delegated results); when nothing is newer, this Update
+   changes nothing. To check, run the app's interpreter with your data directory's user
    packages and expect 3.12.15 and Pillow 13. On macOS:
 
    ```bash

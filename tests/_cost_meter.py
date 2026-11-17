@@ -424,10 +424,11 @@ def _w_os_open(path, flags, *args, **kwargs):
 def _w_copyfile2(existing, new, flags, *args, **kwargs):
     """From CPython 3.12 ``shutil.copy2`` copies with ``CopyFile2`` on Windows and opens nothing in Python: the
     source counts as the ``open`` that copy2 is known by everywhere else."""
+    result = _ORIG["_winapi.CopyFile2"](existing, new, flags, *args, **kwargs)  # a refusal falls back to an io.open
     meter = _ACTIVE
     if meter is not None:
         meter.add("open", path=existing, category=meter.category(existing))
-    return _ORIG["_winapi.CopyFile2"](existing, new, flags, *args, **kwargs)
+    return result
 
 
 def _w_os_read(fd, n, *args, **kwargs):

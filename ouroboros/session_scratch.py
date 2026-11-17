@@ -180,7 +180,7 @@ def _legacy_identity_matches(seen: Any, recorded: List[int], *, windows: bool = 
     made under 3.10 holds its low 32 bits, the serial that Python reported then."""
     if [seen.st_dev, seen.st_ino] == recorded:
         return True
-    return windows and 0 <= recorded[0] < 1 << 32 and [seen.st_dev & 0xFFFFFFFF, seen.st_ino] == recorded
+    return windows and [seen.st_dev & 0xFFFFFFFF, seen.st_ino] == recorded
 
 
 def recorded_scratch(record: pathlib.Path) -> pathlib.Path:
