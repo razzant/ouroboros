@@ -68,7 +68,7 @@ test('a file shown alone gives focus to its Back, unless the caller names a cont
     const context = vm.createContext({
         document: { activeElement: null, body: {} }, lastFocus: null, listScroll: 0, previewEl,
         layoutEl: { dataset: { filesView: 'list' }, contains: () => false }, sidebarEl: {},
-        listEl: { querySelectorAll: () => [row] }, page: { querySelector: () => back },
+        listEl: { querySelectorAll: () => [row] }, page: { querySelector: () => back, contains: () => false },
         placeStatus() {}, singlePane: () => true, syncLayer() {},
     });
     vm.runInContext(source.match(/    function showPane\(view, focusTarget = null\) \{[\s\S]+?\n    \}/)[0], context);
@@ -77,4 +77,29 @@ test('a file shown alone gives focus to its Back, unless the caller names a cont
     context.layoutEl.dataset.filesView = 'list';
     context.showPane('file', nameField);
     assert.equal(context.document.activeElement, nameField, '"+ File": its name field, where the owner types');
+});
+
+test('focus on the round Back goes to the file\'s row when both panes come back and the Back goes with its layer', () => {
+    const source = readFileSync(new URL('../modules/files.js', import.meta.url), 'utf8');
+    let backShown = true;
+    const node = (name, rects = () => [1]) => ({ name, getClientRects: rects, focus() { context.document.activeElement = this; } });
+    const back = node('back', () => (backShown ? [1] : [])), row = node('row'), editor = node('editor');
+    const pageNodes = new Set([back, row, editor]);
+    const context = vm.createContext({
+        document: { activeElement: back, body: {} }, lastFocus: null, listScroll: 0, previewEl: node('preview'),
+        // Back stands in the page's header, outside the panes.
+        layoutEl: { dataset: { filesView: 'file' }, contains: (el) => el === row || el === editor }, sidebarEl: {},
+        listEl: { querySelectorAll: () => [row] },
+        page: { querySelector: () => (backShown ? back : null), contains: (el) => backShown ? pageNodes.has(el) : el !== back && pageNodes.has(el) },
+        placeStatus() {}, singlePane: () => false,
+        // The wide layout owes no Back: its layer ends and the shell takes the button away.
+        syncLayer(open) { if (!open) backShown = false; },
+    });
+    vm.runInContext(source.match(/    function showPane\(view, focusTarget = null\) \{[\s\S]+?\n    \}/)[0], context);
+    context.showPane('file');
+    assert.equal(context.document.activeElement, row, 'focus lands on a shown control, never on the page\'s body');
+    // A control still in sight keeps its focus.
+    context.document.activeElement = editor;
+    context.showPane('file');
+    assert.equal(context.document.activeElement, editor);
 });

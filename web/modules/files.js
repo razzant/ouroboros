@@ -171,6 +171,8 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
     function showPane(view, focusTarget = null) {
         const focused = document.activeElement;
         const active = focused === document.body && lastFocus?.isConnected ? lastFocus : focused;
+        // Back is the shell's, in the page's header: asked before the layer it belongs to can take it away.
+        const inFiles = page.contains(active);
         const changed = layoutEl.dataset.filesView !== view;
         layoutEl.dataset.filesView = view;
         placeStatus();
@@ -180,7 +182,7 @@ export function initFiles({ state: appState, setBeforePageLeave, layers = null }
         // Focus never stays on what just left the screen (the pane put away, or Back once both panes fit): it goes
         // to Back on a file shown alone, otherwise to the file's row. A control the caller names (a new file's name)
         // keeps it.
-        const lost = layoutEl.contains(active) && !active.getClientRects().length;
+        const lost = inFiles && !active.getClientRects().length;
         if (!(single && focusTarget) && !lost) return;
         const row = [...listEl.querySelectorAll('.files-entry.selected')].find((node) => node.getClientRects().length);
         const back = page.querySelector('[data-shell-back]');
